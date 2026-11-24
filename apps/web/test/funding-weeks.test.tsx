@@ -8,7 +8,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function stub(weeks: unknown[]) {
+function stub(weeks: unknown[], whoUsedIt?: unknown) {
   const status = {
     source: { id: "s1", name: "Claude Max", kind: "subscription", provider: "anthropic" },
     credit: null,
@@ -17,6 +17,7 @@ function stub(weeks: unknown[]) {
     forecasts: {},
     daily: [],
     weeks,
+    whoUsedIt,
     totalSpentMicros: 0,
     coverage: "all",
   };
@@ -33,6 +34,29 @@ const week = (i: number, extra: object = {}) => ({
   spendMicros: 0,
   holds: [],
   ...extra,
+});
+
+describe("Who used it fold on a funding card", () => {
+  it("lists agents and projects with shares, and says so when unused", async () => {
+    const who = {
+      days: 7,
+      totalTokens: 1000,
+      totalMicros: 0,
+      agents: [{ id: "a", name: "Zippy", tokens: 800, costMicros: 0, share: 0.8, engagement: false }],
+      agentsOthers: { tokens: 200, costMicros: 0, share: 0.2, count: 2 },
+      projects: [{ id: "p", name: "Web", company: "Acme", tokens: 1000, costMicros: 0, share: 1, engagement: true }],
+    };
+    stub([], who);
+    render(<FundingCards />);
+    expect(await screen.findByText("Who used it, last 7 days")).toBeTruthy();
+    expect(screen.getByText("Zippy")).toBeTruthy();
+    expect(screen.getByText("Everyone else (2)")).toBeTruthy();
+    expect(screen.getByText(/engagement work/)).toBeTruthy();
+    cleanup();
+    stub([], { days: 7, totalTokens: 0, totalMicros: 0, agents: [], projects: [] });
+    render(<FundingCards />);
+    expect(await screen.findByText("Not used in the last 7 days")).toBeTruthy();
+  });
 });
 
 describe("Last 8 weeks fold on a funding card", () => {

@@ -133,6 +133,47 @@ function ByCompany({ s }: { s: FundingStatus }) {
   );
 }
 
+/** "Who used it, last 7 days": top agents and the split by project, each with tokens, spend and share (BOS-2442). */
+function WhoUsedIt({ s }: { s: FundingStatus }) {
+  const w = s.whoUsedIt;
+  if (!w) return null;
+  type Row = { name: string; tokens: number; costMicros: number; share: number; engagement?: boolean; company?: string | null };
+  const line = (r: Row, key: string) => (
+    <li key={key}>
+      <span>
+        {r.name}
+        {r.company ? <span className="muted"> · {r.company}</span> : null}
+        {r.engagement ? <span className="muted"> (engagement work, charged here)</span> : null}
+      </span>
+      <span className="mono nowrap">
+        {compact(r.tokens)} tokens · {usd(r.costMicros)} · {pct(r.share)}
+      </span>
+    </li>
+  );
+  const list = (title: string, rows: Row[], others: { tokens: number; costMicros: number; share: number; count: number } | null | undefined) => (
+    <div>
+      <span className="muted">{title}</span>
+      <ul>
+        {rows.map((r, i) => line(r, `${i}`))}
+        {others && line({ name: `Everyone else (${others.count})`, ...others }, "others")}
+      </ul>
+    </div>
+  );
+  return (
+    <details className="weeks">
+      <summary>Who used it, last 7 days</summary>
+      {w.totalTokens <= 0 && w.totalMicros <= 0 ? (
+        <span className="muted">Not used in the last 7 days</span>
+      ) : (
+        <>
+          {list("Top agents", w.agents, w.agentsOthers)}
+          {list("By project", w.projects, w.projectsOthers)}
+        </>
+      )}
+    </details>
+  );
+}
+
 /** "3 min ago", "2h ago", "4d ago": how old a cached reading is, in age.ts's words. */
 const ago = (seconds: number | null) => (seconds === null ? "" : ageLabel(seconds * 1000));
 
@@ -394,6 +435,7 @@ function SourceCard({ s }: { s: FundingStatus }) {
       {s.source.kind === "subscription" && <QuotaSettings s={s} />}
       <Daily s={s} />
       <ByCompany s={s} />
+      <WhoUsedIt s={s} />
       <Weeks s={s} />
       {s.coverage === "boss_man_runs_only" && s.source.kind !== "subscription" && (
         <span className="muted" style={{ fontSize: 12 }}>

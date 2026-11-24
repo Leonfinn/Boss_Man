@@ -39,6 +39,23 @@ describe("API credit tracking from Boss Man's own runs (spike S3 fallback)", () 
     expect(status.coverage).toBe("boss_man_runs_only");
   });
 
+  it("says who used a source in the last 7 days, with shares, and nothing for an unused one", async () => {
+    const appCo = await company("App Co");
+    const payg = (await post("/api/funding-sources", { name: "Ollama", kind: "api_payg", provider: "ollama" })).json();
+    const idle = (await post("/api/funding-sources", { name: "Idle", kind: "api_payg", provider: "ollama" })).json();
+    await post("/api/cost-events", { fundingSourceId: payg.id, companyId: appCo, costUsd: 3, inputTokens: 600, outputTokens: 200 });
+    await post("/api/cost-events", { fundingSourceId: payg.id, companyId: appCo, costUsd: 1, inputTokens: 100, outputTokens: 100 });
+    await post("/api/cost-events", { fundingSourceId: payg.id, companyId: appCo, costUsd: 50, inputTokens: 5000, occurredAt: new Date(Date.now() - 9 * 86_400_000).toISOString() });
+    const who = (await get(`/api/funding-sources/${payg.id}/status`)).json().whoUsedIt;
+    expect(who.totalMicros).toBe(4_000_000);
+    expect(who.totalTokens).toBe(1000);
+    expect(who.agents).toHaveLength(1);
+    expect(who.agents[0]).toMatchObject({ tokens: 1000, costMicros: 4_000_000, share: 1 });
+    expect(who.projects[0]).toMatchObject({ name: "No project", company: "App Co", share: 1 });
+    const none = (await get(`/api/funding-sources/${idle.id}/status`)).json().whoUsedIt;
+    expect(none).toMatchObject({ totalTokens: 0, totalMicros: 0, agents: [], projects: [] });
+  });
+
   it("splits the last 7 days by company, biggest first", async () => {
     const appCo = await company("App Co");
     const holiday = await company("HolidayHours");

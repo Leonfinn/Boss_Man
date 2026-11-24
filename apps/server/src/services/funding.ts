@@ -18,7 +18,7 @@ import {
   type SyntheticQuota,
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, budgetPolicies, companies, costEvents, fundingQuotaHolds, fundingSources, fundingWindowSummaries, providerQuotaReadings, providerQuotaWarnings, quotaSamples, runs, secretGrants, settings } from "../db/schema.js";
+import { agents, budgetPolicies, companies, costEvents, fundingQuotaHolds, fundingSources, fundingWindowSummaries, projects, providerQuotaReadings, providerQuotaWarnings, quotaSamples, runs, secretGrants, settings } from "../db/schema.js";
 
 type FundingRow = typeof fundingSources.$inferSelect;
 type PolicyRow = typeof budgetPolicies.$inferSelect;
@@ -502,6 +502,7 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
         daily: await this.daily(id, now, timeZone),
         weeks: await this.weeklyHistory(id, now),
         byCompany: await this.byCompany(id, now),
+        whoUsedIt: await this.whoUsedIt(id, now),
         totalSpentMicros: spend.total,
         // Boss Man only sees its own runs (spike S3: no Admin API on individual accounts).
         coverage: "boss_man_runs_only" as const,
@@ -582,6 +583,53 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
           };
         })
         .sort((a, b) => b.costMicros - a.costMicros || b.tokens - a.tokens);
+    },
+
+    /**
+     * "Who used it": this source's last 7 days from its cost events, split by agent and by project. Each row has plan
+     * tokens (input + output), pay-as-you-go spend and its share of the source's total; the top 5 of each split show
+     * and "everyone else" sums the rest. Engagement work counts under the charged company and project (R26).
+     */
+    async whoUsedIt(id: string, now = new Date(), days = 7, top = 5) {
+      const since = new Date(now.getTime() - days * 86_400_000);
+      const tokens = sql<number>`coalesce(sum(coalesce(${costEvents.inputTokens}, 0) + coalesce(${costEvents.outputTokens}, 0)), 0)::float8`;
+      const micros = sql<number>`coalesce(sum(${costEvents.costMicros}), 0)::float8`;
+      const engaged = sql<boolean>`coalesce(bool_or(${costEvents.engagementId} is not null), false)`;
+      const where = and(eq(costEvents.fundingSourceId, id), gte(costEvents.occurredAt, since), lt(costEvents.occurredAt, now));
+      const [total] = await db.select({ tokens, micros }).from(costEvents).where(where);
+      const totalTokens = Number(total?.tokens ?? 0);
+      const totalMicros = Number(total?.micros ?? 0);
+      if (totalTokens <= 0 && totalMicros <= 0) return { days, totalTokens: 0, totalMicros: 0, agents: [], projects: [] };
+      const agentRows = await db
+        .select({ key: costEvents.agentId, name: agents.name, tokens, micros, engaged })
+        .from(costEvents)
+        .leftJoin(agents, eq(agents.id, costEvents.agentId))
+        .where(where)
+        .groupBy(costEvents.agentId, agents.name);
+      const projectKey = sql<string | null>`coalesce(${costEvents.chargedProjectId}, ${costEvents.projectId})`;
+      const projectRows = await db
+        .select({ key: projectKey, name: projects.name, company: companies.name, tokens, micros, engaged })
+        .from(costEvents)
+        .leftJoin(projects, eq(projects.id, projectKey))
+        .leftJoin(companies, eq(companies.id, sql`coalesce(${costEvents.chargedCompanyId}, ${costEvents.companyId})`))
+        .where(where)
+        .groupBy(projectKey, projects.name, companies.name);
+      const share = (r: { tokens: number; micros: number }) => {
+        const parts = [totalTokens > 0 ? Number(r.tokens) / totalTokens : null, totalMicros > 0 ? Number(r.micros) / totalMicros : null].filter((x): x is number => x !== null);
+        return parts.length ? Math.max(...parts) : 0;
+      };
+      const shape = (rows: Array<{ key: string | null; name: string | null; company?: string | null; tokens: number; micros: number; engaged: boolean }>, unknown: string) => {
+        const sorted = rows
+          .map((r) => ({ id: r.key, name: r.name ?? unknown, company: r.company ?? null, tokens: Number(r.tokens), costMicros: Number(r.micros), engagement: r.engaged }))
+          .sort((a, b) => b.costMicros - a.costMicros || b.tokens - a.tokens);
+        const list = sorted.slice(0, top).map((r) => ({ ...r, share: share({ tokens: r.tokens, micros: r.costMicros }) }));
+        const rest = sorted.slice(top);
+        const others = rest.length ? { tokens: rest.reduce((n, r) => n + r.tokens, 0), costMicros: rest.reduce((n, r) => n + r.costMicros, 0), count: rest.length } : null;
+        return { rows: list, others: others && { ...others, share: share({ tokens: others.tokens, micros: others.costMicros }) } };
+      };
+      const a = shape(agentRows, "Unknown agent");
+      const p = shape(projectRows, "No project");
+      return { days, totalTokens, totalMicros, agents: a.rows, agentsOthers: a.others, projects: p.rows, projectsOthers: p.others };
     },
 
     /**
