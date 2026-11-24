@@ -56,6 +56,16 @@ describe("answered cards list (BOS-2187)", () => {
     expect(third.next).toBeNull();
   });
 
+  it("returns when the card was raised next to when it was answered (BOS-2488)", async () => {
+    ctx = await setup();
+    await ctx.db.insert(decisions).values({
+      companyId: ctx.companyId, kind: "question", question: "Waited", options: [], recommendedOption: "a", status: "answered", answer: "a",
+      createdAt: new Date("2026-11-03T10:00:00.000Z"), answeredAt: new Date("2026-11-03T13:00:00.000Z"),
+    });
+    const r = (await ctx.get("/api/decisions/answered")).json() as { items: Array<{ askedAt: string; at: string }> };
+    expect(r.items[0]).toMatchObject({ askedAt: "2026-11-03T10:00:00.000Z", at: "2026-11-03T13:00:00.000Z" });
+  });
+
   it("returns the company name and the owner's note (BOS-2312), and no note on a withdrawn card", async () => {
     ctx = await setup();
     const at = new Date("2026-11-03T09:00:00.000Z");

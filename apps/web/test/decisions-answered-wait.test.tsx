@@ -29,6 +29,20 @@ describe("answered wait", () => {
     expect(answeredSummary([row(1, 60, { status: "withdrawn" })] as never)).toBeNull();
   });
 
+  it("a 40-minute wait reads 'answered after 40 min', and changing the kind filter recomputes the summary", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify({ items: String(url).includes("kind=permission") ? [row(3, 600, { kind: "permission" })] : [row(1, 40), row(2, 120, { kind: "permission" })], next: null }), { status: 200, headers: { "content-type": "application/json" } })));
+    const { container } = render(<AnsweredList />);
+    const details = container.querySelector("details")!;
+    details.open = true;
+    fireEvent(details, new Event("toggle"));
+    await screen.findByText("Question 1");
+    expect(screen.getAllByTestId("answered-wait")[0]!.textContent).toBe(" · answered after 40 min");
+    expect(screen.getByTestId("answered-summary").textContent).toBe("2 answered · median wait 1 h · slowest: Permission cards (median 2 h)");
+    fireEvent.change(screen.getByLabelText("Kind"), { target: { value: "permission" } });
+    await screen.findByText("Question 3");
+    expect(screen.getByTestId("answered-summary").textContent).toBe("1 answered · median wait 10 h");
+  });
+
   it("shows 'answered after' on answered rows only, with the summary above, and adds a CSV column", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ items: [row(1, 180), row(2, 0, { status: "withdrawn", by: "withdrawn", answer: null })], next: null }), { status: 200, headers: { "content-type": "application/json" } })));
     const { container } = render(<AnsweredList />);
