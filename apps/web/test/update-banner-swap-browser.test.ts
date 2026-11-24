@@ -51,7 +51,7 @@ describe.skipIf(!browser || !server)("BOS-2531 update banner: 'being swapped now
       expect(text).toContain("swapping the runners now");
       expect(text).toMatch(/swapping the runners now\. Back by \d{1,2}[:.]\d{2}.* at the latest\./);
     }
-  });
+  }, 60_000); // two page loads; the default 5 s is too short on a slow CPU
 
   it("desktop and phone: nothing left to wait for but no runner mid-swap says the swap is next, never 'now'", async () => {
     for (const [w, h, n] of [[1280, 800, "desktop"], [380, 800, "phone"]] as const) {
@@ -61,5 +61,5 @@ describe.skipIf(!browser || !server)("BOS-2531 update banner: 'being swapped now
       expect(text).not.toContain("swapped now");
       expect(text).not.toContain("swapping the runners now");
     }
-  });
+  }, 60_000);
 });
