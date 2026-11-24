@@ -627,6 +627,7 @@ function StalePages({ pages, companyId, current, onPick }: { pages: PageRow[]; c
   return (
     <details className="wiki-recent wiki-stale">
       <summary>Not changed in {STALE_DAYS} days ({stale.length})</summary>
+      {stale.length === 0 && <p className="muted">No page is older than {STALE_DAYS} days.</p>}
       <ul>
         {shown.map(({ page: p, days }) => (
           <li key={p.id}>

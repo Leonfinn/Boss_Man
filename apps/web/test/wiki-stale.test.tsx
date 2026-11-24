@@ -73,5 +73,6 @@ describe("wiki Not changed in 30 days", () => {
     stubPages([row(1, 1), row(2, 3)]);
     render(<Wiki companies={[company]} companyId="c1" slug="p5" go={() => {}} />);
     await waitFor(() => expect(document.querySelector(".wiki-stale summary")?.textContent).toBe("Not changed in 30 days (0)"));
+    expect(document.querySelector(".wiki-stale")!.textContent).toContain("No page is older than 30 days.");
   });
 });
