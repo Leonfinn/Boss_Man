@@ -2,7 +2,7 @@
 // ignores raw HTML, and its default URL check drops javascript: links, so a page can't run code.
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { createContext, useContext, type ReactNode } from "react";
+import { createContext, isValidElement, useContext, type ReactNode } from "react";
 import { linkMarkdown, type LinkContext } from "../links";
 import { EnlargeableImage } from "./Lightbox";
 
@@ -15,8 +15,16 @@ export function headingId(text: string) {
     .replace(/\s+/g, "-");
 }
 
+// A heading's words, including those inside `code`, **bold** or a link, so "## Batch `27`" gets the id
+// "batch-27" (it was "batch-", BOS-2443) and agrees with the heading's text the landing code also matches.
 const plain = (node: ReactNode): string =>
-  typeof node === "string" || typeof node === "number" ? String(node) : Array.isArray(node) ? node.map(plain).join("") : "";
+  typeof node === "string" || typeof node === "number"
+    ? String(node)
+    : Array.isArray(node)
+      ? node.map(plain).join("")
+      : isValidElement<{ children?: ReactNode }>(node)
+        ? plain(node.props.children)
+        : "";
 
 // True while rendering a link's contents, so a picture inside a link stays a plain image: a button can't
 // sit inside an anchor, and the link already goes somewhere on click (BOS-330 review).

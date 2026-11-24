@@ -47,6 +47,8 @@ describe("wiki-outline helpers", () => {
     // The ids are the elements' own, and headingId of the words gives the same one, so landing agrees.
     for (const e of outline) expect(container.querySelectorAll("h1, h2, h3, h4, h5, h6")[e.index]!.id).toBe(e.id);
     expect(outline[3]!.id).toBe(headingId("Batch 28"));
+    // Words inside inline code count towards the id too.
+    expect(outline[1]!.id).toBe("batch-27-wiki");
     expect(headingId(outline[1]!.id)).toBe(outline[1]!.id);
   });
 
