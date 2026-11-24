@@ -31,6 +31,26 @@ function stub(milestones: unknown[]) {
   );
 }
 
+describe("burn-up and pace on the Roadmap (BOS-2397)", () => {
+  const week = (done: number, total: number, i: number) => ({ weekEnd: day(-7 * (7 - i)), done, total });
+  const growing = [5, 7, 9, 12, 15, 17, 19, 21].map((d, i) => week(d, 30 + Math.round((i * 4) / 7), i));
+
+  it("shows the weekly pace and a labelled burn-up under each open milestone", async () => {
+    stub([{ ...ms("m1", "Beta", "on_track", { pace: 12 }), burnup: growing }]);
+    render(<Roadmap companies={[company]} tab="timeline" go={() => {}} />);
+    await screen.findByText("Pace: 12 points a week (last 4 weeks)");
+    const chart = screen.getByRole("img", { name: /Done rose from 5 to 21 points; total rose from 30 to 34 points/ });
+    expect(chart.querySelectorAll("polyline")).toHaveLength(2);
+  });
+
+  it("says so when there is no pace, and a flat line reads as 'stayed'", async () => {
+    stub([{ ...ms("m1", "Beta", "on_track", { pace: 0, expectedFinish: null }), burnup: [0, 1, 2, 3, 4, 5, 6, 7].map((i) => week(0, 8, i)) }]);
+    render(<Roadmap companies={[company]} tab="timeline" go={() => {}} />);
+    await screen.findByText("Pace: no finished work in the last 4 weeks");
+    expect(screen.getByRole("img", { name: /Done stayed at 0 points; total stayed at 8 points/ })).toBeTruthy();
+  });
+});
+
 describe("milestone forecast on the Roadmap (BOS-2375)", () => {
   it("shows days late in the warning colour, unsized tickets, and the no-pace message", async () => {
     stub([

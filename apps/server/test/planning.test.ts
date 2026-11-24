@@ -176,6 +176,21 @@ describe("milestone forecast (points and pace)", () => {
     expect(f.daysLate).toBeGreaterThan(0);
   });
 
+  it("serves an 8-week burn-up on each milestone (BOS-2397), leaving cancelled work out", async () => {
+    const c = await setup();
+    const obj = (await c.req("POST", `/api/companies/${c.company.id}/objectives`, { title: "Launch", priority: 1 })).json();
+    const ms = (await c.req("POST", `/api/objectives/${obj.id}/milestones`, { title: "Beta" })).json();
+    const a = await c.ticket("Done 5", { milestoneId: ms.id, state: "done" });
+    const b = await c.ticket("Open 8", { milestoneId: ms.id, state: "in_progress" });
+    const x = await c.ticket("Dropped 20", { milestoneId: ms.id, state: "done", outcome: "cancelled" });
+    for (const [t, size] of [[a, 5], [b, 8], [x, 3]] as const) await c.db.update(tickets).set({ size }).where(eq(tickets.id, t.id));
+    const today = new Date().toISOString().slice(0, 10);
+    const burnup = (await c.req("GET", `/api/roadmap?today=${today}`)).json()[0].objectives[0].milestones[0].burnup;
+    expect(burnup).toHaveLength(8);
+    expect(burnup.at(-1)).toMatchObject({ weekEnd: today, done: 5, total: 13 });
+    expect(burnup[0]).toMatchObject({ done: 0, total: 0 });
+  });
+
   it("sums 5+3 done, 8+2 left, ignores unsized points, and finishes two weeks out at 20 points per 28 days", () => {
     const rows = [{ size: 5, done: true }, { size: 3, done: true }, { size: 8, done: false }, { size: 2, done: false }, { size: null, done: false }];
     expect(forecastMilestone(rows, 20 / 4, "2026-12-30", "2026-11-23")).toMatchObject({ pointsDone: 8, pointsLeft: 10, unsized: 1, expectedFinish: "2026-12-07" });
