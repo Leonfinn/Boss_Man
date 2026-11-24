@@ -6,6 +6,7 @@ import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { tickets } from "../src/db/schema.js";
+import { boardCardFields } from "../src/services/work.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -27,10 +28,12 @@ async function setup() {
   const project = (await req("POST", `/api/companies/${company.id}/projects`, { name: "Customer app" })).json() as { id: string };
   const make = async (title: string) => (await req("POST", `/api/projects/${project.id}/tickets`, { title })).json() as { id: string };
   const card = async (id: string, q = "") => ((await req("GET", `/api/projects/${project.id}/board${q}`)).json() as BoardBody).columns.flatMap((c) => c.tickets).find((t) => t.id === id)!;
-  return { ...built, db, close, make, card };
+  const size = async (q = "") => (await req("GET", `/api/projects/${project.id}/board${q}`)).body.length;
+  return { ...built, db, close, make, card, size, companyId: company.id, projectId: project.id };
 }
 
-const LONG = ["plan", "ceoPlan", "stateNote", "ownerSetup", "ownerSetupOverride", "ownerSetupWhy", "ownerSetupIfSkipped", "acceptanceCriteria", "diffFiles", "liveEvidence", "monitorNote"];
+// The long text, and a sample of the row's other columns the page doesn't read.
+const LONG = ["plan", "ceoPlan", "stateNote", "ownerSetup", "ownerSetupOverride", "ownerSetupWhy", "ownerSetupIfSkipped", "acceptanceCriteria", "diffFiles", "liveEvidence", "monitorNote", "projectId", "companyId", "createdAt", "customFields", "baseCommit"];
 
 describe("board card fields (BOS-2497)", () => {
   it("sends no long text, hasPlan for the plan, and the description only with ?text=1", async () => {
@@ -54,5 +57,23 @@ describe("board card fields (BOS-2497)", () => {
     for (const k of LONG) expect(searched, k).not.toHaveProperty(k);
     // With every done ticket asked for as well (what the search box sends).
     expect((await ctx.card(withPlan.id, "?done=all&text=1")).body).toBe("The kanban refresh is slow.");
+  });
+
+  // The ticket's seed: 175 open and 50 done tickets with 2 KB descriptions. Before this change a card was the whole ticket
+  // row plus the board's own fields, so today's size is the ?text=1 response plus, per card, the row's columns it no longer sends.
+  it("a refresh of 175 open and 50 done cards with 2 KB descriptions is at most a quarter of today's size", async () => {
+    ctx = await setup();
+    const words = "The board refresh sends every card to the page every ten seconds. ";
+    const body = words.repeat(Math.ceil(2048 / words.length)).slice(0, 2048);
+    const row = (i: number, systemState: "ready" | "done") => ({ companyId: ctx!.companyId, projectId: ctx!.projectId, title: `Seeded ticket ${i}`, systemState, body, number: i + 1 });
+    await ctx.db.insert(tickets).values([...Array.from({ length: 175 }, (_, i) => row(i, "ready")), ...Array.from({ length: 50 }, (_, i) => row(175 + i, "done"))]);
+    const plain = await ctx.size();
+    const withText = await ctx.size("?text=1");
+    expect(withText).toBeGreaterThan(225 * 2048);
+    // What `...t` used to add on top: each row's JSON less the fields still sent (its sent fields and body, and the braces).
+    const rows = await ctx.db.select().from(tickets).where(eq(tickets.projectId, ctx.projectId));
+    const dropped = rows.reduce((n, r) => n + JSON.stringify(r).length - JSON.stringify({ ...boardCardFields(r), body: r.body }).length, 0);
+    const today = withText + dropped;
+    expect(plain * 4, `refresh ${plain} bytes, searching ${withText}, today ${today}`).toBeLessThanOrEqual(today);
   });
 });
