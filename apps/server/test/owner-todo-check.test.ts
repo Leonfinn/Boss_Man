@@ -4,10 +4,10 @@ import { describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { openPglite } from "../src/db/client.js";
 import { companies, decisions } from "../src/db/schema.js";
-import { ownerTodoFixKey, raiseOwnerTodo } from "../src/services/decisions.js";
+import { APPROVE_HAND_APPLY, ownerTodoFixKey, raiseHandApplyTodo, raiseOwnerTodo, reraiseHeldHandApply, setOwnerTodoFacts } from "../src/services/decisions.js";
 import { ensureCiIdentityCard, ciIdentityKey } from "../src/services/ci-identity-card.js";
 import { screenMismatchSites } from "../src/services/outside-site-mismatch.js";
-import { SCREEN_DIFFERENT_OPTION } from "../src/services/steps.js";
+import { SCREEN_DIFFERENT_OPTION, sh, step } from "../src/services/steps.js";
 
 async function setup() {
   const { db, close } = await openPglite();
@@ -65,6 +65,100 @@ describe("raiseOwnerTodo runs the card check", () => {
     } finally {
       await c.close();
     }
+  });
+
+  // The hand-apply to-do (decisions.ts): its handSteps are code-written, but a host fact can still refuse them.
+  describe("the hand-apply to-do of an approved infra update", () => {
+    const HOSTS = [{ name: "example-host", ownership: [] }];
+    const onHost = (host: string, cmd: string) => step("Run this on the machine that runs Boss Man:", sh(cmd, { host, as: "root" }));
+    const approved = async (c: Awaited<ReturnType<typeof setup>>, handSteps: string[], commit = "c0ffee1") => {
+      const [d] = await c.db
+        .insert(decisions)
+        .values({ companyId: c.companyId, kind: "question", question: "Apply the proxy change", options: ["Approve"], recommendedOption: "Approve", tier: "owner", status: "answered", answer: APPROVE_HAND_APPLY, answeredAt: new Date(), context: { type: "self_deploy", target: "server", commit, fromCommit: "f00d123", infra: true, handSteps } } as never)
+        .returning();
+      return d!;
+    };
+    const run = (c: Awaited<ReturnType<typeof setup>>, d: Awaited<ReturnType<typeof approved>>) => raiseHandApplyTodo(c.db, d, d.context as never, false);
+    const ownerCards = async (c: Awaited<ReturnType<typeof setup>>) => (await c.db.select().from(decisions).where(eq(decisions.companyId, c.companyId))).filter((d) => d.tier === "owner" && (d.context as { type: string }).type === "owner_todo");
+    const fixCards = async (c: Awaited<ReturnType<typeof setup>>) => (await c.db.select().from(decisions).where(eq(decisions.companyId, c.companyId))).filter((d) => d.dedupeKey?.startsWith("owner-todo-fix:"));
+    const compose = { "compose.files": "docker-compose.yml,deploy/bluegreen.yml", "compose.bluegreen": "true", "compose.liveColour": "blue", "compose.cmd": "cd /opt/example/src && docker compose -f docker-compose.yml -f deploy/bluegreen.yml", "paths.src": "/opt/example/src" };
+
+    it("is held on an R6 host fence refusal: a CEO card, none for the owner", async () => {
+      const c = await setup();
+      try {
+        setOwnerTodoFacts(async () => ({ serverHost: "example-host", hosts: HOSTS }));
+        const d = await approved(c, [onHost("other-host", "ls /opt/example")]);
+        expect(await run(c, d)).toBeNull();
+        expect(await ownerCards(c)).toHaveLength(0);
+        const fix = await fixCards(c);
+        expect(fix).toHaveLength(1);
+        expect(fix[0]!.tier).toBe("ceo");
+        expect(fix[0]!.question).toContain(`but Boss Man runs on "example-host"`);
+      } finally {
+        setOwnerTodoFacts(null);
+        await c.close();
+      }
+    });
+
+    it("is held on an R31 compose refusal: a CEO card, none for the owner", async () => {
+      const c = await setup();
+      try {
+        setOwnerTodoFacts(async () => ({ serverHost: "example-host", hosts: HOSTS, values: compose }));
+        const d = await approved(c, [onHost("example-host", "cd /opt/example/src && docker compose up -d")]);
+        expect(await run(c, d)).toBeNull();
+        expect(await ownerCards(c)).toHaveLength(0);
+        const fix = await fixCards(c);
+        expect(fix).toHaveLength(1);
+        expect(fix[0]!.question).toContain("R31b");
+      } finally {
+        setOwnerTodoFacts(null);
+        await c.close();
+      }
+    });
+
+    it("a held card is raised again by the sweep once the steps pass, even after the CEO answered 'Got it' (it was stranded before)", async () => {
+      const c = await setup();
+      try {
+        const d = await approved(c, [onHost("other-host", "ls /opt/example")]);
+        setOwnerTodoFacts(async () => ({ serverHost: "example-host", hosts: HOSTS }));
+        expect(await run(c, d)).toBeNull();
+        expect(await reraiseHeldHandApply(c.db)).toBe(0);
+        expect(await ownerCards(c)).toHaveLength(0);
+        const [fix] = await fixCards(c);
+        await c.db.update(decisions).set({ status: "answered", answer: "Got it", answeredAt: new Date() }).where(eq(decisions.id, fix!.id));
+        // The host now reports the name the steps use.
+        setOwnerTodoFacts(async () => ({ serverHost: "other-host", hosts: [{ name: "other-host", ownership: [] }] }));
+        expect(await reraiseHeldHandApply(c.db)).toBe(1);
+        expect(await ownerCards(c)).toHaveLength(1);
+        // The sweep looks no further once the owner has the card.
+        expect(await fixCards(c)).toHaveLength(0);
+        expect(await reraiseHeldHandApply(c.db)).toBe(0);
+        expect(await ownerCards(c)).toHaveLength(1);
+      } finally {
+        setOwnerTodoFacts(null);
+        await c.close();
+      }
+    });
+
+    it("the CEO is not asked again on every sweep after 'Got it', but is told again a day later if the steps still fail", async () => {
+      const c = await setup();
+      try {
+        setOwnerTodoFacts(async () => ({ serverHost: "example-host", hosts: HOSTS }));
+        const d = await approved(c, [onHost("other-host", "ls /opt/example")]);
+        await run(c, d);
+        const [fix] = await fixCards(c);
+        await c.db.update(decisions).set({ status: "answered", answer: "Got it", answeredAt: new Date() }).where(eq(decisions.id, fix!.id));
+        await reraiseHeldHandApply(c.db);
+        await reraiseHeldHandApply(c.db);
+        expect(await fixCards(c)).toHaveLength(1);
+        await c.db.update(decisions).set({ answeredAt: new Date(Date.now() - 2 * 86_400_000) }).where(eq(decisions.id, fix!.id));
+        await reraiseHeldHandApply(c.db);
+        expect((await fixCards(c)).filter((x) => x.status === "open")).toHaveLength(1);
+      } finally {
+        setOwnerTodoFacts(null);
+        await c.close();
+      }
+    });
   });
 
   it("the CI-identity card is held while GitHub's docs have misled the owner in the last 30 days, and the owner sees nothing", async () => {

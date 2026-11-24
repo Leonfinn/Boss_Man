@@ -41,6 +41,24 @@ describe("every owner-card writer is listed", () => {
     expect(count(all.find((f) => f.file === "services/decisions.ts")!.text, /\braiseOwnerTodo\(db,/g)).toBe(1);
   });
 
+  it("each listed writer has a named test that shows its steps held when the check refuses them", () => {
+    // writer (as listed above) → [test file, test titles that must still exist there]. A new caller adds its row here
+    // with its own held-card test; a renamed or deleted test fails this row.
+    const tests: Record<string, [string, string[]]> = {
+      "services/ci-identity-card.ts": ["owner-todo-check.test.ts", ["the CI-identity card is held while GitHub's docs have misled the owner"]],
+      "services/self-deploy.ts (service cards)": ["self-deploy.test.ts", ["holds the database card when the host's own name is not the one its steps run on (R6)", "holds the proxy card when its check names the standby colour (R31c)"]],
+      "services/self-deploy.ts (deployer-script card)": ["self-deploy.test.ts", ["holds a new deployer-script card on an R6 refusal", "keeps the open deployer-script card's old steps when the refreshed ones are refused"]],
+      "services/decisions.ts (hand-apply to-do)": ["owner-todo-check.test.ts", ["is held on an R6 host fence refusal", "is held on an R31 compose refusal", "a held card is raised again by the sweep"]],
+    };
+    for (const [writer, [file, titles]] of Object.entries(tests)) {
+      const text = readFileSync(join(__dirname, file), "utf8");
+      for (const title of titles) expect(text.includes(title), `${writer}: no test titled "${title}" in ${file}`).toBe(true);
+    }
+    // Every raiseOwnerTodo caller file in src/ has a row.
+    const callerFiles = all.filter((f) => f.file !== "services/decisions.ts" && /\braiseOwnerTodo\(/.test(f.text)).map((f) => f.file).sort();
+    expect([...new Set(Object.keys(tests).map((k) => k.split(" ")[0]))].sort()).toEqual(expect.arrayContaining(callerFiles));
+  });
+
   it("every card context that carries steps for the owner is written by a listed file", () => {
     const writers = all.filter((f) => /type: "owner_todo"|type: "owner_setup"/.test(f.text)).map((f) => f.file).sort();
     // self-deploy.ts only names the type when it reads an open to-do back; its writes go through raiseOwnerTodo.

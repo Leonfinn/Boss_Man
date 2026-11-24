@@ -12,7 +12,7 @@ import type { Db } from "../db/client.js";
 import { agents, companies, decisions, owners, settings, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
 import { priorityGroup } from "./priority-group.js";
-import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, DEPLOY_AND_RUNNERS, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, fixesLiveHeading, markDecisionNotificationRead, raiseOwnerTodo, readyHeading, vetOwnerTodoSteps, type DecisionContext, type DeployUpdate, type DeployUrgent, type LiveFix } from "./decisions.js";
+import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, DEPLOY_AND_RUNNERS, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, fixesLiveHeading, markDecisionNotificationRead, raiseOwnerTodo, readyHeading, reraiseHeldHandApply, vetOwnerTodoSteps, type DecisionContext, type DeployUpdate, type DeployUrgent, type LiveFix } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 import { leaveClosedNotice, liveNotice, newerNotice, replacedNotice, NOTICE_MS, type ClosedNotice } from "./closed-notice.js";
 import { sh, step, type HostFacts, type SelfDeployFacts } from "./steps.js";
@@ -1551,6 +1551,8 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       // A to-do clears as soon as what runs is the approved commit, even if the rest below returns early.
       if (a) await this.clearDoneOwnerTodos(a, s).catch((err) => deps.log?.(`self-deploy: clearing done to-dos failed: ${(err as Error).message}`));
       await syncDeployerScript().catch((err) => deps.log?.(`self-deploy: deployer script check failed: ${(err as Error).message}`));
+      // BOS-2336: a hand-apply to-do the card check held when the owner approved is raised again here.
+      await reraiseHeldHandApply(db).catch((err) => deps.log?.(`self-deploy: re-raising held hand-apply cards failed: ${(err as Error).message}`));
       // Close any runner card, and drop any held offer, that the live image already has the change for (BOS-764).
       const need = await runnerNeed(a, { wake: true }).catch((err: Error) => (deps.log?.(`self-deploy: the runner answer failed: ${err.message}`), null));
       await closeBuiltRunnerCards(need).catch((err) => deps.log?.(`self-deploy: closing built runner cards failed: ${(err as Error).message}`));

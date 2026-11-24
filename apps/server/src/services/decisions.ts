@@ -6,7 +6,7 @@ import { createPermissionLog, type PermissionLog } from "./permission-log.js";
 import { leaveClosedNotice, leaveWithdrawnNotice, parseReplacedBy, recheckBackBy as backByAt, recheckLine, switchedBackNotice, withdrawnNotice, type ClosedNotice, type ReplacedBy } from "./closed-notice.js";
 import type { NotifyInput } from "./notifications.js";
 import { applyFenceAnswer, applyFenceUnavailableAnswer, applyGuardAnswer, checkFenceAnswer } from "./fence-default.js";
-import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from "drizzle-orm";
 import {
   effectiveDueDate,
   evaluatePermission,
@@ -609,8 +609,51 @@ export async function raiseOwnerTodo(
     .onConflictDoNothing()
     .returning({ id: decisions.id });
   // The checked steps went out, so the CEO's card about them is done with.
-  if (row) await clearOwnerTodo(db, ownerTodoFixKey(t.key), "The fixed steps went to the owner.");
+  if (row) {
+    await clearOwnerTodo(db, ownerTodoFixKey(t.key), "The fixed steps went to the owner.");
+    // A fix card the CEO already answered still holds its key; let go so the re-raise sweep stops looking at it.
+    await db.update(decisions).set({ dedupeKey: null }).where(eq(decisions.dedupeKey, ownerTodoFixKey(t.key)));
+  }
   return row ?? null;
+}
+
+const HAND_APPLY_KEY = "owner-todo:self-deploy:";
+/** The hand-apply to-do of an approved infra update (BOS-122), raised when the owner approves and again by reraiseHeldHandApply. */
+export async function raiseHandApplyTodo(db: Db, d: { id: string; companyId: string; question: string; raisedByAgentId: string | null }, ctx: SelfDeployCtx, quietFirst: boolean) {
+  return raiseOwnerTodo(db, {
+    companyId: d.companyId,
+    question: `"${d.question.split("\n\n")[0]}" was approved. It's waiting for you to apply it by hand on the machine that runs Boss Man.`,
+    key: `${HAND_APPLY_KEY}${ctx.commit}`,
+    steps: ctx.handSteps?.length ? ctx.handSteps : ["Apply the approved change by hand on the server that runs Boss Man."],
+    check: ctx.check,
+    rollback: ctx.rollback,
+    ofDecisionId: d.id,
+    raisedByAgentId: d.raisedByAgentId,
+    target: ctx.target,
+    commit: ctx.commit,
+    fromCommit: ctx.fromCommit,
+    update: ctx.update,
+    doAfter: ctx.doAfter,
+    quietFirst,
+  });
+}
+
+/**
+ * BOS-2336: a hand-apply to-do is raised once, when the owner approves, so one held by the card check would be lost.
+ * Each pass looks for the CEO's hold cards of hand-apply to-dos and raises the owner's card again (it is checked again,
+ * and goes out once the steps or the host's facts pass). Returns how many went out.
+ */
+export async function reraiseHeldHandApply(db: Db) {
+  const held = await db.select({ key: decisions.dedupeKey }).from(decisions).where(sql`${decisions.dedupeKey} like ${ownerTodoFixKey(HAND_APPLY_KEY) + "%"}`);
+  let raised = 0;
+  for (const h of held) {
+    const commit = h.key!.slice(ownerTodoFixKey(HAND_APPLY_KEY).length);
+    const [d] = await db.select().from(decisions).where(and(eq(decisions.status, "answered"), eq(decisions.answer, APPROVE_HAND_APPLY), sql`${decisions.context}->>'type' = 'self_deploy' and ${decisions.context}->>'commit' = ${commit}`)).orderBy(desc(decisions.answeredAt)).limit(1);
+    if (!d) continue;
+    const ctx = d.context as SelfDeployCtx;
+    if (await raiseHandApplyTodo(db, d, ctx, ctx.target === "server")) raised++;
+  }
+  return raised;
 }
 
 // lost on restart, harmless because app.ts wires the provider again at every start
@@ -660,6 +703,9 @@ export async function vetOwnerTodoSteps(db: Db, t: { companyId: string; key: str
 /** BOS-2336: the CEO's card when Boss Man's own owner card is held. A "Got it" notice; the real close is the owner's card going out. */
 async function raiseOwnerTodoFix(db: Db, t: { companyId: string; key: string; question: string; findings: LintFinding[] }) {
   const at = new Date().toISOString();
+  // A "Got it" card keeps its dedupe key, which would swallow a later hold of the same card. After a day the answered
+  // card lets go of the key, so the CEO is told again if the steps still fail; within the day a sweep doesn't re-ask.
+  await db.update(decisions).set({ dedupeKey: null }).where(and(eq(decisions.dedupeKey, ownerTodoFixKey(t.key)), ne(decisions.status, "open"), lt(decisions.answeredAt, new Date(Date.now() - 24 * 3_600_000))));
   const [row] = await db
     .insert(decisions)
     .values({
@@ -3566,22 +3612,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (ctx.infra && answer === APPROVE_HAND_APPLY) {
           // The change touches deployment files, so Boss Man can't deploy it. Approval doesn't clear it:
           // it leaves an owner to-do with the steps, the check and the rollback (BOS-122).
-          await raiseOwnerTodo(db, {
-            companyId: d.companyId,
-            question: `"${d.question.split("\n\n")[0]}" was approved. It's waiting for you to apply it by hand on the machine that runs Boss Man.`,
-            key: `owner-todo:self-deploy:${ctx.commit}`,
-            steps: ctx.handSteps?.length ? ctx.handSteps : ["Apply the approved change by hand on the server that runs Boss Man."],
-            check: ctx.check,
-            rollback: ctx.rollback,
-            ofDecisionId: id,
-            raisedByAgentId: d.raisedByAgentId,
-            target: ctx.target,
-            commit: ctx.commit,
-            fromCommit: ctx.fromCommit,
-            update: ctx.update,
-            doAfter: ctx.doAfter,
-            quietFirst: ctx.target === "server" && !!deployWait,
-          });
+          // A hold by the card check is retried by reraiseHeldHandApply on each deployer pass.
+          await raiseHandApplyTodo(db, d, ctx, ctx.target === "server" && !!deployWait);
         } else if (answer === DEPLOY || answer === UPDATE_RUNNERS || answer === DEPLOY_AND_RUNNERS) {
           try {
             // A server update waits for a quiet machine (BOS-420); it is sent at once when the machine is quiet already.
