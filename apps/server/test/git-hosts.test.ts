@@ -325,17 +325,18 @@ describe("CI on a commit for the merge gate (BOS-1070, read through Actions sinc
       });
       const read = async (rows: unknown[]) => (await github([], {}, { 5: rows }).host.failures(cfg("github"), "t", [{ id: 5, name: "check-worker-image", url: "" }]))[0]!;
 
-      it("as it ran: the /work container path and the two file-less summary notes leave the job unnamed (why it bounced)", async () => {
+      it("as it ran: the two file-less summary notes at failure level still leave the job unnamed (why ci.yml changes too)", async () => {
         const f = await read([exit, failedTests, firstErrors, vitestNote("/work/apps/launcher/test/docker.test.ts")]);
         const named = namedTestFiles([{ job: "check-worker-image", paths: f.paths }]);
-        expect(named.files).toEqual([]);
+        expect(named.files).toEqual(["apps/launcher/test/docker.test.ts"]);
         expect(named.unnamed).toEqual(["check-worker-image"]);
       });
 
-      it("with ci.yml's fix (repo mounted at the checkout's path, summaries as warnings) the one failed file is named", async () => {
+      it("the /work path is read as the repo file once the summaries are warnings (failed on the old code: path refused)", async () => {
         const warn = (a: typeof failedTests) => ({ ...a, annotation_level: "warning" });
-        // GitHub's runner makes a path under the workspace repo-relative; either form is read as the same file.
-        for (const path of ["apps/launcher/test/docker.test.ts", "/home/runner/work/Boss_Man/Boss_Man/apps/launcher/test/docker.test.ts"]) {
+        // /work: as vitest named it in this run. The other two: ci.yml now mounts at $GITHUB_WORKSPACE, which GitHub's runner
+        // makes repo-relative (or leaves under /home/runner/work); every form is read as the same file.
+        for (const path of ["/work/apps/launcher/test/docker.test.ts", "apps/launcher/test/docker.test.ts", "/home/runner/work/Boss_Man/Boss_Man/apps/launcher/test/docker.test.ts"]) {
           const f = await read([exit, warn(failedTests), warn(firstErrors), vitestNote(path)]);
           expect(namedTestFiles([{ job: "check-worker-image", paths: f.paths }])).toEqual({ files: ["apps/launcher/test/docker.test.ts"], unnamed: [], unsafe: [] });
         }
