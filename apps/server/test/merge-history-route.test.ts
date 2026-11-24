@@ -89,4 +89,11 @@ describe("merge history route", () => {
     expect(body.perDay).toHaveLength(1);
     expect(body.perDay[0]).toMatchObject({ landed: 4, bounced: 2, medianMs: 20 * 60_000 });
   });
+
+  it("takes days=7, 14 or 30 and refuses anything else with a 422 (BOS-2473)", async () => {
+    const get = (q: string) => ctx.app.inject({ method: "GET", url: `/api/companies/${ctx.companyId}/merge-history${q}`, headers: { cookie: ctx.cookie } });
+    for (const d of [7, 14, 30]) expect((await get(`?days=${d}`)).json()).toMatchObject({ days: d });
+    expect((await get("")).json()).toMatchObject({ days: 14 });
+    for (const bad of ["?days=3", "?days=abc", "?days="]) expect((await get(bad)).statusCode).toBe(422);
+  });
 });

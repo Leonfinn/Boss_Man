@@ -7,13 +7,20 @@ import { z } from "zod";
 import type { Db } from "../db/client.js";
 import { firstFailingLine } from "@boss-man/shared";
 import { checkJobs, checkWorkers, costEvents, projects, runs, ticketTransitions, tickets } from "../db/schema.js";
-import { mergeHistory } from "../services/merge-history.js";
+import { MERGE_HISTORY_PERIODS, mergeHistory } from "../services/merge-history.js";
 
 const IdParam = z.object({ id: z.string().uuid() });
 
 export function ticketRecordRoutes(owner: FastifyInstance, db: Db, deps: { filesChanged: (ticketId: string) => Promise<number | null> }) {
   // BOS-2379: the Merge history page's read: the last 14 days of merges, read-only.
-  owner.get("/api/companies/:id/merge-history", async (req) => mergeHistory(db, IdParam.parse(req.params).id));
+  // BOS-2473: optional ?days=7|14|30 (default 14); anything else is a 422.
+  owner.get("/api/companies/:id/merge-history", async (req, reply) => {
+    const id = IdParam.parse(req.params).id;
+    const raw = (req.query as { days?: string }).days;
+    const days = raw === undefined ? 14 : Number(raw);
+    if (!MERGE_HISTORY_PERIODS.includes(days)) return reply.code(422).send({ error: "invalid_days", message: "days must be 7, 14 or 30." });
+    return mergeHistory(db, id, new Date(), days);
+  });
 
   owner.get("/api/tickets/:id/record", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
