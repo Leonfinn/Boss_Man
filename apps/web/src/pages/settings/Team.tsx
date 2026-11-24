@@ -277,7 +277,7 @@ export function AdviceTimeout({ company, onChanged }: { company: Company; onChan
 type RulesVersion = { id: string; at: string; by: string; added: number; removed: number; before: string; after: string };
 
 /** The last 20 changes to the standing rules; each opens a before/after line view and can be put back. */
-function PastVersions({ url, busy, reloadKey, onPutBack }: { url: string; busy: boolean; reloadKey: string; onPutBack: (v: RulesVersion) => void }) {
+function PastVersions({ companyId, busy, reloadKey, onPutBack }: { companyId: string; busy: boolean; reloadKey: string; onPutBack: (v: RulesVersion) => void }) {
   const [opened, setOpened] = useState(false);
   const [versions, setVersions] = useState<RulesVersion[] | null>(null);
   const [failed, setFailed] = useState(false);
@@ -285,13 +285,13 @@ function PastVersions({ url, busy, reloadKey, onPutBack }: { url: string; busy: 
     if (!opened) return;
     let live = true;
     setFailed(false);
-    void api<{ versions: RulesVersion[] }>(`${url}/history`)
+    void api<{ versions: RulesVersion[] }>(`/api/companies/${companyId}/standing-rules/history`)
       .then((r) => live && setVersions(r.versions))
       .catch(() => live && setFailed(true));
     return () => {
       live = false;
     };
-  }, [opened, url, reloadKey]);
+  }, [opened, companyId, reloadKey]);
   return (
     <details style={{ marginTop: 12 }} onToggle={(e) => setOpened((e.currentTarget as HTMLDetailsElement).open)}>
       <summary>Past versions</summary>
@@ -465,7 +465,7 @@ export function StandingRules({ company, onChanged }: { company: Company; onChan
             </button>
           </div>
           <PastVersions
-            url={url}
+            companyId={company.id}
             busy={act.busy}
             reloadKey={rules.at ?? ""}
             onPutBack={(v) => {
