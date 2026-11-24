@@ -27,6 +27,7 @@ reads:
   - /api/agents/:id/history
   - /api/agents/:id/notes
   - /api/agents/:id/record
+  - /api/companies/:id/agent-records
   - /api/companies/:id/agents
   - /api/companies/:id/models
   - /api/companies/:id/review-policy
