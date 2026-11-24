@@ -76,6 +76,8 @@ GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-example/boss-man}" scripts/render-image-
 P="bminstall$$"
 {
   cat "$T/real.env"
+  # The updater only starts on a release number like 0.1.0 or 0.1.0-beta.1; the CI release.json says "ci". Later lines win.
+  echo "BOSSMAN_VERSION=0.0.0-install"
   echo "BOSSMAN_HOST_PORT=${INSTALL_HOST_PORT:-31100}"
   echo "BOSSMAN_PORTAL_HOST_PORT=${INSTALL_PORTAL_PORT:-31101}"
   echo "BOSSMAN_RUNNER_NETWORK=${P}_default"
@@ -103,7 +105,7 @@ dc up -d || { dc logs --tail 40; bad "up"; exit 1; }
 # Wait for the event (the server answering), with a deadline: a cold pull-and-migrate can take minutes on a slow runner.
 deadline=$((SECONDS + ${INSTALL_WAIT_SECONDS:-300}))
 until curl -fsS "http://127.0.0.1:${INSTALL_HOST_PORT:-31100}/api/health" >/dev/null 2>&1; do
-  [ "$SECONDS" -lt "$deadline" ] || { dc logs --tail 60; bad "the server did not answer /api/health in time"; exit 1; }
+  [ "$SECONDS" -lt "$deadline" ] || { docker ps -a --format '{{.Names}} {{.Status}}'; for c in updater launcher server-blue; do echo "--- $c"; docker logs --tail 40 "$c" 2>&1; done; dc logs --tail 30; bad "the server did not answer /api/health in time"; exit 1; }
   sleep 3
 done
 ok "the server answers /api/health"
