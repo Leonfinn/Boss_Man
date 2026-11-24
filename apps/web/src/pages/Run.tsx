@@ -1,7 +1,9 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { isInfiniteModel } from "@boss-man/shared";
-import { api, usd, type Company, type Transcript, type TranscriptItem } from "../api";
+import { api, usd, type Company, type RunRow, type Transcript, type TranscriptItem } from "../api";
+import { ticketSiblings, type Siblings } from "../run-siblings";
+import { LoadError } from "../components/LoadError";
 import { download } from "../csv";
 import { away } from "../server-watch";
 import { stopRun } from "../stop-run";
@@ -240,8 +242,56 @@ export function TimeSplitFold({ run, items, onGoTo }: { run: Transcript["run"]; 
   );
 }
 
+/** "Other runs on this ticket": every run of the same ticket, oldest first, this one marked. */
+export function SiblingRunsFold({ runId, sibs, error, onRetry }: { runId: string; sibs: Siblings | null; error: Error | null; onRetry: () => void }) {
+  return (
+    <details data-testid="run-siblings" style={{ margin: "8px 0" }}>
+      <summary>Other runs on this ticket{sibs ? ` (${sibs.rows.length})` : ""}</summary>
+      {error && !sibs ? (
+        <LoadError what="the ticket's other runs" message={error.message} onRetry={onRetry} />
+      ) : !sibs ? (
+        <Loader label="Loading the ticket's runs" />
+      ) : (
+        <table>
+          <thead>
+            <tr>
+              <th>Started</th>
+              <th>Agent</th>
+              <th>Result</th>
+              <th>Length</th>
+              <th>Cost</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {sibs.rows.map((r) => (
+              <tr key={r.id} aria-current={r.id === runId ? "true" : undefined}>
+                <td>
+                  <a href={`#/runs/${r.id}`}>{when(r.startedAt)}</a>
+                </td>
+                <td>{r.agent ?? "An agent"}</td>
+                <td>{outcomeTag(r.endedAt ? (r.outcome ?? "end_turn") : null)}</td>
+                <td className="mono">{r.endedAt ? spanWords(Date.parse(r.endedAt) - Date.parse(r.startedAt)) : "running"}</td>
+                <td className="mono">{r.fundingKind === "subscription" ? "plan use" : usd(r.costMicros ?? 0)}</td>
+                <td>{r.id === runId && <strong>This run</strong>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </details>
+  );
+}
+
 export function Run({ runId, companies }: { runId: string; companies: Company[] }) {
   const { run, items, dropped, error } = useTranscript(runId);
+  const sibQuery = run?.ticketId ? (run.runTicketRef ?? run.ticket ?? "") : "";
+  const sibRes = usePoll(
+    async (signal) => (run?.ticketId && sibQuery ? ticketSiblings(await api<RunRow[]>(`/api/runs/recent?q=${encodeURIComponent(sibQuery)}&limit=200`, { signal }), run) : null),
+    60_000,
+    `siblings:${runId}:${run?.ticketId ?? ""}`,
+  );
+  const sibs = run?.ticketId ? sibRes.data : null;
   const [preparing, setPreparing] = useState(false);
   const [dlError, setDlError] = useState<string | null>(null);
   const downloadRun = async () => {
@@ -318,6 +368,16 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
           )}
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {sibs?.previous && (
+            <a className="btn" href={`#/runs/${sibs.previous.id}`}>
+              Previous run
+            </a>
+          )}
+          {sibs?.next && (
+            <a className="btn" href={`#/runs/${sibs.next.id}`}>
+              Next run
+            </a>
+          )}
           {run && (
             <button type="button" className="btn" onClick={() => void downloadRun()} disabled={preparing}>
               {preparing ? "Preparing" : "Download"}
@@ -327,6 +387,7 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
         </div>
       </header>
       {dlError && <p className="error" role="alert">{dlError}</p>}
+      {run?.ticketId && sibQuery && <SiblingRunsFold runId={runId} sibs={sibs} error={sibRes.error} onRetry={sibRes.reload} />}
       {run && <TimeSplitFold run={run} items={items} onGoTo={(i) => { follow.current = false; rows.scrollToIndex(i, { align: "center" }); }} />}
       {run && !run.endedAt && <Steer runId={runId} companyId={run.companyId} ticketId={run.ticketId} />}
       {dropped > 0 && (
