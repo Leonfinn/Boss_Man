@@ -423,14 +423,27 @@ function MainRedBanner({ held, rows, heldBehind }: { held: number; rows: CheckRo
 /** BOS-1800: the checks the Quick checks tab lists and counts: everything in the check queue except merge checks (the Merges tab's). */
 export const quickChecksOf = (rows: CheckRow[]): CheckRow[] => rows.filter((r) => r.kind !== "merge");
 
+/**
+ * BOS-2507: the number on a waiting check = its place in the line shown, so the last one equals the tab count. The server's
+ * `position` counts every waiting check, merge checks too (which this tab leaves out), so it cannot be shown as it is.
+ * Running checks stay unnumbered; held ones (no position) too.
+ */
+export const quickCheckPlaces = (rows: CheckRow[]): Map<string, number> => {
+  let n = rows.filter((r) => r.state === "running").length;
+  const places = new Map<string, number>();
+  for (const r of rows) if (r.state === "waiting" && r.position) places.set(r.id, ++n);
+  return places;
+};
+
 /** The "Quick checks" tab (BOS-1174, BOS-1800): every non-merge check running or waiting in the server's check queue. Read-only. */
 export function QueuedChecks({ data, heldBehind, paused }: { data: CheckQueueData; heldBehind?: HeldSummary | null; paused?: PausedSummary | null }) {
   const held = data.rows.filter((r) => r.heldByMain).length;
   const free = Math.max(0, data.slots - data.running);
   const rows = quickChecksOf(data.rows);
+  const places = quickCheckPlaces(rows);
   return (
     <section>
-      <SectionHead title="Quick checks" fact={`${data.running} of ${data.slots} check ${data.slots === 1 ? "slot" : "slots"} busy, shared with merge checks · running first, then in start order`} />
+      <SectionHead title="Quick checks" fact={`${data.running} of ${data.slots} check ${data.slots === 1 ? "slot" : "slots"} busy, shared with merge checks · running first, then in line order (Background lane after ordinary work)`} />
       {data.mode === "legacy" && <p className="muted" style={{ fontSize: 14 }}>The server-owned check queue is switched off, so only checks it already knows about are listed.</p>}
       {(held > 0 || heldBehind) && <MainRedBanner held={held} rows={data.rows} heldBehind={heldBehind} />}
       {paused && (
@@ -453,7 +466,7 @@ export function QueuedChecks({ data, heldBehind, paused }: { data: CheckQueueDat
             <article key={r.id} className="card mq-item" data-check-state={r.state}>
               <div className="mq-head">
                 <span className="mq-title">
-                  {r.position ? <span className="mq-pos">{r.position}</span> : null}
+                  {places.has(r.id) ? <span className="mq-pos">{places.get(r.id)}</span> : null}
                   <TicketLink id={r.ticketId} ref={r.ref} title={r.title} />
                 </span>
                 <span className="mq-wait">for {waited(r.minutes)}</span>
