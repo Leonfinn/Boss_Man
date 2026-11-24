@@ -1,8 +1,11 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen } from "@testing-library/react";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
 import { Runner, SelfDeploy } from "../src/pages/Settings";
+import { LiveState, historyTag, runnerProgress, type LiveRow, type MaintenanceView } from "../src/pages/settings/updates";
 
 afterEach(() => {
   cleanup();
@@ -102,6 +105,59 @@ describe("Settings → Runner during a planned swap (BOS-382 slice D)", () => {
     expect(now.textContent).toContain("Paused: network guard");
     expect(now.textContent).toContain("guard exited");
     expect(now.textContent).not.toContain("Not connected");
+  });
+});
+
+// BOS-2532 (G2, pins BOS-2525): on 24 Nov the swap badge read "0 of 3 companies done" with 2 of 3 already
+// connected on the new image. The badge and the "Now running" list now share one test, so they can't disagree.
+describe("Settings → Updates: the swap badge counts the list it sits above (BOS-2532)", () => {
+  const runnerImage = "202611241722";
+  const three = [
+    { slug: "a", name: "HolidayHours", registered: true, connected: true, at: "2026-11-24T17:22:00.000Z", imageVersion: runnerImage, fault: null },
+    // The waiting company still carries its swap mark; it is on the old image, so it shows waiting for its runs.
+    { slug: "c", name: "Boss Man Co", registered: true, connected: true, at: "2026-11-24T17:12:01.000Z", imageVersion: "202611241201", fault: null, swap: { retryAt: null, tries: 0 } },
+    // A second company already on the new image, connected.
+    { slug: "b", name: "Stainbeck Homelab", registered: true, connected: true, at: "2026-11-24T17:22:30.000Z", imageVersion: runnerImage, fault: null },
+  ];
+  const mount = (liveRows: object[], newestHint?: string) => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (url.endsWith("/api/self-deploy")) return json({ ...selfDeploy, ...(newestHint ? { runnerImage: { running: null, needed: newestHint } } : {}) });
+      if (url.endsWith("/api/runner-report")) return json({ live: liveRows, update: null });
+      if (url.endsWith("/api/maintenance")) return json({ on: true, kind: "update", deadline: new Date(Date.now() + 600_000).toISOString(), runs: 1, companies: 1, phase: "swapping" });
+      if (url.includes("/api/self-deploy/wait")) return json({ on: false });
+      if (url.includes("/api/self-deploy/history")) return json([{ id: "h1", target: "runner", commit: "abc", changes: 0, result: "deployed", message: null, at: "2026-11-24T17:22:00.000Z" }]);
+      return json([]);
+    }));
+    render(<SelfDeploy go={() => {}} />);
+  };
+
+  it("2 of 3 connected on the new image reads '2 of 3', while the third still waits", async () => {
+    mount(three);
+    const recent = await screen.findByTestId("recent-updates");
+    await vi.waitFor(() => expect(recent.textContent).toContain("Swapping (2 of 3 companies done)"));
+    // The list under the badge: two Connected, one waiting for runs to finish.
+    const now = screen.getByTestId("runner-live");
+    expect((now.textContent ?? "").match(/Connected/g) ?? []).toHaveLength(2);
+    expect(now.textContent).toContain("Waiting for runs to finish");
+  });
+
+  it("0 of 3, 2 of 3 and 3 of 3 are the counts the badge's own rule gives the rows shown", () => {
+    const maint = { on: true, kind: "update", deadline: new Date(Date.now() + 600_000).toISOString(), runs: 1, companies: 1, phase: "swapping" } as MaintenanceView;
+    // Everyone still on the old image while the update is for `runnerImage`: 0 of 3, and no row says Connected.
+    const waiting = three.map((r) => ({ ...r, imageVersion: "202611241201" })) as unknown as LiveRow[];
+    const p0 = runnerProgress(waiting, maint, runnerImage);
+    expect(p0).toMatchObject({ inProgress: true, done: 0, total: 3 });
+    expect(historyTag({ id: "h1", target: "runner", commit: "abc", changes: 0, result: "deployed", message: null, at: "" }, p0).tag).toBe("Swapping (0 of 3 companies done)");
+    // Every row the badge counts as done says Connected in the list under it, row by row.
+    const tags = (live: LiveRow[], p: ReturnType<typeof runnerProgress>) => live.map((r) => renderToStaticMarkup(createElement(LiveState, { r, progress: p })).includes(">Connected<"));
+    const p2 = runnerProgress(three as unknown as LiveRow[], maint);
+    expect(p2).toMatchObject({ done: 2 });
+    expect(tags(three as unknown as LiveRow[], p2)).toEqual([true, false, true]);
+    // All on the new image, and the update is for that image: 3 of 3, every row Connected.
+    const p3 = runnerProgress(three.map((r) => ({ ...r, imageVersion: runnerImage })) as unknown as LiveRow[], maint, runnerImage);
+    expect(p3).toMatchObject({ done: 3 });
+    expect(tags(three.map((r) => ({ ...r, imageVersion: runnerImage })) as unknown as LiveRow[], p3)).toEqual([true, true, true]);
+    expect(tags(waiting, p0)).toEqual([false, false, false]);
   });
 });
 

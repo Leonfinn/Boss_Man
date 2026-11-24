@@ -88,4 +88,27 @@ describe("waiting summary (BOS-2434)", () => {
     expect(readQueueView(new URLSearchParams("kind=signoff&order=oldest"))).toEqual({ kind: "signoff", oldestFirst: true });
     expect(queueViewHref({ kind: null, oldestFirst: false })).toBe("#/decisions");
   });
+
+  // BOS-2532 (G2): on 24 Nov the summary read "10 projects waiting for you" over a 3-card list. With a project chosen
+  // the server tally (all projects) no longer fits, so the heading must count the cards actually listed.
+  it("BOS-2532: with a project chosen, the count and kinds match the cards listed, not the all-projects tally", () => {
+    stub();
+    localStorage.setItem("bossman.decisions.projectFilter", "p-dev");
+    try {
+      const tallied = [
+        decision({ id: "p1", kind: "permission", question: "Run the build?", projects: [{ id: "p-dev", name: "Development" }] }),
+        decision({ id: "p2", kind: "question", question: "Which logo?", projects: [{ id: "p-dev", name: "Development" }] }),
+        // Ten other cards in other projects: the server's all-projects tally says 10, the list shows the two above.
+        ...Array.from({ length: 10 }, (_, i) => decision({ id: `x${i}`, kind: "choice", question: `Elsewhere ${i}`, projects: [{ id: "p-web", name: "Website" }] })),
+      ];
+      render(<Decisions decisions={tallied} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} tally={{ open: 10, waiting: 0 }} />);
+      const box = screen.getByTestId("waiting-summary");
+      expect(box.textContent).toContain("2 waiting for you");
+      expect(within(box).getByText("1 permission")).toBeTruthy();
+      expect(within(box).getByText("1 question")).toBeTruthy();
+      expect(order()).toEqual(["decision-p1", "decision-p2"]);
+    } finally {
+      localStorage.removeItem("bossman.decisions.projectFilter");
+    }
+  });
 });

@@ -63,6 +63,24 @@ describe("notifications", () => {
     expect(JSON.parse(call[1].body as string)).toEqual({ ids: ["t1"] });
   });
 
+  // BOS-2532 (G2): the summary said "Latest 50 shown" over a list of 50 while 50 more were still to come, so the
+  // number read as the whole list. It now counts the rows on screen and says there are more below.
+  it("BOS-2532: the summary counts the rows shown and says more are below until they are loaded", async () => {
+    const mk = (i: number): Notice => ({ ...notice(`b${i}`), id: `n${i}`, title: `Notice ${i}`, createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, 100 - i)).toISOString() });
+    const first = Array.from({ length: 50 }, (_, i) => mk(i));
+    // The server answers the filtered list (Level: Notes) with the same page, then the "Show older" page.
+    vi.stubGlobal("fetch", vi.fn((url: string) =>
+      Promise.resolve(new Response(JSON.stringify(String(url).includes("before=") ? { items: [mk(50), mk(51)], unread: 0 } : { items: first, unread: 0 }), { status: 200, headers: { "content-type": "application/json" } })),
+    ));
+    render(<Notifications feed={{ items: first, unread: 0 }} onChanged={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Notes" }));
+    expect(await screen.findByText("50 shown, more below")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Show older" }));
+    expect(await screen.findByText("Notice 51")).toBeTruthy();
+    expect(await screen.findByText("52 shown")).toBeTruthy();
+    expect(screen.queryByText(/more below/)).toBeNull();
+  });
+
   it("keeps the rows and shows the error when an older load fails", async () => {
     const first = Array.from({ length: 50 }, (_, i) => ({ ...notice("x"), id: `n${i}`, title: `Notice ${i}` }));
     vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(JSON.stringify({ error: "boom" }), { status: 500, headers: { "content-type": "application/json" } }))));

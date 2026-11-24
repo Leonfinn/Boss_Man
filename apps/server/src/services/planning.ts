@@ -48,16 +48,24 @@ export type MilestoneForecast = {
   daysLate: number;
 };
 
+/**
+ * The points of a sized task, as a whole number: 0 for a task with no size. A task whose size reads as 0 (a whole
+ * number that is not one of TASK_SIZES, e.g. saved before the size check) counts as unsized rather than adding
+ * nothing, so "N of M points done" never leaves a sized task's points out of M (BOS-2532, G2).
+ */
+export const effectiveSize = (size: number | null | undefined): number => (typeof size === "number" && Number.isFinite(size) && size >= 1 ? Math.round(size) : 0);
+
 /** Pure forecast for one milestone: sized points done and left, plus the finish date at the recent pace. */
 export function forecastMilestone(rows: Array<{ size: number | null; done: boolean }>, pace: number, targetDate: string | null, today: string): MilestoneForecast {
   let pointsDone = 0;
   let pointsLeft = 0;
   let unsized = 0;
   for (const r of rows) {
-    if (r.size == null) {
+    const size = effectiveSize(r.size);
+    if (size === 0) {
       if (!r.done) unsized++;
-    } else if (r.done) pointsDone += r.size;
-    else pointsLeft += r.size;
+    } else if (r.done) pointsDone += size;
+    else pointsLeft += size;
   }
   const expectedFinish = pointsLeft === 0 ? today : pace > 0 ? addDays(today, Math.ceil((pointsLeft / pace) * 7)) : null;
   const daysLate = expectedFinish && targetDate && expectedFinish > targetDate ? Math.round((Date.parse(expectedFinish) - Date.parse(targetDate)) / dayMs) : 0;

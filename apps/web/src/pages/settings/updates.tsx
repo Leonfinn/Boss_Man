@@ -413,16 +413,42 @@ export function deployerLine(v: SelfDeployView): string {
   return `The host deployer last reported ${when(d.reportedAt)}. It is reading main again and shows what is waiting within a few minutes.`;
 }
 
-/** How far the runner swap has got (BOS-1558): the newest image any runner reports is the new one; the rest are still waiting. */
+/**
+ * How many companies are connected on the new image (BOS-1558, BOS-2532). Same test for the "Swapping (N of M)" badge and
+ * the "Now running" list's tags: each row goes through `liveWord` below, so the two can never disagree. The new image is the
+ * one the server names for the update (`newestHint`), else the newest any runner reports; a runner on an older image, or with
+ * none yet, does not count as done.
+ */
 export type RunnerProgress = { inProgress: boolean; done: number; total: number; newest: string | null };
-export function runnerProgress(live: LiveRow[] | null | undefined, maint: MaintenanceView | null | undefined): RunnerProgress {
+export function runnerProgress(live: LiveRow[] | null | undefined, maint: MaintenanceView | null | undefined, newestHint?: string | null): RunnerProgress {
   const runners = (live ?? []).filter((l) => l.registered);
   const stamps = runners.map((l) => l.imageVersion).filter((v): v is string => !!v);
-  const newest = stamps.length ? stamps.reduce((a, b) => (b > a ? b : a)) : null;
-  const done = runners.filter((l) => l.connected && !l.swap && l.imageVersion === newest).length;
+  // The new image is the one the update is for when the server names it (newestHint), else the newest any runner reports
+  // (BOS-1558). Never the newest among the runners alone: while every runner is still on the old image, that made the old
+  // image "new" and the badge read "3 of 3" mid-swap, or all-Connected rows while nothing had swapped (BOS-2532, G2).
+  const fleetNewest = stamps.length ? stamps.reduce((a, b) => (b > a ? b : a)) : null;
+  const newest = newestHint && fleetNewest ? (newestHint > fleetNewest ? newestHint : fleetNewest) : (newestHint ?? fleetNewest);
+  const done = runners.filter((l) => liveWord(l, newest) === "connected").length;
   // A runner update's hold (not a setting change or a wrap-up) is on, so the swap is not finished whatever the images say.
   const held = !!maint && maint.on && maint.kind !== "settings" && maint.kind !== "wrapup" && maint.kind !== "building";
   return { inProgress: held, done, total: runners.length, newest };
+}
+
+/**
+ * What one company's runner row says in "Now running", from the one rule the badge counts by (BOS-2532): on the new image
+ * reads as connected; a runner still on the old image reads as waiting for its runs; a swap mark counts only while the
+ * runner is not connected. `newest` is the newest image across the fleet (RunnerProgress.newest).
+ */
+export function liveWord(r: LiveRow, newest: string | null): "connected" | "old" | "updating" | "failed" | "guard" | "down" {
+  if (r.registered && r.connected) {
+    if (!newest || !r.imageVersion) return "connected";
+    if (r.imageVersion >= newest) return "connected";
+    return "old";
+  }
+  if (r.swap) return "updating";
+  if (r.swapFailed) return "failed";
+  if (r.guard) return "guard";
+  return "down";
 }
 
 /** Recent updates: the tag for one history row. A rejected-as-stale update is REPLACED (grey), not a failure. `swap`: only for the newest runner row. */
@@ -439,30 +465,29 @@ export const historyWhat = (r: HistoryRow) => (r.target === "runner" ? "Runners,
 
 /** The live state of one company's runner, leading the panel: connected or not, and since when. */
 export function LiveState({ r, progress }: { r: LiveRow; progress?: RunnerProgress | null }) {
-  const connected = r.registered && r.connected;
-  const old = !!progress?.inProgress && connected && !!r.imageVersion && !!progress.newest && r.imageVersion < progress.newest;
+  const word = liveWord(r, progress?.newest ?? null);
   return (
     <li style={{ listStyle: "none" }}>
       <strong>{r.name}</strong>{" "}
-      {old ? (
+      {word === "old" ? (
         <span className="tag amber">Waiting for runs to finish</span>
-      ) : connected ? (
+      ) : word === "connected" ? (
         <span className="tag green">Connected</span>
-      ) : r.swap ? (
+      ) : word === "updating" ? (
         <span className="tag amber">Updating</span>
-      ) : r.swapFailed ? (
+      ) : word === "failed" ? (
         <span className="tag red">Update failed</span>
-      ) : r.guard ? (
+      ) : word === "guard" ? (
         <span className="tag red">Paused: network guard</span>
       ) : (
         <span className="tag red">Not connected</span>
       )}{" "}
       <span className="muted">
-        {connected ? "since" : r.at ? "last seen" : ""} {r.at ? when(r.at) : ""}
-        {old ? ` · waiting for runs to finish, old image ${r.imageVersion}` : connected && r.imageVersion ? ` · image ${r.imageVersion}` : ""}
+        {word === "old" ? "since" : r.at ? "last seen" : ""} {r.at ? when(r.at) : ""}
+        {word === "old" ? ` · waiting for runs to finish, old image ${r.imageVersion}` : word === "connected" && r.imageVersion ? ` · image ${r.imageVersion}` : ""}
         {r.fault ? ` · ${r.fault}` : ""}
-        {!connected && r.swapFailed ? ` · ${r.swapFailed}` : ""}
-        {!connected && !r.swap && !r.swapFailed && r.guard ? ` · ${r.guard.reason}` : ""}
+        {word === "failed" && r.swapFailed ? ` · ${r.swapFailed}` : ""}
+        {word === "guard" && r.guard ? ` · ${r.guard.reason}` : ""}
       </span>
     </li>
   );

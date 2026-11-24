@@ -224,6 +224,12 @@ export function TrialLines({ trial, wait, now, queue, cancelled, held }: { trial
   );
 }
 
+/** The image the runner update is for, so "N of M done" counts against it before any runner reports it (BOS-2525, BOS-2532). */
+function neededRunnerImage(v: SelfDeployView | null | undefined): string | null | undefined {
+  const img = v?.runnerImage;
+  return img ? (img.needed ?? img.running) : undefined;
+}
+
 /** What the host deployer last did, and a button to ask for the newest main (docs/09-self-deploy.md). Hidden when self-deploy is off. */
 export function SelfDeploy({ go }: { go: (to: string) => void }) {
   const view = usePoll((signal) => api<SelfDeployView>("/api/self-deploy", { signal }), 10_000, "self-deploy");
@@ -263,7 +269,7 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
     );
   }
   const s =v?.status ?? null;
-  const progress = runnerProgress(report.data?.live, maint.data);
+  const progress = runnerProgress(report.data?.live, maint.data, neededRunnerImage(v));
   const st = updateStatus(v, maint.data, wait.data, now, { runnersAt: report.data?.update?.at ?? null });
   const wrap = maint.data && maint.data.on && ((maint.data as WrapUpStatus).wrapAsked || maint.data.kind === "wrapup") ? (maint.data as WrapUpStatus) : null;
   const busy = act.busy || !v;

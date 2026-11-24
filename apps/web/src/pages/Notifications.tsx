@@ -239,7 +239,10 @@ export function Notifications({ feed, onChanged, companies = null, browserPermis
   const unreadShown = items.filter((n) => !n.readAt);
   const clear = () => setFilters(NO_FILTERS);
 
-  const summary = updating ? "Updating…" : `${older.canMore ? "Latest " : ""}${items.length} shown`;
+  // BOS-2532 (G2): the rows on screen are `items`, so the summary counts those and no more. It said "Latest N shown"
+  // while "Show older" was still to come, counting only the first page; now it says the list is cut and how many are
+  // here, and the button that loads the rest is what brings more in.
+  const summary = updating ? "Updating…" : !older.rows && older.canMore ? `Latest ${items.length} shown, more below` : older.canMore ? `${items.length} shown, more below` : `${items.length} shown`;
   const neverAny = !active && feed && !items.length;
 
   return (
