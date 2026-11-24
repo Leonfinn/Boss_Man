@@ -1,5 +1,4 @@
 import path from "node:path";
-import { boardBuilds } from "./services/board-build.js";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest, type FastifyServerOptions } from "fastify";
 import cookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
@@ -1015,7 +1014,6 @@ export async function buildApp(opts: AppOptions) {
     onFeature: (id) => feedback.syncFeature(id),
     // The board's "Approved, merging" cards say where their merge is (BOS-667). `review` is built below; this runs per request.
     runningMerges: () => review.runningMerges(),
-    boardBuilds: boardBuilds((id) => review.branchChecksOrThrow(id)),
     now: opts.now,
   });
   // The CEO's proposed skills (BOS-86): review by the Security Reviewer where required, the owner's decision, then install.

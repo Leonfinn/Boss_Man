@@ -9,6 +9,19 @@ export const BOARD_BUILD_TTL_MS = 5 * 60_000;
  * `fetch` is `review.branchChecksOrThrow`: null when the company has no git host (no tag), a throw when the host fails (unavailable).
  * The key is the ticket plus its last activity, so new work on the branch (a new head) is fetched fresh.
  */
+// shortcut: the board service is built before the review service, so the review service hands its lookup over here, per database; rebuilt at every start, nothing to lose.
+const lookups = new WeakMap<object, ReturnType<typeof boardBuilds>>();
+
+/** The review service calls this once when it is built, so the board can reach the git host without app.ts wiring it. */
+export function registerBoardBuilds(db: object, fetch: Parameters<typeof boardBuilds>[0]): void {
+  lookups.set(db, boardBuilds(fetch));
+}
+
+/** The board's lookup for this database: no entries until the review service has registered. */
+export function boardBuildsFor(db: object): ReturnType<typeof boardBuilds> {
+  return async (cards) => (await lookups.get(db)?.(cards)) ?? new Map();
+}
+
 export function boardBuilds(fetch: (ticketId: string) => Promise<(CommitChecks & { sha: string }) | null>, now: () => number = Date.now) {
   // shortcut: a 5-minute cache of the host's answer, safe to lose on restart (the next board load asks again); one entry per Review card, dropped when it expires.
   const cache = new Map<string, { at: number; value: BoardBuild | null }>();
