@@ -1,6 +1,6 @@
 // The search box's route (BOS-2192): tickets, wiki pages and chat messages of one company, grouped, with snippets.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { agents, companies, decisions, features, ownerChatMessages, projects, runs, skills, tickets, wikiPages } from "../src/db/schema.js";
+import { agents, companies, decisions, features, feedbackNotes, ownerChatMessages, projects, runs, skills, tickets, wikiPages } from "../src/db/schema.js";
 import { decisionTitle, refOf, runResultWord, SEARCH_EXTRA_MAX, SEARCH_GROUP_MAX, snippetOf, type SearchResults } from "../src/routes/search.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
@@ -186,6 +186,27 @@ describe("search route (BOS-2192)", () => {
     expect([r.agents.length, r.skills.length]).toEqual([SEARCH_EXTRA_MAX, SEARCH_EXTRA_MAX]);
     // An agent with no job title is an "Agent", as on the Agents page.
     expect(r.agents[0]!.snippet).toBe("Agent");
+  });
+
+  it("finds feedback notes by text or title, links to the note, and never shows an unconfirmed or another company's note (BOS-2433)", async () => {
+    await t.db.insert(feedbackNotes).values([
+      { companyId: A.company, title: "Dark mode please", text: "Someone asked for dark mode on the phone." },
+      { companyId: A.company, text: "A call: they would love a heron view." },
+      { companyId: A.company, text: "Unconfirmed heron note", confirmTokenHash: "h".repeat(64), confirmExpiresAt: new Date(Date.now() + 86_400_000) },
+      { companyId: B.company, title: "Heron elsewhere", text: "heron heron" },
+    ]);
+    const dark = await find(A.company, "dark mode");
+    expect(dark.counts.feedback).toBe(1);
+    expect(dark.feedback[0]).toMatchObject({ title: "Dark mode please", link: `feedback/${A.company}/${dark.feedback[0]!.id}` });
+    const heron = await find(A.company, "heron");
+    // The untitled note is shown by the start of its text; the unconfirmed and the other company's notes are not there.
+    expect(heron.counts.feedback).toBe(1);
+    expect(heron.feedback[0]!.title).toMatch(/^A call/);
+    const only = await t.app.inject({ method: "GET", url: `/api/companies/${A.company}/search?q=dark&kind=feedback&limit=5`, headers: { cookie } });
+    expect((only.json() as SearchResults).feedback).toHaveLength(1);
+    // The since filter works on a note's creation date: nothing was made after tomorrow.
+    const later = await t.app.inject({ method: "GET", url: `/api/companies/${A.company}/search?q=dark&since=${encodeURIComponent(new Date(Date.now() + 86_400_000).toISOString())}`, headers: { cookie } });
+    expect((later.json() as SearchResults).counts.feedback).toBe(0);
   });
 
   it("caps each group at 8", async () => {

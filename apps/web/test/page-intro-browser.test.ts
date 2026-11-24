@@ -44,6 +44,7 @@ function answer(p: string): unknown {
   if (p === "/api/companies/c1/models") return { runner: {}, api: [] };
   if (p === "/api/companies/c1/review-policy") return { levels: {} };
   if (p === "/api/notifications/settings") return { quiet: false, start: "22:00", end: "07:00", phoneAddress: null };
+  if (p === "/api/notifications/week") return { timeZone: "UTC", days: [], totals: { notices: 0, pushed: 0, quiet: 0, cap: 0, failed: 0 }, topAgents: [], lastFailure: null };
   if (p === "/api/companies/c1/features") return { settings: { demandWeight: 1, ceoTriage: false }, drivers: [], maxDemand: 0, features: [feature] };
   if (p === "/api/companies/c1/feedback-settings") return { demandWeight: 1, ceoTriage: false, portalEnabled: true, portalToken: null, portalTitle: null, portalIntro: null, hasLogo: false, drivers: [], areas: [] };
   // Settings → Server and runner shows every panel on one page; each one needs a shape it can read.

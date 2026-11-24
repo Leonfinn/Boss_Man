@@ -1,11 +1,15 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
 import { ChatPage } from "../src/pages/Chat";
 
 // BOS-2411: find in this conversation, and go to date.
 Element.prototype.scrollIntoView = () => {};
+// Each wait below returns as soon as its element is there. Testing-library's own 1 s deadline and vitest's 5 s test limit
+// are tuned to a fast machine: rendering 60 messages in jsdom takes ~4 s per test when the CPU is squeezed (scripts/squeeze-test.sh),
+// and GitHub's runners are slower still. A 15 s deadline per wait and a 45 s limit per test only catch a wait that never ends.
+configure({ asyncUtilTimeout: 15_000 });
 afterEach(() => {
   cleanup();
   sessionStorage.clear();
@@ -39,7 +43,7 @@ function stub(opts: { older?: unknown[]; hasMore?: boolean } = {}) {
 const renderChat = () => render(<ChatPage companies={[company]} companyId="c1" agentId="a1" go={() => {}} onChanged={() => {}} />);
 const type = (v: string) => fireEvent.change(screen.getByLabelText("Find in this conversation"), { target: { value: v } });
 
-describe("chat: find in this conversation (BOS-2411)", () => {
+describe("chat: find in this conversation (BOS-2411)", { timeout: 45_000 }, () => {
   it("highlights all 3 matches, says 1 of 3, and Next, Previous and Enter step and scroll to each", async () => {
     stub();
     const scrolled: string[] = [];
@@ -73,9 +77,13 @@ describe("chat: find in this conversation (BOS-2411)", () => {
     let scrolls = 0;
     const { container } = renderChat();
     await screen.findByText("msg-89");
+    // The scroll to the first match can land after "1 of 3" shows (GitHub failed with 1 here). Count from before typing,
+    // wait for that first scroll, then zero the counter: only a scroll caused by clearing is left to count.
+    Element.prototype.scrollIntoView = () => void scrolls++;
     type("needle");
     await screen.findByText("1 of 3");
-    Element.prototype.scrollIntoView = () => void scrolls++;
+    await waitFor(() => expect(scrolls).toBeGreaterThan(0));
+    scrolls = 0;
     type("");
     await waitFor(() => expect(container.querySelectorAll("mark")).toHaveLength(0));
     expect(screen.queryByText("1 of 3")).toBeNull();

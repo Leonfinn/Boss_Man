@@ -5,11 +5,11 @@
 // company's few thousand rows scan in milliseconds, and meaning search is BOS-2116's.
 // Every query filters on the company in the address, so no other company's rows can come back.
 import { ticketRef } from "@boss-man/shared";
-import { and, desc, eq, gte, isNotNull, ne, or, sql, type AnyColumn } from "drizzle-orm";
+import { and, desc, eq, gte, isNotNull, isNull, ne, or, sql, type AnyColumn } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { Db } from "../db/client.js";
-import { agents, companies, decisions, features, ownerChatMessages, runs, skills, tickets, wikiPages } from "../db/schema.js";
+import { agents, companies, decisions, features, feedbackNotes, ownerChatMessages, runs, skills, tickets, wikiPages } from "../db/schema.js";
 import { liveWikiPage } from "../services/wiki.js";
 
 /** At most this many results per group in the box. */
@@ -24,13 +24,13 @@ export const SEARCH_EXTRA_MAX = 5;
 const DECISION_TITLE_MAX = 160;
 
 /** The kinds of result, in the order the box and the Search page show them. */
-export const SEARCH_KINDS = ["tickets", "wiki", "chats", "features", "decisions", "runs", "agents", "skills"] as const;
+export const SEARCH_KINDS = ["tickets", "wiki", "chats", "features", "decisions", "runs", "agents", "skills", "feedback"] as const;
 export type SearchKind = (typeof SEARCH_KINDS)[number];
 /** The Search page (BOS-2378) asks for one kind a page at a time: this many by default, never more than the max. */
 export const SEARCH_PAGE = 25;
 export const SEARCH_PAGE_MAX = 100;
 /** How many of each kind the box shows when no kind is picked. */
-const GROUP_MAX: Record<SearchKind, number> = { tickets: SEARCH_GROUP_MAX, wiki: SEARCH_GROUP_MAX, chats: SEARCH_GROUP_MAX, features: SEARCH_EXTRA_MAX, decisions: SEARCH_EXTRA_MAX, runs: SEARCH_EXTRA_MAX, agents: SEARCH_EXTRA_MAX, skills: SEARCH_EXTRA_MAX };
+const GROUP_MAX: Record<SearchKind, number> = { tickets: SEARCH_GROUP_MAX, wiki: SEARCH_GROUP_MAX, chats: SEARCH_GROUP_MAX, features: SEARCH_EXTRA_MAX, decisions: SEARCH_EXTRA_MAX, runs: SEARCH_EXTRA_MAX, agents: SEARCH_EXTRA_MAX, skills: SEARCH_EXTRA_MAX, feedback: SEARCH_EXTRA_MAX };
 
 /**
  * (BOS-2378) `kind` asks for that kind only, `limit` of them from `offset` (the other kinds come back empty, with their
@@ -41,7 +41,7 @@ export type SearchOptions = { kind?: SearchKind; offset?: number; limit?: number
 
 export type SearchHit = { id: string; title: string; snippet: string; link: string; ref?: string | null; exact?: boolean; who?: string; at?: string };
 /** `counts` is every match of each kind (with `since` applied), not just the ones returned. */
-export type SearchResults = { q: string; tickets: SearchHit[]; wiki: SearchHit[]; chats: SearchHit[]; features: SearchHit[]; decisions: SearchHit[]; runs: SearchHit[]; agents: SearchHit[]; skills: SearchHit[]; counts: Record<SearchKind, number> };
+export type SearchResults = { q: string; tickets: SearchHit[]; wiki: SearchHit[]; chats: SearchHit[]; features: SearchHit[]; decisions: SearchHit[]; runs: SearchHit[]; agents: SearchHit[]; skills: SearchHit[]; feedback: SearchHit[]; counts: Record<SearchKind, number> };
 
 /** An agent's job in the Agents page's words (web Agents.tsx jobOf; the server can't import web code). */
 export function agentJob(a: { role: string; title: string | null; duty: string | null }): string {
@@ -99,7 +99,7 @@ export function refOf(q: string): { prefix: string | null; number: number } | nu
 export async function search(db: Db, companyId: string, rawQ: string, opts: SearchOptions = {}): Promise<SearchResults> {
   const q = rawQ.trim();
   const counts = Object.fromEntries(SEARCH_KINDS.map((k) => [k, 0])) as Record<SearchKind, number>;
-  const empty: SearchResults = { q, tickets: [], wiki: [], chats: [], features: [], decisions: [], runs: [], agents: [], skills: [], counts };
+  const empty: SearchResults = { q, tickets: [], wiki: [], chats: [], features: [], decisions: [], runs: [], agents: [], skills: [], feedback: [], counts };
   if (q.length < SEARCH_MIN) return empty;
   const [company] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, companyId));
   if (!company) return empty;
@@ -125,7 +125,7 @@ export async function search(db: Db, companyId: string, rawQ: string, opts: Sear
   const tp = page("tickets");
   const ticketLimit = Math.max(1, top && tp.offset === 0 ? tp.limit - 1 : tp.limit);
   const ticketOffset = top && tp.offset > 0 ? tp.offset - 1 : tp.offset;
-  const [ticketRows, wikiRows, chatRows, featureRows, decisionRows, runRows, agentRows, skillRows] = await Promise.all([
+  const [ticketRows, wikiRows, chatRows, featureRows, decisionRows, runRows, agentRows, skillRows, feedbackRows] = await Promise.all([
     db
       .select({ ...ticketCols, total })
       .from(tickets)
@@ -202,6 +202,15 @@ export async function search(db: Db, companyId: string, rawQ: string, opts: Sear
       .orderBy(sql`(${skills.name} ilike ${like}) desc`, skills.name, skills.id)
       .limit(page("skills").limit)
       .offset(page("skills").offset),
+    // (BOS-2433) Feedback notes by title or text. A portal note still waiting for its email confirmation is hidden
+    // from everyone, so it is left out here too.
+    db
+      .select({ id: feedbackNotes.id, title: feedbackNotes.title, text: around(feedbackNotes.text, q), titleHit: sql<boolean>`${feedbackNotes.title} ilike ${like}`, createdAt: feedbackNotes.createdAt, total })
+      .from(feedbackNotes)
+      .where(and(eq(feedbackNotes.companyId, companyId), isNull(feedbackNotes.confirmTokenHash), or(sql`${feedbackNotes.title} ilike ${like}`, sql`${feedbackNotes.text} ilike ${like}`), since(feedbackNotes.createdAt)))
+      .orderBy(sql`(${feedbackNotes.title} ilike ${like}) desc`, desc(feedbackNotes.createdAt), feedbackNotes.id)
+      .limit(page("feedback").limit)
+      .offset(page("feedback").offset),
   ]);
 
   // A page past the last match has no row to carry the count: it reads as 0 there, and the page keeps its first count.
@@ -214,6 +223,7 @@ export async function search(db: Db, companyId: string, rawQ: string, opts: Sear
   counts.runs = countOf(runRows);
   counts.agents = countOf(agentRows);
   counts.skills = countOf(skillRows);
+  counts.feedback = countOf(feedbackRows);
   // Rows read only for their count are not shown.
   const only = <T,>(k: SearchKind, rows: T[]): T[] => (shown(k) ? rows : []);
 
@@ -246,6 +256,11 @@ export async function search(db: Db, companyId: string, rawQ: string, opts: Sear
     // Neither page carries the company in the address: both show the company on screen, which is the one searched.
     agents: only("agents", agentRows).map((a) => ({ id: a.id, title: a.name, snippet: `${agentJob(a)}${a.retiredAt ? " · Retired" : ""}`, link: `agents/${a.id}` })),
     skills: only("skills", skillRows).map((s) => ({ id: s.id, title: s.name, snippet: snippetOf(s.description, s.nameHit ? "" : q), link: `skills/${s.id}` })),
+    // The Feedback page opens a note from #/feedback/<company>/<note>. A note without a title shows the start of its text.
+    feedback: only("feedback", feedbackRows).map((n) => {
+      const title = n.title?.trim();
+      return { id: n.id, title: title || snippetOf(n.text, "").slice(0, 80) || "Feedback note", snippet: title && n.titleHit ? "" : snippetOf(n.text, q), at: n.createdAt.toISOString(), link: `feedback/${companyId}/${n.id}` };
+    }),
   };
 }
 

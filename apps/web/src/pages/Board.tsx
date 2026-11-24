@@ -580,13 +580,24 @@ function DoneTitle({ id, title }: { id: string; title: string }) {
 
 type BoardTicket = BoardData["columns"][number]["tickets"][number];
 
+type BuildResult = NonNullable<BoardTicket["build"]>;
+
+/** BOS-2435: the words on a Review card's build tag (words, not colour alone). */
+export function buildWords(b: BuildResult): string {
+  return b.state === "passed" ? "Build passed" : b.state === "failed" ? "Build failed" : b.state === "running" ? "Build running" : b.state === "none" ? "No build yet" : "Build result unavailable";
+}
+
+export function buildTitle(b: BuildResult): string {
+  return b.state === "failed" && b.failing.length ? `Failing: ${b.failing.join(", ")}` : buildWords(b);
+}
+
 /** The Board's "Download CSV": one row per ticket shown, in the order the lanes show them. */
 export function boardToCsv(rows: Array<{ t: BoardTicket; column: string; assignee: string; ref: string }>): string {
   return buildCsv(
-    ["Reference", "Title", "Column", "Assignee", "Risk", "Size", "Feature", "Priority 1", "Last activity", "Days in state"],
+    ["Reference", "Title", "Column", "Assignee", "Risk", "Size", "Feature", "Priority 1", "Last activity", "Days in state", "Build"],
     rows.map(({ t, column, assignee, ref }) => {
       const a = stateAge(t);
-      return [ref, t.title, column, assignee, t.risk ?? "", t.size ?? "", t.featureTitle ?? "", t.urgentByOwner ? "yes" : "no", t.lastActivityAt ?? "", a ? (Math.floor(a.days * 10) / 10).toString() : ""];
+      return [ref, t.title, column, assignee, t.risk ?? "", t.size ?? "", t.featureTitle ?? "", t.urgentByOwner ? "yes" : "no", t.lastActivityAt ?? "", a ? (Math.floor(a.days * 10) / 10).toString() : "", t.build ? (t.build.state === "failed" && t.build.failing.length ? `failed: ${t.build.failing.join(", ")}` : t.build.state) : ""];
     }),
   );
 }
@@ -691,6 +702,11 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
         )}
         {t.looksStuck && <span className="tag amber" title="The watchdog has handed this to the Scrum Master.">Looks stuck</span>}
         {t.reviewStage === "checking" && <span className="tag">Being checked</span>}
+        {t.systemState === "review" && t.build && (
+          <span className={`tag${t.build.state === "failed" ? " amber" : t.build.state === "passed" ? " green" : ""}`} title={buildTitle(t.build)}>
+            {buildWords(t.build)}
+          </span>
+        )}
         {isLiveCheckWait(t) && <span className="tag green">Merged</span>}
         {isLiveCheckWait(t) && watchNoDateDays(t) !== null && <span className="tag amber">No date · {watchNoDateDays(t)} days</span>}
         {t.wipExempt === "busy" && !isLiveCheckWait(t) && <span className="tag">Agent busy</span>}

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
-import { SpendChart, SpendTable, stacksBy, toCsv, totalsBy, type SpendData, type SpendRow } from "../src/pages/SpendReport";
+import { SpendChart, SpendTable, changeText, headlineText, stacksBy, toCsv, totalsBy, type SpendData, type SpendRow } from "../src/pages/SpendReport";
 
 // BOS-2194: the Spend page's totals, stacks, table and CSV.
 
@@ -84,5 +84,45 @@ describe("the chart and table", () => {
   it("names Other in the legend when there are more than five", () => {
     render(<SpendChart data={many} by="agent" />);
     expect(within(screen.getByRole("list")).getByText("Other")).toBeTruthy();
+  });
+});
+
+// BOS-2432: the change against the previous period of the same length.
+describe("previous period", () => {
+  const previous = {
+    days: 7,
+    totalMicros: 10_000_000,
+    agents: [
+      { key: "a-Ann", name: "Ann", micros: 5_000_000 },
+      { key: "a-Zed", name: "Zed", micros: 5_000_000 },
+    ],
+    features: [],
+    projects: [],
+    models: [],
+  };
+  const data: SpendData = { timeZone: "UTC", days, rows: [row("2026-11-20", "Ann", 8_000_000), row("2026-11-20", "Bob", 1_000_000)], totalMicros: 9_000_000, previous };
+
+  it("words and signs the change, and handles new, dropped and empty", () => {
+    expect(changeText(8_000_000, 5_000_000)).toBe("+$3.00 (+60%)");
+    expect(changeText(1_000_000, 5_000_000)).toBe("−$4.00 (−80%)");
+    expect(changeText(1_000_000, 0)).toBe("new");
+    expect(changeText(0, 0)).toBe("no change");
+    expect(headlineText(12_300_000, previous)).toBe("Up 23% on the previous 7 days");
+    expect(headlineText(5_900_000, previous)).toBe("Down $4.10 on the previous 7 days");
+    expect(headlineText(5_000_000, { ...previous, totalMicros: 0 })).toBe("Nothing spent in the previous 7 days");
+  });
+
+  it("shows a dropped agent at $0 and a new one as new", () => {
+    render(<SpendTable data={data} by="agent" />);
+    expect(within(screen.getByText("Zed").closest("tr")!).getByText("−$5.00 (−100%)")).toBeTruthy();
+    expect(within(screen.getByText("Bob").closest("tr")!).getByText("new")).toBeTruthy();
+    expect(within(screen.getByText("Ann").closest("tr")!).getByText("+$3.00 (+60%)")).toBeTruthy();
+  });
+
+  it("adds a previous period cost column to the CSV only when there is a previous period", () => {
+    const lines = toCsv(data.rows, previous, "agent").split("\r\n");
+    expect(lines[0]).toBe("date,agent,feature,project,tickets,cost_usd,previous_period_cost_usd");
+    expect(lines[1]).toBe("2026-11-20,Ann,Search box,Site,1,8.0000,5.0000");
+    expect(lines[2]).toMatch(/,0\.0000$/);
   });
 });

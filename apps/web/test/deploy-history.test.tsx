@@ -30,6 +30,7 @@ function stub(all: Row[], failFirst = false) {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
+      if (url.startsWith("/api/deploys/summary")) return json({ days: 30, total: 3, succeeded: 2, failedOrRejected: 1, medianSeconds: 125, lastSuccessAt: "2026-11-20T10:00:00.000Z" });
       if (url.startsWith("/api/deploys")) {
         urls.push(url);
         if (failFirst && !failed) {
@@ -85,6 +86,14 @@ describe("deploy history", () => {
     fireEvent.click(within(details).getByRole("button", { name: "Show older" }));
     await vi.waitFor(() => expect(within(details).getAllByRole("listitem")).toHaveLength(25));
     expect(within(details).queryByRole("button", { name: "Show older" })).toBeNull();
+  });
+
+  it("shows the 30-day line and asks the server for the chosen status", async () => {
+    const urls = stub([row(1)]);
+    const details = await open();
+    expect(await within(details).findByText(/3 deploys, 2 succeeded, 1 failed or refused, median 2 min to finish/)).toBeTruthy();
+    fireEvent.change(within(details).getByRole("combobox"), { target: { value: "failed" } });
+    await vi.waitFor(() => expect(urls.some((u) => u.includes("status=failed"))).toBe(true));
   });
 
   it("shows a load error with Retry, and Retry loads the list", async () => {

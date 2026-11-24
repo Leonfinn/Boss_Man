@@ -129,6 +129,71 @@ describe("Spend page", () => {
     expect(lines.slice(1).reduce((n, l) => n + Number(l.split(",").at(-1)), 0)).toBeCloseTo(4);
   });
 
+  // BOS-2432: the comparison with the previous period, through the page, for each period and split.
+  const withPrev = (n: number, previousTotal: number) => {
+    const base = answer(n);
+    const day = base.days.at(-1)!;
+    const m = { runs: 2, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    const modelDays = [{ date: day, model: "opus", micros: 3_000_000, planMicros: 0, payMicros: 3_000_000, ...m }];
+    return {
+      ...base,
+      models: modelDays.map((d) => ({ ...d, date: "" })),
+      modelDays,
+      previous: {
+        days: n,
+        totalMicros: previousTotal,
+        agents: [{ key: "Ann", name: "Ann", micros: 2_000_000 }, { key: "Zed", name: "Zed", micros: 2_000_000 }],
+        features: [{ key: "Search", name: "Search", micros: 1_500_000 }, { key: "Old feature", name: "Old feature", micros: 2_000_000 }],
+        projects: [{ key: "Site", name: "Site", micros: 6_000_000 }, { key: "Old site", name: "Old site", micros: 1_000_000 }],
+        models: [{ key: "opus", name: "opus", micros: 1_500_000 }, { key: "Gone model", name: "Gone model", micros: 2_000_000 }],
+      },
+    };
+  };
+  const cellsOf = (name: string) => Array.from(within(screen.getByRole("table")).getByText(name).closest("tr")!.querySelectorAll("td")).map((c) => c.textContent);
+
+  it("shows the headline, the previous column and the change for 7, 30 and 90 days and every split (BOS-2432)", async () => {
+    respond = (url) => {
+      const n = Number(new URL(url, "http://x").searchParams.get("days"));
+      return { status: 200, body: withPrev(n, 2_000_000) };
+    };
+    render(<SpendReport company={company} />);
+    for (const n of [30, 7, 90]) {
+      if (n !== 30) fireEvent.click(screen.getByRole("button", { name: `${n} days` }));
+      await waitFor(() => expect(screen.getByTestId("spend-headline").textContent).toContain(`Up 100% on the previous ${n} days`));
+      expect(screen.getByTestId("spend-headline").textContent).toContain("($2.00)");
+      expect(screen.getByRole("columnheader", { name: `Previous ${n} days` })).toBeTruthy();
+      expect(screen.getByRole("columnheader", { name: "vs previous" })).toBeTruthy();
+    }
+    // 90 days is now selected: agents, then each other split.
+    expect(cellsOf("Ann").join("|")).toContain("$2.00|+$1.00 (+50%)");
+    expect(cellsOf("Zed").slice(1, 4)).toEqual(["$0.00", "0%", "$2.00"]);
+    expect(cellsOf("Zed")).toContain("−$2.00 (−100%)");
+    expect(cellsOf("Bob")).toContain("new");
+    fireEvent.click(screen.getByRole("button", { name: "By feature" }));
+    expect(cellsOf("Search")).toContain("+$1.50 (+100%)");
+    expect(cellsOf("Old feature")).toContain("−$2.00 (−100%)");
+    expect(cellsOf("No feature")).toContain("new");
+    fireEvent.click(screen.getByRole("button", { name: "By project" }));
+    expect(cellsOf("Site")).toContain("−$3.00 (−50%)");
+    expect(cellsOf("Old site")).toContain("−$1.00 (−100%)");
+    expect(cellsOf("Docs")).toContain("new");
+    fireEvent.click(screen.getByRole("button", { name: "By model" }));
+    expect(screen.getByRole("columnheader", { name: "Previous 90 days" })).toBeTruthy();
+    expect(cellsOf("opus")).toContain("+$1.50 (+100%)");
+    expect(cellsOf("Gone model")).toContain("−$2.00 (−100%)");
+  });
+
+  it("says nothing was spent before, with no percentage, when the previous period is empty (BOS-2432)", async () => {
+    respond = (url) => {
+      const n = Number(new URL(url, "http://x").searchParams.get("days"));
+      return { status: 200, body: { ...withPrev(n, 0), previous: { ...withPrev(n, 0).previous, agents: [] } } };
+    };
+    render(<SpendReport company={company} />);
+    await waitFor(() => expect(screen.getByTestId("spend-headline").textContent).toContain("Nothing spent in the previous 30 days"));
+    expect(screen.getByTestId("spend-headline").textContent).not.toContain("%");
+    expect(cellsOf("Ann")).toContain("new");
+  });
+
   it("says why when the load fails, and keeps the CSV button off with nothing to export", async () => {
     respond = () => ({ status: 500, body: { error: "boom" } });
     render(<SpendReport company={company} />);

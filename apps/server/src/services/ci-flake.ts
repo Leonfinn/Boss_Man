@@ -38,10 +38,14 @@ export type NamedTests = {
 /**
  * GitHub makes annotation paths repo-relative; a workspace-absolute one is cut back to that: hosted runners
  * (`/home/runner/work/<repo>/<repo>/…`), container jobs (`/__w/<repo>/<repo>/…`), self-hosted (`…/_work/<repo>/<repo>/…`)
- * and Docker actions (`/github/workspace/…`). Any other absolute path stays absolute, which SAFE_TEST_PATH refuses.
+ * and Docker actions (`/github/workspace/…`). BOS-2448: also a repo mounted at `/work` for a `docker run -w /work` step
+ * (run 45323213260 named `/work/apps/launcher/test/docker.test.ts`), the usual mount in Docker's own docs; a wrong cut can
+ * only name a file the merge commit lacks, which the gate re-run refuses (CANT_RERUN_EXIT). Any other absolute path stays
+ * absolute, which SAFE_TEST_PATH refuses.
  */
 export function repoRelative(p: string): string {
   if (p.startsWith("/github/workspace/")) return p.slice("/github/workspace/".length);
+  if (p.startsWith("/work/")) return p.slice("/work/".length);
   const m = /^(?:\/home\/runner\/work|\/__w|\/.*\/_work)\/[^/]+\/[^/]+\/(.+)$/.exec(p);
   return m ? m[1]! : p;
 }

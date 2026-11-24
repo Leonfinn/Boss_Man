@@ -6,6 +6,7 @@ import { eq, inArray } from "drizzle-orm";
 import type { DiskReport, RunnerCommand } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { companies, decisions, runners, tickets } from "../db/schema.js";
+import { dataHealthService } from "./data-health.js";
 
 export type DiskLimits = { defaultCapBytes: number; retentionDays: number; warnPercent: number; warnBytes: number };
 export const DEFAULT_DISK_LIMITS: DiskLimits = { defaultCapBytes: 20 * 1024 ** 3, retentionDays: 7, warnPercent: 0.1, warnBytes: 5 * 1024 ** 3 };
@@ -15,6 +16,7 @@ const gb = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GB`;
 export function diskService(db: Db, deps: { send: (runnerId: string, command: RunnerCommand) => boolean; limits?: Partial<DiskLimits>; now?: () => Date }) {
   const limits = { ...DEFAULT_DISK_LIMITS, ...deps.limits };
   const now = deps.now ?? (() => new Date());
+  const health = dataHealthService(db, { now });
 
   return {
     limits,
@@ -101,6 +103,8 @@ export function diskService(db: Db, deps: { send: (runnerId: string, command: Ru
           lowSpaceAlerted = rows.length > 0;
         }
       }
+      // BOS-2380: the server's own disk and database size ride on this hourly pass; one notice a day, and a failure here never fails the report.
+      await health.checkWarnings().catch((err) => console.error("[data-health] check failed:", err instanceof Error ? err.message : err));
       return { released, alerted, capBytes: cap, lowSpaceAlerted };
     },
   };

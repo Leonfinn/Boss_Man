@@ -26,6 +26,7 @@ reads:
   - /api/agent-templates
   - /api/agents/:id/history
   - /api/agents/:id/notes
+  - /api/agents/:id/record
   - /api/companies/:id/agents
   - /api/companies/:id/models
   - /api/companies/:id/review-policy
@@ -155,6 +156,7 @@ sections:
   - Projects (…)
 reads: 
   - /api/companies/:id/projects
+  - /api/companies/:id/projects-summary
   - /api/companies/:id/review-policy
 
 ## #/roadmap
@@ -178,6 +180,7 @@ reads:
   - /api/runs
   - /api/runs/:id/permissions
   - /api/runs/:id/transcript
+  - /api/runs/recent
 
 ## #/scrum-master
 sections: 
@@ -251,6 +254,7 @@ reads:
   - /api/host-facts
   - /api/run-limits
   - /api/settings/check-queue
+  - /api/settings/check-workers/line
   - /api/settings/check-workers/stats
   - /api/settings/merge-carry
   - /api/settings/wait-for-ci
@@ -269,6 +273,7 @@ reads:
   - /api/notification-settings
   - /api/notification-settings/phone-login/:id
   - /api/notifications/pushes
+  - /api/notifications/week
   - /api/setup
 
 ## #/settings/<company>/permissions
@@ -360,6 +365,7 @@ reads:
   - /api/companies/:id/penpot
   - /api/companies/:id/projects
   - /api/deploys
+  - /api/deploys/summary
 
 ## #/settings/<company>/transfer
 sections: 
@@ -373,9 +379,11 @@ sections:
   - Now running
   - Other actions
   - Recent updates
+  - Server health
   - Stop all work
   - Updates
 reads: 
+  - /api/data-health
   - /api/kill-switch
   - /api/maintenance
   - /api/runner-report
@@ -487,6 +495,7 @@ sections:
   - Sizes
   - Week by week
   - What this shows
+  - Where tickets wait
   - Workflow report
 reads: 
   - /api/companies/:id/retros/latest

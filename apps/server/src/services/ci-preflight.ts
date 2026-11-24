@@ -8,7 +8,8 @@ import type { Db } from "../db/client.js";
 import { checkJobs, checkResults, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
 import { CI_TIMING, CiPublishError, needsEarlyGithubRun, publishAndWait, touchesGithubOnlyJobs, touchesWorkflows, type CiOutcome, type CiTarget, type CiTiming } from "./ci-publish.js";
-import type { gitHostService } from "./git-hosts.js";
+import { SAFE_TEST_PATH, repoRelative } from "./ci-flake.js";
+import type { CiRun, gitHostService } from "./git-hosts.js";
 
 export const PREFLIGHT_KIND = "ci_preflight";
 export const PREFLIGHT_NA_KIND = "ci_preflight_na";
@@ -37,7 +38,7 @@ export type PreflightContext = {
 };
 
 export type PreflightDeps = {
-  hosts: Pick<ReturnType<typeof gitHostService>, "ciStatus" | "failures" | "workflowRuns" | "rerunRun">;
+  hosts: Pick<ReturnType<typeof gitHostService>, "ciStatus" | "failures" | "workflowRuns" | "rerunRun" | "fileText">;
   context: (ticket: { id: string; companyId: string; projectId: string }) => Promise<PreflightContext | null>;
   wake?: (agentId: string, w: { ticketId: string; reason: string; note: string; priority?: number }) => PromiseLike<unknown> | unknown;
   timing?: CiTiming;
@@ -45,6 +46,15 @@ export type PreflightDeps = {
 };
 
 const short = (s: string) => s.slice(0, 8);
+
+/**
+ * BOS-2438: a test "reads the workflows" the way check-quick finds whole-repo tests: by what its text does. It reads repo files
+ * (a read call) and names the workflow folder. Such a test sees main's workflow files in the early run (BOS-2300), not the
+ * branch's edit, so its failure there says nothing about the branch.
+ */
+const READS_FILES = /readFileSync|readdirSync|readFile\(|readdir\(|statSync|existsSync|git ls-files/;
+const NAMES_WORKFLOWS = /\.github\/workflows|["'`]\.github["'`]\s*,\s*["'`]workflows["'`]/;
+export const readsWorkflows = (text: string) => READS_FILES.test(text) && NAMES_WORKFLOWS.test(text);
 
 /** BOS-2300: kept in a run's row detail ("<agent>|wf", "<agent>|<tree>|wf"): the branch edits workflows, so only main's may be pushed. */
 const WORKFLOW_MARK = "wf";
@@ -93,6 +103,30 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
     }
   }
 
+  const asideNote = (tests: string[]) =>
+    `Set aside, not counted against your branch: ${tests.join(", ")}. Your branch edits workflow files and these tests read them, but the early run pushes main's workflow files, not yours, so they could not test your edit.`;
+
+  /**
+   * BOS-2438: which of the failed jobs' tests read the workflow files (judged from the test's text on the pushed branch), and
+   * whether anything else failed. `counted` is true unless every failed job names only such tests: an unreadable annotation,
+   * a failure in a source file, or a test that doesn't read workflows all count against the branch.
+   */
+  async function setAside(ctx: PreflightContext, failed: CiRun[], ref: string): Promise<{ tests: string[]; counted: boolean }> {
+    const found = await deps.hosts.failures(ctx.target.cfg, ctx.target.token, failed).catch(() => []);
+    const tests = new Set<string>();
+    let counted = found.length < failed.length || found.length === 0;
+    for (const f of found) {
+      const paths = (f.paths ?? []).map(repoRelative);
+      if (!paths.length) counted = true;
+      for (const p of paths) {
+        const text = SAFE_TEST_PATH.test(p) ? await deps.hosts.fileText(ctx.target.cfg, ctx.target.token, p, ref).catch(() => null) : null;
+        if (text !== null && readsWorkflows(text)) tests.add(p);
+        else counted = true;
+      }
+    }
+    return { tests: [...tests].sort(), counted };
+  }
+
   async function run(t: { id: string; companyId: string; projectId: string }, agentId: string, head: string, ctx: PreflightContext, needsMain = false) {
     let passed = false;
     let text: string;
@@ -103,14 +137,22 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
       } else if (prep.status !== "prepared") {
         text = `GitHub's CI could not be run: the merge with main answered "${prep.status}". Commit everything, then ask again.`;
       } else {
+        let pushedBranch = "";
         const outcome = await publishAndWait(
-          { hosts: deps.hosts, target: ctx.target, timing, publish: (commit) => (needsMain ? ctx.publish(commit, true) : ctx.publish(commit)), announce: async (branch) => void (await record(db, { companyId: t.companyId, ticketId: t.id, kind: PREFLIGHT_ACTIVITY, summary: `Pushed your branch merged with main (${short(prep.commit)}) to ${branch} for GitHub's CI jobs. Nothing to do; you are woken with the result.` })) },
+          { hosts: deps.hosts, target: ctx.target, timing, publish: (commit) => (needsMain ? ctx.publish(commit, true) : ctx.publish(commit)), announce: async (branch) => { pushedBranch = branch; await record(db, { companyId: t.companyId, ticketId: t.id, kind: PREFLIGHT_ACTIVITY, summary: `Pushed your branch merged with main (${short(prep.commit)}) to ${branch} for GitHub's CI jobs. Nothing to do; you are woken with the result.` }); } },
           prep,
           { stopped: false },
         );
-        const w = await words(ctx, outcome, short(prep.commit));
-        passed = w.passed;
-        text = w.text;
+        // BOS-2438: the early run held main's workflow files, so tests that read them can't judge the branch's workflow edit.
+        const set = needsMain && outcome.kind === "failed" && pushedBranch ? await setAside(ctx, outcome.status.failed, pushedBranch) : null;
+        if (set && !set.counted) {
+          passed = true;
+          text = `${asideNote(set.tests)} Nothing else failed, so GitHub's CI jobs count as passed on your branch merged with main (${short(prep.commit)}). The merge gate runs your own workflow files after the reviews, and those tests must pass there.`;
+        } else {
+          const w = await words(ctx, outcome, short(prep.commit));
+          passed = w.passed;
+          text = set?.tests.length ? `${asideNote(set.tests)} The other failures below still count.\n${w.text}` : w.text;
+        }
       }
     } catch (err) {
       text = err instanceof CiPublishError ? err.message : `GitHub's CI run could not be started: ${(err as Error).message}`;

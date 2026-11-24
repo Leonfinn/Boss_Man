@@ -35,7 +35,22 @@ export type TrainMember = {
   /** BOS-1604: when it last prepared, and how many restacks in a row came sooner than TRAIN_QUICK_RESTACK_MS after a prepare. */
   preparedAt: number | null;
   quick: number;
+  /** BOS-2360: GitHub CI on this member's prepared commit (only while CI gating is on; "none" otherwise). Reset on every prepare. */
+  ci: TrainCi;
 };
+
+/**
+ * BOS-2360: GitHub CI on a member's current commit. "accepted": it may land without a pass of its own (main's known red R40,
+ * no workflows, or no run started); it covers nobody. "failed": its run failed and the train hasn't decided whose fault it is.
+ */
+export type TrainCi = "none" | "pending" | "passed" | "accepted" | "failed";
+
+/**
+ * BOS-2360: what a member's failed GitHub run means right now. covered: a member behind it, stacked on it, passed, so its change
+ * passed GitHub inside a larger tree (a one-off failure) and it may land. wait: a member ahead hasn't finished on GitHub. restack:
+ * a member ahead left or changed, so the failure may be theirs. stands: everything ahead is through, so the failure is its own.
+ */
+export type CiFailureVerdict = "covered" | "wait" | "restack" | "stands";
 
 /** Why a member has to prepare again: the member ahead left or changed, or main moved outside the train. */
 export type RestackWhy = "ahead_left" | "ahead_changed" | "main_moved";
@@ -240,7 +255,7 @@ export class MergeTrain {
       }
       const w = this.waiting.get(next)!;
       this.waiting.delete(next);
-      this.members.push({ ticketId: next, priority: w.priority, place: w.place, base: null, commit: null, tree: null, status: "preparing", restacks: 0, rerun: false, preparedAt: null, quick: 0 });
+      this.members.push({ ticketId: next, priority: w.priority, place: w.place, base: null, commit: null, tree: null, status: "preparing", restacks: 0, rerun: false, preparedAt: null, quick: 0, ci: "none" });
       this.seenSince.add(next);
     }
   }
@@ -291,6 +306,8 @@ export class MergeTrain {
     if (p.onMain) this.onMain(p.base);
     const m = this.member(ticketId);
     if (m.commit && m.commit !== p.commit) this.lose(m.commit);
+    // A new commit is one GitHub hasn't seen: its CI starts again (a same tree is reused by publishAndWait's passed trees).
+    if (m.commit !== p.commit) m.ci = "none";
     Object.assign(m, { base: p.base, commit: p.commit, tree: p.tree, status: "checking" as const, preparedAt: this.now() });
   }
 
@@ -338,7 +355,7 @@ export class MergeTrain {
     // BOS-1604: a restack sooner than a check could have run counts as quick; a run of them is a loop, not a busy train.
     m.quick = m.preparedAt !== null && this.now() - m.preparedAt < TRAIN_QUICK_RESTACK_MS ? m.quick + 1 : 0;
     if (m.quick >= TRAIN_THRASH_QUICK) this.thrashSince ??= this.now();
-    Object.assign(m, { base: null, commit: null, tree: null, status: "preparing" as const, rerun: false, preparedAt: null });
+    Object.assign(m, { base: null, commit: null, tree: null, status: "preparing" as const, rerun: false, preparedAt: null, ci: "none" as const });
     m.restacks++;
     return m.restacks <= TRAIN_RESTACK_CAP;
   }
@@ -383,6 +400,51 @@ export class MergeTrain {
     const i = this.index(ticketId);
     if (i < 0) return "stands";
     return this.members.slice(0, i).every((m) => m.status === "passed") ? "stands" : "wait";
+  }
+
+  /**
+   * BOS-2360: GitHub CI on a member's commit, as the gate's wait reports it. `commit` is the commit the wait was for: a report
+   * for a commit the member has since replaced (a restack raced the wait's end) is dropped.
+   */
+  ciState(ticketId: string, commit: string, state: Exclude<TrainCi, "none">) {
+    const m = this.members[this.index(ticketId)];
+    if (m && m.commit === commit) m.ci = state;
+  }
+
+  /**
+   * BOS-2360: the member whose GitHub pass covers this one: itself when its own run passed, else the nearest member behind it
+   * in an unbroken stack (each one prepared on the commit of the one ahead) whose run passed. That member's tree holds this
+   * member's change, so GitHub passed it. Null when none has.
+   */
+  ciCoveredBy(ticketId: string): { ticketId: string; commit: string } | null {
+    const i = this.index(ticketId);
+    if (i < 0) return null;
+    for (let j = i; j < this.members.length; j++) {
+      const m = this.members[j]!;
+      if (!m.commit) return null;
+      if (j > i && m.base !== this.members[j - 1]!.commit) return null;
+      if (m.ci === "passed") return { ticketId: m.ticketId, commit: m.commit };
+    }
+    return null;
+  }
+
+  /** BOS-2360: GitHub CI lets this member land: its own run passed or was accepted, or a pass behind it covers it. */
+  ciCleared(ticketId: string): boolean {
+    const i = this.index(ticketId);
+    if (i < 0) return false;
+    return this.members[i]!.ci === "accepted" || this.ciCoveredBy(ticketId) !== null;
+  }
+
+  /**
+   * BOS-2360: a member's GitHub run failed (after the gate's own flake handling). Like failure() for the gate's check, but
+   * a pass behind it decides first: it covers this member, whatever is ahead.
+   */
+  ciFailure(ticketId: string): CiFailureVerdict {
+    if (this.ciCoveredBy(ticketId)) return "covered";
+    if (this.stale(ticketId)) return "restack";
+    const i = this.index(ticketId);
+    if (i < 0) return "stands";
+    return this.members.slice(0, i).every((m) => this.ciCleared(m.ticketId)) ? "stands" : "wait";
   }
 
   /** The head pushed `commit` (its prepared commit): it leaves, and the member behind's base is now main. */

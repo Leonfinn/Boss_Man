@@ -730,6 +730,14 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
       return rows.filter((r) => r.type === "blob" && typeof r.path === "string").map((r) => String(r.path));
     },
 
+    /** BOS-2438: the text of one file at a ref (a branch or sha), or null when it can't be read (missing, too big, refused). */
+    async fileText(cfg: GitHostConfig, token: string, path: string, ref: string): Promise<string | null> {
+      if (cfg.kind !== "github") return null;
+      const res = await call(cfg, token, "GET", `/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(ref)}`).catch(() => null);
+      if (!res?.ok || !res.json || Array.isArray(res.json) || res.json.encoding !== "base64" || typeof res.json.content !== "string") return null;
+      return Buffer.from(res.json.content, "base64").toString("utf8");
+    },
+
     async get(cfg: GitHostConfig, token: string, number: number): Promise<PullRequest> {
       const res = await call(cfg, token, "GET", `/pulls/${number}`);
       if (!res.ok || !res.json || Array.isArray(res.json)) throw new GitHostError(res.status, `Couldn't read pull request ${number}: ${messageOf(res.json, res.status)}`);

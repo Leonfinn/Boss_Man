@@ -91,7 +91,15 @@ type ChangeRow = { id: string; lever: string; summary: string; approver: "ceo" |
 type SizeRow = { role: string; size: number; done: number; p50CycleMs: number | null; p85CycleMs: number | null; meanCostMicros: number | null; meanRework: number | null };
 type SizeNote = { role: string; size: number; likeSize: number };
 type TrendWeek = { weekStart: string; partial: boolean; done: number; firstPassRate: number | null; meanRework: number | null; medianCycleMs: number | null; costPerDoneMicros: number | null };
-type Scorecard = { days: number; trend?: TrendWeek[]; overall?: Stats; previous?: { overall: Stats; handoffs: Handoff[] } | null; costBasis: "estimate" | "billed" | "mixed" | null; byRole: Role[]; byAgent: AgentRow[]; handoffs: Handoff[]; features: Feature[]; sizes: SizeRow[]; sizeNotes: SizeNote[] };
+type WaitState = "in_progress" | "checking" | "in_review" | "blocked" | "merging";
+type StateWaits = {
+  rows: { state: WaitState; tickets: number; p50Ms: number | null; p90Ms: number | null; share: number | null }[];
+  slowest: { id: string; ref: string | null; title: string; totalMs: number; longest: WaitState; longestMs: number }[];
+  timed: number;
+  leftOut: number;
+};
+const WAIT_LABEL: Record<WaitState, string> = { in_progress: "In progress", checking: "Being checked", in_review: "In review", blocked: "Blocked", merging: "Merging" };
+type Scorecard = { days: number; stateWaits?: StateWaits; trend?: TrendWeek[]; overall?: Stats; previous?: { overall: Stats; handoffs: Handoff[] } | null; costBasis: "estimate" | "billed" | "mixed" | null; byRole: Role[]; byAgent: AgentRow[]; handoffs: Handoff[]; features: Feature[]; sizes: SizeRow[]; sizeNotes: SizeNote[] };
 
 /** "45m", "3.5h", "2d"; a dash for no number. */
 export function span(ms: number | null) {
@@ -117,6 +125,66 @@ function Ticket({ t }: { t: { id: string; ref: string | null; title: string } })
     <a href={`#/tickets/${t.id}`} title={t.title}>
       {t.ref ?? t.title}
     </a>
+  );
+}
+
+/** BOS-2425: where finished tickets spent their time, by state, and the 5 slowest. */
+function StateWaitsSection({ w }: { w: StateWaits }) {
+  const leftOut = w.leftOut ? ` ${w.leftOut} finished ${w.leftOut === 1 ? "ticket is" : "tickets are"} left out: ${w.leftOut === 1 ? "its" : "their"} history began before state changes were recorded.` : "";
+  return (
+    <section id="state-waits">
+      <h2 tabIndex={-1}>Where tickets wait</h2>
+      <p className="muted" style={{ fontSize: 14 }}>
+        Tickets finished in this period ({w.timed}), from first starting to done.{leftOut}
+      </p>
+      <details>
+        <summary>What the rows mean</summary>
+        <p className="muted" style={{ fontSize: 14 }}>
+          <strong>Being checked</strong> is time in Review before its reviews opened (waiting for or running the quick check, or a check that failed). <strong>In review</strong> runs until the last reviewer approved. <strong>Merging</strong> is from then until the ticket was done (the merge line and its checks). <strong>Middle</strong> and <strong>slow (1 in 10)</strong> times count only the tickets that spent time in that state. <strong>Share</strong> is that state's part of all the time. Time parked in Ready or Backlog after the start is not counted.
+        </p>
+      </details>
+      {w.timed ? (
+        <>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>State</th>
+                  <th>Tickets</th>
+                  <th>Middle time</th>
+                  <th>Slow (1 in 10)</th>
+                  <th>Share of time</th>
+                </tr>
+              </thead>
+              <tbody>
+                {w.rows.map((r) => (
+                  <tr key={r.state}>
+                    <td>{WAIT_LABEL[r.state]}</td>
+                    <td>{r.tickets}</td>
+                    <td>{span(r.p50Ms)}</td>
+                    <td>{span(r.p90Ms)}</td>
+                    <td>{pct(r.share)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <strong style={{ fontSize: 14 }}>Slowest {w.slowest.length}</strong>
+          <ul>
+            {w.slowest.map((s) => (
+              <li key={s.id}>
+                <Ticket t={s} /> {s.title}{" "}
+                <small className="muted">
+                  {span(s.totalMs)} in all · longest {WAIT_LABEL[s.longest].toLowerCase()} ({span(s.longestMs)})
+                </small>
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : (
+        <p className="muted">No finished ticket with a full history in this period.</p>
+      )}
+    </section>
   );
 }
 
@@ -356,6 +424,7 @@ export function Workflow({ company }: { company: Company | undefined }) {
               </div>
             </section>
           ) : null}
+          {d.stateWaits && <StateWaitsSection w={d.stateWaits} />}
           <section id="roles">
             <h2 tabIndex={-1}>Roles</h2>
             <details>

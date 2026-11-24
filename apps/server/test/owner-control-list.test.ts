@@ -192,6 +192,7 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Runs.tsx>EndAllRuns": "Runs",
   // Settings' pages (Settings.tsx SETTINGS_GROUPS): each panel the Settings page shows, by the page that shows it (BOS-1019).
   "pages/Settings.tsx>StopAllWork": "Server and runner",
+  "pages/Settings.tsx>ServerHealth": "Server and runner",
   "pages/Settings.tsx>ServerPanel": "Server and runner",
   "pages/Settings.tsx>SelfDeploy": "Server and runner",
   "pages/Settings.tsx>ThisHost": "Server and runner",

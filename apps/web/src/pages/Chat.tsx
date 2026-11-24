@@ -19,6 +19,8 @@ import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { ThinkingTrace } from "../components/ThinkingTrace";
 import { linkPieces, type LinkContext } from "../links";
 import { countHits, dayStart, findQuery, findSpots, firstOnOrAfter, spotIndex, splitHits, stepSpot, type FindSpot, type Segment } from "../chat-find";
+import { isFarUp, messageLink, newSince } from "../chat-scroll";
+import { copyText } from "../clipboard";
 import type { TraceBody } from "@boss-man/shared";
 
 type Message = { id: string; role: "owner" | "assistant" | "system"; text: string; createdAt: string; trace?: TraceBody };
@@ -49,7 +51,7 @@ export function linked(text: string, wikiCompanyId?: string, ctx: LinkContext = 
 }
 
 /** What a message shows as words (plain text and link text), for the find box: never the markup or an image. */
-const visibleParts = (text: string) => linkPieces(text, {}).flatMap((p) => (p.kind === "text" || p.kind === "link" ? [p.text] : []));
+export const visibleParts = (text: string) => linkPieces(text, {}).flatMap((p) => (p.kind === "text" || p.kind === "link" ? [p.text] : []));
 
 /** The whole conversation as Markdown (BOS-2313): oldest first, no thinking traces; attachments stay as their links. */
 export function chatMarkdown(agentName: string, date: string, items: Message[]): string {
@@ -202,6 +204,14 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
   const [loadingOlder, setLoadingOlder] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
   const keep = useRef<{ height: number; top: number } | null>(null);
+  // BOS-2440: the reader is more than a screen up the log. `anchor` is the newest message when they scrolled up.
+  const farUp = useRef(false);
+  const [far, setFar] = useState(false);
+  const [anchor, setAnchor] = useState<string | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
+  const [linkShown, setLinkShown] = useState<{ id: string; link: string } | null>(null);
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(copyTimer.current), []);
   const convKey = `${company?.id ?? "none"}/${current?.id ?? "none"}`;
   const olderHere = older?.key === convKey ? older : null;
   const newest = chat.data?.items ?? [];
@@ -260,6 +270,36 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
   const [stepOpen, setStepOpen] = useState<Record<string, Record<number, boolean>>>({});
   const liveKey = `live:${current?.id ?? ""}`;
   const latest = items.at(-1)?.createdAt;
+  const onLogScroll = () => {
+    const log = logRef.current;
+    if (!log) return;
+    const up = isFarUp(log);
+    if (up === farUp.current) return;
+    farUp.current = up;
+    setFar(up);
+    setAnchor(up ? (newest.at(-1)?.id ?? null) : null);
+  };
+  const jumpToNewest = () => {
+    farUp.current = false;
+    setFar(false);
+    setAnchor(null);
+    end.current?.scrollIntoView({ block: "end" });
+  };
+  const copyMessageLink = async (id: string) => {
+    if (!company || !current) return;
+    const link = messageLink(window.location, company.id, current.id, id);
+    const ok = await copyText(link);
+    clearTimeout(copyTimer.current);
+    if (ok) {
+      setLinkShown(null);
+      setCopied(id);
+      copyTimer.current = setTimeout(() => setCopied(null), 2000);
+    } else {
+      setCopied(null);
+      setLinkShown({ id, link });
+    }
+  };
+  const newBelow = far ? newSince(newest.map((m) => m.id), anchor) : 0;
   useEffect(() => setBusy(state !== "idle"), [state]);
   // Braces: scrollIntoView returns a Promise in Chromium 150+, and React would call it as the clean-up.
   // A search result names one message (BOS-2192): scroll to it once it has loaded. If the conversation
@@ -271,6 +311,9 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
   // Declared before the scroll effect so it runs first in the same commit.
   useEffect(() => {
     target.current = messageId;
+    farUp.current = false;
+    setFar(false);
+    setAnchor(null);
     setOlderThanShown(false);
   }, [messageId, current?.id]);
   // Only this conversation's data counts: right after a switch the previous agent's page is still in
@@ -290,6 +333,8 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
       setOlderThanShown(true);
     }
     // Keyed on the polled newest page (BOS-2167), so loading older messages doesn't jump to the end.
+    // BOS-2440: a reader who has scrolled up keeps their place; "Jump to newest" takes them down.
+    if (farUp.current) return;
     end.current?.scrollIntoView({ block: "end" });
   }, [newest.length, newest.at(-1)?.id, current?.id, loaded, messageId]);
   useEffect(() => {
@@ -567,7 +612,7 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
                   </p>
                 )}
               </div>
-              <div className="chat-log" role="log" aria-live="polite" ref={logRef}>
+              <div className="chat-log" role="log" aria-live="polite" ref={logRef} onScroll={onLogScroll}>
                 {hasMore && (
                   <button type="button" className="btn" onClick={() => void loadOlder()} disabled={loadingOlder}>
                     {loadingOlder ? "Loading…" : "Load older messages"}
@@ -624,6 +669,21 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
                         {m.role === "owner" ? "You" : m.role === "assistant" ? current.name : "Boss Man"} · {when(m.createdAt)}
                       </small>
                       {m.role === "owner" && <RememberThis companyId={company.id} text={m.text} />}
+                      <button type="button" className="linkish msg-link-btn" onClick={() => void copyMessageLink(m.id)}>
+                        {copied === m.id ? "Link copied" : "Copy link"}
+                      </button>
+                      {linkShown?.id === m.id && (
+                        <label className="msg-link-box">
+                          Couldn't copy here. Copy the link by hand:
+                          <input
+                            className="mono"
+                            readOnly
+                            autoFocus
+                            value={linkShown.link}
+                            onFocus={(e) => e.currentTarget.select()}
+                          />
+                        </label>
+                      )}
                     </div>
                   );
                 })}
@@ -643,6 +703,11 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
                   </div>
                 )}
                 <div ref={end} />
+                {far && (
+                  <button type="button" className="btn primary jump-newest" onClick={jumpToNewest}>
+                    {newBelow > 0 ? `${newBelow} new ↓` : "Jump to newest ↓"}
+                  </button>
+                )}
               </div>
               <form onSubmit={send} className="chat-form">
                 <OwnerMessageBox

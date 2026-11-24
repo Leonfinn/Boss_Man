@@ -130,6 +130,7 @@ const WRITERS: Record<string, { counts: Record<string, number>; why: string }> =
   "src/services/deploy-wait.ts": { counts: { insert: 1 }, why: "kind approval: deploy_wait (the 30-minute card: keep waiting, update now, cancel; no raising agent, no approveSummary)" },
   "src/services/deploys.ts": { counts: { insert: 1 }, why: "kind approval: deploy" },
   "src/services/disk.ts": { counts: { insert: 2, question: 2 }, why: "no raising agent, one option (disk cap card and low host disk card, BOS-2182)" },
+  "src/services/data-health.ts": { counts: { insert: 1, question: 1 }, why: "the daily server-health warning (BOS-2380): kind question, tier owner, no raising agent, one option" },
   "src/services/engagements.ts": { counts: { insert: 1 }, why: "kind engagement" },
   "src/services/feature-portal.ts": { counts: { insert: 1, question: 1 }, why: "type feature_portal_hold (BOS-1358): no raising agent, one card per held-off feature, owner-only answer (Keep off the portal / Publish)" },
   "src/services/fence-default.ts": { counts: { insert: 3, question: 3 }, why: "types fence_default (BOS-940), fence_unavailable (BOS-373) and guard_unavailable (BOS-938): no raising agent, owner-only answer" },
