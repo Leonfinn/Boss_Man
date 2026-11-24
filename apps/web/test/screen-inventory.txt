@@ -476,6 +476,7 @@ sections:
   - Sizes
   - Week by week
   - What this shows
+  - Where tickets wait
   - Workflow report
 reads: 
   - /api/companies/:id/retros/latest
