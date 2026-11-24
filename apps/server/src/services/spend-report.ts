@@ -1,4 +1,4 @@
-import { and, eq, gte, inArray, ne, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, sql } from "drizzle-orm";
 import { dateIn, isTimeZone, ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, costEvents, features, fundingSources, projects, runs, tickets } from "../db/schema.js";
@@ -29,7 +29,36 @@ export type SpendTopTicket = {
   runs: number;
 };
 
-export type SpendReport = { timeZone: string; days: string[]; rows: SpendReportRow[]; totalMicros: number; topTickets: SpendTopTicket[] };
+/**
+ * One model's use (BOS-2401). Unlike the other splits this counts plan (subscription) use too, at list price, kept apart
+ * from pay-as-you-go: `micros` is both added, `planMicros` and `payMicros` the two parts. `date` is empty in the period totals.
+ */
+export type SpendModelRow = {
+  date: string;
+  model: string;
+  micros: number;
+  planMicros: number;
+  payMicros: number;
+  runs: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+};
+
+export type SpendReport = {
+  timeZone: string;
+  days: string[];
+  rows: SpendReportRow[];
+  totalMicros: number;
+  topTickets: SpendTopTicket[];
+  /** The period's totals per model, biggest first. */
+  models: SpendModelRow[];
+  /** The same per local day and model, for the chart and CSV. */
+  modelDays: SpendModelRow[];
+};
+
+export const UNKNOWN_MODEL = "Unknown model";
 
 const TOP_TICKETS = 10;
 
@@ -64,6 +93,12 @@ export async function spendReport(db: Db, companyId: string, opts: { days: numbe
       feature: features.title,
       projectId: projects.id,
       project: projects.name,
+      model: costEvents.model,
+      kind: fundingSources.kind,
+      inTok: costEvents.inputTokens,
+      outTok: costEvents.outputTokens,
+      readTok: costEvents.cacheReadTokens,
+      writeTok: costEvents.cacheWriteTokens,
     })
     .from(costEvents)
     .innerJoin(fundingSources, eq(fundingSources.id, costEvents.fundingSourceId))
@@ -73,9 +108,29 @@ export async function spendReport(db: Db, companyId: string, opts: { days: numbe
     .leftJoin(features, eq(features.id, tickets.featureId))
     // Same project the budget page uses: the charged project of engagement work, else the event's, else the ticket's.
     .leftJoin(projects, eq(projects.id, sql`coalesce(${costEvents.chargedProjectId}, ${costEvents.projectId}, ${tickets.projectId})`))
-    .where(and(eq(costEvents.companyId, companyId), gte(costEvents.occurredAt, since), ne(fundingSources.kind, "subscription")));
+    .where(and(eq(costEvents.companyId, companyId), gte(costEvents.occurredAt, since)));
 
   const daySet = new Set(days);
+  // not state: locals that live for this one call
+  const modelTotals = new Map<string, SpendModelRow & { runIds: Set<string> }>();
+  const modelByDay = new Map<string, SpendModelRow & { runIds: Set<string> }>();
+  const addModel = (map: Map<string, SpendModelRow & { runIds: Set<string> }>, date: string, e: (typeof events)[number]) => {
+    const model = e.model?.trim() || UNKNOWN_MODEL;
+    const k = `${date}|${model}`;
+    let m = map.get(k);
+    if (!m) {
+      m = { date, model, micros: 0, planMicros: 0, payMicros: 0, runs: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, runIds: new Set() };
+      map.set(k, m);
+    }
+    m.micros += e.micros;
+    if (e.kind === "subscription") m.planMicros += e.micros;
+    else m.payMicros += e.micros;
+    m.inputTokens += e.inTok ?? 0;
+    m.outputTokens += e.outTok ?? 0;
+    m.cacheReadTokens += e.readTok ?? 0;
+    m.cacheWriteTokens += e.writeTok ?? 0;
+    if (e.runId) m.runIds.add(e.runId);
+  };
   // not state: locals that live for this one call
   const perTicket = new Map<string, { ticketId: string | null; micros: number; runs: Set<string> }>();
   // not state: a local that lives for this one call
@@ -84,6 +139,10 @@ export async function spendReport(db: Db, companyId: string, opts: { days: numbe
   for (const e of events) {
     const date = dateIn(e.at, timeZone);
     if (!daySet.has(date)) continue;
+    addModel(modelByDay, date, e);
+    addModel(modelTotals, "", e);
+    // The other splits are real money only: plan use is left out of them.
+    if (e.kind === "subscription") continue;
     const key = [date, e.agentId ?? "", e.featureId ?? "", e.projectId ?? ""].join("|");
     let g = groups.get(key);
     if (!g) {
@@ -136,5 +195,11 @@ export async function spendReport(db: Db, companyId: string, opts: { days: numbe
   const rows = [...groups.values()]
     .map(({ ids, ...r }) => ({ ...r, tickets: ids.size }))
     .sort((a, b) => a.date.localeCompare(b.date) || b.micros - a.micros || a.agent.localeCompare(b.agent));
-  return { timeZone, days, rows, totalMicros, topTickets };
+  const finish = (m: SpendModelRow & { runIds: Set<string> }): SpendModelRow => {
+    const { runIds, ...r } = m;
+    return { ...r, runs: runIds.size };
+  };
+  const models = [...modelTotals.values()].map(finish).sort((a, b) => b.micros - a.micros || a.model.localeCompare(b.model));
+  const modelDays = [...modelByDay.values()].map(finish).sort((a, b) => a.date.localeCompare(b.date) || b.micros - a.micros || a.model.localeCompare(b.model));
+  return { timeZone, days, rows, totalMicros, topTickets, models, modelDays };
 }

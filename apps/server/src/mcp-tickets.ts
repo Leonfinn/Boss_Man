@@ -22,7 +22,7 @@ import { NOTHING_CHANGED, ReviewError } from "./services/review.js";
 import { reviewTicketWriteRefusal } from "./services/skill-proposals.js";
 import { wipQueuedNote } from "./services/agent-wip.js";
 import { moveTicket } from "./services/ticket-moves.js";
-import { ceoMoveNote, ceoPlanText, IN_PROGRESS_BLOCKED_WARNING, leavesPlan, planMoveWarning, REVIEW_BLOCKED_REFUSAL, unexpiredPlan, urgentBackwards } from "./services/ceo-plan.js";
+import { ceoMoveNote, ceoPlanText, IN_PROGRESS_BLOCKED_WARNING, leavesPlan, planHoldsAlerts, planMoveWarning, REVIEW_BLOCKED_REFUSAL, unexpiredPlan, urgentBackwards } from "./services/ceo-plan.js";
 import { conflictNote } from "./services/merge-line-conflicts.js";
 import { checkTicketDoneRefusal } from "./services/after-merge-check-tickets.js";
 import { CARD_CITE_REFUSAL, hostFactRefusal, namesOutsideService, outsideServiceEvidenceRefusal, pageShotRefusal, uncitedCardPasses } from "./services/host-fact-gate.js";
@@ -824,7 +824,8 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       // R36 (BOS-1679): the third date-only park in a row, with no link between, wakes the CEO once with the ticket and its note.
       if (state === "blocked") {
         const parks = await noteBlockedPark(db, { companyId: scope.companyId, ticketId, agentId: scope.agentId, holds: await blockedHolds(db, ticketId, { blockedUntil: until ?? null }), at }).catch(() => null);
-        if (parks && hooks.wake) {
+        // BOS-2402: a CEO plan whose deadline (plus grace) is still ahead already explains the repeated parking.
+        if (parks && hooks.wake && !planHoldsAlerts({ ceoPlan: withCriteria.ceoPlan, ceoPlanDeadline: withCriteria.ceoPlanDeadline }, at)) {
           const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, scope.companyId), eq(agents.role, "ceo")));
           if (ceo && ceo.id !== scope.agentId) {
             await Promise.resolve(hooks.wake(ceo.id, { reason: "parked by date again and again", ticketId, causedByRunId: scope.runId, note: `"${withCriteria.title}" has been parked by date ${parks} times in a row with no link to what settles it. Its note: ${summary?.trim() ?? "(none)"}. Whoever it waits on may not know. Find who acts, link their ticket (update_ticket waitsOn) or open one for them.` })).catch(() => undefined);

@@ -9,9 +9,11 @@ sections:
   - Needs you …
   - Recent tasks
   - Right now …
+  - Weekly summary
 reads: 
   - /api/companies/:id/dashboard
   - /api/companies/:id/merge-queue
+  - /api/companies/:id/weekly-summary/view
 
 ## #/agents
 sections: 
@@ -73,11 +75,13 @@ sections:
   - Needs you …
   - Recent tasks
   - Right now …
+  - Weekly summary
 reads: 
   - /api/companies/:id/dashboard
   - /api/companies/:id/merge-queue
   - /api/companies/:id/setup-checklist
   - /api/companies/:id/skill-proposals/:id
+  - /api/companies/:id/weekly-summary/view
   - /api/decisions/answered
   - /api/decisions/tally
   - /api/funding-sources
@@ -189,6 +193,12 @@ reads:
   - /api/companies/:id/watchdog/actions
   - /api/companies/:id/watchdog/issues
 
+## #/search
+sections: 
+  - Search
+reads: 
+  - /api/companies/:id/search
+
 ## #/settings
 sections: 
   - Settings
@@ -246,6 +256,7 @@ reads:
   - /api/host-facts
   - /api/run-limits
   - /api/settings/check-queue
+  - /api/settings/check-workers/stats
   - /api/settings/merge-carry
   - /api/settings/wait-for-ci
   - /api/wip-limits

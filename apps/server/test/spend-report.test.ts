@@ -85,6 +85,26 @@ describe("spendReport", () => {
     expect(r.topTickets[1]).toMatchObject({ ticketId: null, ref: null });
   });
 
+  it("splits by model: spend, runs, tokens, plan use apart from pay-as-you-go, and a null model as Unknown model (BOS-2401)", async () => {
+    const s = await setup();
+    const [run2] = await db().insert(runs).values({ companyId: s.company.id }).returning();
+    const ev = (fundingSourceId: string, costMicros: number, extra: Record<string, unknown>) =>
+      db().insert(costEvents).values({ runId: run2!.id, companyId: s.company.id, fundingSourceId, costMicros, occurredAt: new Date("2026-11-20T10:00:00Z"), ...extra });
+    await ev(s.api.id, 1_000_000, { model: "opus", inputTokens: 10, outputTokens: 20, cacheReadTokens: 30, cacheWriteTokens: 40 });
+    await ev(s.api.id, 500_000, { model: "opus", inputTokens: 1 });
+    await ev(s.sub.id, 3_000_000, { model: "opus", outputTokens: 5 });
+    await s.cost(s.sub.id, 250_000, "2026-11-21T10:00:00Z");
+    await s.cost(s.api.id, 9_000_000, "2026-09-01T10:00:00Z");
+    const r = await spendReport(db(), s.company.id, { days: 7, timeZone: "UTC", now: NOW });
+    expect(r.models).toEqual([
+      { date: "", model: "opus", micros: 4_500_000, planMicros: 3_000_000, payMicros: 1_500_000, runs: 1, inputTokens: 11, outputTokens: 25, cacheReadTokens: 30, cacheWriteTokens: 40 },
+      expect.objectContaining({ model: "Unknown model", micros: 250_000, planMicros: 250_000, payMicros: 0, runs: 1 }),
+    ]);
+    expect(r.modelDays.map((m) => [m.date, m.model])).toEqual([["2026-11-20", "opus"], ["2026-11-21", "Unknown model"]]);
+    // The other splits still leave plan use out.
+    expect(r.totalMicros).toBe(1_500_000);
+  });
+
   it("caps the costliest tickets at 10", async () => {
     const s = await setup();
     for (let i = 0; i < 12; i++) {
