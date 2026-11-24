@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // BOS-2434: a "Waiting for you" summary above the open cards (count by kind, the oldest card), a kind link that narrows
 // the list, and an "Oldest first" order, both kept in the page address.
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company, Decision } from "../src/api";
 import { Decisions, queueViewHref, readQueueView, waitingSummary } from "../src/pages/Decisions";
@@ -70,6 +70,19 @@ describe("waiting summary (BOS-2434)", () => {
     const box = screen.getByTestId("waiting-summary");
     expect(within(box).getByText("Show all").getAttribute("href")).toBe("#/decisions?order=oldest");
     expect(within(box).getByText("1 question").getAttribute("href")).toBe("#/decisions?kind=question&order=oldest");
+  });
+
+  it("clicking the oldest card's title scrolls to it; with no open cards there is no summary", async () => {
+    stub();
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
+    show();
+    fireEvent.click(within(screen.getByTestId("waiting-summary")).getByText("Delete the temp folder?"));
+    await vi.waitFor(() => expect(scroll).toHaveBeenCalled());
+    expect(scroll.mock.instances[0]).toBe(document.getElementById("decision-b"));
+    cleanup();
+    render(<Decisions decisions={[]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.queryByTestId("waiting-summary")).toBeNull();
   });
 
   it("round-trips the address", () => {
