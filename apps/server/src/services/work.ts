@@ -3,6 +3,17 @@ import { and, asc, desc, eq, exists, inArray, isNull, or, ne, sql, type SQL } fr
 
 /** BOS-2166: how many of the newest done tickets the board sends unless it asks for all of them. */
 export const BOARD_DONE_LIMIT = 50;
+
+/**
+ * BOS-2497: the ticket fields a board card sends, the ones the page reads (web `BoardTicket`). The whole row was about
+ * 2.8 KB a card (about 100 columns, half of it the description), so 1 MB a refresh, every 10 s. A field the board starts
+ * to show is added here and to the web type; the page's typecheck catches a read of one that isn't sent.
+ * columnId stays: the server places each card in its column with it.
+ */
+export function boardCardFields(t: typeof tickets.$inferSelect) {
+  const { id, number, title, systemState, outcome, columnId, assigneeAgentId, assignedToOwner, branch, risk, size, planFirst, planApprovedAt, featureId, lastActivityAt, stateChangedAt, urgent, urgentByOwner, recurring, watchingFor, watchUntil, mergeCommit } = t;
+  return { id, number, title, systemState, outcome, columnId, assigneeAgentId, assignedToOwner, branch, risk, size, planFirst, planApprovedAt, featureId, lastActivityAt, stateChangedAt, urgent, urgentByOwner, recurring, watchingFor, watchUntil, mergeCommit };
+}
 import { addsUsabilityCriterion, watchEndsAt, withUsabilityCriterion,columnProblems, DEFAULT_COLUMNS, type GoLiveWait, effectiveDueDate, planFirstByDefault, readCriteria, type ColumnSpec, type RiskTier, type Criterion, type SystemState, type TaskSize } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { boardBuildsFor, type BoardBuild } from "./board-build.js";
@@ -297,7 +308,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       return columnsOf(projectId);
     },
 
-    async board(projectId: string, opts: { doneAll?: boolean } = {}) {
+    async board(projectId: string, opts: { doneAll?: boolean; withText?: boolean } = {}) {
       const p = await project(projectId);
       const cols = await columnsOf(projectId);
       const boardRows = (where: SQL | undefined) =>
@@ -484,7 +495,10 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         const hold = t.systemState === "review" ? (holds.get(t.id) ?? null) : null;
         const reviewStage = t.systemState !== "review" || waitingOnOwner ? null : beingChecked.has(t.id) ? ("checking" as const) : hold ? ("held" as const) : passed.has(t.id) || withPr.has(t.id) || merging.has(t.id) ? ("merging" as const) : ("awaiting_review" as const);
         return {
-        ...t,
+        ...boardCardFields(t),
+        // The description only for the search box, which asks for it while it has words (BOS-2497).
+        ...(opts.withText ? { body: t.body } : {}),
+        hasPlan: !!t.plan,
         waitingOnOwner,
         reviewStage,
         checkLine: reviewStage === "checking" ? (checkLines.get(t.id) ?? "waiting for its check") : null,
