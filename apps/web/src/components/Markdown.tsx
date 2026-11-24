@@ -32,19 +32,42 @@ function MarkdownImage({ src, alt }: { src?: string | URL; alt?: string }) {
   );
 }
 
+// Something to show inside each heading after its words (the wiki's "Copy link to this section", BOS-2443).
+// It comes through context so the heading components below stay the same functions on every render: a new
+// component per render would remount every heading, and a pressed button in one would lose focus.
+const HeadingAction = createContext<((id: string, title: string) => ReactNode) | undefined>(undefined);
+
+// The action must add no text of its own (an icon with an aria-label): the wiki outline and the landing code
+// read a heading's textContent as its words.
+function heading(Tag: "h1" | "h2" | "h3" | "h4" | "h5" | "h6") {
+  return function MarkdownHeading({ children }: { children?: ReactNode }) {
+    const action = useContext(HeadingAction);
+    const title = plain(children);
+    const id = headingId(title);
+    return (
+      <Tag id={id}>
+        {children}
+        {id && action ? action(id, title) : null}
+      </Tag>
+    );
+  };
+}
+const [H1, H2, H3, H4, H5, H6] = (["h1", "h2", "h3", "h4", "h5", "h6"] as const).map(heading);
+
 /** Markdown with links built by the one shared builder (BOS-358): page names, ticket references and routes. */
-export function Markdown({ text, wikiCompanyId, linkContext }: { text: string; wikiCompanyId?: string; linkContext?: LinkContext }) {
+export function Markdown({ text, wikiCompanyId, linkContext, headingAction }: { text: string; wikiCompanyId?: string; linkContext?: LinkContext; headingAction?: (id: string, title: string) => ReactNode }) {
   return (
     <div className="md">
+      <HeadingAction.Provider value={headingAction}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
-          h1: ({ children }) => <h1 id={headingId(plain(children))}>{children}</h1>,
-          h2: ({ children }) => <h2 id={headingId(plain(children))}>{children}</h2>,
-          h3: ({ children }) => <h3 id={headingId(plain(children))}>{children}</h3>,
-          h4: ({ children }) => <h4 id={headingId(plain(children))}>{children}</h4>,
-          h5: ({ children }) => <h5 id={headingId(plain(children))}>{children}</h5>,
-          h6: ({ children }) => <h6 id={headingId(plain(children))}>{children}</h6>,
+          h1: H1,
+          h2: H2,
+          h3: H3,
+          h4: H4,
+          h5: H5,
+          h6: H6,
           // Links inside Boss Man stay in the tab; anything else opens a new one.
           a: ({ href, children }) =>
             href?.startsWith("#/") ? (
@@ -67,6 +90,7 @@ export function Markdown({ text, wikiCompanyId, linkContext }: { text: string; w
       >
         {linkMarkdown(text, { ...linkContext, companyId: wikiCompanyId ?? linkContext?.companyId })}
       </ReactMarkdown>
+      </HeadingAction.Provider>
     </div>
   );
 }

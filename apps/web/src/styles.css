@@ -921,6 +921,14 @@ a.btn { display: inline-flex; align-items: center; text-decoration: none; }
 .md > * + * { margin-top: 0.75em; }
 .md h1 { font-size: 24px; } .md h2 { font-size: 20px; margin-top: 1.2em; } .md h3 { font-size: 17px; margin-top: 1em; }
 .md h1, .md h2, .md h3, .md h4 { font-weight: 600; line-height: 1.3; }
+/* A wiki heading's "Copy link to this section" (BOS-2443): always shown on touch, on hover or focus with a mouse. */
+.md :is(h1, h2, h3, h4, h5, h6) { scroll-margin-top: 12px; }
+.heading-link { display: inline-flex; vertical-align: middle; margin-left: 6px; padding: 4px; min-width: 24px; min-height: 24px; align-items: center; justify-content: center; border: 0; border-radius: 6px; background: none; color: var(--muted); cursor: pointer; }
+.heading-link:hover, .heading-link:focus-visible { color: var(--ink); background: var(--ground); }
+@media (hover: hover) { .md :is(h1, h2, h3, h4, h5, h6) .heading-link { opacity: 0; } .md :is(h1, h2, h3, h4, h5, h6):hover .heading-link, .heading-link:focus-visible { opacity: 1; } }
+.heading-link-field { display: block; margin-top: 4px; width: min(480px, 100%); font-size: 13px; font-weight: 400; }
+.wiki-outline summary { cursor: pointer; font-weight: 600; }
+.wiki-outline ul { margin-top: 6px; display: flex; flex-direction: column; gap: 2px; font-size: 14px; }
 .md ul, .md ol { padding-left: 1.4em; } .md ul { list-style: disc; } .md ol { list-style: decimal; }
 .md li + li { margin-top: 0.25em; }
 .md code { font-family: var(--mono, "IBM Plex Mono", monospace); font-size: 0.9em; background: var(--ground); padding: 1px 5px; border-radius: 4px; }
