@@ -119,7 +119,7 @@ export function ConnectionFold({ history }: { history: ConnectionHistory | undef
     <details data-testid="runner-connection">
       <summary style={{ fontSize: 14 }}>Connection, last 7 days{history.percentConnected != null ? `: ${history.percentConnected}% connected` : ""}</summary>
       {history.percentConnected == null ? (
-        <p className="muted" style={{ fontSize: 14 }}>Nothing recorded yet. The history starts when the runner next connects.</p>
+        <p className="muted" style={{ fontSize: 14 }}>History starts from this update: nothing is recorded until the runner next connects.</p>
       ) : (
         <>
           <dl className="facts">

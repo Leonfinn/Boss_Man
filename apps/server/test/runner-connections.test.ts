@@ -58,6 +58,18 @@ describe("runner connection history", () => {
     expect(s.percentConnected).toBeLessThan(100);
   });
 
+  it("with a 2-hour gap and a 10-second gap: 2 drops, longest 2 h, only the 2-hour gap listed", async () => {
+    const { db, runnerId } = await setup();
+    const a = await openConnection(db, runnerId, at(5 * 3_600_000));
+    await closeConnection(db, a, at(4 * 3_600_000));
+    const b = await openConnection(db, runnerId, at(2 * 3_600_000));
+    await closeConnection(db, b, at(3_600_000));
+    await openConnection(db, runnerId, new Date(NOW.getTime() - 3_600_000 + 10_000));
+    const s = await connectionSummary(db, runnerId, NOW);
+    expect(s).toMatchObject({ drops: 2, longestGapMs: 2 * 3_600_000, shortGaps: 1 });
+    expect(s.gaps).toHaveLength(1);
+  });
+
   it("shows a runner that is away now as an open gap", async () => {
     const { db, runnerId } = await setup();
     const a = await openConnection(db, runnerId, at(DAY));
