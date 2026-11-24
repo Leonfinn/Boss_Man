@@ -13,6 +13,7 @@ cat >"$t/server.mjs" <<'JS'
 import http from "node:http";
 import { writeFileSync } from "node:fs";
 const [, , portFile, commit, mode] = process.argv;
+let creates = 0, made = null;
 const fresh = mode === "fresh"; let owner = null; // fresh: an empty staging with no owner yet (first-run setup open)
 const P = "11111111-1111-1111-1111-111111111111", C = "22222222-2222-2222-2222-222222222222", T = "33333333-3333-3333-3333-333333333333";
 const s = http.createServer((req, res) => {
@@ -24,6 +25,13 @@ const s = http.createServer((req, res) => {
     if (req.url === "/api/setup") { if (!fresh || owner) return send(409, { error: "already_set_up" }); if (JSON.parse(data).password.length < 12) return send(400, { error: "invalid" }); owner = JSON.parse(data).password; return send(201, { username: "smoke" }); }
     if (req.url === "/api/login" && fresh) return JSON.parse(data).password === owner ? send(200, { username: "smoke" }) : send(401, { error: "wrong" });
     if (req.url === "/api/login") return ["right", "pa\\ss\"w"].includes(JSON.parse(data).password) ? send(200, { username: "smoke" }) : send(401, { error: "wrong" });
+    // nocompany: staging after a reset (no company until the smoke check makes one); broken: creating one fails.
+    if (req.url === "/api/companies" && req.method === "POST" && mode === "broken") return send(500, { error: "boom" });
+    if (req.url === "/api/companies" && req.method === "POST") { creates++; made = { company: false, project: false }; made.company = true; return send(201, { company: { id: C, name: JSON.parse(data).name }, ceo: { id: "x" } }); }
+    if (req.url === `/api/companies/${C}/projects` && req.method === "POST") { creates++; made.project = true; return send(201, { id: P, name: "p" }); }
+    if (req.url === "/__creates") return send(200, { creates });
+    if (req.url === "/api/companies" && mode?.startsWith("nocompany") || req.url === "/api/companies" && mode === "broken")
+      return send(200, made?.company ? [{ id: C, name: "Staging smoke check company", agents: [], projects: made.project ? [{ id: P, companyId: C, name: "p" }] : [] }] : []);
     if (req.url === "/api/companies") return send(200, [{ id: C, projects: [{ id: P, companyId: C, name: "p" }] }]);
     if (req.url === `/api/projects/${P}/tickets`) return send(201, { id: T });
     if (req.url === `/api/tickets/${T}/state`) return send(200, { ok: true });
@@ -97,6 +105,22 @@ printf 'smoke_username=smoke\nsmoke_password=short\n' >"$t/creds-short"
 if out="$(SMOKE_CREDENTIALS="$t/creds-short" "$here/smoke-staging.sh" "$t/stg" "$sha")"; then fail "short password should fail"; fi
 [[ $out == *"at least 12 characters"* && $out != *"already has an owner"* ]] || fail "short password should be named: $out"
 [[ $out != *short\;* && $out != *"=short"* ]] || fail "the password was printed"
+stop_server
+
+# Staging with an owner but no company (BOS-2405): the check makes the company and project, the ticket and runner checks run and pass,
+# and a second run reuses them (two creates in all: one company, one project).
+start_server "$sha" nocompany
+out="$(SMOKE_CREDENTIALS="$t/creds" "$here/smoke-staging.sh" "$t/stg" "$sha")" || fail "no-company run failed: $out"
+[[ $(res ticket) == pass && $(res runner) == pass ]] || fail "no company should be made, then checked: $out"
+out="$(SMOKE_CREDENTIALS="$t/creds" "$here/smoke-staging.sh" "$t/stg" "$sha")" || fail "second no-company run failed: $out"
+[[ $(res ticket) == pass && $(res runner) == pass && $out != *"made by this check"* ]] || fail "second run should reuse: $out"
+[[ "$(curl -s "http://127.0.0.1:$(cat "$t/port")/__creates")" == *'"creates":2'* ]] || fail "company and project should be made once"
+stop_server
+
+# Creating the company fails: ticket and runner fail with the reason, never a silent skip.
+start_server "$sha" broken
+if out="$(SMOKE_CREDENTIALS="$t/creds" "$here/smoke-staging.sh" "$t/stg" "$sha")"; then fail "failed company creation should exit 1"; fi
+[[ $(res ticket) == fail && $(res runner) == fail && $out == *"creating the staging company failed"* ]] || fail "broken creation should fail with a reason: $out"
 stop_server
 
 # Wrong commit on staging: version fails.
