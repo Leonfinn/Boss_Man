@@ -1,1 +1,0 @@
-ALTER TABLE "tickets" ADD COLUMN "recurring" boolean DEFAULT false NOT NULL;
