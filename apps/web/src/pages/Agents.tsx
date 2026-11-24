@@ -18,7 +18,7 @@ import { clearDraft, saveDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
 import { MoreAbout } from "../components/MoreAbout";
 
-type AgentRecord = { days: number; finished: number; passedFirstTime: number; sendBacks: number; medianMergeMs: number | null; costPerFinishedMicros: number | null; recent: Array<{ id: string; ref: string | null; title: string; size: number | null; finishedAt: string; sendBacks: number; costMicros: number }> };
+type AgentRecord = { days: number; finished: number; runs: number; failedRuns: number; passedFirstTime: number; sendBacks: number; medianMergeMs: number | null; costPerFinishedMicros: number | null; recent: Array<{ id: string; ref: string | null; title: string; size: number | null; finishedAt: string; sendBacks: number; costMicros: number }> };
 type Template = { id: string; title: string; role: "manager" | "worker"; modelTier: string; summary: string; instructions: string };
 export type AgentRow = {
   id: string;
@@ -215,6 +215,17 @@ const isHours = (v: unknown): v is Hours => !!v && typeof v === "object" && Arra
 export const hoursText = (h: Hours) => `${h.days.map((d) => DAY_NAMES[d]).join(", ")}, ${h.start} to ${h.end} (${h.timeZone})`;
 const show = (v: unknown, sources: FundingSource[]) =>
   isHours(v) ? hoursText(v) : v === null || v === undefined || v === "" ? "none" : typeof v === "boolean" ? (v ? "yes" : "no") : typeof v === "string" ? (sources.find((s) => s.id === v)?.name ?? v) : JSON.stringify(v);
+
+/** "N runs · M failed (P%)" for the record line (BOS-2465). "M failed" links to the Runs page's failed filter. */
+export function RecordRuns({ runs, failedRuns }: { runs: number; failedRuns: number }) {
+  const pct = runs > 0 ? Math.round((failedRuns / runs) * 100) : 0;
+  return (
+    <span data-testid="record-runs">
+      {runs} {runs === 1 ? "run" : "runs"} ·{" "}
+      {failedRuns > 0 ? <a href="#/runs?result=failed">{failedRuns} failed</a> : "0 failed"} ({pct}%)
+    </span>
+  );
+}
 
 /** The listed agents as a spreadsheet: funding source by name only, working hours as days, times and zone. */
 export function agentsToCsv(rows: AgentRow[]): string {
@@ -541,11 +552,16 @@ function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: Ag
         <summary className="section-label">Record (last 30 days)</summary>
         {record.data ? (
           record.data.finished === 0 ? (
-            <p className="muted">Nothing finished in the last 30 days</p>
+            <>
+              <p className="muted">Nothing finished in the last 30 days</p>
+              <p>
+                <RecordRuns runs={record.data.runs ?? 0} failedRuns={record.data.failedRuns ?? 0} />
+              </p>
+            </>
           ) : (
             <>
               <p>
-                {record.data.finished} finished · {record.data.passedFirstTime} passed review first time · {record.data.sendBacks} send-backs · median {span(record.data.medianMergeMs)} to merge · {usd(record.data.costPerFinishedMicros ?? 0)} per finished ticket
+                {record.data.finished} finished · <RecordRuns runs={record.data.runs} failedRuns={record.data.failedRuns} /> · {record.data.passedFirstTime} passed review first time · {record.data.sendBacks} send-backs · median {span(record.data.medianMergeMs)} to merge · {usd(record.data.costPerFinishedMicros ?? 0)} per finished ticket
               </p>
               <table>
                 <thead>

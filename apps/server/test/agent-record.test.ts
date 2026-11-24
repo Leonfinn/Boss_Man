@@ -54,7 +54,14 @@ it("counts a finished ticket per agent over 30 days: first-time passes, send-bac
   const mergedAt = new Date(t0.getTime() - 30 * 60_000);
   await db.update(tickets).set({ mergedAt }).where(eq(tickets.id, clean!.id));
 
+  // Runs: Dev has the 3 above; add two failed ones and an old failed one (outside the window).
+  await db.insert(runs).values({ companyId: co.company.id, agentId: dev.id, outcome: "error: boom", endedAt: new Date() });
+  await db.insert(runs).values({ companyId: co.company.id, agentId: dev.id, outcome: "error: again", endedAt: new Date() });
+  await db.insert(runs).values({ companyId: co.company.id, agentId: dev.id, outcome: "error: old", startedAt: new Date(t0.getTime() - 40 * 24 * HOUR), endedAt: new Date(t0.getTime() - 40 * 24 * HOUR) });
+
   const rec = await agentRecordService(db, { now: () => t0 }).record(dev.id);
+  expect(rec.runs).toBe(5);
+  expect(rec.failedRuns).toBe(2);
   expect(rec.finished).toBe(2);
   expect(rec.passedFirstTime).toBe(1);
   expect(rec.sendBacks).toBe(1);
@@ -74,6 +81,7 @@ it("counts a finished ticket per agent over 30 days: first-time passes, send-bac
   const idle = (await built.app.inject({ method: "POST", url: `/api/companies/${co.company.id}/agents`, headers, payload: { name: "Idle" } })).json() as { id: string };
   const none = await agentRecordService(db, { now: () => t0 }).record(idle.id);
   expect(none.finished).toBe(0);
+  expect(none).toMatchObject({ runs: 0, failedRuns: 0 });
   expect(none.recent).toEqual([]);
   await expect(agentRecordService(db).record(randomUUID())).rejects.toBeInstanceOf(AgentRecordError);
 });

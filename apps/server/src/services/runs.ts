@@ -46,7 +46,7 @@ export async function liveRuns(db: Db, companyId: string) {
 /** The Runs page's result filter. The same split as its Failed / Interrupted / Finished tags (Runs.tsx outcomeTag). */
 export type RunResult = "finished" | "failed" | "interrupted";
 
-function resultWhere(result: RunResult) {
+export function resultWhere(result: RunResult) {
   const failed = sql`${runs.outcome} like 'error%'`;
   if (result === "failed") return failed;
   if (result === "interrupted") return eq(runs.outcome, "interrupted");
