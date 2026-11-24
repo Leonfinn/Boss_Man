@@ -17,6 +17,17 @@ export function lastMovedLabel(iso: string | null | undefined, now = Date.now())
   return days < 1 ? "today" : `${days} d ago`;
 }
 
+/** "Last moved" sort: longest quiet first, features with no tasks last, ties by higher priority. */
+export function compareLastMoved(
+  a: { lastMovedAt?: string | null; priority: number },
+  b: { lastMovedAt?: string | null; priority: number },
+): number {
+  if (!a.lastMovedAt && !b.lastMovedAt) return b.priority - a.priority;
+  if (!a.lastMovedAt) return 1;
+  if (!b.lastMovedAt) return -1;
+  return a.lastMovedAt.localeCompare(b.lastMovedAt) || b.priority - a.priority;
+}
+
 /** In progress, some task done and some not, and no movement for more than 3 days. Cancelled tasks count for neither. */
 export function isStalled(f: StallFeature, now = Date.now()): boolean {
   if (f.status !== "in_progress" || !f.lastMovedAt) return false;

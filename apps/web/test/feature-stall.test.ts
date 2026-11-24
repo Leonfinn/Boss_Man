@@ -1,9 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { isStalled, lastMovedLabel } from "../src/feature-stall";
+import { compareLastMoved, isStalled, lastMovedLabel } from "../src/feature-stall";
 
 const NOW = Date.parse("2026-11-24T12:00:00Z");
 const daysAgo = (n: number) => new Date(NOW - n * 86_400_000).toISOString();
 const tasks = (...states: string[]) => ({ items: states.map((state) => ({ state, outcome: null })) });
+
+describe("compareLastMoved", () => {
+  it("puts the longest quiet first and features with no tasks last", () => {
+    const recent = { lastMovedAt: daysAgo(1), priority: 1 };
+    const old = { lastMovedAt: daysAgo(9), priority: 1 };
+    const none = { lastMovedAt: null, priority: 99 };
+    expect([none, recent, old].sort(compareLastMoved)).toEqual([old, recent, none]);
+  });
+  it("breaks a tie by higher priority", () => {
+    const a = { lastMovedAt: daysAgo(2), priority: 1 };
+    const b = { lastMovedAt: daysAgo(2), priority: 5 };
+    expect([a, b].sort(compareLastMoved)).toEqual([b, a]);
+  });
+});
 
 describe("lastMovedLabel", () => {
   it("says today, days ago, or a dash", () => {

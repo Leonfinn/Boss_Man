@@ -28,7 +28,7 @@ import { Loader } from "../components/Loader";
 import { LoadError } from "../components/LoadError";
 import { CopyLinkButton } from "../components/CopyLinkButton";
 import { buildCsv, download } from "../csv";
-import { STALL_DAYS, isStalled, lastMovedLabel, lastMovedTitle } from "../feature-stall";
+import { STALL_DAYS, compareLastMoved, isStalled, lastMovedLabel, lastMovedTitle } from "../feature-stall";
 
 export const STATUS_TONE: Record<FeatureStatus, string> = { idea: "", considering: "blue", planned: "blue", in_progress: "amber", released: "green", declined: "red" };
 const EFFORT = ["", "Tiny", "Small", "Medium", "Large", "Huge"];
@@ -665,9 +665,9 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
   };
   const d = data.data;
   const areas = settings.data?.areas ?? [];
-  // "Last moved" puts the most recent first and the features with no tasks last.
+  // "Last moved" puts the longest-quiet first and the features with no tasks last.
   const order = (a: Feature, b: Feature) =>
-    sort === "priority" ? b.priority - a.priority || b.demand - a.demand : sort === "demand" ? b.demand - a.demand || b.priority - a.priority : sort === "moved" ? (b.lastMovedAt ?? "").localeCompare(a.lastMovedAt ?? "") || b.priority - a.priority : b.createdAt.localeCompare(a.createdAt);
+    sort === "priority" ? b.priority - a.priority || b.demand - a.demand : sort === "demand" ? b.demand - a.demand || b.priority - a.priority : sort === "moved" ? compareLastMoved(a, b) : b.createdAt.localeCompare(a.createdAt);
   const listed = (d?.features ?? []).filter((f) => (all || ACTIVE.includes(f.status)) && (!stalledOnly || isStalled(f)));
   // Search (BOS-2256): a feature matches on title or description; its subfeatures stay under it, and a matching subfeature brings its parent.
   const needle = query.trim().toLowerCase();
