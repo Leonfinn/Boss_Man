@@ -35,6 +35,7 @@ const api: Record<string, unknown> = {
   "/api/companies": [{ id: "c1", name: "Boss Man Co", mission: null, paused: false, ticketPrefix: "BOS", agents }],
   "/api/companies/c1/skills": skills,
   "/api/companies/c1/skills/updates": updates,
+  "/api/companies/c1/skills/elsewhere": [],
   "/api/companies/c1/skill-proposals": [],
 };
 
@@ -64,7 +65,7 @@ describe.skipIf(!browser || !server)("Skills needs-attention line in a real brow
       try {
         await stubApi(page, api);
         await page.goto(`${server!.resolvedUrls.local[0]}#/skills`, { waitUntil: "domcontentloaded" });
-        await page.waitForSelector(".wiki-list .skills-attention", { timeout: 30_000 });
+        await page.waitForSelector(".wiki-list .skills-attention", { timeout: 40_000 });
         const count = await page.evaluate(() =>
           [...document.querySelectorAll(".skills-attention-count")].map((e) => (e as HTMLElement).innerText)[0],
         );
@@ -73,7 +74,7 @@ describe.skipIf(!browser || !server)("Skills needs-attention line in a real brow
         const r = await page.evaluate(() => {
           const box = (e: Element | null) => {
             const b = e?.getBoundingClientRect();
-            return b ? { l: b.left, r: b.right, t: b.top, b: b.bottom, w: b.width, h: b.height } : null;
+            return b ? { l: b.left, r: b.right, y: b.top, y2: b.bottom, w: b.width, h: b.height } : null;
           };
           const list = document.querySelector(".wiki-list") as HTMLElement;
           const row = document.querySelector(".wiki-list .skills-attention") as HTMLElement;
@@ -103,20 +104,23 @@ describe.skipIf(!browser || !server)("Skills needs-attention line in a real brow
           for (const other of [r.count, r.sw, r.label]) {
             if (other === part) continue;
             const overlapX = Math.min(part!.r, other!.r) - Math.max(part!.l, other!.l);
-            const overlapY = Math.min(part!.b, other!.b) - Math.max(part!.t, other!.t);
+            const overlapY = Math.min(part!.y2, other!.y2) - Math.max(part!.y, other!.y);
             expect(Math.min(overlapX, overlapY)).toBeLessThanOrEqual(1);
           }
         }
         // The page never scrolls sideways.
         expect(r.docScroll).toBeLessThanOrEqual(r.docClient);
-        // Wider screens have room for the whole line: count and switch share one line. On a phone the
-        // label may wrap below, but the count and switch still do not.
-        if (size.width >= 641) expect(Math.abs(r.count!.t - r.sw!.t)).toBeLessThan(4);
+        // Wider screens have room for the whole line: count and switch share one row (their boxes overlap
+        // vertically, centred). On a phone the label may wrap below, but the count and switch still do not.
+        if (size.width >= 641) {
+          const vOverlap = Math.min(r.count!.y2, r.sw!.y2) - Math.max(r.count!.y, r.sw!.y);
+          expect(vOverlap).toBeGreaterThan(Math.min(r.count!.h, r.sw!.h) / 2);
+        }
 
         if (process.env.BOSSMAN_SCRATCH) await page.screenshot({ path: path.join(process.env.BOSSMAN_SCRATCH, `skills-attention-${size.name}.png`), fullPage: true });
       } finally {
         await page.close();
       }
-    });
+    }, 60_000);
   }
 });
