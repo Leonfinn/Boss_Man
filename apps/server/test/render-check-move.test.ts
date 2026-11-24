@@ -1,11 +1,13 @@
-// BOS-2511: set_ticket_state review refuses a screen change without a geometry render test and before/after screenshots,
-// unless noVisualChange says why; the reason is kept in the state note for the reviewer.
+// BOS-2511 (DR-075): set_ticket_state review refuses a screen change without a real-browser render test and seeded
+// before/after screenshots, unless noVisualChange says why; the reason is kept in the state note for the reviewer.
 import { randomBytes, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { WorkspaceDiff } from "@boss-man/shared";
+import { addPngText, SCREENSHOT_MARKER_KEY, SCREENSHOT_MARKER_SEEDED } from "../../../scripts/png-marker.mjs";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { ticketImages, tickets } from "../src/db/schema.js";
@@ -15,8 +17,14 @@ const BASE: WorkspaceDiff = { baseCommit: "a".repeat(40), head: "b".repeat(40), 
 const BOARD = "apps/web/src/pages/Board.tsx";
 const TEST = "apps/web/test/lane-age-render.test.tsx";
 const LAYOUT: WorkspaceDiff = { ...BASE, files: [{ path: BOARD, added: 1, removed: 0 }], diff: [`diff --git a/${BOARD} b/${BOARD}`, '+      <span className="mono state-age">{age}</span>'].join("\n") };
-const WITH_TEST: WorkspaceDiff = { ...LAYOUT, files: [...LAYOUT.files, { path: TEST, added: 1, removed: 0 }], diff: `${LAYOUT.diff}\ndiff --git a/${TEST} b/${TEST}\n+const box = el.getBoundingClientRect();` };
+const WITH_TEST: WorkspaceDiff = { ...LAYOUT, files: [...LAYOUT.files, { path: TEST, added: 1, removed: 0 }], diff: `${LAYOUT.diff}\ndiff --git a/${TEST} b/${TEST}\n+  it("one line tall", () => {});` };
 const HANDLER: WorkspaceDiff = { ...BASE, files: [{ path: BOARD, added: 1, removed: 0 }], diff: [`diff --git a/${BOARD} b/${BOARD}`, "+  const onOpen = () => setOpen(true);"].join("\n") };
+// The test's whole file at the head: the BOS-1078 template counts; a jsdom test with a geometry call doesn't.
+const BROWSER_TEST = readFileSync(new URL("../../web/test/merge-queue-held-render.test.tsx", import.meta.url), "utf8");
+const JSDOM_TEST = 'import "../src/styles.css";\nit("fits", () => { expect(el.getBoundingClientRect().height).toBe(0); });';
+// A 1x1 PNG; the marked copy is what scripts/screenshot.mjs --api writes.
+const PNG = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c626001000000ffff03000006000557bfabd40000000049454e44ae426082", "hex");
+const SEEDED = addPngText(PNG, SCREENSHOT_MARKER_KEY, SCREENSHOT_MARKER_SEEDED);
 
 let ctx: Awaited<ReturnType<typeof setup>>;
 const clients: Client[] = [];
@@ -35,18 +43,22 @@ async function setup() {
   await req("PATCH", `/api/projects/${withRepo.id}`, { repoUrl: "https://github.com/example/customer-app.git" });
   const noRepo = (await req("POST", `/api/companies/${co.company.id}/projects`, { name: "Notes" })).json() as { id: string };
   const reg = (await req("POST", `/api/companies/${co.company.id}/runner`)).json() as { runnerId: string };
-  const diff = { current: LAYOUT, failing: false };
+  const runner = { diff: LAYOUT, diffFails: false, testText: BROWSER_TEST as string | null };
   built.runners.connect(reg.runnerId, (c) => {
     if (c.type === "workspace.diff")
-      queueMicrotask(() => built.runners.resolveReply(diff.failing ? { requestId: c.requestId, ok: false, error: "no workspace or branch" } : { requestId: c.requestId, ok: true, data: diff.current }));
+      queueMicrotask(() => built.runners.resolveReply(runner.diffFails ? { requestId: c.requestId, ok: false, error: "no workspace or branch" } : { requestId: c.requestId, ok: true, data: runner.diff }));
+    if (c.type === "workspace.file")
+      queueMicrotask(() => built.runners.resolveReply(runner.testText === null ? { requestId: c.requestId, ok: false, error: "no such file" } : { requestId: c.requestId, ok: true, data: { text: runner.testText, truncated: false, from: "branch" } }));
     if (c.type === "workspace.migrations") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: { needed: false, reason: "No other branch uses this ticket's migration numbers." } }));
     return true;
   });
   const ticket = async (projectId = withRepo.id) =>
     (await db.insert(tickets).values({ companyId: co.company.id, projectId, title: "Lane age on the board", systemState: "in_progress", assigneeAgentId: dev.id, branch: "bossman/x" }).returning())[0]!;
-  const shot = (ticketId: string, caption: string, byAgent = true) =>
-    db.insert(ticketImages).values({ companyId: co.company.id, ticketId, name: "shot.png", caption, type: "image/png", size: 4, bytes: Buffer.from("png!"), agentId: byAgent ? dev.id : null });
-  return { ...built, db, close, base, co, dev, noRepo, diff, ticket, shot };
+  const shot = (ticketId: string, caption: string, o: { bytes?: Buffer; byAgent?: boolean; createdAt?: Date } = {}) => {
+    const bytes = o.bytes ?? SEEDED;
+    return db.insert(ticketImages).values({ companyId: co.company.id, ticketId, name: "shot.png", caption, type: "image/png", size: bytes.length, bytes, agentId: o.byAgent === false ? null : dev.id, ...(o.createdAt ? { createdAt: o.createdAt } : {}) });
+  };
+  return { ...built, db, close, base, co, dev, noRepo, runner, ticket, shot };
 }
 
 beforeEach(async () => {
@@ -73,29 +85,41 @@ describe("BOS-2511: a screen change at the move to review", () => {
   it("is refused with neither the render test nor the screenshots, naming both, the tools and the way out", async () => {
     const t = await ctx.ticket();
     const out = await toReview(t.id);
-    expect(out).toContain("real-browser check before review");
-    expect(out).toContain(BOARD);
-    expect(out).toContain("render test");
-    expect(out).toContain("scripts/screenshot.mjs");
-    expect(out).toContain("noVisualChange");
+    for (const s of ["real-browser check before review", BOARD, "render test", "scripts/screenshot.mjs", "docs/28-browser-checks.md", "merge-queue-held-render.test.tsx", "noVisualChange"]) expect(out).toContain(s);
     expect((await stateOf(t.id)).systemState).toBe("in_progress");
   });
 
-  it("is refused with the test but only an owner's paste and one agent shot", async () => {
+  it("moves with a real-browser render test and seeded before/after screenshots", async () => {
     const t = await ctx.ticket();
-    ctx.diff.current = WITH_TEST;
-    await ctx.shot(t.id, "Board before");
-    await ctx.shot(t.id, "Board after", false);
-    expect(await toReview(t.id)).toContain("Missing: before and after screenshots");
-  });
-
-  it("moves with a geometry render test and before/after screenshots", async () => {
-    const t = await ctx.ticket();
-    ctx.diff.current = WITH_TEST;
+    ctx.runner.diff = WITH_TEST;
     await ctx.shot(t.id, "Board before, 1667 px");
     await ctx.shot(t.id, "Board after, 1667 px");
     await toReview(t.id);
     expect((await stateOf(t.id)).systemState).toBe("review");
+  });
+
+  it("refuses a jsdom test (whole file read at the head), and a test file the runner can't read", async () => {
+    const t = await ctx.ticket();
+    ctx.runner.diff = WITH_TEST;
+    await ctx.shot(t.id, "Board before");
+    await ctx.shot(t.id, "Board after");
+    ctx.runner.testText = JSDOM_TEST;
+    expect(await toReview(t.id)).toContain(`${TEST} doesn't`);
+    ctx.runner.testText = null;
+    expect(await toReview(t.id)).toContain(`couldn't read ${TEST}`);
+    expect((await stateOf(t.id)).systemState).toBe("in_progress");
+  });
+
+  it("refuses shots without the screenshot.mjs mark (a mock-up), the owner's paste, or from before the ticket started", async () => {
+    const t = await ctx.ticket();
+    ctx.runner.diff = WITH_TEST;
+    await ctx.shot(t.id, "Board before");
+    await ctx.shot(t.id, "Board after", { bytes: PNG });
+    expect(await toReview(t.id)).toContain("1 picture attached don't count");
+    await ctx.shot(t.id, "Board after", { byAgent: false });
+    await ctx.shot(t.id, "Board after", { createdAt: new Date(Date.now() - 24 * 3600_000) });
+    expect(await toReview(t.id)).toContain('Missing: "before" and "after" screenshots');
+    expect((await stateOf(t.id)).systemState).toBe("in_progress");
   });
 
   it("moves with noVisualChange, keeping the reason in the state note", async () => {
@@ -114,17 +138,17 @@ describe("BOS-2511: a screen change at the move to review", () => {
   });
 
   it("leaves a handler-only page edit, a project without a repo and an unreadable diff alone", async () => {
-    ctx.diff.current = HANDLER;
+    ctx.runner.diff = HANDLER;
     const a = await ctx.ticket();
     await toReview(a.id);
     expect((await stateOf(a.id)).systemState).toBe("review");
 
-    ctx.diff.current = LAYOUT;
+    ctx.runner.diff = LAYOUT;
     const b = await ctx.ticket(ctx.noRepo.id);
     await toReview(b.id);
     expect((await stateOf(b.id)).systemState).toBe("review");
 
-    ctx.diff.failing = true;
+    ctx.runner.diffFails = true;
     const c = await ctx.ticket();
     const out = await toReview(c.id);
     expect((await stateOf(c.id)).systemState).toBe("review");

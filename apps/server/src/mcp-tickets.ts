@@ -19,7 +19,8 @@ import { EngagementError } from "./services/engagements.js";
 import { FOLLOW_UP_HELP, followUpsSchema, handOffRefusal, openFollowUps, resolveFollowUpAssignees } from "./services/hand-offs.js";
 import { getHold, WRAP_UP } from "./services/maintenance.js";
 import { NOTHING_CHANGED, ReviewError } from "./services/review.js";
-import { layoutFiles, NO_VISUAL_CHANGE_MAX, noVisualChangeProblem, renderCheckRefusal } from "./services/render-check-gate.js";
+import { NO_VISUAL_CHANGE_MAX, noVisualChangeProblem } from "./services/render-check-gate.js";
+import { renderCheckForMove } from "./services/render-check-move.js";
 import { reviewTicketWriteRefusal } from "./services/skill-proposals.js";
 import { wipQueuedNote } from "./services/agent-wip.js";
 import { moveTicket } from "./services/ticket-moves.js";
@@ -772,17 +773,12 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         if (bad) return fail(bad);
       }
       let renderUnread = "";
-      const [repo] = state === "review" && !sameState && !withCriteria.noCode ? await db.select({ url: projects.repoUrl }).from(tickets).innerJoin(projects, eq(projects.id, tickets.projectId)).where(eq(tickets.id, ticketId)) : [];
-      if (repo?.url) {
-        const d = await review.diff(ticketId, scope.companyId).catch(() => null);
-        if (!d) renderUnread = "\n\nThe branch's diff couldn't be read, so the screen-change check (BOS-2511) was skipped: if this changes a screen's layout, attach before/after screenshots and a render test anyway; the reviewer will ask for them.";
-        else if (layoutFiles(d).length) {
-          const images = (await db.select({ name: ticketImages.name, caption: ticketImages.caption, agentId: ticketImages.agentId }).from(ticketImages).where(and(eq(ticketImages.ticketId, ticketId), eq(ticketImages.companyId, scope.companyId), sql`${ticketImages.type} like 'image/%'`))).map((i) => ({ name: i.name, caption: i.caption, byAgent: !!i.agentId }));
-          const refusal = renderCheckRefusal({ diff: d, images, noVisualChange });
-          if (refusal) return fail(refusal);
-          // Kept with the move so the reviewer reads it and agrees or not.
-          if (noVisualChange?.trim()) summary = `${summary?.trim() ?? ""}\nNo visual change (author's reason): ${noVisualChange.trim()}`;
-        }
+      if (state === "review" && !sameState && !withCriteria.noCode) {
+        const r = await renderCheckForMove(db, review, { ticketId, companyId: scope.companyId, noVisualChange });
+        if (r.refusal) return fail(r.refusal);
+        if (r.skipped) renderUnread = "\n\nThe branch's diff couldn't be read, so the screen-change check (BOS-2511) was skipped: if this changes a screen's layout, add a render test and before/after screenshots anyway; the reviewer will ask for them.";
+        // Kept with the move so the reviewer reads it and agrees or not.
+        if (r.layout && noVisualChange?.trim()) summary = `${summary?.trim() ?? ""}\nNo visual change (author's reason): ${noVisualChange.trim()}`;
       }
       // A ticket waiting on the owner has to show in their Your review lane, which it only does through an open decision.
       const blockedNow = state === "blocked" ? await blockedHolds(db, ticketId, { blockedUntil: until ?? null }) : [];

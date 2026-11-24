@@ -1,6 +1,9 @@
-// BOS-2511: the screen-change rule's pure parts: what triggers it, what counts as a render test and as screenshots.
+// BOS-2511 (DR-075): the screen-change rule's pure parts: what triggers it, what counts as a render test and as screenshots.
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { geometryRenderTests, hasBeforeAfterShots, layoutFiles, noVisualChangeProblem, renderCheckRefusal } from "../src/services/render-check-gate.js";
+// The writer scripts/screenshot.mjs uses, so writer and reader can't drift apart.
+import { addPngText, SCREENSHOT_MARKER_KEY as WRITER_KEY, SCREENSHOT_MARKER_SEEDED as WRITER_VALUE } from "../../../scripts/png-marker.mjs";
+import { hasBeforeAfterShots, hasSeededMarker, isBrowserRenderTest, layoutFiles, noVisualChangeProblem, renderCheckRefusal, renderTestCandidates, SCREENSHOT_MARKER_KEY, SCREENSHOT_MARKER_SEEDED, type ShotFacts } from "../src/services/render-check-gate.js";
 
 const section = (path: string, lines: string[]) => [`diff --git a/${path} b/${path}`, "index 1..2 100644", `--- a/${path}`, `+++ b/${path}`, "@@ -1,3 +1,3 @@", ...lines].join("\n");
 const diffOf = (...parts: Array<{ path: string; lines: string[] }>) => ({
@@ -10,18 +13,20 @@ const diffOf = (...parts: Array<{ path: string; lines: string[] }>) => ({
 });
 const BOARD = "apps/web/src/pages/Board.tsx";
 const TEST = "apps/web/test/board-age-render.test.tsx";
-const GEOMETRY_TEST = { path: TEST, lines: ["+const box = el.getBoundingClientRect();", "+expect(box.height).toBeLessThan(24);"] };
-const SHOTS = [
-  { name: "board-before.png", caption: "Board before, 1667 px", byAgent: true },
-  { name: "board-after.png", caption: "Board after, 1667 px", byAgent: true },
-];
+// The BOS-1078 template on main: the test the refusal points authors at must itself count.
+const TEMPLATE = readFileSync(new URL("../../web/test/merge-queue-held-render.test.tsx", import.meta.url), "utf8");
+const shot = (caption: string, over: Partial<ShotFacts> = {}): ShotFacts => ({ name: "shot.png", caption, byAgent: true, seeded: true, sinceStart: true, ...over });
+const SHOTS = [shot("Board before, 1667 px"), shot("Board after, 1667 px")];
+// A 1x1 PNG: signature, IHDR, IDAT, IEND.
+const PNG = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c626001000000ffff03000006000557bfabd40000000049454e44ae426082", "hex");
 
 describe("what triggers the rule", () => {
-  it("any change to styles.css", () => {
+  it("any change to styles.css or App.tsx", () => {
     expect(layoutFiles(diffOf({ path: "apps/web/src/styles.css", lines: ["-  gap: 4px;", "+  gap: 6px;"] }))).toEqual(["apps/web/src/styles.css"]);
+    expect(layoutFiles(diffOf({ path: "apps/web/src/App.tsx", lines: ["+  const x = 1;"] }))).toEqual(["apps/web/src/App.tsx"]);
   });
 
-  it("page or component JSX: a tag, a className or a style prop", () => {
+  it("page or component JSX: a tag, a fragment, a className or a style prop", () => {
     expect(layoutFiles(diffOf({ path: BOARD, lines: ['+      <span className="mono state-age">{sa.label}</span>'] }))).toEqual([BOARD]);
     expect(layoutFiles(diffOf({ path: "apps/web/src/components/Card.tsx", lines: ["+  return (<>", "+  </>);"] }))).toEqual(["apps/web/src/components/Card.tsx"]);
     expect(layoutFiles(diffOf({ path: BOARD, lines: ["+  <div style={{ gap: 4 }} />"] }))).toEqual([BOARD]);
@@ -29,12 +34,12 @@ describe("what triggers the rule", () => {
   });
 
   it("not a handler, a generic, a comparison or an import in a page", () => {
-    const d = diffOf({ path: BOARD, lines: ["+  const [x, setX] = useState<string>(\"\");", "+  if (a < b) onClick();", '+import { api } from "../api";'] });
+    const d = diffOf({ path: BOARD, lines: ['+  const [x, setX] = useState<string>("");', "+  if (a < b) onClick();", '+import { api } from "../api";'] });
     expect(layoutFiles(d)).toEqual([]);
   });
 
-  it("not a .tsx outside pages/components, nor a .ts helper inside them", () => {
-    expect(layoutFiles(diffOf({ path: "apps/web/src/App.tsx", lines: ["+<div />"] }, { path: "apps/web/src/pages/board-sort.ts", lines: ["+<div />"] }))).toEqual([]);
+  it("not an entry point, nor a .ts helper inside pages", () => {
+    expect(layoutFiles(diffOf({ path: "apps/web/src/main.tsx", lines: ["+<div />"] }, { path: "apps/web/src/lazy-page.tsx", lines: ["+<div />"] }, { path: "apps/web/src/pages/board-sort.ts", lines: ["+<div />"] }))).toEqual([]);
   });
 
   it("a page missing from a truncated diff counts on its path alone", () => {
@@ -50,72 +55,75 @@ describe("what triggers the rule", () => {
 });
 
 describe("what counts as a render test", () => {
-  it("a *-render.test whose added lines measure geometry", () => {
-    expect(geometryRenderTests(diffOf(GEOMETRY_TEST))).toEqual([TEST]);
-    expect(geometryRenderTests(diffOf({ path: "apps/web/test/x-render.test.ts", lines: ["+const overflow = el.scrollWidth - el.clientWidth;"] }))).toEqual(["apps/web/test/x-render.test.ts"]);
-    expect(geometryRenderTests(diffOf({ path: "apps/web/test/x-render.test.tsx", lines: ["+const b = await page.locator('.card').boundingBox();"] }))).toEqual(["apps/web/test/x-render.test.tsx"]);
+  it("candidates are changed or added *-render.test files under apps/web/test, not deletions or other names", () => {
+    const d = diffOf({ path: TEST, lines: ["+x"] }, { path: "apps/web/test/gone-render.test.ts", lines: ["-x"] }, { path: "apps/web/test/board.test.tsx", lines: ["+x"] }, { path: "apps/server/test/x-render.test.ts", lines: ["+x"] });
+    expect(renderTestCandidates(d)).toEqual([TEST]);
   });
 
-  it("not one that only checks classes exist (BOS-2496), nor geometry in a removed line", () => {
-    expect(geometryRenderTests(diffOf({ path: TEST, lines: ["+expect(el.classList.contains('nowrap')).toBe(true);"] }))).toEqual([]);
-    expect(geometryRenderTests(diffOf({ path: TEST, lines: ["-const box = el.getBoundingClientRect();", "+// removed"] }))).toEqual([]);
+  it("the BOS-1078 template counts: styles.css, a real browser and geometry", () => {
+    expect(isBrowserRenderTest(TEMPLATE)).toBe(true);
   });
 
-  it("not a geometry test with another name or outside apps/web/test", () => {
-    expect(geometryRenderTests(diffOf({ path: "apps/web/test/board.test.tsx", lines: GEOMETRY_TEST.lines }))).toEqual([]);
-    expect(geometryRenderTests(diffOf({ path: "apps/server/test/x-render.test.ts", lines: GEOMETRY_TEST.lines }))).toEqual([]);
-  });
-
-  it("one a truncated diff never reached counts on its path", () => {
-    const d = { ...diffOf({ path: BOARD, lines: ["+<div />"] }), truncated: true };
-    d.files.push({ path: TEST, added: 80, removed: 0 });
-    expect(geometryRenderTests(d)).toEqual([TEST]);
+  it("a jsdom test with a geometry call doesn't, nor a browser test that only checks classes, nor one without the stylesheet", () => {
+    expect(isBrowserRenderTest('import "../src/styles.css";\nconst r = el.getBoundingClientRect();')).toBe(false);
+    expect(isBrowserRenderTest('import { chromium } from "playwright";\nconst css = read("styles.css");\nexpect(el.classList.contains("nowrap")).toBe(true);')).toBe(false);
+    expect(isBrowserRenderTest('import { chromium } from "playwright";\nconst b = await el.boundingBox();')).toBe(false);
   });
 });
 
 describe("what counts as screenshots", () => {
-  it("two agent pictures, one before and one after, by caption or file name", () => {
-    expect(hasBeforeAfterShots(SHOTS)).toBe(true);
-    expect(hasBeforeAfterShots([{ name: "a.png", caption: "Before: lane header", byAgent: true }, { name: "b.png", caption: "After: lane header", byAgent: true }])).toBe(true);
+  it("the marker scripts/screenshot.mjs writes is the one the server reads", () => {
+    expect([WRITER_KEY, WRITER_VALUE]).toEqual([SCREENSHOT_MARKER_KEY, SCREENSHOT_MARKER_SEEDED]);
+    const marked = addPngText(PNG, WRITER_KEY, WRITER_VALUE);
+    expect(hasSeededMarker(marked)).toBe(true);
+    expect(hasSeededMarker(new Uint8Array(marked.subarray(0, 200)))).toBe(true); // the caller reads only a prefix
   });
 
-  it("not one picture named both, only befores, the owner's pastes, or unlabelled shots", () => {
-    expect(hasBeforeAfterShots([{ name: "x.png", caption: "before and after", byAgent: true }])).toBe(false);
-    expect(hasBeforeAfterShots([SHOTS[0]!, { ...SHOTS[0]!, name: "b2.png" }])).toBe(false);
+  it("no marker: a plain PNG, another key or value, a JPEG, garbage", () => {
+    expect(hasSeededMarker(PNG)).toBe(false);
+    expect(hasSeededMarker(addPngText(PNG, "Software", "api=seeded"))).toBe(false);
+    expect(hasSeededMarker(addPngText(PNG, WRITER_KEY, "api=none"))).toBe(false);
+    expect(hasSeededMarker(Buffer.from("ffd8ffe000104a464946", "hex"))).toBe(false);
+    expect(hasSeededMarker(Buffer.from("not an image"))).toBe(false);
+  });
+
+  it("two marked agent pictures since the start, one before and one after, by caption or file name", () => {
+    expect(hasBeforeAfterShots(SHOTS)).toBe(true);
+    expect(hasBeforeAfterShots([shot("", { name: "board-before.png" }), shot("", { name: "board-after.png" })])).toBe(true);
+  });
+
+  it("not unmarked (a mock-up), older than the ticket's start, the owner's, one named both, or unlabelled", () => {
+    expect(hasBeforeAfterShots([SHOTS[0]!, shot("Board after", { seeded: false })])).toBe(false);
+    expect(hasBeforeAfterShots([shot("Board before", { sinceStart: false }), SHOTS[1]!])).toBe(false);
     expect(hasBeforeAfterShots(SHOTS.map((s) => ({ ...s, byAgent: false })))).toBe(false);
-    expect(hasBeforeAfterShots([{ name: "1.png", caption: "board", byAgent: true }, { name: "2.png", caption: "board", byAgent: true }])).toBe(false);
-    expect(hasBeforeAfterShots([{ name: "beforehand.png", caption: null, byAgent: true }, { name: "aftermath.png", caption: null, byAgent: true }])).toBe(false);
+    expect(hasBeforeAfterShots([shot("before and after")])).toBe(false);
+    expect(hasBeforeAfterShots([shot("board"), shot("board")])).toBe(false);
+    expect(hasBeforeAfterShots([shot("", { name: "beforehand.png" }), shot("", { name: "aftermath.png" })])).toBe(false);
   });
 });
 
 describe("the refusal", () => {
-  const layout = diffOf({ path: BOARD, lines: ['+<span className="age" />'] });
+  const layout = [BOARD];
+  const good = [{ path: TEST, text: TEMPLATE }];
 
-  it("no layout change: no refusal, whatever is missing", () => {
-    expect(renderCheckRefusal({ diff: diffOf({ path: "apps/server/src/a.ts", lines: ["+x"] }), images: [] })).toBeNull();
+  it("no layout change: no refusal", () => {
+    expect(renderCheckRefusal({ layout: [], tests: [], images: [] })).toBeNull();
   });
 
   it("names what is missing, the files, the tools and the way out", () => {
-    const r = renderCheckRefusal({ diff: layout, images: [] })!;
-    expect(r).toContain(BOARD);
-    expect(r).toContain("render test");
-    expect(r).toContain("before and after screenshots");
-    expect(r).toContain("scripts/screenshot.mjs");
-    expect(r).toContain("docs/28-browser-checks.md");
-    expect(r).toContain("merge-queue-held-render.test.tsx");
-    expect(r).toContain("noVisualChange");
+    const r = renderCheckRefusal({ layout, tests: [], images: [] })!;
+    for (const s of [BOARD, "render test", '"before" and "after" screenshots', "scripts/screenshot.mjs", "docs/28-browser-checks.md", "merge-queue-held-render.test.tsx", "noVisualChange"]) expect(r).toContain(s);
   });
 
-  it("with only one half, names only the other", () => {
-    const onlyTest = renderCheckRefusal({ diff: diffOf({ path: BOARD, lines: ['+<span className="age" />'] }, GEOMETRY_TEST), images: [] })!;
-    expect(onlyTest).toContain("Missing: before and after screenshots");
-    const onlyShots = renderCheckRefusal({ diff: layout, images: SHOTS })!;
-    expect(onlyShots).toMatch(/Missing: a render test[^;]*\.$/m);
+  it("with only one half, names only the other; says which test or picture didn't count and why", () => {
+    expect(renderCheckRefusal({ layout, tests: good, images: [] })!).toMatch(/Missing: "before" and "after" screenshots[^;]*\.$/m);
+    expect(renderCheckRefusal({ layout, tests: [{ path: TEST, text: "jsdom only" }], images: SHOTS })!).toContain(`${TEST} doesn't`);
+    expect(renderCheckRefusal({ layout, tests: [{ path: TEST, text: null }], images: SHOTS })!).toContain(`couldn't read ${TEST}`);
+    expect(renderCheckRefusal({ layout, tests: good, images: [shot("before", { seeded: false }), shot("after", { seeded: false })] })!).toContain("2 pictures attached don't count");
   });
 
-  it("passes with both, or with noVisualChange", () => {
-    expect(renderCheckRefusal({ diff: diffOf({ path: BOARD, lines: ['+<span className="age" />'] }, GEOMETRY_TEST), images: SHOTS })).toBeNull();
-    expect(renderCheckRefusal({ diff: layout, images: [], noVisualChange: "only the aria-label wording changed" })).toBeNull();
+  it("passes with a counting test and marked shots", () => {
+    expect(renderCheckRefusal({ layout, tests: [{ path: "apps/web/test/x-render.test.ts", text: null }, ...good], images: SHOTS })).toBeNull();
   });
 
   it("noVisualChange needs a real one-line reason", () => {

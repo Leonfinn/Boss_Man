@@ -8,7 +8,9 @@
 // from a tiny in-process server on 127.0.0.1, answers every /api/* request from fixtures (a built-in set that
 // lets the app boot as a signed-in owner with one company and one project, merged with --api FILE: a JSON map
 // of "/api/path" -> response body; an unknown path gets {}), opens it in headless Chromium at --width, waits for
-// the --wait CSS selector (never a fixed time), and writes a PNG.
+// the --wait CSS selector (never a fixed time), and writes a PNG. With --api (and no --url) the PNG carries a
+// `bossman-screenshot` = `api=seeded` text chunk (png-marker.mjs): the move to review counts only marked
+// before/after shots for a screen change (BOS-2511, DR-075). An --out ending .jpg/.jpeg writes an unmarked JPEG.
 //
 // Why it is built this way (the blank/failed captures on BOS-1053):
 //  - /dev/shm on the runner is small (64 MB) and can be nearly full. Chromium's default of using it for renderer
@@ -33,6 +35,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, extname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { addPngText, SCREENSHOT_MARKER_KEY, SCREENSHOT_MARKER_SEEDED } from "./png-marker.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -239,7 +242,10 @@ async function main() {
       fail(`"${o.wait}" did not appear within ${o.timeout} ms at ${target}`);
     }
     mkdirSync(dirname(resolve(o.out)), { recursive: true });
-    await page.screenshot({ path: o.out, fullPage: o.fullPage });
+    // BOS-2511 (DR-075): a PNG made from seeded --api data carries a marker, which the move to review looks for.
+    const jpeg = /\.jpe?g$/i.test(o.out);
+    const shot = await page.screenshot({ type: jpeg ? "jpeg" : "png", fullPage: o.fullPage });
+    writeFileSync(o.out, !jpeg && o.api && !o.url ? addPngText(shot, SCREENSHOT_MARKER_KEY, SCREENSHOT_MARKER_SEEDED) : shot);
     console.log(resolve(o.out));
   } finally {
     await cleanup();
