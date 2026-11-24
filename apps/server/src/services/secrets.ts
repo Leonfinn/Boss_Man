@@ -48,6 +48,7 @@ export type UseSummary = {
 /** Counts the last 30 days of reads. Never sees a value. */
 export function summariseUse(rows: { at: Date; company: string | null; purpose: string }[], now = new Date()): UseSummary {
   const byPurpose = { run: 0, deploy: 0, merge: 0, other: 0 };
+  // shortcut: local to one call, gone when it returns; nothing to upgrade
   const companies = new Map<string, number>();
   const perDay = new Array<number>(USE_DAYS).fill(0);
   const today = Math.floor(now.getTime() / 86_400_000);
