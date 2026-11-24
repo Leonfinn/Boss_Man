@@ -39,7 +39,8 @@ export const OWNER_CONTROLS = {
     // Every page intro's fold (P7, BOS-1278): Agents, Server and runner, Notifications and Features show it.
     "More about this",
     // The search box (Ctrl+K) and its sidebar button (BOS-2192).
-    "Search", "Close",
+    // "Clear" empties the recent searches listed when the box is empty (BOS-2433).
+    "Search", "Close", "Clear",
   ],
   "Log in": ["Create owner account", "Log in"],
   Setup: [
@@ -64,14 +65,14 @@ export const OWNER_CONTROLS = {
     // Under each command in a step (the label is set in code, so the test can't read it).
     "Copy",
   ],
-  Notifications: ["Turn on browser notifications", "Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole", "Create phone login", "Set up ntfy for me", "Reset password", "Copy password", "I've saved it", "Waiting for the host", "Save", "Send a test message", "Switch off", "Switch on", "Change", "Remove", "Save changes", "Add", "Cancel", "Send one now"],
-  Chat: ["Ask the CEO", "Send", "Show more", "Show less", "Running now", "Load older messages", "Loading", "Download", "Preparing","Remember this", "Add to standing rules", "Undo", "Cancel"],
+  Notifications: ["Turn on browser notifications", "Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark this day read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole", "Create phone login", "Set up ntfy for me", "Reset password", "Copy password", "I've saved it", "Waiting for the host", "Save", "Send a test message", "Switch off", "Switch on", "Change", "Remove", "Save changes", "Add", "Cancel", "Send one now"],
+  Chat: ["Ask the CEO", "Send", "Show more", "Show less", "Running now", "Load older messages", "Loading", "Download", "Preparing", "Previous", "Next", "Search older messages", "Searching", "Remember this", "Add to standing rules", "Undo", "Cancel", "Copy link", "Link copied", "Jump to newest"],
   // A project's page (Projects → a project). Its tabs along the top, then the Kanban tab's buttons.
   Board: [
     "Kanban", "Budget", "Config",
     "Save", "Cancel", "New feature", "New task", "Add feature", "Add and start", "Add to backlog",
     "Let the CEO question me first", "Add task", "All", "Features", "Tasks", "Show fewer", "Show",
-    "Show all done tasks", "Run now", "Discard draft", "Add limit",
+    "Show all done tasks", "Show all", "Run now", "Discard draft", "Add limit",
     // The filters behind one Filter button (BOS-1194): its button and count, the chips' and panel's ways to clear,
     // and the way out of a column emptied by filters. "Working now" is a switch with only a label there now, not a button.
     "Filter", "Clear all", "Clear filters", "Clear search",
@@ -101,6 +102,8 @@ export const OWNER_CONTROLS = {
     "Copy link", "Copied",
     // The header's "Download": the ticket as Markdown, "Preparing" while it fetches the conversation (BOS-2314).
     "Download", "Preparing",
+    // Find in this conversation (BOS-2422): the header's "Find", and the labels BOS-2411 added to Chat.
+    "Find", "Previous", "Next", "Search older messages", "Searching",
   ],
   // A project's Config tab (repo and merge-check settings, brief, archive), and the Projects page, which shows
   // the same settings for every project. The merge-check setting ("Before merging, Boss Man will…") is here,
@@ -113,7 +116,7 @@ export const OWNER_CONTROLS = {
   // The Runs page's emergency stop: every run going now, in every company (BOS-837).
   // The Engagements list: the paged list's own buttons come from "Any screen"; its "Show" filter is a field (OWNER_FIELDS).
   Engagements: [],
-  Runs: ["End all running runs", "Ending", "Loading", "Show more", "Retry", "Download CSV"],
+  Runs: ["End all running runs", "Ending", "Loading", "Show more", "Retry", "Download CSV", "Start now", "Cancel", "Starting", "Cancelling"],
   // The Merge queue page's two views (BOS-1174).
   // Below three recently finished checks, "Show N more" opens the rest (BOS-1239).
   "Merge queue": ["Merges", "Quick checks", "Show …", "Move to front"],
@@ -125,6 +128,8 @@ export const OWNER_CONTROLS = {
     "What's holding work up …", "Show all …", "Show fewer",
     // BOS-1306: the labelled Hide / Show button at the right end of that heading.
     "Hide", "Show",
+    // BOS-2430: the filters' reset and the CSV of the items shown.
+    "Clear filters", "Download CSV", "Unassigned",
   ],
   Wiki: [
     "Show older versions", "Compare", "Close compare", "Show", "Restore this version",
@@ -146,9 +151,9 @@ export const OWNER_CONTROLS = {
     "Add feedback", "Add to the inbox", "Cancel", "Use the whole note", "Create …", "Creating", "Back to the list", "Unlink",
     "Link to …", "Done: mark processed", "Back to unprocessed", "Archive", "Delete", "Copy", "New link", "Remove",
     "Feedback portal", "Search", "Anonymous …", "Save times",
-    "Download CSV", "Preparing",
+    "Download CSV", "Preparing", "Show older", "Show newer",
   ],
-  "Feedback portal": ["Edit your comment", "Tell us why", "Remove my vote", "Send", "Cancel", "Send idea", "Send my vote"],
+  "Feedback portal": ["Edit your comment", "Tell us why", "Remove my vote", "Send", "Cancel", "Send idea", "Send my vote", "Copy link", "Copied"],
   Agents: [
     "Refresh models", "Asking the runner", "Choose from the list", "Hire …", "Use the default", "Replace with the current …",
     "Fill in from the …", "Rehire", "Undo", "Save", "Add note", "Cancel", "Edit", "Delete", "Start", "Pause", "Close",
@@ -165,7 +170,7 @@ export const OWNER_CONTROLS = {
     "Funding", "Secrets", "Account", "Notifications", "Tools and deploys", "Reviews", "Team and CEO", "Watchdog", "Permissions",
     "Updates", "Limits and checks", "Runner", "Email", "This server", "Devices and privacy", "Import and export",
     "Server and runner",
-    "Run the setup wizard",
+    "Run the setup wizard", "Clear",
   ],
   "Server and runner": [
     "Reconnect runner", "Start runner", "Restart", "Stop", "Copy token", "Issue a new runner token", "Register a runner",
@@ -204,13 +209,15 @@ export const OWNER_CONTROLS = {
     "Remove anyway",
     // The Deploys fold under each deploy target (BOS-2318): the next page of older deploys.
     "Show older",
+    // A past successful deploy in that fold: ship that version again (BOS-2329).
+    "Deploy this version again",
   ],
   // Who approves and reviews work at each risk level, and whether it moved the goal.
   Reviews: ["Reset to defaults"],
   // Standing rules, the CEO chapters, the advice setting, nudges, the run time limit and the retros.
-  "Team and CEO": ["Pause company", "Resume company", "Cancel", "Edit", "Start a new chapter", "Clear", "Undo last change", "Discard draft", "Run a retro now"],
+  "Team and CEO": ["Pause company", "Resume company", "Cancel", "Edit", "Start a new chapter", "Clear", "Undo last change", "Put this version back", "Discard draft", "Run a retro now"],
   // The permission rules page, its advice mode, the second opinion and the fence.
-  Permissions: ["Delete", "Edit", "Save", "Cancel", "Ask the CEO to draft it", "Add rule", "Check", "Test", "Choose Off: run agents without the fence"],
+  Permissions: ["Delete", "Edit", "Save", "Cancel", "Ask the CEO to draft it", "Add rule", "Make a rule", "Check", "Test", "Choose Off: run agents without the fence"],
   // The Scrum Master's watchdog: its limits, its record-only rehearsal and its safety cap.
   Watchdog: ["Switch off", "Switch back on", "Switch on", "Test on the past 48 hours"],
   "Import and export": ["Check name", "Import as a new company", "Open …"],
@@ -240,6 +247,10 @@ export const OWNER_FIELDS = {
   Engagements: ["Show", "Search engagements"],
   // The Runs page's search box (BOS-2317).
   Runs: ["Search by ticket"],
+  // The Plan page's filters (BOS-2430).
+  Plan: ["Project", "Assignee", "Kind", "Show finished"],
+  // The Settings page's search box (BOS-2348).
+  Settings: ["Find a setting"],
   Setup: [
     "Company name", "What it's for", "Project name", "The CEO", "Title", "Description", "Give it to",
     // The credentials, funding and project panels Setup shares with Secrets, Access and funding, and Projects.
@@ -254,11 +265,13 @@ export const OWNER_FIELDS = {
     "Your answer, in your own words. It goes to …", "What's unclear (optional, one line)",
     "Every agent in this company",
     "Your one-line reason, or the corrected lesson (needed for Edit)",
+    "Who answered", "Kind",
   ],
   // The "Remember this" box under the owner's own message (BOS-2184).
-  Chat: ["Add this to the standing rules every agent reads"],
+  // And the find box and date field above the conversation (BOS-2411).
+  Chat: ["Add this to the standing rules every agent reads", "Go to date", "Couldn't copy here. Copy the link by hand"],
   Notifications: [
-    "Company", "Quiet hours: pages and asks become flags, flags become notes", "From", "Until", "Time zone",
+    "Search notifications", "Company", "Quiet hours: pages and asks become flags, flags become notes", "From", "Until", "Time zone",
     "Per agent, per hour, before the rest become notes", "Send to my phone through my own ntfy server", "Send to my phone",
     "Also send flags (normal priority)", "Topic",
     "Access token", "Remove the saved token", "Boss Man's address on your phone, so a tap opens the evidence",
@@ -291,6 +304,8 @@ export const OWNER_FIELDS = {
     "Watch this repo", "GitHub repo (owner/name)", "Check every (minutes, at least 15)", "Issues", "Discussions",
     "Skip posts by these GitHub logins (yours, Boss Man's account)",
     "Security alerts (this project owns the repo's alerts)",
+    // The order of the project list (BOS-2463).
+    "Sort by",
   ],
   Roadmap: ["Milestone", "Target date", "New milestone", "Company", "New objective", "Priority", "Where", "Show done work", "Key result", "Current", "Target", "Unit", "Objective"],
   Wiki: [
@@ -311,13 +326,13 @@ export const OWNER_FIELDS = {
   ],
   Feedback: [
     "Feedback, as they said it", "Title (optional)", "From (optional)", "Their email (optional)", "Segment (optional)",
-    "Came in by", "Feature", "Portal on", "Heading", "Replace", "Add logo", "Introduction", "Link back to your website (optional)", "Link text (optional)", "Search feedback",
+    "Came in by", "Order", "Feature", "Portal on", "Heading", "Replace", "Add logo", "Introduction", "Link back to your website (optional)", "Link text (optional)", "Search feedback",
     "Visitors must click a link we email them before a post, comment or vote counts", "Link works for (hours)",
     "Remember a confirmed browser for (days)", "Open this portal at the public address itself",
   ],
   "Feedback portal": [
     "Your name (optional)", "Email, if you'd like to hear back (optional)", "What would it let you do",
-    "Your idea, in a few words", "What problem would it solve for you", "Website", "Your email",
+    "Your idea, in a few words", "What problem would it solve for you", "Website", "Your email", "Search features", "Copy the address by hand",
   ],
   Agents: [
     "Only start", "From", "To", "Time zone",
@@ -372,6 +387,8 @@ export const OWNER_FIELDS = {
     "Requires approval (you approve each deploy here too)", "After a successful deploy, move tag", "Tag name", "In the repo of",
     // The Penpot form (BOS-1582).
     "Penpot address", "Access token", "Export email (optional)", "Export password (optional)",
+    // The status filter on a deploy target's history (BOS-2409).
+    "Show",
   ],
   // Who reviews at each risk level, and the "did it move the goal?" check.
   Reviews: ["Ask after (days)"],
@@ -439,7 +456,7 @@ export const OWNER_SECTIONS = {
   ],
   Watchdog: ["Watchdog"],
   Permissions: ["Permission rules", "Advice on permission cards", "Second opinion", "Second opinion from a model (optional)", "Agent fence", "Setting up a host", "Try a command"],
-  Updates: ["Updates", "Other actions", "Now running", "Recent updates", "Stop all work", "What the host said"],
+  Updates: ["Updates", "Other actions", "Now running", "Recent updates", "Stop all work", "Server health", "What the host said"],
   "Limits and checks": ["Agents at once", "Tickets in progress", "Checks", "Check workers"],
   Runner: ["Runner", "Add-ons", "Workspace disk"],
   Email: ["Outgoing email", "Main's CI"],

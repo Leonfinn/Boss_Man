@@ -14,6 +14,7 @@ import { forgetRunTrace, runTrace } from "../mcp-trace.js";
 import { missingPageNote } from "./wiki.js";
 import { ownerSetupFacts, ownerSetupLines, workerSetupLines } from "./owner-record.js";
 import { namedThingsSection, type NamedSources } from "./named-things.js";
+import { swapUntilForScreen } from "./maintenance.js";
 
 /** Drops the "You said "X" on card Y, 2026-11-01, about Z, ..." footer lines that BOS-1855 saved under older CEO replies. */
 export function stripYouSaidLines(text: string): string {
@@ -24,6 +25,8 @@ import type { ChatTraceService } from "./chat-trace.js";
 import { reportBackSection, settleReports } from "./chat-report-back.js";
 
 export const CHAT_REASON = "owner_chat";
+/** Why the scheduler's launch() leaves a wake queued while its company's runner isn't connected (a swap, a restart). */
+export const RUNNER_OFFLINE = "runner offline";
 
 /** The brief's "Owner's setup" section, for the CEO's chat prompt; empty if the record can't be read. */
 async function ownerSetupSection(db: Db, companyId: string): Promise<string[]> {
@@ -133,8 +136,10 @@ export function chatService(
     named?: NamedSources;
     /** Lines of "possible matches by meaning" for the owner's latest message (BOS-2116); absent, or empty when the company has it off. */
     meaning?: (companyId: string, ownerText: string) => Promise<string[]>;
+    now?: () => Date;
   },
 ) {
+  const now = deps.now ?? (() => new Date());
   // shortcut: replies being saved, by run, so the end-of-run check sees them; lost on restart, harmless because a run dies with the restart.
   const saving = new Map<string, Promise<unknown>>();
   // shortcut: how many changes the run had when it last replied, so the run-end line lists only what came after (BOS-758).
@@ -168,8 +173,15 @@ export function chatService(
       .from(wakes)
       .where(and(eq(wakes.agentId, agentId), eq(wakes.reason, CHAT_REASON), inArray(wakes.status, ["queued", "deferred"])));
     const [running] = await db.select({ id: runs.id }).from(runs).where(and(eq(runs.companyId, companyId), eq(runs.agentId, agentId), eq(runs.purpose, "chat"), isNull(runs.endedAt)));
-    // A queued wake with a reason is held (agent or company paused, a limit, a runner update), not just waiting for the runner.
-    return running ? "answering" : queued ? (queued.status === "deferred" || queued.reason ? `waiting: ${queued.reason ?? "deferred"}` : "queued") : "idle";
+    if (running) return "answering";
+    if (!queued) return "idle";
+    // BOS-2404: the one update wait a chat has is its runner being swapped (launch() finds it offline): name it and when it ends.
+    if (queued.reason === RUNNER_OFFLINE) {
+      const until = await swapUntilForScreen(db, now());
+      if (until) return `waiting: your runner is being swapped to the new version, usually under a minute (back by ${until.toISOString().slice(11, 16)} UTC at the latest)`;
+    }
+    // A queued wake with a reason is held (agent or company paused, a limit, a runner offline), not just waiting for the runner.
+    return queued.status === "deferred" || queued.reason ? `waiting: ${queued.reason ?? "deferred"}` : "queued";
   }
 
   return {

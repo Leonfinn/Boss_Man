@@ -247,16 +247,17 @@ describe("what holds the swap is named, and chat keeps answering until the swap 
     await until(async () => !(await c.review.landingMergesByCompany()).size, "the landing to end");
   });
 
-  it("held by nothing it can name: a short pause is only the swap itself; after that it says late and chat answers", async () => {
+  it("held by nothing it can name: first 'swapping', then it says late; chat answers throughout (BOS-2404)", async () => {
     const c = (ctx = await setup());
     await c.req("POST", "/api/maintenance/start", {});
-    // The first minute (the swap itself): "swapping", chat is held.
-    expect(((await c.req("GET", "/api/maintenance")).json() as Status)).toMatchObject({ phase: "swapping", unknownWait: false, chatOpen: false });
-    expect(await chatStarts(c)).toBe(0);
+    // The first minutes: "swapping", but no runner is being recreated yet, so chat answers (BOS-1951 held it here).
+    expect(((await c.req("GET", "/api/maintenance")).json() as Status)).toMatchObject({ phase: "swapping", unknownWait: false, chatOpen: true });
+    expect(await chatStarts(c)).toBe(1);
     // Nothing swapped it by 3 minutes: late, said so, chat is open (the 19 Nov wait was 86 minutes of this).
     c.advance(3 * 60_000);
     expect(((await c.req("GET", "/api/maintenance")).json() as Status)).toMatchObject({ phase: "waiting", overdue: true, unknownWait: true, chatOpen: true, expectedFinishAt: null });
-    expect(await chatStarts(c)).toBe(1);
+    // The chat run started above is still answering (one chat run per agent at a time).
+    expect(((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json() as { state: string }).state).toBe("answering");
   });
 });
 

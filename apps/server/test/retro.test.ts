@@ -140,6 +140,29 @@ describe("when a retro starts", () => {
     expect(await c.wakeFor()).toHaveLength(1);
   });
 
+  it("status lists the last 8 retros with findings by kind and what became of their changes", async () => {
+    const c = (ctx = await setup());
+    for (let i = 0; i < 9; i++) {
+      const r = await c.priorRetro((20 - i) * D);
+      if (i === 8) {
+        await c.db.update(retros).set({ findings: [{ failure: "missing_tests", tickets: [], count: 2, note: "n" }, { failure: "missing_tests", tickets: [], count: 1, note: "n" }, { failure: "slow_review", tickets: [], count: 1, note: "n" }] }).where(eq(retros.id, r.id));
+        const base = { companyId: c.company.id, retroId: r.id, lever: "model", summary: "s", metricScope: {}, approver: "owner" as const };
+        await c.db.insert(workflowChanges).values([
+          { ...base, metric: "firstPassRate", baseline: 0.4, status: "kept", result: { value: 0.6, measuredAt: new Date().toISOString(), sample: 5, capped: false } },
+          { ...base, metric: "meanRework", baseline: 1, status: "reverted", result: { value: 2, measuredAt: new Date().toISOString(), sample: 5, capped: false } },
+          { ...base, metric: "meanRework", baseline: 1, status: "skipped" },
+          { ...base, metric: "meanRework", baseline: 1, status: "proposed" },
+        ]);
+      }
+    }
+    const { history } = await c.retro.status(c.company.id);
+    expect(history).toHaveLength(8);
+    // Newest first: the last one made is the newest (age 12 days).
+    expect(history[0]!.changes).toEqual({ applied: 2, skipped: 1, waiting: 1, checked: 2, met: 1 });
+    expect(history[0]!.findings).toEqual([{ failure: "missing_tests", label: "Tests were missing or weak", count: 2 }, { failure: "slow_review", label: "Review took too long", count: 1 }]);
+    expect(history[1]!.changes).toEqual({ applied: 0, skipped: 0, waiting: 0, checked: 0, met: 0 });
+  });
+
   it("picks the Product Manager, else the CEO, else the agent Settings names", async () => {
     const c = (ctx = await setup({ pm: false }));
     await c.done(5, D);

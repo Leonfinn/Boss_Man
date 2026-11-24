@@ -110,4 +110,28 @@ describe("Answered list", () => {
     expect(new URL(calls[0]!, "http://x").searchParams.get("id")).toBeNull();
     expect(screen.getByRole("searchbox", { name: "Search answered cards" })).toBeTruthy();
   });
+
+  it("shows the CEO week line, the filters, and the CEO's reason and what happened next (BOS-2382)", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      calls.push(String(url));
+      return reply({ items: [item(1, { by: "ceo", byName: "Casey", note: "Looked safe", kind: "merge", outcome: "merged" })], next: null, ceoWeek: { total: 3, byKind: [{ kind: "merge", count: 2 }, { kind: "plan", count: 1 }] } });
+    }));
+    const { container } = render(<AnsweredList />);
+    const details = container.querySelector("details")!;
+    details.open = true;
+    fireEvent(details, new Event("toggle"));
+    await screen.findByText("Question 1");
+    expect(screen.getByTestId("ceo-week").textContent).toContain("This week the CEO answered 3 cards for you: 2 merges, 1 plan.");
+    expect(screen.getByTestId("ceo-reason").textContent).toContain("Looked safe");
+    expect(screen.getByTestId("ceo-outcome").textContent).toContain("merged");
+    expect(new URL(calls[0]!, "http://x").searchParams.get("weeks")).toBe("8");
+    fireEvent.click(screen.getByText("Show them"));
+    await waitFor(() => expect(calls.some((u) => u.includes("by=ceo"))).toBe(true));
+    expect((screen.getByLabelText("Who answered") as HTMLSelectElement).value).toBe("ceo");
+    fireEvent.change(screen.getByLabelText("Who answered"), { target: { value: "ceo" } });
+    await waitFor(() => expect(calls.some((u) => u.includes("by=ceo"))).toBe(true));
+    fireEvent.change(screen.getByLabelText("Kind"), { target: { value: "merge" } });
+    await waitFor(() => expect(calls.some((u) => u.includes("by=ceo") && u.includes("kind=merge"))).toBe(true));
+  });
 });

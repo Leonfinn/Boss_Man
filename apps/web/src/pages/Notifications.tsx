@@ -1,10 +1,11 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type Company, type Notice, type NoticeCounts, type NoticeFeed, type NotifyLevel } from "../api";
 import { useOlder, usePoll } from "../hooks";
 import { ShowOlder } from "../components/ShowOlder";
 import { away } from "../server-watch";
 import { when } from "./Runs";
 import { MoreText } from "./Decisions";
+import { READ_IDS_MAX, groupByDay } from "../notice-days";
 import { FeedItem, LevelTag, feedTitle } from "../components/FeedItem";
 
 const LEVEL: Record<NotifyLevel, { label: string; tone: string; help: string }> = {
@@ -56,8 +57,10 @@ function Item({ n, onRead }: { n: Notice; onRead: (id: string) => void }) {
   );
 }
 type Status = "all" | "unread" | "read";
-type Filters = { status: Status; level: NotifyLevel | "all"; company: string };
-const NO_FILTERS: Filters = { status: "all", level: "all", company: "all" };
+type Filters = { status: Status; level: NotifyLevel | "all"; company: string; text: string };
+const NO_FILTERS: Filters = { status: "all", level: "all", company: "all", text: "" };
+const SEARCH_MAX = 200;
+const SEARCH_DELAY_MS = 300;
 const FILTERS_KEY = "notifications-filters";
 const NO_COMPANY = "none";
 const LEVEL_PLURAL: Record<NotifyLevel, string> = { note: "Notes", flag: "Flags", page: "Pages", ask: "Asks" };
@@ -71,6 +74,7 @@ function readFilters(): Filters {
         status: s.status === "unread" || s.status === "read" ? s.status : "all",
         level: s.level && s.level in LEVEL ? s.level : "all",
         company: typeof s.company === "string" && s.company ? s.company : "all",
+        text: typeof s.text === "string" ? s.text.trim().slice(0, SEARCH_MAX) : "",
       };
     }
   } catch {
@@ -104,6 +108,18 @@ const unreadLabel = (name: string, n: number | undefined) => (n ? `${name}, ${n 
 /** One row of toggle chips in three groups; a second press turns a chip off (BOS-1277). */
 function FilterBar({ filters, companies, counts, unread, set }: { filters: Filters; companies: Company[]; counts: NoticeCounts | undefined; unread: number | undefined; set: (patch: Partial<Filters>) => void }) {
   const [help, setHelp] = useState(false);
+  // The typed text is applied after a short pause; a later change to the saved text (Clear filters) replaces what is typed.
+  const [draft, setDraft] = useState(filters.text);
+  const latestSet = useRef(set);
+  latestSet.current = set;
+  useEffect(() => {
+    const t = draft.trim();
+    if (t === filters.text) return;
+    const timer = setTimeout(() => latestSet.current({ text: t }), SEARCH_DELAY_MS);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only a new draft starts the wait
+  }, [draft]);
+  useEffect(() => setDraft((d) => (d.trim() === filters.text ? d : filters.text)), [filters.text]);
   const sorted = [...companies].sort((a, b) => a.name.localeCompare(b.name));
   const showNone = filters.company === NO_COMPANY || (counts?.company[NO_COMPANY] ?? 0) > 0;
   const hideCompanies = sorted.length === 1 && !showNone;
@@ -121,6 +137,11 @@ function FilterBar({ filters, companies, counts, unread, set }: { filters: Filte
   const toggleCompany = (v: string) => set({ company: filters.company === v ? "all" : v });
   return (
     <div className="nf-wrap">
+      {/* Above the chip row, which scrolls sideways on a phone and would hide it. */}
+      <label className="nf-search" style={{ display: "flex", alignItems: "center", gap: 8, margin: "0 0 10px", flexWrap: "wrap" }}>
+        <span className="nf-name">Search notifications</span>
+        <input type="search" value={draft} maxLength={SEARCH_MAX} placeholder="Words in the title or text" style={{ flex: "1 1 220px", maxWidth: 420 }} onChange={(e) => setDraft(e.target.value)} />
+      </label>
       <div className="nf-bar" role="search" aria-label="Filter notifications">
         <div className="nf-group" role="group" aria-label="Read or unread">
           {/* R43: the server's one unread figure, the sidebar badge's (notifications.unread), not a sum made here. */}
@@ -179,12 +200,13 @@ export function Notifications({ feed, onChanged, companies = null, browserPermis
       /* storage blocked: the choice lasts until the page reloads */
     }
   };
-  const active = filters.status !== "all" || filters.level !== "all" || filters.company !== "all";
+  const active = filters.status !== "all" || filters.level !== "all" || filters.company !== "all" || filters.text !== "";
 
   const query = new URLSearchParams();
   if (filters.status !== "all") query.set("status", filters.status);
   if (filters.level !== "all") query.set("level", filters.level);
   if (filters.company !== "all") query.set("company", filters.company);
+  if (filters.text) query.set("q", filters.text);
   const qs = query.toString();
   // With a filter on the page polls its own list, so older notices and new arrivals are matched by the server.
   const filtered = usePoll((signal) => (qs ? api<NoticeFeed>(`/api/notifications?${qs}`, { signal }) : Promise.resolve(null)), 10_000, `notifications-${qs}`);
@@ -281,11 +303,26 @@ export function Notifications({ feed, onChanged, companies = null, browserPermis
         </div>
       )}
       {items.length > 0 && (
-        <ul aria-busy={updating} style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 10 }}>
-          {items.map((n) => (
-            <Item key={n.id} n={n} onRead={(id) => read({ ids: [id] })} />
+        <div aria-busy={updating} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {groupByDay(items).map((g) => (
+            <section key={g.key} aria-label={g.label}>
+              <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", margin: "0 0 8px" }}>
+                <h2 style={{ margin: 0, fontSize: 16 }}>{g.label}</h2>
+                {g.unreadIds.length > 0 && <span className="muted">{g.unreadIds.length} new</span>}
+                {g.unreadIds.length > 0 && (
+                  <button type="button" className="btn small" style={{ marginLeft: "auto" }} onClick={() => read({ ids: g.unreadIds.slice(0, READ_IDS_MAX) })}>
+                    Mark this day read
+                  </button>
+                )}
+              </div>
+              <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 10 }}>
+                {g.items.map((n) => (
+                  <Item key={n.id} n={n} onRead={(id) => read({ ids: [id] })} />
+                ))}
+              </ul>
+            </section>
           ))}
-        </ul>
+        </div>
       )}
       {!updating && <ShowOlder older={older} />}
     </>

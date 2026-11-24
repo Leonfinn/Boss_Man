@@ -8,7 +8,7 @@ import { z } from "zod";
 import { ruleProblems, RuleMatchSchema,type PolicyMatch, type PolicyOutcome, columnProblems, DEFAULT_REVIEW_POLICY, noLooserThan, normalisePolicyMarked, REVIEW_KINDS, ReviewPolicySchema, repoUrlAllowed, findCredential, DAEMON_ONLY_SECRET_REFUSAL, isDaemonOnlySecret,THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, type ReviewKind, type ReviewPolicy } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { endpointProblem } from "./deploys.js";
-import { agentAvatars, agentSkills, agents, companies, deployTargets, features, fundingSources, policyRules, keyResults, mcpServers, milestones, objectives, projects, skills, ticketMessages, tickets, wikiPages, wikiRevisions, workflowColumns } from "../db/schema.js";
+import { agentAvatars, agentSkills, agents, companies, deployTargets, features, fundingSources, policyRules, keyResults, keyResultReadings, mcpServers, milestones, objectives, projects, skills, ticketMessages, tickets, wikiPages, wikiRevisions, workflowColumns } from "../db/schema.js";
 import { EXPORT_FORMAT } from "./company-export.js";
 import { fromAgentCompanies, isAgentCompanies } from "./import-agent-companies.js";
 import { MAX_BODY, slugify } from "./wiki.js";
@@ -72,7 +72,7 @@ const Plan = z.object({
         priority: z.number().int().min(1).max(5).default(2),
         status: str(32).default("active"),
         project: opt(120),
-        keyResults: z.array(z.object({ title: z.string().trim().min(1).max(500), target: z.number().nullable().optional(), current: z.number().nullable().optional(), unit: opt(32), method: z.enum(["manual", "agent", "check"]).default("manual"), checkSpec: z.unknown().optional() })).max(50).default([]),
+        keyResults: z.array(z.object({ title: z.string().trim().min(1).max(500), target: z.number().nullable().optional(), current: z.number().nullable().optional(), unit: opt(32), method: z.enum(["manual", "agent", "check"]).default("manual"), checkSpec: z.unknown().optional(), readings: z.array(z.object({ at: z.string().datetime(), value: z.number(), by: z.string().max(200) })).max(100).default([]) })).max(50).default([]),
         milestones: z.array(z.object({ ref: Uuidish, title: z.string().trim().min(1).max(500), targetDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(), horizon: z.enum(["now", "next", "later"]).nullable().optional() })).max(100).default([]),
       }),
     )
@@ -553,7 +553,12 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
     for (const o of pkg.plan.objectives) {
       const [row] = await tx.insert(objectives).values({ companyId, title: o.title, priority: o.priority, status: o.status, projectId: (o.project && projectId.get(o.project)) || null }).returning();
       objectiveId.set(o.ref, row!.id);
-      if (o.keyResults.length) await tx.insert(keyResults).values(o.keyResults.map((k) => ({ objectiveId: row!.id, title: k.title, target: k.target ?? null, current: k.current ?? null, unit: k.unit ?? null, method: k.method, checkSpec: k.checkSpec ?? null })));
+      if (o.keyResults.length) {
+        const made = await tx.insert(keyResults).values(o.keyResults.map((k) => ({ objectiveId: row!.id, title: k.title, target: k.target ?? null, current: k.current ?? null, unit: k.unit ?? null, method: k.method, checkSpec: k.checkSpec ?? null }))).returning({ id: keyResults.id });
+        // History comes along; agents are not portable, so an agent's reading keeps no agent (BOS-2458).
+        const history = o.keyResults.flatMap((k, i) => k.readings.map((r) => ({ keyResultId: made[i]!.id, value: r.value, at: new Date(r.at), byKind: r.by === "the owner" ? "owner" : r.by === "automatic check" ? "check" : "agent", agentId: null })));
+        if (history.length) await tx.insert(keyResultReadings).values(history);
+      }
       for (const m of o.milestones) {
         const [ms] = await tx.insert(milestones).values({ objectiveId: row!.id, title: m.title, targetDate: m.targetDate ?? null, horizon: m.horizon ?? null }).returning();
         milestoneId.set(m.ref, ms!.id);

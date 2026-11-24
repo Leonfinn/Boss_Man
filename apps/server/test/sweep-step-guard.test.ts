@@ -5,7 +5,7 @@ import { eq } from "drizzle-orm";
 import { openPglite, type Db } from "../src/db/client.js";
 import { companies } from "../src/db/schema.js";
 import { sweepService } from "../src/services/sweeps.js";
-import { sweepStepGuard, sweepStepOkReason } from "../src/services/sweep-step-guard.js";
+import { sweepStepGuard, sweepStepKey, sweepStepOkReason } from "../src/services/sweep-step-guard.js";
 import type { AlertInput } from "../src/services/alert-ladder.js";
 
 let ctx: { db: Db; close: () => Promise<void> } | undefined;
@@ -85,5 +85,26 @@ describe("the sweep pass", () => {
     expect(logs.some((l) => l.includes("merge stall alarm"))).toBe(true);
     expect(pass).toHaveProperty("goalChecks");
     expect((await db.select().from(companies).where(eq(companies.name, "Acme"))).length).toBe(1);
+  });
+});
+
+describe("sweepStepKey", () => {
+  it("pins the key format and keeps one key per step name", () => {
+    expect(sweepStepKey("run time limit")).toBe("sweep-step:run time limit");
+    expect(sweepStepKey("run time limit")).toBe(sweepStepKey("run time limit"));
+    expect(sweepStepKey("run time limit")).not.toBe(sweepStepKey("merge stall alarm"));
+  });
+
+  it("is the dedupe key of the alert raised for the failing step", async () => {
+    const { db, companyId } = await setup();
+    const raised: AlertInput[] = [];
+    const opts = { alert: async (i: AlertInput) => (raised.push(i), { id: "a" }), homeCompany: async () => companyId };
+    for (let pass = 0; pass < 3; pass++) {
+      const g = await sweepStepGuard(db, opts);
+      await g.step("run time limit", async () => { throw new Error("x"); }, undefined);
+      await g.finish();
+    }
+    expect(raised).toHaveLength(1);
+    expect(raised[0]!.dedupeKey).toBe(sweepStepKey("run time limit"));
   });
 });

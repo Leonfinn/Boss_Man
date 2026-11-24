@@ -446,6 +446,61 @@ rm -f "$t/marks"/*; run 0 "full check next runs no shell tests" env BOSSMAN_MERG
 [ -z "$(marks)" ] || fail "full check next ran shell tests: $(marks)"
 g checkout -q -B feature origin/main
 
+# BOS-2386: a test in any package that names a string the branch removed or renamed runs, with the string in the log. BOS-2326
+# renamed the Ctrl+K box's aria-label, and web's keyboard-shortcuts test (no import of the changed file) failed first at the merge.
+g checkout -q main
+wr apps/web/src/Box.tsx 'export const Box = () => <input aria-label="Search tickets, wiki and chats" title="Kept label here" />;
+export const Help = () => <dd>Old help line text</dd>;'
+wr apps/web/src/routes.ts 'export const NOTICES = "#/settings/old-path";
+export const KEY = "x";'
+wr apps/web/test/shortcuts.test.tsx 'it("x", () => screen.findByRole("combobox", { name: "Search tickets, wiki and chats" }));'
+wr apps/web/test/help.test.tsx 'it("x", () => screen.getByText("Old help line text"));'
+wr apps/server/test/screen-path.test.ts 'it("x", () => expect(r8("Open #/settings/old-path")).toEqual([]));'
+wr apps/server/test/kept.test.ts 'it("x", () => expect("Kept label here").toBeTruthy());'
+for i in 1 2 3; do wr "apps/launcher/test/common$i.test.ts" 'it("x", () => "Common label text");'; done
+wr apps/web/src/common.ts 'export const C = "Common label text";'
+g add -A; g commit -q -m "labels"; g update-ref refs/remotes/origin/main HEAD
+g checkout -q -B rn1 origin/main
+wr apps/web/src/Box.tsx 'export const Box = () => <input aria-label="Search tickets, wiki, chats and runs" title="Kept label here" />;
+export const Help = () => <dd>New help line text</dd>;'
+wr apps/web/src/routes.ts 'export const NOTICES = "#/settings/new-path";
+export const KEY = "y";'
+wr apps/web/src/common.ts 'export const C = "Other label text";'
+g add -A; g commit -q -m rename
+run 0 "a web rename runs the tests that name the old strings, in any package" env
+grep -q "^INFO  tests that name a string the branch removed or renamed: 6 to run" "$t/out" || fail "removed strings: no INFO line: $(cat "$t/out")"
+grep -qF 'apps/web/test/shortcuts.test.tsx  ("Search tickets, wiki and chats")' "$t/out" || fail "removed strings: string not named: $(cat "$t/out")"
+grep -qF 'apps/server/test/screen-path.test.ts  ("#/settings/old-path")' "$t/out" || fail "removed strings: path not named: $(cat "$t/out")"
+logged "pnpm --filter @boss-man/web exec vitest run test/help.test.tsx test/shortcuts.test.tsx" "web tests naming removed strings (JSX text too)"
+# The server is untouched (no typecheck), but its test naming the old Settings path runs.
+logged "pnpm --filter @boss-man/server exec vitest run test/screen-path.test.ts" "an untouched package's test"
+notlogged "@boss-man/server typecheck" "server untouched"
+notlogged "kept.test.ts" "a string the diff keeps on the edited line"
+logged "exec vitest run test/common1.test.ts test/common2.test.ts test/common3.test.ts" "a string in 3 test files is under the default limit"
+# A string in more test files than CHECK_QUICK_REMOVED_COMMON is left out, and the log says so.
+run 0 "a common string" env CHECK_QUICK_REMOVED_COMMON=2
+grep -qF 'left out as too common: "Common label text" (in 3 test files)' "$t/out" || fail "common string: no note: $(cat "$t/out")"
+notlogged "common1.test.ts" "common string left out"
+# The cap keeps the files naming the most strings first, then by path, and says it cut some.
+run 0 "the cap" env CHECK_QUICK_REMOVED_COMMON=2 CHECK_QUICK_REMOVED_MAX=1
+grep -qF "cap hit: 3 test files name a removed string, running the first 1 (CHECK_QUICK_REMOVED_MAX)" "$t/out" || fail "cap: no note: $(cat "$t/out")"
+logged "pnpm --filter @boss-man/server exec vitest run test/screen-path.test.ts" "cap keeps the first by path"
+notlogged "shortcuts.test.tsx" "cap cut the rest"
+# A failing picked test fails the check, at the gate too.
+run 1 "a failing test naming a removed string" env BOSSMAN_MERGE_CHECK=1 FAIL_ON=shortcuts.test
+grep -q "^FAIL  tests naming a string the branch removed (apps/web, 2 files)" "$t/out" || fail "removed strings: no FAIL line: $(cat "$t/out")"
+# A test the branch changes itself is already in the related run: not picked twice.
+wr apps/web/test/shortcuts.test.tsx 'it("x", () => screen.findByRole("combobox", { name: "Search tickets, wiki and chats" })); // still old'
+g add -A; g commit -q -m "touch test"
+run 0 "a changed test is not picked twice" env
+logged "pnpm --filter @boss-man/web exec vitest run test/help.test.tsx" "the other web pick stays"
+! grep -qF "exec vitest run test/help.test.tsx test/shortcuts.test.tsx" "$LOG" || fail "changed test picked twice: $(cat "$LOG")"
+logged "vitest related --run src/Box.tsx src/common.ts src/routes.ts test/shortcuts.test.tsx" "the changed test runs in the related run"
+# The full check that runs next runs everything: no pick, no line.
+run 0 "full check next" env BOSSMAN_MERGE_CHECK=1 BOSSMAN_FULL_CHECK_NEXT=1
+! grep -q "^INFO  tests that name a string" "$t/out" || fail "full check next listed removed-string tests: $(cat "$t/out")"
+g checkout -q -B feature origin/main
+
 # A broad related-test list is skipped (exit 0), typecheck still runs; CHECK_QUICK_FORCE_RELATED=1 runs it.
 g checkout -q -B broad origin/main; commit apps/server/src/mcp.ts
 run 0 "mcp.ts is broad" env

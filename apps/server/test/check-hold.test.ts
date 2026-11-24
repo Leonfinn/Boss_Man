@@ -9,7 +9,7 @@ import { eq, sql } from "drizzle-orm";
 import type { WorkspaceDiff } from "@boss-man/shared";
 import { openPglite } from "../src/db/client.js";
 import { agents, checkJobs, companies, projects, reviewRequests, runners, settings, tickets, workflowColumns } from "../src/db/schema.js";
-import { agentWipHold, BEING_CHECKED_CAP, countInProgress } from "../src/services/agent-wip.js";
+import { agentWipHold, countInProgress } from "../src/services/agent-wip.js";
 import { checkHoldService } from "../src/services/check-hold.js";
 import { CHECK_QUEUE_MODE_KEY, checkQueue } from "../src/services/check-queue.js";
 import { checkRequestService } from "../src/services/check-request.js";
@@ -128,7 +128,7 @@ describe("when the check ends", () => {
 });
 
 describe("limits", () => {
-  it("a ticket being checked counts toward neither limit; two of them hold the agent's next start, one does not", async () => {
+  it("tickets being checked count toward neither limit and never hold the agent's next start (BOS-2385); one sent back counts again", async () => {
     const s = await setup();
     await s.db.insert(settings).values({ key: "wip_limits", value: { agent: 2, company: 2 } });
     const a = await s.ticket("review", { checkHoldAt: new Date() });
@@ -137,17 +137,12 @@ describe("limits", () => {
     expect(await countInProgress(s.db, eq(tickets.companyId, s.co), undefined, "company")).toBe(0);
     expect((await agentWipHold(s.db, next)).hold).toBeNull(); // one waiting on its check: room to start
     await s.ticket("review", { checkHoldAt: new Date() });
-    const held = (await agentWipHold(s.db, next)).hold;
-    expect(BEING_CHECKED_CAP).toBe(2);
-    expect(held).toMatchObject({ scope: "agent" });
-    expect(held!.reason).toMatch(/2 tickets being checked/);
-    // A third hand-in is not refused here (the move is the agent's), and one clearing frees the next start.
+    expect((await agentWipHold(s.db, next)).hold).toBeNull(); // two being checked: still room (was held before BOS-2385)
     await s.ticket("review", { checkHoldAt: new Date() });
-    await s.db.update(tickets).set({ checkHoldAt: null }).where(eq(tickets.id, a.id));
-    expect((await agentWipHold(s.db, next)).hold?.scope).toBe("agent"); // two still held
-    const rest = await s.db.select().from(tickets).where(eq(tickets.assigneeAgentId, s.agent));
-    await s.db.update(tickets).set({ checkHoldAt: null }).where(eq(tickets.id, rest.find((r) => r.checkHoldAt)!.id));
     expect((await agentWipHold(s.db, next)).hold).toBeNull();
+    // A ticket the check sends back returns to in progress and counts again.
+    await s.db.update(tickets).set({ systemState: "in_progress", checkHoldAt: null }).where(eq(tickets.id, a.id));
+    expect(await countInProgress(s.db, eq(tickets.assigneeAgentId, s.agent))).toBe(1);
   });
 });
 

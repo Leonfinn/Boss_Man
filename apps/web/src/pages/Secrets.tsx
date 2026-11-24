@@ -6,7 +6,9 @@ import { LoadError } from "../components/LoadError";
 import { Loader } from "../components/Loader";
 import { when } from "./Runs";
 
-type Secret = { id: string; name: string; kind: string; hint: string | null; version: number; createdAt: string; updatedAt: string };
+type Secret = { id: string; name: string; kind: string; hint: string | null; version: number; createdAt: string; updatedAt: string; lastUsedAt?: string | null; unusedIn30Days?: boolean };
+type UseSummary = { total: number; byCompany: { company: string; reads: number }[]; byPurpose: { run: number; deploy: number; merge: number; other: number }; perDay: number[] };
+type AccessLog = { entries: Access[]; summary: UseSummary };
 type Grant = { id: string; envName: string; companyId: string; company: string; deployTargetId: string | null; deployTarget: string | null; agentIds: string[] };
 type Access = { id: string; at: string; company: string | null; runId: string | null; purpose: string };
 
@@ -19,9 +21,43 @@ const KIND: Record<string, string> = {
   generic: "Other",
 };
 
+/** Counts only: reads in the last 30 days per company and purpose, and a 30-cell strip of reads per day. */
+/** Status text, not a control: kept out of the components so the owner-control list guard doesn't read it as a button. */
+function lastUsedText(at: string | null | undefined): string {
+  return at ? `Last used ${when(at)}` : "Never used";
+}
+
+function UseSummaryView({ summary }: { summary: UseSummary }) {
+  if (summary.total === 0) return <p className="muted">Not read in the last 30 days.</p>;
+  const max = Math.max(...summary.perDay, 1);
+  const p = summary.byPurpose;
+  const purposes = [
+    ["run", p.run],
+    ["deploy run", p.deploy],
+    ["merging approved work", p.merge],
+    ["other", p.other],
+  ] as const;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
+      <p style={{ margin: 0 }}>
+        {summary.total} {summary.total === 1 ? "read" : "reads"}
+        {summary.byCompany.length > 0 && <span className="muted"> · {summary.byCompany.map((c) => `${c.company} ${c.reads}`).join(", ")}</span>}
+      </p>
+      <p className="muted" style={{ margin: 0 }}>
+        {purposes.filter(([, n]) => n > 0).map(([label, n]) => `${label} ${n}`).join(" · ")}
+      </p>
+      <div role="img" aria-label={`Reads per day, last 30 days: ${summary.perDay.join(", ")}`} style={{ display: "flex", gap: 2, alignItems: "flex-end", height: 24 }}>
+        {summary.perDay.map((n, i) => (
+          <span key={i} title={`${n} ${n === 1 ? "read" : "reads"}`} style={{ flex: 1, height: n ? Math.max(4, Math.round((n / max) * 24)) : 2, background: n ? "var(--accent, #3b82f6)" : "var(--border, #ccc)" }} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function Detail({ secret, onChanged }: { secret: Secret; onChanged: () => void }) {
   const grants = usePoll((signal) => api<Grant[]>(`/api/secrets/${secret.id}/grants`, { signal }), 30_000, `g-${secret.id}`);
-  const log = usePoll((signal) => api<Access[]>(`/api/secrets/${secret.id}/access-log?limit=50`, { signal }), 30_000, `l-${secret.id}`);
+  const log = usePoll((signal) => api<AccessLog>(`/api/secrets/${secret.id}/access-log?limit=50`, { signal }), 30_000, `l-${secret.id}`);
   const [value, setValue] = useState("");
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const run = async (fn: () => Promise<string>) => {
@@ -107,8 +143,10 @@ function Detail({ secret, onChanged }: { secret: Secret; onChanged: () => void }
         </p>
       )}
       <div>
+        <p className="label">Last 30 days</p>
+        {log.data && <UseSummaryView summary={log.data.summary} />}
         <p className="label">Recent use</p>
-        {log.data?.length ? (
+        {log.data?.entries.length ? (
           <div className="table-wrap">
             <table>
               <thead>
@@ -119,7 +157,7 @@ function Detail({ secret, onChanged }: { secret: Secret; onChanged: () => void }
                 </tr>
               </thead>
               <tbody>
-                {log.data.map((l) => (
+                {log.data.entries.map((l) => (
                   <tr key={l.id}>
                     <td className="mono muted">{when(l.at)}</td>
                     <td>{l.company ?? "A deleted company"}</td>
@@ -169,8 +207,9 @@ export function Secrets({ companies, companyId, onChanged }: { companies: Compan
                 <span className="muted">{KIND[s.kind] ?? s.kind}</span>
                 <span className="mono muted">{s.hint ?? ""}</span>
                 <span className="muted">
-                  v{s.version} · updated {when(s.updatedAt)}
+                  v{s.version} · updated {when(s.updatedAt)} · {lastUsedText(s.lastUsedAt)}
                 </span>
+                {s.unusedIn30Days && <span className="tag">Not used in 30 days</span>}
               </button>
               {open === s.id && <Detail secret={s} onChanged={list.reload} />}
             </li>

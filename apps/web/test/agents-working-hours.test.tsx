@@ -21,6 +21,7 @@ function stub(agents: unknown, calls: Array<{ method: string; url: string; body:
       calls.push({ method: init?.method ?? "GET", url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
       if (url.includes("agent-templates")) return json({ templates: [] });
       if (url.includes("/models")) return json({ runner: {}, api: [] });
+      if (url.includes("/record")) return json({ days: 30, finished: 0, passedFirstTime: 0, sendBacks: 0, medianMergeMs: null, costPerFinishedMicros: null, recent: [] });
       if (url.includes("/history")) return json([]);
       if (url.includes("/notes")) return json({ items: [], limits: { count: 20, title: 80, text: 500, why: 300 } });
       if (init?.method === "PATCH") return json({});

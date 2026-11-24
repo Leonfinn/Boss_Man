@@ -4,7 +4,7 @@ import { api, ApiError, type AdvisedDecision, type ClosedNoticeCard, type Compan
 import { art } from "../brand";
 import { copyText, selectText } from "../clipboard";
 import { State } from "../components/State";
-import { usePoll } from "../hooks";
+import { hashQuery, usePoll } from "../hooks";
 import { ageLabel, dayLabel, raisedAgo } from "../age";
 import { clearDraft, readDraft, saveDraft } from "../drafts";
 import { describe, useTranscript } from "../transcript";
@@ -452,10 +452,53 @@ function settledWord(answer: string) {
   return answer;
 }
 
+/** The key a card's kind label is found under (BOS-2434: the summary counts and narrows by it). */
+export function kindKeyOf(d: Pick<Decision, "kind" | "options"> & { context?: unknown }): string {
+  const ctx = d.context as { type?: string } | undefined;
+  return ctx?.type === "deploy" || ctx?.type === "self_deploy" || ctx?.type === "rule_proposal" ? ctx.type : d.options.includes("Approve plan") ? "plan" : ctx?.type === "risk_review" ? "signoff" : ctx?.type === "review_stall" ? "review_stall" : d.kind;
+}
+
 function kindOf(d: Decision) {
-  const ctx = (d as Decision & { context?: { type?: string } }).context;
-  const key = ctx?.type === "deploy" || ctx?.type === "self_deploy" || ctx?.type === "rule_proposal" ? ctx.type : d.options.includes("Approve plan") ? "plan" : ctx?.type === "risk_review" ? "signoff" : ctx?.type === "review_stall" ? "review_stall" : d.kind;
-  return KIND[key] ?? { label: d.kind.replace(/_/g, " "), tone: "" };
+  return KIND[kindKeyOf(d)] ?? { label: d.kind.replace(/_/g, " "), tone: "" };
+}
+
+/** (BOS-2434) A short name for a card in the summary: its kind and the ticket it is about, never the question text (which can hold raw step fences). */
+function oldestTitle(d: Decision): string {
+  const t = d.about?.[0] ?? d.blocks[0];
+  const kind = (KIND[kindKeyOf(d)]?.label ?? d.kind.replace(/_/g, " "));
+  return t ? `${kind}: ${t.ref ?? t.title}` : kind;
+}
+
+/** (BOS-2434) The "Waiting for you" summary: how many cards by kind (biggest group first), and the oldest card. */
+export function waitingSummary(cards: Decision[], now = Date.now()): { total: number; kinds: Array<{ key: string; label: string; count: number }>; oldest: { id: string; title: string; waited: string } | null } {
+  const counts = new Map<string, number>();
+  for (const d of cards) counts.set(kindKeyOf(d), (counts.get(kindKeyOf(d)) ?? 0) + 1);
+  const kinds = [...counts].map(([key, count]) => ({ key, label: KIND[key]?.label ?? key.replace(/_/g, " "), count })).sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+  let oldest: Decision | null = null;
+  for (const d of cards) if (!oldest || new Date(d.createdAt).getTime() < new Date(oldest.createdAt).getTime()) oldest = d;
+  return { total: cards.length, kinds, oldest: oldest ? { id: oldest.id, title: oldestTitle(oldest), waited: ageLabel(now - new Date(oldest.createdAt).getTime()).replace(/ ago$/, "") } : null };
+}
+
+/** (BOS-2434) The page address's `kind` and `order` choices ("#/decisions?kind=permission&order=oldest"). */
+export function readQueueView(query: URLSearchParams): { kind: string | null; oldestFirst: boolean } {
+  return { kind: query.get("kind") || null, oldestFirst: query.get("order") === "oldest" };
+}
+export function queueViewHref(view: { kind: string | null; oldestFirst: boolean }): string {
+  const q = new URLSearchParams();
+  if (view.kind) q.set("kind", view.kind);
+  if (view.oldestFirst) q.set("order", "oldest");
+  const s = q.toString();
+  return `#/decisions${s ? `?${s}` : ""}`;
+}
+function useQueueView() {
+  const read = () => (typeof window === "undefined" ? { kind: null, oldestFirst: false } : readQueueView(hashQuery()));
+  const [view, setView] = useState(read);
+  useEffect(() => {
+    const on = () => setView(read());
+    window.addEventListener("hashchange", on);
+    return () => window.removeEventListener("hashchange", on);
+  }, []);
+  return view;
 }
 
 
@@ -569,7 +612,7 @@ function ModelChange({ d, editing, onEdit, onCancel, onSubmit, busy }: { d: Deci
 
 /** The card id in a #/decisions/<id> link (BOS-1078), or null. Safe where there is no window (a static render). */
 export function linkedCardOf(hash: string): string | null {
-  const [page, id] = hash.replace(/^#\/?/, "").split("/");
+  const [page, id] = hash.replace(/^#\/?/, "").split("?")[0]!.split("/");
   return page === "decisions" && id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ? id : null;
 }
 
@@ -723,7 +766,13 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
   const shownNotices = closedNotices.filter((n) => !filter || n.companyId === filter);
   // (BOS-551) The server puts waiting cards last and marks them; show them in the "Waiting, nothing to do
   // yet" group instead of the numbered list. Anything not marked keeps its place in the main list.
-  const queueCards = shown.filter((d) => !d.waiting);
+  const openCards = shown.filter((d) => !d.waiting);
+  // (BOS-2434) The summary counts every open card for the owner; the kind link narrows the list, the order switch re-sorts it.
+  const queueView = useQueueView();
+  const summary = waitingSummary(openCards);
+  const kindChoice = queueView.kind && summary.kinds.some((k) => k.key === queueView.kind) ? queueView.kind : null;
+  const byKind = kindChoice ? openCards.filter((d) => kindKeyOf(d) === kindChoice) : openCards;
+  const queueCards = queueView.oldestFirst ? [...byKind].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()) : byKind;
   // (BOS-1691) A card folded away while its author re-checks it leaves a line in the main list, never a silent gap.
   const recheckCards = shown.filter((d) => !!d.waiting && !!d.rechecking?.hidden);
   const waitingCards = shown.filter((d) => !!d.waiting && !d.rechecking?.hidden);
@@ -828,7 +877,7 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
           <p className="sub">
             {figureText("decisions.needYou", counts.open)}
             {counts.waiting > 0 ? ` · ${figureText("decisions.withTeam", counts.waiting)}` : ""}
-            {filter ? "" : companies.length === 1 ? ` in ${companies[0]!.name}` : " across all companies"}, newest first.
+            {filter ? "" : companies.length === 1 ? ` in ${companies[0]!.name}` : " across all companies"}, {queueView.oldestFirst ? "oldest first" : "newest first"}.
           </p>
           {elsewhere.length > 0 && (
             <p className="sub">
@@ -911,6 +960,31 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
         )
       ) : (
         <>
+          {openCards.length > 0 && (
+            <div data-testid="waiting-summary" className="sub" style={{ display: "flex", flexWrap: "wrap", gap: "4px 12px", alignItems: "baseline" }}>
+              <strong>{summary.total} waiting for you:</strong>
+              <span>
+                {summary.kinds.map((k, i) => (
+                  <span key={k.key}>
+                    {i > 0 && ", "}
+                    <a href={queueViewHref({ kind: k.key, oldestFirst: queueView.oldestFirst })} aria-current={kindChoice === k.key ? "true" : undefined} style={kindChoice === k.key ? { fontWeight: 600 } : undefined}>{k.count} {k.label.toLowerCase()}</a>
+                  </span>
+                ))}
+              </span>
+              {kindChoice && <a href={queueViewHref({ kind: null, oldestFirst: queueView.oldestFirst })}>Show all</a>}
+              {summary.oldest && (
+                <span>
+                  oldest:{" "}
+                  <a href={queueViewHref({ kind: kindChoice, oldestFirst: queueView.oldestFirst })} onClick={(e) => { e.preventDefault(); const id = summary.oldest!.id; if (kindChoice && !queueCards.some((c) => c.id === id)) window.location.hash = queueViewHref({ kind: null, oldestFirst: queueView.oldestFirst }); setTimeout(() => document.getElementById(`decision-${id}`)?.scrollIntoView?.({ block: "start" }), 0); }}>{summary.oldest.title.length > 70 ? `${summary.oldest.title.slice(0, 70)}…` : summary.oldest.title}</a>, waiting {summary.oldest.waited}
+                </span>
+              )}
+              <span role="group" aria-label="Order">
+                <a href={queueViewHref({ kind: kindChoice, oldestFirst: false })} aria-current={!queueView.oldestFirst ? "true" : undefined} style={!queueView.oldestFirst ? { fontWeight: 600 } : undefined}>Newest first</a>
+                {" · "}
+                <a href={queueViewHref({ kind: kindChoice, oldestFirst: true })} aria-current={queueView.oldestFirst ? "true" : undefined} style={queueView.oldestFirst ? { fontWeight: 600 } : undefined}>Oldest first</a>
+              </span>
+            </div>
+          )}
           {queueCards.length > 0 && (
           <>
           <ol className="queue">
@@ -1614,7 +1688,26 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
   );
 }
 
-type AnsweredItem = { id: string; question: string; status: "answered" | "withdrawn"; answer: string | null; by: "owner" | "ceo" | "auto" | "withdrawn"; byName: string | null; companyName?: string; note?: string | null; at: string; ticket: { id: string; title: string; ref: string | null } | null };
+type AnsweredItem = { id: string; question: string; status: "answered" | "withdrawn"; answer: string | null; by: "owner" | "ceo" | "auto" | "withdrawn"; byName: string | null; companyName?: string; note?: string | null; at: string; ticket: { id: string; title: string; ref: string | null } | null; kind?: string; outcome?: "merged" | "closed" | "open" | null; state?: string | null };
+type CeoWeek = { total: number; byKind: Array<{ kind: string; count: number }> };
+
+/** (BOS-2382) The kinds of card the Answered filter offers, by the key the server sends. */
+const ANSWERED_KINDS: Array<[string, string, string]> = [
+  ["merge", "Merge", "merges"],
+  ["plan", "Plan", "plans"],
+  ["hire", "Hire", "hires"],
+  ["permission", "Permission", "permissions"],
+  ["model", "Model", "model changes"],
+  ["question", "Question", "questions"],
+  ["deploy", "Deploy", "deploys"],
+  ["skill", "Skill", "skills"],
+  ["engagement", "Engagement", "engagements"],
+  ["stale_blocker", "Stale blocker", "stale blockers"],
+  ["lesson", "Lesson", "lessons"],
+  ["rule_proposal", "Rule", "rules"],
+];
+const kindPlural = (k: string) => ANSWERED_KINDS.find((x) => x[0] === k)?.[2] ?? k.replace(/_/g, " ") + " cards";
+const outcomeText = (i: AnsweredItem) => (i.outcome === "merged" ? "The ticket merged." : i.outcome === "closed" ? "The ticket was closed without a merge." : i.outcome === "open" ? `The ticket is still open${i.state ? ` (${i.state.replace(/_/g, " ")})` : ""}.` : null);
 
 const answeredBy = (i: AnsweredItem) => (i.by === "owner" ? "You" : i.by === "ceo" ? i.byName ?? "The CEO" : i.by === "auto" ? "Automatically" : "Withdrawn by the team");
 const answeredWhen = (iso: string) => new Date(iso).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
@@ -1647,6 +1740,10 @@ export function AnsweredList({ companyId, linkedId }: { companyId?: string | nul
   const [done, setDone] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
+  // (BOS-2382) Who answered and what kind of card; the list reaches back 8 weeks.
+  const [by, setBy] = useState("");
+  const [kind, setKind] = useState("");
+  const [ceoWeek, setCeoWeek] = useState<CeoWeek | null>(null);
   const exportCsv = async () => {
     setExporting(true);
     setExportError(null);
@@ -1678,7 +1775,13 @@ export function AnsweredList({ companyId, linkedId }: { companyId?: string | nul
       if (q.trim()) params.set("q", q.trim());
       if (companyId) params.set("companyId", companyId);
       if (pinned) params.set("id", pinned);
-      const r = await api<{ items: AnsweredItem[]; next: string | null }>(`/api/decisions/answered?${params.toString()}`);
+      else {
+        params.set("weeks", "8");
+        if (by) params.set("by", by);
+        if (kind) params.set("kind", kind);
+      }
+      const r = await api<{ items: AnsweredItem[]; next: string | null; ceoWeek?: CeoWeek }>(`/api/decisions/answered?${params.toString()}`);
+      if (r.ceoWeek) setCeoWeek(r.ceoWeek);
       setItems((prev) => (cursor ? [...prev, ...r.items] : r.items));
       setNext(r.next);
       setDone(true);
@@ -1693,7 +1796,7 @@ export function AnsweredList({ companyId, linkedId }: { companyId?: string | nul
     const t = setTimeout(() => void load(null, text), text ? 300 : 0);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [opened, text, companyId, pinned]);
+  }, [opened, text, companyId, pinned, by, kind]);
   useEffect(() => {
     if (pinned && items.some((i) => i.id === pinned)) document.getElementById(`decision-${pinned}`)?.scrollIntoView?.({ block: "center" });
   }, [pinned, items]);
@@ -1707,6 +1810,33 @@ export function AnsweredList({ companyId, linkedId }: { companyId?: string | nul
           </p>
         ) : (
           <>
+            {ceoWeek && ceoWeek.total > 0 && (
+              <p data-testid="ceo-week" style={{ margin: "0 0 8px" }}>
+                This week the CEO answered {ceoWeek.total} {ceoWeek.total === 1 ? "card" : "cards"} for you: {ceoWeek.byKind.map((k) => `${k.count} ${k.count === 1 ? kindPlural(k.kind).replace(/s$/, "") : kindPlural(k.kind)}`).join(", ")}.{" "}
+                <a href="#/decisions" onClick={() => { setBy("ceo"); setKind(""); }}>Show them</a>
+              </p>
+            )}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+              <label className="muted">
+                Who answered{" "}
+                <select aria-label="Who answered" value={by} onChange={(e) => setBy(e.target.value)}>
+                  <option value="">Everyone</option>
+                  <option value="owner">You</option>
+                  <option value="ceo">The CEO</option>
+                  <option value="auto">Automatic</option>
+                  <option value="withdrawn">Withdrawn</option>
+                </select>
+              </label>
+              <label className="muted">
+                Kind{" "}
+                <select aria-label="Kind" value={kind} onChange={(e) => setKind(e.target.value)}>
+                  <option value="">All kinds</option>
+                  {ANSWERED_KINDS.map(([k, label]) => (
+                    <option key={k} value={k}>{label}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
             <input type="search" aria-label="Search answered cards" placeholder="Search the questions" value={text} onChange={(e) => setText(e.target.value)} style={{ maxWidth: 320, marginBottom: 8 }} />{" "}
             <button type="button" className="btn small" disabled={exporting || (done && items.length === 0)} onClick={() => void exportCsv()}>
               {exporting ? "Preparing…" : "Download CSV"}
@@ -1732,10 +1862,14 @@ export function AnsweredList({ companyId, linkedId }: { companyId?: string | nul
                 )}{" "}
                 <span className="muted">· {answeredWhen(i.at)}</span>
               </div>
+              {i.by === "ceo" && i.note && <div className="muted" data-testid="ceo-reason">Reason: {i.note}</div>}
               {i.ticket && (
-                <a href={`#/tickets/${i.ticket.id}`} title={i.ticket.title}>
-                  {i.ticket.ref ? <strong>{i.ticket.ref}</strong> : null} {i.ticket.title}
-                </a>
+                <div>
+                  <a href={`#/tickets/${i.ticket.id}`} title={i.ticket.title}>
+                    {i.ticket.ref ? <strong>{i.ticket.ref}</strong> : null} {i.ticket.title}
+                  </a>
+                  {i.by === "ceo" && outcomeText(i) && <span className="muted" data-testid="ceo-outcome"> · {outcomeText(i)}</span>}
+                </div>
               )}
             </li>
           ))}

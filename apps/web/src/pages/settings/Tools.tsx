@@ -343,6 +343,7 @@ type DeployTargetRow = {
   isProduction: boolean;
   rules: { requiresApproval?: boolean; liveTag?: { projectId: string; name: string } | null };
   lastDeploy: { id: string; ref: string; commit: string | null; at: string | null; tagName: string | null; tagResult: string | null } | null;
+  latestAttempt?: { status: string; outcome: string | null; at: string } | null;
 };
 
 const ENDPOINT_HINT = { ssh: "deploy@host or ssh://deploy@host:22", docker: "tcp://socket-proxy:2375", git: "https://git.example.com/you/app.git" } as const;
@@ -358,7 +359,7 @@ function tagResultText(r: string | null) {
 
 type DeployHistoryRow = {
   id: string;
-  deploy: { id: string; ref: string; commit: string | null; notes: string | null; status: string; outcome: string | null; ticketId: string | null; tagName: string | null; tagResult: string | null; createdAt: string };
+  deploy: { id: string; ref: string; commit: string | null; notes: string | null; status: string; outcome: string | null; ticketId: string | null; tagName: string | null; tagResult: string | null; createdAt: string; finishedAt?: string | null; redeployOf?: string | null };
   agentName: string | null;
   ticketRef: string | null;
 };
@@ -374,21 +375,65 @@ const DEPLOY_STATUS_TEXT: Record<string, string> = {
 };
 
 /** A target's deploys, newest first, in a fold under its row (BOS-2318). Loads only once opened. */
-function DeployHistory({ targetId, name }: { targetId: string; name: string }) {
+function DeployHistory({ companyId, targetId, name, latestSuccessId }: { companyId: string; targetId: string; name: string; latestSuccessId: string | null }) {
   const [open, setOpen] = useState(false);
   return (
     <details onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)} style={{ marginTop: 6 }}>
       <summary>Deploys</summary>
-      {open && <DeployHistoryList targetId={targetId} name={name} />}
+      {open && <DeployHistoryList companyId={companyId} targetId={targetId} name={name} latestSuccessId={latestSuccessId} />}
     </details>
   );
 }
 
-function DeployHistoryList({ targetId, name }: { targetId: string; name: string }) {
-  const first = usePoll((signal) => api<{ deploy: DeployHistoryRow["deploy"]; agentName: string | null; ticketRef: string | null }[]>(`/api/deploys?targetId=${targetId}&limit=${DEPLOY_PAGE}`, { signal }).then((rows) => rows.map((r) => ({ ...r, id: r.deploy.id }))), 30_000, `deploy-history-${targetId}`);
-  const older = useOlder<DeployHistoryRow>(first.data ?? null, DEPLOY_PAGE, (before) => api<Omit<DeployHistoryRow, "id">[]>(`/api/deploys?targetId=${targetId}&limit=${DEPLOY_PAGE}&before=${before}`).then((rows) => rows.map((r) => ({ ...r, id: r.deploy.id }))), `deploy-history-${targetId}`);
+type DeploySummary = { days: number; total: number; succeeded: number; failedOrRejected: number; medianSeconds: number | null; lastSuccessAt: string | null };
+const DEPLOY_FILTERS = [
+  ["", "All"],
+  ["succeeded", "Succeeded"],
+  ["failed", "Failed or rejected"],
+] as const;
+
+function lengthText(s: number) {
+  if (s < 90) return `${Math.round(s)} s`;
+  if (s < 5400) return `${Math.round(s / 60)} min`;
+  return `${Math.round(s / 3600)} h`;
+}
+
+/** The 30-day line and the status filter above one target's list (BOS-2409). */
+function DeployHistoryList(props: { companyId: string; targetId: string; name: string; latestSuccessId: string | null }) {
+  const [status, setStatus] = useState<"" | "succeeded" | "failed">("");
+  const sum = usePoll((signal) => api<DeploySummary>(`/api/deploys/summary?targetId=${props.targetId}`, { signal }), 30_000, `deploy-summary-${props.targetId}`);
+  const s = sum.data;
+  return (
+    <>
+      {s && s.total > 0 && (
+        <p style={{ fontSize: 13, margin: "6px 0" }}>
+          Last {s.days} days: {s.total} deploy{s.total === 1 ? "" : "s"}, {s.succeeded} succeeded, {s.failedOrRejected} failed or refused
+          {s.medianSeconds !== null && <>, median {lengthText(s.medianSeconds)} to finish</>}.{" "}
+          {s.lastSuccessAt ? <>Last success: {when(s.lastSuccessAt)}</> : <span className="error">No successful deploy in {s.days} days</span>}
+        </p>
+      )}
+      <label style={{ fontSize: 13 }}>
+        Show{" "}
+        <select value={status} onChange={(e) => setStatus(e.target.value as typeof status)}>
+          {DEPLOY_FILTERS.map(([v, l]) => (
+            <option key={v} value={v}>
+              {l}
+            </option>
+          ))}
+        </select>
+      </label>
+      <DeployRows key={status} {...props} status={status} />
+    </>
+  );
+}
+
+function DeployRows({ companyId, targetId, name, latestSuccessId, status }: { companyId: string; targetId: string; name: string; latestSuccessId: string | null; status: string }) {
+  const act = useAction();
+  const filter = status ? `&status=${status}` : "";
+  const first = usePoll((signal) => api<{ deploy: DeployHistoryRow["deploy"]; agentName: string | null; ticketRef: string | null }[]>(`/api/deploys?targetId=${targetId}&limit=${DEPLOY_PAGE}${filter}`, { signal }).then((rows) => rows.map((r) => ({ ...r, id: r.deploy.id }))), 30_000, `deploy-history-${targetId}-${status}`);
+  const older = useOlder<DeployHistoryRow>(first.data ?? null, DEPLOY_PAGE, (before) => api<Omit<DeployHistoryRow, "id">[]>(`/api/deploys?targetId=${targetId}&limit=${DEPLOY_PAGE}&before=${before}${filter}`).then((rows) => rows.map((r) => ({ ...r, id: r.deploy.id }))), `deploy-history-${targetId}-${status}`);
   if (!older.rows) return first.error ? <LoadError what={`the deploys of ${name}`} message={first.error.message} onRetry={first.reload} /> : <Loader label="Loading the deploys" />;
-  if (!older.rows.length) return <p className="muted" style={{ fontSize: 13 }}>No deploys to {name} yet.</p>;
+  if (!older.rows.length) return <p className="muted" style={{ fontSize: 13 }}>{status ? `No ${status === "failed" ? "failed or refused" : "succeeded"} deploys to ${name}.` : `No deploys to ${name} yet.`}</p>;
   return (
     <>
       <ul style={{ listStyle: "none", padding: 0, margin: "6px 0", display: "flex", flexDirection: "column", gap: 6, fontSize: 13 }}>
@@ -404,12 +449,32 @@ function DeployHistoryList({ targetId, name }: { targetId: string; name: string 
                 · <a href={`#/tickets/${d.ticketId}`}>{ticketRef ?? "ticket"}</a>
               </>
             )}
+            {d.redeployOf && <div className="muted">Repeats {(older.rows?.find((r) => r.deploy.id === d.redeployOf)?.deploy.commit ?? "").slice(0, 7) || "an earlier deploy"}</div>}
             {d.notes && <div className="muted">{d.notes}</div>}
+            {d.status === "succeeded" && d.commit && d.id !== latestSuccessId && (
+              <button
+                type="button"
+                className="btn small"
+                disabled={act.busy}
+                onClick={() => {
+                  const date = (d.finishedAt ?? d.createdAt).slice(0, 10);
+                  if (!window.confirm(`Deploy ${d.ref} (${d.commit!.slice(0, 7)}, from ${date}) to ${name} again? This ships that exact code again and goes through the same approval as any deploy. It does not roll back data or the database.`)) return;
+                  void act.run(async () => {
+                    await api(`/api/deploys/${d.id}/redeploy`, { method: "POST", body: { companyId } });
+                    first.reload();
+                    return "Asked. The new deploy is at the top of the list.";
+                  });
+                }}
+              >
+                Deploy this version again
+              </button>
+            )}
             {d.outcome && d.status !== "succeeded" && <div className="muted">{d.outcome}</div>}
             {d.tagResult && <div className={d.tagResult.startsWith("failed") ? "error" : "muted"}>{tagResultText(d.tagResult)}</div>}
           </li>
         ))}
       </ul>
+      {act.view}
       {older.error && <LoadError what="older deploys" message={older.error} onRetry={() => void older.more()} />}
       {older.canMore && (
         <button type="button" className="btn small" disabled={older.busy} onClick={() => void older.more()}>
@@ -532,7 +597,13 @@ export function DeployTargets({ company }: { company: Company }) {
                     ) : (
                       <span className="muted">none yet</span>
                     )}
-                    <DeployHistory targetId={t.id} name={t.name} />
+                    {t.latestAttempt && (
+                      <div className={t.latestAttempt.status === "failed" || t.latestAttempt.status === "rejected" ? "error" : t.latestAttempt.status === "pending_approval" ? "warning" : "muted"} style={{ fontSize: 13 }}>
+                        Latest: {DEPLOY_STATUS_TEXT[t.latestAttempt.status] ?? t.latestAttempt.status}
+                        {t.latestAttempt.status !== "pending_approval" && t.latestAttempt.status !== "running" && t.latestAttempt.status !== "approved" && <> {when(t.latestAttempt.at)}</>}
+                      </div>
+                    )}
+                    <DeployHistory companyId={company.id} targetId={t.id} name={t.name} latestSuccessId={t.lastDeploy?.id ?? null} />
                   </td>
                   <td style={{ whiteSpace: "nowrap" }}>
                     <button type="button" className="btn small" disabled={act.busy} onClick={() => edit(t)} aria-label={`Edit deploy target ${t.name}`}>

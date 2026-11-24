@@ -5,9 +5,9 @@ import { BUILT_IN_RULES, type RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { appCache, sharedDatabase } from "./helpers/shared-server.js";
-import { activity, decisions, fundingSources, notifications, quotaSamples, runners, runTokens, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { activity, decisions, fundingQuotaHolds, fundingSources, notifications, nudges, quotaSamples, runners, runTokens, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { hashToken } from "../src/auth.js";
-import type { Limits } from "../src/services/scheduler.js";
+import { isReplyLane, noCheckoutNote, type Limits } from "../src/services/scheduler.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
 
@@ -438,10 +438,13 @@ describe("scheduler", () => {
     await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: meta(0.99) });
     await ctx.tick();
     expect((await ctx.db.select().from(notifications)).filter((n) => /Routine work paused/.test(n.title))).toHaveLength(1);
+    // The funding page's history records the hold as open.
+    expect((await ctx.db.select().from(fundingQuotaHolds)).map((h) => [h.window, h.endedAt])).toEqual([["seven_day", null]]);
     await new Promise((r) => setTimeout(r, 5));
     await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: meta(0.2) });
     await ctx.tick();
     expect((await ctx.db.select().from(notifications)).filter((n) => /running again/.test(n.title))).toHaveLength(1);
+    expect((await ctx.db.select().from(fundingQuotaHolds))[0]!.endedAt).not.toBeNull();
   });
 
   it("says once that extra-usage credits are being used", async () => {
@@ -571,7 +574,7 @@ describe("scheduler", () => {
     expect(await ctx.tick()).toMatchObject({ launched: 1, dropped: 0 });
   });
 
-  it("drops a ticketless nudge whose named tickets are all finished, by BOS-ref (BOS-1136)", async () => {
+  it("drops a ticketless nudge whose named tickets all finished after it was sent, by BOS-ref (BOS-1136, BOS-2356)", async () => {
     ctx = await setup({ agent: 5 });
     const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
     const a = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Done one" })).json();
@@ -580,10 +583,98 @@ describe("scheduler", () => {
     await ctx.req("PATCH", `/api/companies/${ctx.company.id}`, { ticketPrefix: "TST" });
     const ref = (t: { number: number }) => `TST-${t.number}`;
     await ctx.db.delete(wakes);
-    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, reason: "nudge", priority: 2, note: `carry on with ${ref(a)}` });
+    // Queued a minute before the ticket closed (stateChangedAt is "now"), as a nudge held behind a busy queue would be.
+    const sentBefore = new Date(Date.now() - 60_000);
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, reason: "nudge", priority: 2, note: `carry on with ${ref(a)}`, createdAt: sentBefore });
     expect(await ctx.tick()).toMatchObject({ launched: 0, dropped: 1 });
-    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, reason: "nudge", priority: 2, note: `carry on with ${ref(a)} then ${ref(b)}` });
+    expect((await ctx.db.select().from(wakes))[0]!.statusReason).toBe("every ticket it named was finished after it was sent");
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, reason: "nudge", priority: 2, note: `carry on with ${ref(a)} then ${ref(b)}`, createdAt: sentBefore });
     expect(await ctx.tick()).toMatchObject({ launched: 1, dropped: 0 });
+  });
+
+  it("delivers a ticketless nudge that names a ticket finished before it was sent (BOS-2356)", async () => {
+    ctx = await setup({ agent: 5 });
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    const a = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Done one" })).json();
+    await ctx.req("PATCH", `/api/tickets/${a.id}`, { state: "done" });
+    // Closed an hour ago: the nudge below is about the finished work (a follow-up), not a replay of it.
+    await ctx.db.update(tickets).set({ stateChangedAt: new Date(Date.now() - 3_600_000) }).where(eq(tickets.id, a.id));
+    await ctx.req("PATCH", `/api/companies/${ctx.company.id}`, { ticketPrefix: "TST" });
+    await ctx.db.delete(wakes);
+    // Both ways a note names a ticket: by reference and by id.
+    const sent = await ctx.scheduler.nudge({ runId: randomUUID(), fromAgentId: ctx.ceo.id, to: worker.id, why: `TST-${a.number} (${a.id}) is done; please check what it left` });
+    expect(sent).toMatchObject({ ok: true });
+    expect(await ctx.tick()).toMatchObject({ launched: 1, dropped: 0 });
+    expect(ctx.commands.at(-1)!.prompt).toContain("please check what it left");
+    // Delivered, so the sender hears nothing.
+    expect(await ctx.db.select().from(wakes).where(eq(wakes.reason, "nudge dropped"))).toHaveLength(0);
+  });
+
+  it("tells the sender once, with the reason, when a ticketless nudge is dropped (BOS-2356)", async () => {
+    ctx = await setup({ agent: 5 });
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    const a = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Open then done" })).json();
+    await ctx.req("PATCH", `/api/companies/${ctx.company.id}`, { ticketPrefix: "TST" });
+    await ctx.db.delete(wakes);
+    const sent = await ctx.scheduler.nudge({ runId: randomUUID(), fromAgentId: ctx.ceo.id, to: worker.id, why: `please finish TST-${a.number}` });
+    expect(sent).toMatchObject({ ok: true });
+    const [nudgeWake] = await ctx.db.select().from(wakes).where(eq(wakes.reason, "nudge"));
+    // It was sent a minute ago and the ticket finished after that, before the nudge could start.
+    await ctx.db.update(wakes).set({ createdAt: new Date(Date.now() - 60_000) }).where(eq(wakes.id, nudgeWake!.id));
+    await ctx.db.update(tickets).set({ systemState: "done", stateChangedAt: new Date() }).where(eq(tickets.id, a.id));
+    const before = ctx.commands.length;
+    await ctx.tick();
+    const [dropped] = await ctx.db.select().from(wakes).where(eq(wakes.id, nudgeWake!.id));
+    expect(dropped!.status).toBe("dropped");
+    // The worker was not started for it.
+    expect(ctx.commands.slice(before).every((c) => !c.prompt.includes(`please finish TST-${a.number}`))).toBe(true);
+    // The sender got one notice, ticketless, naming the colleague, the reason and what was sent.
+    const notices = await ctx.db.select().from(wakes).where(eq(wakes.reason, "nudge dropped"));
+    expect(notices).toHaveLength(1);
+    expect(notices[0]!.agentId).toBe(ctx.ceo.id);
+    expect(notices[0]!.ticketId).toBeNull();
+    expect(notices[0]!.note).toContain("Your nudge to Engineer was not delivered: every ticket it named was finished after it was sent");
+    expect(notices[0]!.note).toContain(`please finish TST-${a.number}`);
+    // Another pass adds nothing: one notice per dropped nudge.
+    await ctx.tick();
+    expect(await ctx.db.select().from(wakes).where(eq(wakes.reason, "nudge dropped"))).toHaveLength(1);
+    // The notice is not a nudge: it has no nudge record, so dropping it (here as the owner's stop would) tells nobody again.
+    expect(await ctx.db.select().from(nudges).where(eq(nudges.wakeId, notices[0]!.id))).toHaveLength(0);
+    await ctx.db.update(wakes).set({ status: "dropped", statusReason: "test drop" }).where(eq(wakes.id, notices[0]!.id));
+    await ctx.scheduler.nudgesDropped([notices[0]!.id], "test drop");
+    expect(await ctx.db.select().from(wakes).where(eq(wakes.reason, "nudge dropped"))).toHaveLength(1);
+  });
+
+  it("tells the sender when a nudge on a ticket is dropped because the ticket finished after it was sent (BOS-2356)", async () => {
+    ctx = await setup({ agent: 5 });
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    const t = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Closing soon" })).json();
+    await ctx.req("PATCH", `/api/companies/${ctx.company.id}`, { ticketPrefix: "TST" });
+    await ctx.db.delete(wakes);
+    expect(await ctx.scheduler.nudge({ runId: randomUUID(), fromAgentId: ctx.ceo.id, to: worker.id, ticketId: t.id, why: "Can you look at this?" })).toMatchObject({ ok: true });
+    const [nudgeWake] = await ctx.db.select().from(wakes).where(eq(wakes.reason, "nudge"));
+    await ctx.db.update(wakes).set({ createdAt: new Date(Date.now() - 60_000) }).where(eq(wakes.id, nudgeWake!.id));
+    await ctx.db.update(tickets).set({ systemState: "done", stateChangedAt: new Date() }).where(eq(tickets.id, t.id));
+    await ctx.tick();
+    expect((await ctx.db.select().from(wakes).where(eq(wakes.id, nudgeWake!.id)))[0]!.status).toBe("dropped");
+    const notices = await ctx.db.select().from(wakes).where(eq(wakes.reason, "nudge dropped"));
+    expect(notices).toHaveLength(1);
+    expect(notices[0]!.agentId).toBe(ctx.ceo.id);
+    // It names the ticket and the reason.
+    expect(notices[0]!.note).toContain(`about TST-${t.number} "Closing soon" was not delivered: the ticket it was about was finished after you sent it`);
+  });
+
+  it("tells the sender when the owner parks the ticket a waiting nudge was about (BOS-2356)", async () => {
+    ctx = await setup({ agent: 5 });
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    const t = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Parked by the owner" })).json();
+    await ctx.db.delete(wakes);
+    expect(await ctx.scheduler.nudge({ runId: randomUUID(), fromAgentId: ctx.ceo.id, to: worker.id, ticketId: t.id, why: "Status?" })).toMatchObject({ ok: true });
+    expect((await ctx.req("POST", `/api/tickets/${t.id}/state`, { state: "backlog" })).statusCode).toBe(200);
+    expect((await ctx.db.select().from(wakes).where(eq(wakes.reason, "nudge")))[0]!.status).toBe("dropped");
+    const notices = await ctx.db.select().from(wakes).where(eq(wakes.reason, "nudge dropped"));
+    expect(notices.map((n) => n.agentId)).toEqual([ctx.ceo.id]);
+    expect(notices[0]!.note).toContain("the owner moved the ticket it was about to");
   });
 
   it("holds a ticketless nudge while the agent's own ticket waits to start (BOS-1136)", async () => {
@@ -993,6 +1084,49 @@ describe("scheduler", () => {
     expect(launched).toHaveLength(1);
   });
 
+  it("Start now launches a held wake at once when a slot is free, logging the owner's reason (BOS-2328)", async () => {
+    ctx = await setup({ company: 1 });
+    const w = await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "x" });
+    await ctx.db.update(wakes).set({ status: "deferred", statusReason: "quiet hours", notBefore: new Date(Date.now() + 3_600_000) }).where(eq(wakes.id, w.id));
+    await ctx.scheduler.tick();
+    expect(ctx.commands).toHaveLength(0); // held until its time
+    const res = await ctx.req("POST", `/api/companies/${ctx.company.id}/wakes/${w.id}/start-now`, { reason: "needed now" });
+    expect(res.json()).toMatchObject({ ok: true, started: true });
+    expect(ctx.commands).toHaveLength(1);
+    const rows = await ctx.db.select().from(activity).where(eq(activity.kind, "wake_start_now"));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.summary).toContain("needed now");
+  });
+
+  it("Start now never goes over the company limit: the wake stays waiting and the route says so (BOS-2328)", async () => {
+    ctx = await setup({ company: 1 });
+    await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "x" });
+    await ctx.scheduler.tick();
+    expect(ctx.commands).toHaveLength(1); // the one slot is full
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    const w = await ctx.scheduler.wake({ agentId: worker.id, reason: "x" });
+    const res = await ctx.req("POST", `/api/companies/${ctx.company.id}/wakes/${w.id}/start-now`, {});
+    expect(res.json()).toMatchObject({ ok: true, started: false });
+    expect(res.json().waitingReason).toBeTruthy();
+    expect(ctx.commands).toHaveLength(1);
+  });
+
+  it("Cancel removes only that wake; start-now and cancel refuse another company's wake (BOS-2328)", async () => {
+    ctx = await setup({ company: 1 });
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    const a = await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "x" });
+    const b = await ctx.scheduler.wake({ agentId: worker.id, reason: "y" });
+    const other = "00000000-0000-4000-8000-000000000009";
+    expect((await ctx.req("POST", `/api/companies/${other}/wakes/${a.id}/cancel`, {})).statusCode).toBe(404);
+    expect((await ctx.req("POST", `/api/companies/${other}/wakes/${a.id}/start-now`, {})).statusCode).toBe(404);
+    expect(await ctx.db.select().from(wakes).where(eq(wakes.id, a.id))).toHaveLength(1);
+    expect((await ctx.req("POST", `/api/companies/${ctx.company.id}/wakes/${a.id}/cancel`, { reason: "no longer wanted" })).statusCode).toBe(200);
+    expect(await ctx.db.select().from(wakes).where(eq(wakes.id, a.id))).toHaveLength(0);
+    expect(await ctx.db.select().from(wakes).where(eq(wakes.id, b.id))).toHaveLength(1);
+    const rows = await ctx.db.select().from(activity).where(eq(activity.kind, "wake_cancelled"));
+    expect(rows[0]!.summary).toContain("no longer wanted");
+  });
+
   it("never holds an owner chat behind the instance or company limit, but one chat per agent at a time", async () => {
     ctx = await setup({ instance: 1, company: 1 });
     const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
@@ -1309,5 +1443,54 @@ describe("scheduler", () => {
       const res = await ctx.req("POST", "/api/funding-sources", { name: "Plain", kind: "api_credit", provider: "anthropic", fallbackRank: 1 });
       expect(res.statusCode).toBe(400);
     });
+  });
+});
+
+// BOS-2365 (background lane): two small scheduler helpers that take plain values (no clock, no
+// database), so made-up values pin their exact behaviour.
+describe("isReplyLane (BOS-2365)", () => {
+  it("is true only for the two reply-lane reasons", () => {
+    expect(isReplyLane("ceo reply")).toBe(true);
+    expect(isReplyLane("update alert")).toBe(true);
+  });
+
+  it("is false for every other wake reason", () => {
+    expect(isReplyLane("ticket watch")).toBe(false);
+    expect(isReplyLane("wiki upkeep")).toBe(false);
+    expect(isReplyLane("chat")).toBe(false);
+  });
+
+  it("matches the whole reason, not a piece of it, and is case-sensitive", () => {
+    expect(isReplyLane("")).toBe(false);
+    expect(isReplyLane("reply")).toBe(false);
+    expect(isReplyLane("ceo reply please")).toBe(false);
+    expect(isReplyLane("CEO reply")).toBe(false);
+    expect(isReplyLane("ceo reply ")).toBe(false);
+    expect(isReplyLane("update")).toBe(false);
+  });
+});
+
+describe("noCheckoutNote (BOS-2365)", () => {
+  it("names the folder the run started in and says it is not a repo copy", () => {
+    const note = noCheckoutNote("/ws/agents/basil");
+    expect(note).toContain("it started in /ws/agents/basil, which is not a copy of the repo");
+  });
+
+  it("starts on its own lines and warns against editing, checking or making a worktree", () => {
+    const note = noCheckoutNote("/ws/agents/basil");
+    expect(note.startsWith("\n\n")).toBe(true);
+    expect(note).toContain("has no ticket checkout");
+    expect(note).toContain("Don't edit code, run checks or create a worktree here");
+    expect(note).toContain("work on a run woken on that ticket");
+  });
+
+  it("puts the folder in verbatim, even when it is empty or has awkward characters", () => {
+    expect(noCheckoutNote("")).toContain("it started in , which is not a copy of the repo");
+    expect(noCheckoutNote("/ws/my agent's folder")).toContain("it started in /ws/my agent's folder, which is not");
+    expect(noCheckoutNote("/ws/a \"quoted\" name")).toContain('it started in /ws/a "quoted" name, which is not');
+  });
+
+  it("gives the same text for the same folder every time", () => {
+    expect(noCheckoutNote("/ws/x")).toBe(noCheckoutNote("/ws/x"));
   });
 });

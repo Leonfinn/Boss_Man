@@ -4,7 +4,7 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 import { redact } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { permissionDecisions } from "../db/schema.js";
+import { decisions, permissionDecisions } from "../db/schema.js";
 import type { PermissionLogEntry } from "./permission-log.js";
 
 export const PERMISSION_TITLE_MAX = 200;
@@ -44,6 +44,77 @@ export function permissionStore(db: Db): PermissionStore {
         .where(and(eq(permissionDecisions.decisionId, decisionId), sql`${permissionDecisions.answeredBy} is null`));
     },
   };
+}
+
+export type RuleUseCounts = { allow: number; ceo: number; owner: number; deny: number };
+export type RuleUsage = { week: RuleUseCounts; month: RuleUseCounts; lastAt: string };
+
+/**
+ * How often each rule decided in the last 7 and 30 days (BOS-2372), by the rule text stored on the decision,
+ * split by where the request went (allowed, the CEO, the owner, refused), with the last time it matched.
+ * One company, or every company when companyId is null. Read-only. A rule renamed since keeps its old counts under the old name.
+ */
+export async function ruleUsage(db: Db, companyId: string | null, now: Date = new Date()): Promise<Record<string, RuleUsage>> {
+  const monthStart = new Date(now.getTime() - 30 * 86_400_000);
+  const weekStart = new Date(now.getTime() - 7 * 86_400_000);
+  const count = (tier: string, from: Date) => sql<number>`count(*) filter (where ${permissionDecisions.tier} = ${tier} and ${permissionDecisions.at} >= ${from.toISOString()}::timestamptz)::int`;
+  const rows = await db
+    .select({
+      rule: permissionDecisions.rule,
+      wAllow: count("allow", weekStart),
+      wCeo: count("ceo", weekStart),
+      wOwner: count("owner", weekStart),
+      wDeny: count("deny", weekStart),
+      mAllow: count("allow", monthStart),
+      mCeo: count("ceo", monthStart),
+      mOwner: count("owner", monthStart),
+      mDeny: count("deny", monthStart),
+      lastAt: sql<string>`max(${permissionDecisions.at})`,
+    })
+    .from(permissionDecisions)
+    .where(and(sql`${permissionDecisions.at} >= ${monthStart.toISOString()}::timestamptz`, companyId ? eq(permissionDecisions.companyId, companyId) : undefined))
+    .groupBy(permissionDecisions.rule);
+  const out: Record<string, RuleUsage> = {};
+  for (const r of rows) {
+    out[r.rule] = {
+      week: { allow: r.wAllow, ceo: r.wCeo, owner: r.wOwner, deny: r.wDeny },
+      month: { allow: r.mAllow, ceo: r.mCeo, owner: r.mOwner, deny: r.mDeny },
+      lastAt: new Date(r.lastAt).toISOString(),
+    };
+  }
+  return out;
+}
+
+export type AskedCard = { kind: string | null; title: string; asked: number; toOwner: number; toCeo: number; allowed: number; refused: number; open: number; lastAt: string };
+export const ASKED_CARDS_TOP = 10;
+
+/**
+ * The most-asked cards of the last 30 days (BOS-2418): decisions that went to the owner or the CEO, grouped by kind and exact
+ * title, ranked by the owner's own cards first, top 10. How each was answered comes from the linked decision (an "Allow once" or
+ * "Approve plan" answer is allowed, any other answer refused, an open card still open). Read-only; one company, or all when null.
+ */
+export async function mostAskedCards(db: Db, companyId: string | null, now: Date = new Date()): Promise<AskedCard[]> {
+  const from = new Date(now.getTime() - 30 * 86_400_000).toISOString();
+  const isAllowed = sql`(${decisions.status} = 'answered' and (${decisions.answer} = 'Allow once' or ${decisions.answer} = 'Approve plan'))`;
+  const rows = await db
+    .select({
+      kind: permissionDecisions.kind,
+      title: sql<string>`coalesce(${permissionDecisions.title}, '')`,
+      asked: sql<number>`count(*)::int`,
+      toOwner: sql<number>`count(*) filter (where ${permissionDecisions.tier} = 'owner')::int`,
+      toCeo: sql<number>`count(*) filter (where ${permissionDecisions.tier} = 'ceo')::int`,
+      allowed: sql<number>`count(*) filter (where ${isAllowed})::int`,
+      refused: sql<number>`count(*) filter (where ${decisions.status} = 'answered' and not ${isAllowed})::int`,
+      open: sql<number>`count(*) filter (where ${decisions.status} = 'open')::int`,
+      lastAt: sql<string>`max(${permissionDecisions.at})`,
+    })
+    .from(permissionDecisions)
+    .leftJoin(decisions, eq(decisions.id, permissionDecisions.decisionId))
+    .where(and(sql`${permissionDecisions.at} >= ${from}::timestamptz`, sql`${permissionDecisions.tier} in ('owner', 'ceo')`, companyId ? eq(permissionDecisions.companyId, companyId) : undefined))
+    .groupBy(permissionDecisions.kind, sql`coalesce(${permissionDecisions.title}, '')`)
+    .orderBy(sql`count(*) filter (where ${permissionDecisions.tier} = 'owner') desc`, sql`count(*) desc`, sql`max(${permissionDecisions.at}) desc`)
+    .limit(ASKED_CARDS_TOP);
+  return rows.map((r) => ({ ...r, lastAt: new Date(r.lastAt).toISOString() }));
 }
 
 /** One run's decisions, oldest first, capped; `truncated` says the run had more. */

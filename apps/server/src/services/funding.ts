@@ -18,7 +18,7 @@ import {
   type SyntheticQuota,
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, budgetPolicies, companies, costEvents, fundingSources, providerQuotaReadings, providerQuotaWarnings, quotaSamples, runs, secretGrants, settings } from "../db/schema.js";
+import { agents, budgetPolicies, companies, costEvents, fundingQuotaHolds, fundingSources, fundingWindowSummaries, projects, providerQuotaReadings, providerQuotaWarnings, quotaSamples, runs, secretGrants, settings } from "../db/schema.js";
 
 type FundingRow = typeof fundingSources.$inferSelect;
 type PolicyRow = typeof budgetPolicies.$inferSelect;
@@ -188,6 +188,21 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
     }
   }
 
+  /**
+   * Keeps the highest use seen in a usage window for the "Last 8 weeks" history. The reset time is rounded
+   * to the hour so jitter in the reported time stays one window.
+   */
+  async function noteWindowPeak(fundingSourceId: string, window: string, resetsAt: Date, utilization: number, limitValue: number | null = null, tx: Db = db) {
+    const end = new Date(Math.round(resetsAt.getTime() / 3_600_000) * 3_600_000);
+    await tx
+      .insert(fundingWindowSummaries)
+      .values({ fundingSourceId, window, resetsAt: end, peakUtilization: utilization, limitValue })
+      .onConflictDoUpdate({
+        target: [fundingWindowSummaries.fundingSourceId, fundingWindowSummaries.window, fundingWindowSummaries.resetsAt],
+        set: { peakUtilization: sql`greatest(${fundingWindowSummaries.peakUtilization}, ${utilization})`, limitValue: sql`coalesce(${limitValue}, ${fundingWindowSummaries.limitValue})` },
+      });
+  }
+
   /** The newest stored reading for a source (not counting renewals synthetic never sends). */
   async function newestReading(fundingSourceId: string) {
     const [row] = await db.select().from(providerQuotaReadings).where(eq(providerQuotaReadings.fundingSourceId, fundingSourceId)).orderBy(desc(providerQuotaReadings.takenAt)).limit(1);
@@ -208,6 +223,13 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
     const window = SYNTHETIC_WINDOWS[q.measure];
     const utilization = q.used / q.limit;
     const renews = q.renewsAt ? Date.parse(q.renewsAt) : NaN;
+    // The history row: a weekly plan's window ends at the end of its renewal week (the stored time moves
+    // every tick), the request window at its renewal.
+    if (!Number.isNaN(renews)) {
+      const weekMs = WEEKLY_REGEN_TICK_MS * WEEKLY_REGEN_TICKS;
+      const end = q.measure === "weekly" ? new Date((Math.floor(renews / weekMs) + 1) * weekMs) : new Date(renews);
+      await noteWindowPeak(fundingSourceId, window, end, utilization, q.limit);
+    }
     const resetsAt = new Date(Math.max(Number.isNaN(renews) ? 0 : renews, takenAt.getTime() + SYNTHETIC_HOLD_SAMPLE_MS));
     const [last] = await db
       .select({ id: quotaSamples.id, utilization: quotaSamples.utilization })
@@ -478,7 +500,9 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
         /** Synthetic's own used/limit reading, its age and its history; null for other providers. */
         providerQuota: await providerQuota(source),
         daily: await this.daily(id, now, timeZone),
+        weeks: await this.weeklyHistory(id, now),
         byCompany: await this.byCompany(id, now),
+        whoUsedIt: await this.whoUsedIt(id, now),
         totalSpentMicros: spend.total,
         // Boss Man only sees its own runs (spike S3: no Admin API on individual accounts).
         coverage: "boss_man_runs_only" as const,
@@ -561,6 +585,100 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
         .sort((a, b) => b.costMicros - a.costMicros || b.tokens - a.tokens);
     },
 
+    /**
+     * "Who used it": this source's last 7 days from its cost events, split by agent and by project. Each row has plan
+     * tokens (input + output), pay-as-you-go spend and its share of the source's total; the top 5 of each split show
+     * and "everyone else" sums the rest. Engagement work counts under the charged company and project (R26).
+     */
+    async whoUsedIt(id: string, now = new Date(), days = 7, top = 5) {
+      const since = new Date(now.getTime() - days * 86_400_000);
+      const tokens = sql<number>`coalesce(sum(coalesce(${costEvents.inputTokens}, 0) + coalesce(${costEvents.outputTokens}, 0)), 0)::float8`;
+      const micros = sql<number>`coalesce(sum(${costEvents.costMicros}), 0)::float8`;
+      const engaged = sql<boolean>`coalesce(bool_or(${costEvents.engagementId} is not null), false)`;
+      const where = and(eq(costEvents.fundingSourceId, id), gte(costEvents.occurredAt, since), lt(costEvents.occurredAt, now));
+      const [total] = await db.select({ tokens, micros }).from(costEvents).where(where);
+      const totalTokens = Number(total?.tokens ?? 0);
+      const totalMicros = Number(total?.micros ?? 0);
+      if (totalTokens <= 0 && totalMicros <= 0) return { days, totalTokens: 0, totalMicros: 0, agents: [], projects: [] };
+      const agentRows = await db
+        .select({ key: costEvents.agentId, name: agents.name, tokens, micros, engaged })
+        .from(costEvents)
+        .leftJoin(agents, eq(agents.id, costEvents.agentId))
+        .where(where)
+        .groupBy(costEvents.agentId, agents.name);
+      const projectKey = sql<string | null>`coalesce(${costEvents.chargedProjectId}, ${costEvents.projectId})`;
+      const projectRows = await db
+        .select({ key: projectKey, name: projects.name, company: companies.name, tokens, micros, engaged })
+        .from(costEvents)
+        .leftJoin(projects, eq(projects.id, projectKey))
+        .leftJoin(companies, eq(companies.id, sql`coalesce(${costEvents.chargedCompanyId}, ${costEvents.companyId})`))
+        .where(where)
+        .groupBy(projectKey, projects.name, companies.name);
+      // One basis for order and share, so the column adds to 100%: spend when the source has any, else tokens.
+      const bySpend = totalMicros > 0;
+      const share = (r: { tokens: number; micros: number }) => (bySpend ? Number(r.micros) / totalMicros : Number(r.tokens) / totalTokens);
+      const shape = (rows: Array<{ key: string | null; name: string | null; company?: string | null; tokens: number; micros: number; engaged: boolean }>, unknown: string) => {
+        const sorted = rows
+          .map((r) => ({ id: r.key, name: r.name ?? unknown, company: r.company ?? null, tokens: Number(r.tokens), costMicros: Number(r.micros), engagement: r.engaged }))
+          .sort((a, b) => (bySpend ? b.costMicros - a.costMicros || b.tokens - a.tokens : b.tokens - a.tokens || b.costMicros - a.costMicros));
+        const list = sorted.slice(0, top).map((r) => ({ ...r, share: share({ tokens: r.tokens, micros: r.costMicros }) }));
+        const rest = sorted.slice(top);
+        const others = rest.length ? { tokens: rest.reduce((n, r) => n + r.tokens, 0), costMicros: rest.reduce((n, r) => n + r.costMicros, 0), count: rest.length } : null;
+        return { rows: list, others: others && { ...others, share: share({ tokens: others.tokens, micros: others.costMicros }) } };
+      };
+      const a = shape(agentRows, "Unknown agent");
+      const p = shape(projectRows, "No project");
+      return { days, totalTokens, totalMicros, agents: a.rows, agentsOthers: a.others, projects: p.rows, projectsOthers: p.others };
+    },
+
+    /**
+     * The last `weeks` weeks of this source, newest first, each week the 7 days ending `now - i weeks`: the
+     * peak use at each reset per window, the money its cost events add up to, and the times work was held
+     * for its quota. Spend comes from the cost events themselves (not pruned), so it covers every week.
+     */
+    async weeklyHistory(id: string, now = new Date(), weeks = 8) {
+      const weekMs = 7 * 86_400_000;
+      const since = new Date(now.getTime() - weeks * weekMs);
+      const bucket = (t: Date) => {
+        const i = Math.floor((now.getTime() - t.getTime()) / weekMs);
+        return i >= 0 && i < weeks ? i : -1;
+      };
+      const out = Array.from({ length: weeks }, (_, i) => ({
+        start: new Date(now.getTime() - (i + 1) * weekMs).toISOString(),
+        end: new Date(now.getTime() - i * weekMs).toISOString(),
+        plans: new Map<string, { window: string; resets: number; peak: number; limit: number | null }>(),
+        spendMicros: 0,
+        holds: [] as Array<{ window: string; startedAt: string; endedAt: string | null; ms: number }>,
+      }));
+      const summaries = await db
+        .select()
+        .from(fundingWindowSummaries)
+        .where(and(eq(fundingWindowSummaries.fundingSourceId, id), gte(fundingWindowSummaries.resetsAt, since), lt(fundingWindowSummaries.resetsAt, now)));
+      for (const s of summaries) {
+        const i = bucket(s.resetsAt);
+        if (i < 0) continue;
+        const p = out[i]!.plans.get(s.window) ?? { window: s.window, resets: 0, peak: 0, limit: null };
+        p.resets++;
+        p.peak = Math.max(p.peak, s.peakUtilization);
+        p.limit = s.limitValue ?? p.limit;
+        out[i]!.plans.set(s.window, p);
+      }
+      // Summed in the database: a busy source has many thousands of cost events in 8 weeks.
+      const weekIndex = sql<number>`floor((extract(epoch from ${now.toISOString()}::timestamptz) - extract(epoch from ${costEvents.occurredAt})) / ${weekMs / 1000})::int`;
+      const spend = await db
+        .select({ week: weekIndex, costMicros: sql<number>`coalesce(sum(${costEvents.costMicros}), 0)::float8` })
+        .from(costEvents)
+        .where(and(eq(costEvents.fundingSourceId, id), gte(costEvents.occurredAt, since), lt(costEvents.occurredAt, now)))
+        .groupBy(sql`1`);
+      for (const e of spend) if (e.week >= 0 && e.week < weeks) out[e.week]!.spendMicros += Number(e.costMicros);
+      const holds = await db.select().from(fundingQuotaHolds).where(and(eq(fundingQuotaHolds.fundingSourceId, id), gte(fundingQuotaHolds.startedAt, since), lt(fundingQuotaHolds.startedAt, now))).orderBy(desc(fundingQuotaHolds.startedAt));
+      for (const h of holds) {
+        const i = bucket(h.startedAt);
+        if (i >= 0) out[i]!.holds.push({ window: h.window, startedAt: h.startedAt.toISOString(), endedAt: h.endedAt?.toISOString() ?? null, ms: (h.endedAt ?? now).getTime() - h.startedAt.getTime() });
+      }
+      return out.map((w) => ({ ...w, plans: [...w.plans.values()].sort((a, b) => a.window.localeCompare(b.window)) }));
+    },
+
     async recordCost(input: typeof costEvents.$inferInsert, tx: Db = db) {
       const [row] = await tx.insert(costEvents).values(input).returning();
       return row!;
@@ -568,6 +686,7 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
 
     async recordQuota(fundingSourceId: string, samples: QuotaSample[], observedAt = new Date(), tx: Db = db) {
       if (samples.length === 0) return [];
+      for (const s of samples) if (s.resetsAt) await noteWindowPeak(fundingSourceId, s.window, s.resetsAt, s.utilization, null, tx);
       return tx
         .insert(quotaSamples)
         .values(

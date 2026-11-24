@@ -46,8 +46,14 @@ export function recoveryService(db: Db) {
       const steps = await finishedSteps(runId);
       // A run the server closed because its runner went offline and never reported it (BOS-574).
       const lost = run.outcome?.startsWith("lost:");
+      // A run that ended on a passing error (stream timeout, connection reset, API overloaded), BOS-2357.
+      const failed = run.outcome?.startsWith("error:") ? run.outcome.replace(/^error:\s*/i, "").slice(0, 200) : null;
       const note = [
-        lost ? "Your previous run was cut off when the runner went offline, and this run picks it up." : "Your previous run was interrupted when the runner restarted, and this run picks it up.",
+        failed
+          ? `Your previous run ended on an error that usually passes by itself (${failed}), and this run picks it up.`
+          : lost
+            ? "Your previous run was cut off when the runner went offline, and this run picks it up."
+            : "Your previous run was interrupted when the runner restarted, and this run picks it up.",
         steps.length
           ? `Boss Man saw you finish these steps before the interruption:\n${steps.slice(-30).map((s, i) => `${i + 1}. ${s}`).join("\n")}`
           : "Boss Man saw no finished steps before the interruption.",

@@ -58,6 +58,50 @@ export function WorkspaceDisk({ company, onChanged }: { company: Company; onChan
   );
 }
 
+type ServerHealthView = {
+  disk: { freeBytes: number; totalBytes: number; freePercent: number } | null;
+  database: { bytes: number | null; dayAgoBytes: number | null; weekAgoBytes: number | null; growthPercent7d: number | null };
+  limits: { statementTimeouts: number; poolFull: number };
+  slowQueries: { seconds: number; query: string }[];
+  warnings: string[];
+};
+const healthGb = (b: number | null) => (b === null ? "not available" : b < 1024 ** 3 ? `${(b / 1024 ** 2).toFixed(0)} MB` : `${(b / 1024 ** 3).toFixed(1)} GB`);
+
+/** BOS-2380: the server's own disk, database size and query limits, read when the page loads. Read-only: no buttons. */
+export function ServerHealth() {
+  const view = usePoll((signal) => api<ServerHealthView>("/api/data-health", { signal }), 60_000, "data-health");
+  // An answer without the expected parts (an old server, a stub) shows the loader, not a blank page.
+  const v = view.data && view.data.database && view.data.limits ? view.data : undefined;
+  return (
+    <Section id="server-health-h" title="Server health">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Free space on the disk holding the server's data, the size of the database, and queries that were cut off or are running long. You get one notice a day when free space drops below 10% or 5 GB, or the database grows more than 50% in 7 days. Nothing is stopped by it.
+      </p>
+      {view.error && !v ? <LoadError what="server health" message={view.error.message} onRetry={view.reload} /> : !v ? <Loader /> : (
+        <>
+          {(v.warnings ?? []).map((w) => (
+            <p key={w} className="error" role="alert">{w}</p>
+          ))}
+          <ul style={{ fontSize: 14, margin: 0, paddingLeft: 18 }}>
+            <li data-testid="health-disk">Data disk: {v.disk ? `${healthGb(v.disk.freeBytes)} free of ${healthGb(v.disk.totalBytes)} (${v.disk.freePercent.toFixed(0)}% free)` : "not available"}</li>
+            <li data-testid="health-db">
+              Database: {healthGb(v.database.bytes)}. 1 day ago {healthGb(v.database.dayAgoBytes)}, 7 days ago {healthGb(v.database.weekAgoBytes)}
+              {v.database.growthPercent7d !== null ? ` (growth: ${v.database.growthPercent7d > 0 ? "+" : ""}${v.database.growthPercent7d}% in 7 days)` : " (growth: not enough history yet)"}. Earlier days fill in as the server keeps one reading a day.
+            </li>
+            <li data-testid="health-limits">Last 24 hours (since the server started, if less): {v.limits.statementTimeouts} queries cut off for running too long, {v.limits.poolFull} times the connection pool was full.</li>
+            <li data-testid="health-slow">
+              {v.slowQueries?.length ? "Running over 60 seconds now:" : "No query is running over 60 seconds."}
+              {(v.slowQueries ?? []).map((q, i) => (
+                <div key={i} className="mono" style={{ fontSize: 13 }}>{q.seconds} s: {q.query}</div>
+              ))}
+            </li>
+          </ul>
+        </>
+      )}
+    </Section>
+  );
+}
+
 /** A clock that ticks every 15 s, so a countdown on the page moves without waiting for the next poll (BOS-953). */
 export function useNow(everyMs = 15_000): number {
   const [now, setNow] = useState(() => Date.now());
@@ -530,8 +574,39 @@ function RecentUpdates({ rows, liveRows, older, progress, wait, maint, queued }:
         </ul>
       )}
       <ShowOlder older={older} />
+      <PastWaits />
       <p style={{ fontSize: 13 }}><a href="#/decisions">All updates</a></p>
     </div>
+  );
+}
+
+/** BOS-2408: what each runner-update wait did, kept in the database so a restart doesn't erase it. */
+export type PastWait = { id: string; startedAt: string; kind: string; endedAt: string | null; endOk: boolean | null; endTitle: string | null; swapTries: { slug: string; n: number; at: string; outcome: string; error?: string }[]; events: { at: string; text: string }[] };
+export function pastWaitLine(w: PastWait): string {
+  const failed = w.swapTries.filter((t) => t.outcome === "failed").length;
+  const how = w.endedAt ? (w.endTitle ?? "ended") : "still going";
+  return `${how}${failed ? `, ${failed} swap ${failed === 1 ? "try" : "tries"} failed` : ""}${w.events.length ? `, ${w.events.length} noted ${w.events.length === 1 ? "moment" : "moments"}` : ""}`;
+}
+function PastWaits() {
+  const view = usePoll((signal) => api<{ holds: PastWait[] }>("/api/maintenance/history?limit=10", { signal }), 60_000, "maintenance-history");
+  const holds = Array.isArray(view.data?.holds) ? view.data.holds : [];
+  if (!holds.length) return null;
+  return (
+    <details data-testid="past-waits" style={{ fontSize: 13, margin: "6px 0" }}>
+      <summary>Past update waits ({holds.length})</summary>
+      <ul style={{ margin: 0, padding: 0 }}>
+        {holds.map((w) => (
+          <li key={w.id} style={{ listStyle: "none", marginTop: 6 }}>
+            <strong>{when(w.startedAt)}</strong> ({w.kind}): {pastWaitLine(w)}
+            {[...w.swapTries.map((t) => ({ at: t.at, text: `${t.slug} try ${t.n}: ${t.outcome}${t.error ? ` (${t.error})` : ""}` })), ...w.events]
+              .sort((a, b) => a.at.localeCompare(b.at))
+              .map((e, i) => (
+                <div key={i} className="muted">{atTime(e.at)} {e.text}</div>
+              ))}
+          </li>
+        ))}
+      </ul>
+    </details>
   );
 }
 
@@ -816,7 +891,7 @@ export function PrivateDetails() {
 }
 
 /** Settings → Server and runner → Limits and checks (BOS-798): the owner's switch for the server-owned check queue (DR-003). */
-export function CheckQueueSetting() {
+export function CheckQueueSetting({ companyId }: { companyId?: string } = {}) {
   const view = usePoll((signal) => api<CheckQueueView>("/api/settings/check-queue", { signal }), 30_000, "check-queue");
   const act = useAction();
   const [edit, setEdit] = useState<{ mode: "legacy" | "server"; slots: string; train: boolean; policy: SlotPolicy; laneAge: string } | null>(null);
@@ -894,7 +969,7 @@ export function CheckQueueSetting() {
         <input type="checkbox" data-testid="merge-train" checked={v.train} onChange={(e) => setEdit({ ...v, train: e.target.checked })} />
         <span>
           <strong>Merge approved work in the order it was approved.</strong> <code className="mono">merge train</code>{" "}
-          <span className="muted">Up to one approved ticket per check slot is checked on top of the tickets ahead of it, and they land in that order, so a merge landing ahead no longer spoils the long checks behind it. Main still only ever gets exactly what passed its check. Needs the server queue. Turning it off takes effect for the next merge.</span>
+          <span className="muted">Up to one approved ticket per check slot is checked on top of the tickets ahead of it, and they land in that order, so a merge landing ahead no longer spoils the long checks behind it. Main still only ever gets exactly what passed its check. With "Wait for GitHub CI" on, each one also runs on GitHub, and a GitHub pass on a ticket further back lets the tickets ahead of it land too. Needs the server queue. Turning it off takes effect for the next merge.</span>
         </span>
       </label>
       {v.train && (d.runnersTooOldForTrain ?? []).length > 0 && (
@@ -912,7 +987,7 @@ export function CheckQueueSetting() {
           </p>
         </div>
       )}
-      <CheckWorkers workers={d.workers ?? []} maxSlots={d.maxSlots} reload={view.reload} />
+      <CheckWorkers workers={d.workers ?? []} maxSlots={d.maxSlots} reload={view.reload} companyId={companyId} />
       <p className="muted" style={{ fontSize: 14 }}>
         Switching back to legacy cancels checks that are still waiting (their agents are told to run the check themselves); checks already running finish.
       </p>

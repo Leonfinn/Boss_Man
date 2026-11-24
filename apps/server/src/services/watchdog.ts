@@ -119,6 +119,7 @@ const SUGGEST: Record<WatchdogRule, string> = {
   stale_blocked: "nudge the assignee to unblock it or say what it waits on",
   blocked_until_passed: "nudge the assignee: the time it was waiting for has passed",
   review_loop: "escalate to the CEO, or raise_decision if only the owner can settle it",
+  check_line_backed_up: "nothing to do on the ticket: tell the CEO the check line is backed up, once",
   owner_decision_waiting: "nothing: Boss Man reminds the owner",
 };
 
@@ -409,19 +410,27 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     // still live or ended since the ticket last moved matter to the rules.
     const checks = new Map<string, Array<{ from: Date; to: Date | null }>>();
     const inProgress = rows.filter((r) => r.systemState === "in_progress").map((r) => r.id);
-    if (inProgress.length) {
+    // A ticket in review "Being checked" (BOS-2416) waits on its quick check of its head the same way: nobody can act, so the
+    // stale-review alert holds off while that check is queued or running.
+    const inReview = rows.filter((r) => r.systemState === "review").map((r) => r.id);
+    if (inProgress.length || inReview.length) {
       const jobs = await db
         .select({ ticketId: checkJobs.ticketId, kind: checkJobs.kind, commit: checkJobs.commit, state: checkJobs.state, queuedAt: checkJobs.queuedAt, endedAt: checkJobs.endedAt })
         .from(checkJobs)
         .innerJoin(tickets, eq(tickets.id, checkJobs.ticketId))
-        .where(and(inArray(checkJobs.ticketId, inProgress), inArray(checkJobs.kind, ["pre_review", "merge"]), or(inArray(checkJobs.state, ["queued", "running"]), gte(checkJobs.endedAt, tickets.stateChangedAt))))
+        .where(and(inArray(checkJobs.ticketId, [...inProgress, ...inReview]), inArray(checkJobs.kind, ["pre_review", "merge"]), or(inArray(checkJobs.state, ["queued", "running"]), gte(checkJobs.endedAt, tickets.stateChangedAt))))
         .orderBy(desc(checkJobs.queuedAt));
+      const reviewIds = new Set(inReview);
       const head = new Map<string, string>();
       for (const j of jobs) if (j.kind === "pre_review" && !head.has(j.ticketId)) head.set(j.ticketId, j.commit);
+      // Place in the line for a queued check: the company's queued checks that were queued before it, plus one.
+      const queuedAll = await db.select({ queuedAt: checkJobs.queuedAt }).from(checkJobs).where(and(eq(checkJobs.companyId, companyId), eq(checkJobs.state, "queued")));
       for (const j of jobs) {
         if (j.kind === "pre_review" && j.commit !== head.get(j.ticketId)) continue;
+        if (reviewIds.has(j.ticketId) && j.kind !== "pre_review") continue;
         const live = j.state === "queued" || j.state === "running";
-        checks.set(j.ticketId, [...(checks.get(j.ticketId) ?? []), { from: j.queuedAt, to: live ? null : (j.endedAt ?? j.queuedAt) }]);
+        const position = j.state === "queued" ? queuedAll.filter((q) => q.queuedAt.getTime() < j.queuedAt.getTime()).length + 1 : undefined;
+        checks.set(j.ticketId, [...(checks.get(j.ticketId) ?? []), { from: j.queuedAt, to: live ? null : (j.endedAt ?? j.queuedAt), ...(position ? { position } : {}) }]);
       }
       // BOS-1836: GitHub's CI before review (ci-preflight.ts). Its "started" row is a wait until a result row for the same head
       // follows; a start with no result for PREFLIGHT_MAX_WAIT_MS counts as lost (a restart that recover() missed), so it can't hide a stall.

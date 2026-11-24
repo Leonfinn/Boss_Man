@@ -119,12 +119,15 @@ export function notificationRoutes(
         status: z.enum(["unread", "read"]).optional(),
         level: z.enum(["note", "flag", "page", "ask"]).optional(),
         company: z.union([z.literal("none"), Uuid]).optional(),
+        q: z.string().max(200).optional(),
       })
       .parse(req.query);
     return { items: await notes.list(q), unread: await notes.unread(), counts: await notes.unreadCounts() };
   });
   // The last 20 phone pushes, with why each was urgent and whether its card is still open (BOS-1097).
   owner.get("/api/notifications/pushes", async () => ({ items: await notes.recentPushes(20) }));
+  // BOS-2420: "Last 7 days" on Settings → Notifications.
+  owner.get("/api/notifications/week", async (req) => notes.weekSummary(z.object({ company: Uuid }).parse(req.query).company));
   owner.post("/api/notifications/read", async (req) => {
     const b = z.object({ ids: z.array(Uuid).max(500).optional(), all: z.boolean().optional() }).parse(req.body);
     await notes.markRead(b.all ? "all" : (b.ids ?? []));

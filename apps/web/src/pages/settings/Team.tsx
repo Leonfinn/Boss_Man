@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type Company } from "../../api";
+import { diffLines, foldDiff } from "../../line-diff";
 import { usePoll } from "../../hooks";
 import { when } from "../Runs";
 import { clearDraft, readDraft } from "../../drafts";
@@ -131,7 +132,49 @@ export function GoalCheck({ company, onChanged }: { company: Company; onChanged:
   );
 }
 
-type RetroStatus = { agentId: string | null; runner: { id: string; name: string; source: "chosen" | "default" | "ceo" } | null; last: { startedAt: string; doneCount: number; savedAt: string | null } | null; doneSince: number };
+type RetroStatus = { agentId: string | null; runner: { id: string; name: string; source: "chosen" | "default" | "ceo" } | null; last: { startedAt: string; doneCount: number; savedAt: string | null } | null; doneSince: number; history?: RetroHistoryRow[] };
+type RetroHistoryRow = {
+  id: string;
+  startedAt: string;
+  agentName: string | null;
+  doneCount: number;
+  findings: { failure: string; label: string; count: number }[];
+  changes: { applied: number; skipped: number; waiting: number; checked: number; met: number };
+};
+
+/** Past retros (BOS-2429): the last 8, newest first; a failure kind in 3 or more of them keeps coming up. */
+function PastRetros({ history }: { history: RetroHistoryRow[] }) {
+  if (!history.length)
+    return (
+      <details>
+        <summary>Past retros</summary>
+        <p className="muted" style={{ fontSize: 14 }}>No retros yet.</p>
+      </details>
+    );
+  const seen = new Map<string, number>();
+  for (const h of history) for (const f of h.findings) seen.set(f.failure, (seen.get(f.failure) ?? 0) + 1);
+  return (
+    <details>
+      <summary>Past retros</summary>
+      <ul style={{ fontSize: 14 }}>
+        {history.map((h) => (
+          <li key={h.id}>
+            {when(h.startedAt)}, run by {h.agentName ?? "an agent who has left"}; {h.doneCount} tickets finished.{" "}
+            {h.findings.length
+              ? h.findings.map((f, i) => (
+                  <span key={f.failure}>
+                    {i ? "; " : "Findings: "}
+                    {f.label} ({f.count}){(seen.get(f.failure) ?? 0) >= 3 ? " (keeps coming up)" : ""}
+                  </span>
+                ))
+              : "No findings saved."}{" "}
+            Changes: {h.changes.applied} applied, {h.changes.skipped} skipped, {h.changes.waiting} waiting; of {h.changes.checked} checked, {h.changes.met} met their target and {h.changes.checked - h.changes.met} missed.
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
 
 /** Workflow retros (docs/19): who runs the team's look-back, when it last ran, and a button to run one now. */
 export function WorkflowRetros({ company }: { company: Company }) {
@@ -174,6 +217,7 @@ export function WorkflowRetros({ company }: { company: Company }) {
       <p style={{ fontSize: 14 }}>
         {status.last ? `Last ran ${when(status.last.startedAt)}, over ${status.last.doneCount} finished tickets.` : "It has not run yet. The first one waits for 5 finished tickets."} {status.doneSince} finished since.
       </p>
+      <PastRetros history={status.history ?? []} />
       <div>
         <button
           type="button"
@@ -227,6 +271,67 @@ export function AdviceTimeout({ company, onChanged }: { company: Company; onChan
       </div>
       {act.view}
     </Section>
+  );
+}
+
+type RulesVersion = { id: string; at: string; by: string; added: number; removed: number; before: string; after: string };
+
+/** The last 20 changes to the standing rules; each opens a before/after line view and can be put back. */
+function PastVersions({ companyId, busy, reloadKey, onPutBack }: { companyId: string; busy: boolean; reloadKey: string; onPutBack: (v: RulesVersion) => void }) {
+  const [opened, setOpened] = useState(false);
+  const [versions, setVersions] = useState<RulesVersion[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    if (!opened) return;
+    let live = true;
+    setFailed(false);
+    void api<{ versions: RulesVersion[] }>(`/api/companies/${companyId}/standing-rules/history`)
+      .then((r) => live && setVersions(r.versions))
+      .catch(() => live && setFailed(true));
+    return () => {
+      live = false;
+    };
+  }, [opened, companyId, reloadKey]);
+  return (
+    <details style={{ marginTop: 12 }} onToggle={(e) => setOpened((e.currentTarget as HTMLDetailsElement).open)}>
+      <summary>Past versions</summary>
+      {failed ? (
+        <p className="muted">Couldn't load the past versions.</p>
+      ) : !versions ? (
+        <Loader label="Loading the past versions" />
+      ) : versions.length === 0 ? (
+        <p className="muted">No past versions yet. Changes made from now on will be listed here.</p>
+      ) : (
+        <ul style={{ listStyle: "none", padding: 0, margin: "8px 0 0" }}>
+          {versions.map((v) => (
+            <li key={v.id} style={{ marginBottom: 8 }}>
+              <details>
+                <summary>
+                  {when(v.at)} by {v.by}: +{v.added} / −{v.removed} lines
+                </summary>
+                <div className="mono" style={{ fontSize: 13, margin: "6px 0" }} aria-label="Before and after">
+                  {foldDiff(diffLines(v.before, v.after), 2).map((b, i) =>
+                    b.kind === "folded" ? (
+                      <div key={i} className="muted">… {b.lines.length} unchanged lines</div>
+                    ) : (
+                      b.lines.map((l, j) => (
+                        <div key={`${i}-${j}`} style={{ whiteSpace: "pre-wrap", background: l.kind === "add" ? "rgba(46,160,67,0.18)" : l.kind === "del" ? "rgba(248,81,73,0.18)" : undefined }}>
+                          {l.kind === "add" ? "+ " : l.kind === "del" ? "− " : "  "}
+                          {l.text}
+                        </div>
+                      ))
+                    ),
+                  )}
+                </div>
+                <button type="button" className="btn" disabled={busy} onClick={() => onPutBack(v)}>
+                  Put this version back
+                </button>
+              </details>
+            </li>
+          ))}
+        </ul>
+      )}
+    </details>
   );
 }
 
@@ -359,6 +464,23 @@ export function StandingRules({ company, onChanged }: { company: Company; onChan
               Undo last change
             </button>
           </div>
+          <PastVersions
+            companyId={company.id}
+            busy={act.busy}
+            reloadKey={rules.at ?? ""}
+            onPutBack={(v) => {
+              if (!confirm(`Put back the rules as they were after the change on ${when(v.at)}? The rules now are replaced; you can undo this.`)) return;
+              void act.run(async () => {
+                const saved = await api<Rules>(`${url}/put-back`, { method: "POST", body: { changeId: v.id } });
+                setRules(saved);
+                clearDraft(draftKey);
+                setKept("");
+                setShown(saved.text);
+                onChanged();
+                return "Put back.";
+              });
+            }}
+          />
         </>
       )}
       {act.view}

@@ -11,11 +11,12 @@ import type { Db } from "../db/client.js";
 import { agents, companies } from "../db/schema.js";
 import { record } from "../services/activity.js";
 import { PERMISSION_REPORT_MAX_HOURS, permissionReport } from "../services/permission-report.js";
+import { mostAskedCards, ruleUsage } from "../services/permission-store.js";
 import { RuleError, type policyRulesService } from "../services/policy-rules.js";
 import { checkPolicy as checkPolicyIn } from "../services/review-policy.js";
 import type { schedulerService } from "../services/scheduler.js";
 import type { secretsService } from "../services/secrets.js";
-import { getStandingRules, setStandingRules, standingRulesError, STANDING_RULES_MAX, undoStandingRules } from "../services/standing-rules.js";
+import { getStandingRules, putBackStandingRules, setStandingRules, standingRulesHistory, standingRulesError, STANDING_RULES_MAX, undoStandingRules } from "../services/standing-rules.js";
 
 const Uuid = z.string().uuid();
 const IdParam = z.object({ id: Uuid });
@@ -96,6 +97,28 @@ export function policyRoutes(
     await record(db, { companyId: id, kind: "settings", summary: "Owner added a line to the standing rules from Chat" });
     return { ...saved, max: STANDING_RULES_MAX };
   });
+  // The last 20 stored changes, newest first, each with its before and after text.
+  owner.get("/api/companies/:id/standing-rules/history", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    const [c] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, id));
+    if (!c) return reply.code(404).send({ error: "not_found" });
+    return { versions: await standingRulesHistory(db, id) };
+  });
+  // "Put this version back": saves a past change's text again; recorded as a change of its own, so Undo works.
+  owner.post("/api/companies/:id/standing-rules/put-back", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    const b = z.object({ changeId: z.string().uuid() }).parse(req.body);
+    const [c] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, id));
+    if (!c) return reply.code(404).send({ error: "not_found" });
+    try {
+      const saved = await putBackStandingRules(db, id, b.changeId, { by: "the owner", byAgentId: await standingRulesCeo(id) });
+      await record(db, { companyId: id, kind: "settings", summary: "Owner put back an earlier version of the standing rules" });
+      return { ...saved, max: STANDING_RULES_MAX };
+    } catch (err) {
+      if (err instanceof Error && err.name === "StandingRulesError") return reply.code(400).send({ error: "invalid_standing_rules", message: err.message });
+      throw err;
+    }
+  });
   owner.post("/api/companies/:id/standing-rules/undo", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
     const ceo = await standingRulesCeo(id);
@@ -117,6 +140,10 @@ export function policyRoutes(
     if (err instanceof RuleError) return reply.code(err.status).send({ error: "rejected", message: err.message });
     throw err;
   };
+  // How often each rule matched in the last 7 and 30 days (BOS-2372). Read-only.
+  owner.get("/api/policy-rules/usage", async (req) => ({ rules: await ruleUsage(db, z.object({ companyId: Uuid.optional() }).parse(req.query).companyId ?? null) }));
+  // The 10 kinds of request that reached the owner or the CEO most in the last 30 days (BOS-2418). Read-only.
+  owner.get("/api/policy-rules/most-asked", async (req) => ({ cards: await mostAskedCards(db, z.object({ companyId: Uuid.optional() }).parse(req.query).companyId ?? null) }));
   owner.get("/api/policy-rules", async (req) => rules.list(z.object({ companyId: Uuid.optional() }).parse(req.query).companyId ?? null));
   // Every change leaves a "settings" activity line (BOS-1963). A rule for every company (companyId null)
   // has no single company, so the same line is recorded against each company.

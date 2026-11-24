@@ -23,7 +23,7 @@ type CarriedHold = { ticketId: string | null; ref: string | null; title: string 
 type HoldingCard = { id: string; kind: "sign_off" | "hold" | "merge"; question: string; raisedBy: string | null; raisedAt: string; staleHint: string | null };
 type WaitingRow = { ticketId: string; ref: string | null; title: string; minutes: number; state: WaitingState; label: string; stuck: boolean; next: string | null; actor: "agent" | "ceo" | "owner" | "system" | null; decisionId: string | null; risk: string; urgent: boolean; failedCheck: boolean; carried?: CarriedHold[]; card?: HoldingCard | null; signedOffAt?: string | null; place?: number | null; why?: string | null; ranOn?: string | null; statusLine?: StatusLine };
 type RecentRow = { ticketId: string; ref: string | null; title: string; result: "merged" | "check_failed"; detail: string; at: string; stageLine?: string };
-type MergeQueueData = { companyId: string; mode: "legacy" | "server"; slots: number; serverHost?: string | null; slotSplit?: Array<{ ranOn: string; slots: number }>; running: RunningNow[]; waiting: WaitingRow[]; recent: RecentRow[]; waitingCount: number; lineCount?: number; line?: MergeLine };
+type MergeQueueData = { companyId: string; mode: "legacy" | "server"; slots: number; serverHost?: string | null; slotSplit?: Array<{ ranOn: string; slots: number }>; running: RunningNow[]; waiting: WaitingRow[]; recent: RecentRow[]; waitingCount: number; lineCount?: number; line?: MergeLine; landingTurns?: LandingTurn[] };
 
 const PHASE: Record<Phase, string> = { queued: "about to start the check", checking: "running the check", merging: "merging", waiting_to_retry: "trying again after the runner restarted", retrying_git: "retrying after a push/fetch failure to the git host" };
 const ACTOR: Record<NonNullable<WaitingRow["actor"]>, string> = { agent: "the agent", ceo: "the CEO", owner: "you", system: "Boss Man" };
@@ -49,12 +49,36 @@ export function clockText(iso: string, now = new Date()): string {
 }
 
 /** BOS-1517: the one status line of a ticket in the merge pipeline, from the server's live view (the queue and the ticket page show the same). */
-export type StatusLine = { step: string; since: string; next: string; blocker: string | null };
+export type StatusLine = { step: string; since: string; next: string; blocker: string | null; /** BOS-2359: estimated land time (ISO), when the server could work one out. */ landsAt?: string };
+
+/** BOS-2359: " Expected to land about 15:12." or "" when no estimate. */
+function landsText(line: StatusLine): string {
+  return line.landsAt ? ` Expected to land about ${clockText(line.landsAt)}.` : "";
+}
 
 /** BOS-1546: the same line as one short sentence for a board card: "Waiting for a check slot (2 ahead) · since 09:10. In the way: BOS-7 must merge first." */
 export function statusLineText(line: StatusLine): string {
   const blocker = line.blocker ? ` In the way: ${line.blocker.replace(/\.$/, "")}.` : "";
-  return `${upFirst(line.step)} · since ${clockText(line.since)}.${blocker}`;
+  return `${upFirst(line.step)} · since ${clockText(line.since)}.${blocker}${landsText(line)}`;
+}
+
+/** BOS-2359: a project's landing turn: the holder, what it waits for, when it should land (see the server's LandingTurnView). */
+export type LandingTurn = {
+  projectId: string;
+  holder: { ticketId: string; ref: string | null; title: string | null; since: string; waitingFor: string; waitingSince: string | null; landsAt: string | null; overdue: boolean };
+  usualWaitMin: number | null;
+  samples: number;
+  line: Array<{ ticketId: string; ref: string | null; title: string | null; landsAt: string | null }>;
+};
+
+/** "BOS-2337 holds the landing turn since 14:50, waiting for the GitHub run, started 14:52. A landing usually waits about 23 min." */
+export function landingTurnText(t: LandingTurn): string {
+  const h = t.holder;
+  const who = h.ref ?? (h.title ? `"${h.title}"` : "A ticket");
+  const wait = `waiting for ${h.waitingFor === "GitHub run" ? "the GitHub run" : h.waitingFor}${h.waitingSince ? `, started ${clockText(h.waitingSince)}` : ""}`;
+  const usual = t.usualWaitMin === null ? "" : ` A landing usually waits about ${t.usualWaitMin} min for GitHub${h.overdue ? "; this one is well past that" : ""}.`;
+  const lands = h.landsAt ? ` Expected to land about ${clockText(h.landsAt)}.` : "";
+  return `${who} holds the landing turn since ${clockText(h.since)}, ${wait}.${usual}${lands}`;
 }
 
 /** "Waiting for a train seat · since 20:39 (12m). Next: …. In the way: …." */
@@ -64,6 +88,7 @@ export function StatusLineView({ line }: { line: StatusLine }) {
       <strong>{upFirst(line.step)}</strong> · since {clockText(line.since)} ({waited(Math.max(0, Math.round((Date.now() - new Date(line.since).getTime()) / 60_000)))}).
       {line.next ? <span className="mq-sl-part"> Next: {line.next.replace(/\.$/, "")}.</span> : null}
       {line.blocker ? <span className="mq-sl-part" data-in-the-way="true"> In the way: {line.blocker.replace(/\.$/, "")}.</span> : null}
+      {line.landsAt ? <span className="mq-sl-part" data-lands-at="true">{landsText(line)}</span> : null}
     </p>
   );
 }
@@ -533,7 +558,7 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
       <header className="page-head">
         <div>
           <h1>Merge queue</h1>
-          {company && <p className="sub">{company.name}: approved work on its way to merge.</p>}
+          {company && <p className="sub">{company.name}: approved work on its way to merge. <a href="#/merge-history">Merge history</a></p>}
         </div>
       </header>
       {data &&
@@ -574,6 +599,9 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
               {pausedLine && (
                 <p className="mq-held-fix" role="status" data-merge-paused="true"><strong>{pausedText(pausedLine)}</strong> {pausedWaitText(pausedLine)}</p>
               )}
+              {(data.landingTurns ?? []).map((t) => (
+                <p key={t.projectId} className="mq-held-fix" role="status" data-landing-turn="true">{landingTurnText(t)}</p>
+              ))}
               <Running rows={data.running} slots={data.slots} paused={pausedLine} serverHost={data.serverHost} slotSplit={data.slotSplit} />
               <Waiting serverHost={data.serverHost} rows={data.waiting} companyId={companyId} onMoved={() => { mq.reload(); cqPoll.reload(); }} />
               <Recent rows={data.recent} />

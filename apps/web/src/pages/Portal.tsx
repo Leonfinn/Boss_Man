@@ -1,9 +1,10 @@
 // The public feedback portal (portal.html#<token>). It shares nothing with the owner's app
 // but the styles; the token after "#" never reaches the server in a URL.
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { clearDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
 import { Loader } from "../components/Loader";
+import { copyText } from "../clipboard";
 
 type Importance = "nice_to_have" | "important" | "critical";
 const LEVELS: Array<{ id: Importance; label: string }> = [
@@ -15,19 +16,49 @@ type Stage = "considering" | "planned" | "released";
 const STAGES: Array<{ id: Stage; label: string; help: string }> = [
   { id: "considering", label: "Under consideration", help: "Ideas we haven't committed to yet. Tell us how much they'd matter to you." },
   { id: "planned", label: "Planned", help: "On the way. Your vote still helps us decide what comes first." },
-  { id: "released", label: "Released", help: "Done recently." },
+  { id: "released", label: "What's new", help: "Features we've released, newest first." },
 ];
+/** The released features grouped under "November 2026" style headings (UTC), newest first. */
+export function groupByMonth<T extends { releasedAt?: string | null }>(items: T[]): Array<{ month: string; items: T[] }> {
+  const sorted = [...items].sort((a, b) => (b.releasedAt ?? "").localeCompare(a.releasedAt ?? ""));
+  const groups: Array<{ month: string; items: T[] }> = [];
+  for (const f of sorted) {
+    const month = f.releasedAt ? new Date(f.releasedAt).toLocaleString("en-US", { month: "long", year: "numeric", timeZone: "UTC" }) : "Earlier";
+    const last = groups[groups.length - 1];
+    if (last && last.month === month) last.items.push(f);
+    else groups.push({ month, items: [f] });
+  }
+  return groups;
+}
+const releaseDate = (iso: string) => new Date(iso).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
 // BOS-1921: a summary that only repeats the title is shown once (nothing stored changes).
 const squash = (s: string) => s.toLowerCase().replace(/\s+/g, " ").replace(/[\s.!?…:;,]+$/, "").trim();
 const sameText = (title: string, body: string) => squash(title) === squash(body);
-type PortalFeature = { id: string; title: string; description: string | null; stage: Stage; myVote: { importance: Importance; comment: string | null } | null };
+type PortalFeature = { id: string; title: string; description: string | null; stage: Stage; releasedAt?: string | null; myVote: { importance: Importance; comment: string | null } | null };
 type Portal = { title: string; intro: string | null; hasLogo: boolean; confirmByEmail?: boolean; rememberedEmail?: string | null; back: { url: string; text: string } | null; features: PortalFeature[] };
 /** BOS-1388: with "Confirm posts by email" on, the address is needed and the reason is said once, next to the box. */
 type Ask = { required: boolean; remembered: string | null };
 const WHY_EMAIL = "We ask for your email only to send you a link that confirms it's you. It counts once you click it. Nobody else ever sees it.";
 const CHECK_EMAIL = "Check your email: we sent you a link. It counts once you click it.";
 
-const token = () => decodeURIComponent(window.location.hash.replace(/^#/, ""));
+// BOS-2391: the hash is the secret, then "&feature-<id>" when the link points at one feature (a bare-address link is
+// just "#feature-<id>"). Neither part reaches the server in a URL.
+const hashParts = () => {
+  const parts = decodeURIComponent(window.location.hash.replace(/^#/, "")).split("&");
+  const at = parts.findIndex((p) => p.startsWith("feature-"));
+  return { token: parts.filter((_, i) => i !== at).join("&"), feature: at >= 0 ? parts[at]!.slice("feature-".length) : null };
+};
+const token = () => hashParts().token;
+/** A feature's own link, keeping the secret when there is one. */
+export const featureLink = (id: string, loc: Pick<Location, "origin" | "pathname" | "hash"> = window.location) => {
+  const t = hashParts().token;
+  return `${loc.origin}${loc.pathname}#${t ? `${encodeURIComponent(t)}&` : ""}feature-${id}`;
+};
+/** Every typed word must appear in the title or summary. */
+export const matchesSearch = (f: { title: string; description: string | null }, q: string) => {
+  const hay = `${f.title} ${f.description ?? ""}`.toLowerCase();
+  return q.toLowerCase().split(/\s+/).filter(Boolean).every((w) => hay.includes(w));
+};
 
 async function call<T>(path: string, init: { method?: string; body?: unknown } = {}): Promise<T> {
   const res = await fetch(path, {
@@ -68,7 +99,13 @@ function Who({ name, email, onChange, idPrefix, ask }: { name: string; email: st
   );
 }
 
-function FeatureCard({ f, onChanged, ask }: { f: PortalFeature; onChanged: () => void; ask: Ask }) {
+function FeatureCard({ f, onChanged, ask, lit }: { f: PortalFeature; onChanged: () => void; ask: Ask; lit: boolean }) {
+  const [copy, setCopy] = useState<"idle" | "copied" | "failed">("idle");
+  const copyLink = async () => {
+    const ok = await copyText(featureLink(f.id));
+    setCopy(ok ? "copied" : "failed");
+    if (ok) setTimeout(() => setCopy("idle"), 2000);
+  };
   const [comment, setComment] = useState(f.myVote?.comment ?? "");
   // A visitor's comment is kept in their browser as they type (DR-045); it goes once it is sent.
   const commentKey = `portal-comment/${f.id}`;
@@ -86,8 +123,13 @@ function FeatureCard({ f, onChanged, ask }: { f: PortalFeature; onChanged: () =>
   const remove = () => void call(`/api/portal/votes/${f.id}`, { method: "DELETE" }).then(() => (setNote(null), setComment(""), clearDraft(commentKey), onChanged()), (err: Error) => setNote({ ok: false, text: err.message }));
   const canVote = f.stage !== "released";
   return (
-    <li className="card portal-card">
+    <li id={`feature-${f.id}`} className="card portal-card" data-lit={lit || undefined} style={lit ? { outline: "2px solid var(--accent, #e0a030)", outlineOffset: 2 } : undefined}>
       <h3>{f.title}</h3>
+      {f.releasedAt && (
+        <p className="muted" style={{ fontSize: 13 }}>
+          Released <time dateTime={f.releasedAt}>{releaseDate(f.releasedAt)}</time>
+        </p>
+      )}
       {f.description && !sameText(f.title, f.description) && <p style={{ whiteSpace: "pre-wrap" }}>{f.description}</p>}
       {canVote && (
         <>
@@ -155,6 +197,16 @@ function FeatureCard({ f, onChanged, ask }: { f: PortalFeature; onChanged: () =>
           )}
         </>
       )}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <button type="button" className="btn small" onClick={() => void copyLink()}>
+          {copy === "copied" ? "Copied" : "Copy link"}
+        </button>
+        {copy === "failed" && (
+          <label style={{ fontSize: 13 }}>
+            Copy the address by hand: <input className="mono" readOnly value={featureLink(f.id)} onFocus={(e) => e.currentTarget.select()} />
+          </label>
+        )}
+      </div>
       {note && (
         <p role={note.ok ? "status" : "alert"} className={note.ok ? "muted" : "error"} style={{ fontSize: 14 }}>
           {note.text}
@@ -242,11 +294,41 @@ export function PortalApp() {
       (err: Error) => setError(token() ? err.message : "This link is incomplete. Ask for the full portal link."),
     );
   }, []);
+  const [query, setQuery] = useState("");
+  const [focus, setFocus] = useState<string | null>(() => hashParts().feature);
+  const [lit, setLit] = useState<string | null>(null);
+  const opened = useRef<string | null>(null);
   useEffect(() => {
+    const onHash = () => (setFocus(hashParts().feature), load());
     load();
-    window.addEventListener("hashchange", load);
-    return () => window.removeEventListener("hashchange", load);
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
   }, [load]);
+  // BOS-2391: a feature link opens its column, clears the search, scrolls to the card and lights it for a moment.
+  useEffect(() => {
+    if (!data || !focus || opened.current === focus) return;
+    const f = data.features.find((x) => x.id === focus);
+    if (!f) return;
+    opened.current = focus;
+    setStage(f.stage);
+    setQuery("");
+    setLit(f.id);
+    // No cleanup on purpose: a data reload re-runs this effect and must not cancel the highlight's end.
+    setTimeout(() => document.getElementById(`feature-${f.id}`)?.scrollIntoView?.({ block: "center" }), 0);
+    setTimeout(() => setLit(null), 3000);
+  }, [data, focus]);
+  // The feed is advertised in the page head only where a feed reader can reach it: not on a secret-link portal.
+  const secret = !!data && !!token();
+  useEffect(() => {
+    if (!data || secret) return;
+    const link = document.createElement("link");
+    link.rel = "alternate";
+    link.type = "application/atom+xml";
+    link.title = "New releases";
+    link.href = "/api/portal/feed.atom";
+    document.head.appendChild(link);
+    return () => link.remove();
+  }, [data, secret]);
   if (error)
     return (
       <main className="portal">
@@ -261,7 +343,8 @@ export function PortalApp() {
         <Loader label="Loading the feedback page" />
       </main>
     );
-  const shown = data.features.filter((f) => f.stage === stage);
+  const found = data.features.filter((f) => matchesSearch(f, query));
+  const shown = found.filter((f) => f.stage === stage);
   const ask: Ask = { required: !!data.confirmByEmail, remembered: data.rememberedEmail ?? null };
   // BOS-967: when the owner sets a website address, the page gains a bar at the top and a link at the
   // bottom so a visitor can get back to the site. Both are plain links in the same tab.
@@ -291,21 +374,41 @@ export function PortalApp() {
           {STAGES.map((s) => (
             <button key={s.id} type="button" role="tab" aria-selected={stage === s.id} onClick={() => setStage(s.id)}>
               {s.label}
-              <span className="tab-count">{data.features.filter((f) => f.stage === s.id).length}</span>
+              <span className="tab-count">{found.filter((f) => f.stage === s.id).length}</span>
             </button>
           ))}
+        </div>
+        <div className="field">
+          <label htmlFor="portal-search">Search features</label>
+          <input id="portal-search" type="search" maxLength={100} autoComplete="off" value={query} onChange={(e) => setQuery(e.target.value)} />
         </div>
         <p className="muted" style={{ fontSize: 14 }}>
           {STAGES.find((s) => s.id === stage)!.help}
         </p>
-        {shown.length ? (
+        {stage === "released" && !token() && (
+          <p style={{ fontSize: 14 }}>
+            <a href="/api/portal/feed.atom">Follow new releases (Atom feed)</a>
+          </p>
+        )}
+        {shown.length && stage === "released" ? (
+          groupByMonth(shown).map((g) => (
+            <section key={g.month} aria-label={g.month}>
+              <h2 style={{ fontSize: 18, fontWeight: 600 }}>{g.month}</h2>
+              <ul className="portal-list">
+                {g.items.map((f) => (
+                  <FeatureCard key={f.id} f={f} onChanged={load} ask={ask} lit={lit === f.id} />
+                ))}
+              </ul>
+            </section>
+          ))
+        ) : shown.length ? (
           <ul className="portal-list">
             {shown.map((f) => (
-              <FeatureCard key={`${f.id}:${ask.remembered ?? ""}`} f={f} onChanged={load} ask={ask} />
+              <FeatureCard key={`${f.id}:${ask.remembered ?? ""}`} f={f} onChanged={load} ask={ask} lit={lit === f.id} />
             ))}
           </ul>
         ) : (
-          <p className="muted">Nothing here yet.</p>
+          <p className="muted">{query.trim() ? "No features match" : "Nothing here yet."}</p>
         )}
         <Idea key={ask.remembered ?? ""} ask={ask} />
         <p className="muted" style={{ fontSize: 12 }}>

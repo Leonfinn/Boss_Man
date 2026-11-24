@@ -4,9 +4,9 @@
 // and holds low-priority work while a subscription window is nearly used up (R33).
 import { createHash, randomUUID } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, ne, notInArray, or, sql } from "drizzle-orm";
-import { REAL_USE_LABEL, harnessLoadsSkills, currentReportSamples, agentIdentity, BUILT_IN_RULES, formatDate, isDaemonOnlySecret, isInfiniteModel, nextWorkingStart, parkedOnPurpose, WORKING_HOURS_REASON, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowHasReset, windowLabel, type QuietHours } from "@boss-man/shared";
+import { REAL_USE_LABEL, OUTGOING_LINE, harnessLoadsSkills, currentReportSamples, agentIdentity, BUILT_IN_RULES, formatDate, isDaemonOnlySecret, isInfiniteModel, nextWorkingStart, parkedOnPurpose, WORKING_HOURS_REASON, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowHasReset, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
-import { CHAT_REASON } from "./chat.js";
+import { CHAT_REASON, RUNNER_OFFLINE } from "./chat.js";
 import { dueChatReport } from "./chat-report-back.js";
 import { agentHold } from "./fence-default.js";
 import { runCapabilities } from "./run-capabilities.js";
@@ -15,7 +15,7 @@ import type { Db } from "../db/client.js";
 import { linkedSlugs, liveWikiPage } from "./wiki.js";
 import { checkJobsByCompany, updateWaitCountsRun } from "./runner-busy.js";
 import { pickAccount } from "./claude-accounts.js";
-import { activity, agentSkills, agents, checkJobs, companies, costEvents, decisions, engagements, fundingSources, mcpServers, projects, nudges, quotaSamples, runners, runs, secretGrantAgents, secretGrants, settings, skillProposals, reviewRequests, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
+import { activity, agentSkills, agents, checkJobs, companies, costEvents, decisions, engagements, fundingQuotaHolds, fundingSources, mcpServers, projects, nudges, quotaSamples, runners, runs, secretGrantAgents, secretGrants, settings, skillProposals, reviewRequests, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
 import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
 import { record } from "./activity.js";
@@ -27,7 +27,7 @@ import { monthStartUtc, projectSpendMicros } from "./project-spend.js";
 import { effectivePolicy } from "./review-policy.js";
 import { endedNormally, handOverReviews, requeueUnansweredReviews, REVIEW_REASON, requestReviews, reviewTicketsOf, wakeReviewers } from "./review-kinds.js";
 import { buildBrief } from "./brief.js";
-import { getHold, HOLD_REASON, HOLD_RELEASED_REASON, holdBlocksStarts, unknownWait } from "./maintenance.js";
+import { getHold, HOLD_REASON, HOLD_RELEASED_REASON, holdBlocksStarts } from "./maintenance.js";
 import { createLaneWatch } from "./lane-watch.js";
 import { limitUnderHold, softHold, softHoldReason } from "./deploy-wait-hold.js";
 import { RETRO_DUTY, RETRO_REASON } from "./retro.js";
@@ -138,7 +138,7 @@ export const PLAIN_SUMMARY_RULE =
 export const TWIN_PATHS_GUIDANCE =
   "For a fix to a fault the owner reported, list its twin paths and states, and for each say \"covered by test X\" or \"follow-up BOS-n\": server and runner, chat and ticket run, every company, after a restart or rebuild, every form of that kind, the state the owner presses it in.";
 /** The usability gate for every company (BOS-1571): not only "is it safe, does it work once", but "does it keep delivering with the owner's real life". */
-export const USABILITY_GATE_GUIDANCE = `Usability gate, for every change, fix or feature: walk the owner's life with it, day 1, after the next update or runner rebuild, after a restart, a week on, the owner away. For anything that comes in from outside (an alert, an issue, a message), who reads it, who acts and who closes it where it came from. A step the owner must repeat routinely, or a feature that works only while someone watches it, fails: request changes. On a feature ticket, one with owner setup steps or one that changes what the owner installs, your code or infra approval needs a "${REAL_USE_LABEL}" paragraph saying this, or Boss Man refuses it.`;
+export const USABILITY_GATE_GUIDANCE = `Usability gate, for every change, fix or feature: walk the owner's life with it, day 1, after the next update or runner rebuild, after a restart, a week on, the owner away. For anything that comes in from outside (an alert, an issue, a message), who reads it, who acts and who closes it where it came from. ${OUTGOING_LINE} A step the owner must repeat routinely, or a feature that works only while someone watches it, fails: request changes. On a feature ticket, one with owner setup steps or one that changes what the owner installs, your code or infra approval needs a "${REAL_USE_LABEL}" paragraph saying this, or Boss Man refuses it.`;
 const WATCH_LINE =/^Watch ticket ([0-9a-f-]{36})$/gm;
 const OWNER_REASONS = new Set([CHAT_REASON, "woken by owner", "message", "rule request"]);
 const fromOwner = (w: { reason: string; causedByRunId?: string | null }) => OWNER_REASONS.has(w.reason) && (w.reason !== "message" || !w.causedByRunId);
@@ -210,6 +210,8 @@ export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, backg
 
 /** BOS-1555: a finished check's result wake; the agent picks it up before starting anything new. */
 const CHECK_RESULT_REASON = "check_result";
+/** BOS-2356: the sender of a nudge that was dropped instead of delivered is told so, with the reason. */
+export const NUDGE_DROPPED_REASON = "nudge dropped";
 /** Reasons whose older unstarted copies for one agent and ticket are dropped for the newest (BOS-1555). */
 const SUPERSEDED_REASONS = [CHECK_RESULT_REASON, "check due", "checking an old card"];
 /** BOS-1791: wakes that hand a ticket to its assignee; dropped when the ticket was parked or reassigned after they were queued. */
@@ -263,7 +265,7 @@ export function planFirstText(agentKind: string): string {
 }
 
 /** BOS-1571: the plan approver reads how the owner lives with a feature before any code is written. */
-const PLAN_REAL_USE_LINE = `If the ticket has a "Usability gate" criterion, end the plan with a "${REAL_USE_LABEL}" walk-through: day 1, after routine updates and restarts, a week on, the owner away, and every step the owner repeats with how often.`;
+const PLAN_REAL_USE_LINE = `If the ticket has a "Usability gate" criterion, end the plan with a "${REAL_USE_LABEL}" walk-through: day 1, after routine updates and restarts, a week on, the owner away, and every step the owner repeats with how often. ${OUTGOING_LINE}`;
 
 export function schedulerService(
   db: Db,
@@ -282,8 +284,6 @@ export function schedulerService(
     onFeature?: (featureId: string) => Promise<unknown>;
     limits?: Partial<Limits>;
     now?: () => Date;
-    /** BOS-1951: tickets whose merge is being pushed to main; a runner swap waits for them, so chat keeps answering meanwhile. */
-    landingMergeIds?: () => Promise<string[]>;
     /** The owner's quiet hours; agent wakes below high priority wait for them to end (R86). */
     quietHours?: () => Promise<QuietHours | null>;
     /** Tells the owner something without needing an answer (quota holds, credits in use). */
@@ -475,6 +475,8 @@ export function schedulerService(
           })
           .catch((err) => deps.log?.(`quota hold notification failed: ${(err as Error).message}`));
         await db.update(fundingSources).set({ quotaHeldNotified: true }).where(eq(fundingSources.id, source.id));
+        // For the "Last 8 weeks" fold on the Funding page: when this hold began.
+        await db.insert(fundingQuotaHolds).values({ fundingSourceId: source.id, window: first.window, startedAt: t });
       }
       if (!held && source.quotaHeldNotified) {
         await deps
@@ -487,6 +489,7 @@ export function schedulerService(
           })
           .catch((err) => deps.log?.(`quota release notification failed: ${(err as Error).message}`));
         await db.update(fundingSources).set({ quotaHeldNotified: false }).where(eq(fundingSources.id, source.id));
+        await db.update(fundingQuotaHolds).set({ endedAt: t }).where(and(eq(fundingQuotaHolds.fundingSourceId, source.id), isNull(fundingQuotaHolds.endedAt)));
       }
       if (overage && !source.quotaOverageNotified) {
         await deps
@@ -1069,16 +1072,58 @@ export function schedulerService(
     if (waited > limits.staleWakeMs) return `it waited ${Math.round(waited / 3_600_000)} hours, so it is out of date`;
     if (!w.note) return null;
     const [company] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, w.companyId));
-    const named: Array<{ systemState: string }> = [];
+    const named: Array<{ systemState: string; stateChangedAt: Date | null }> = [];
+    const cols = { systemState: tickets.systemState, stateChangedAt: tickets.stateChangedAt };
     const ids = [...new Set(w.note.match(NOTE_TICKET_IDS) ?? [])];
-    if (ids.length) named.push(...(await db.select({ systemState: tickets.systemState }).from(tickets).where(and(eq(tickets.companyId, w.companyId), inArray(tickets.id, ids)))));
+    if (ids.length) named.push(...(await db.select(cols).from(tickets).where(and(eq(tickets.companyId, w.companyId), inArray(tickets.id, ids)))));
     const prefix = company?.prefix;
     if (prefix) {
       const re = new RegExp(`\\b${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-(\\d+)\\b`, "gi");
       const numbers = [...new Set([...w.note.matchAll(re)].map((m) => Number(m[1])))];
-      if (numbers.length) named.push(...(await db.select({ systemState: tickets.systemState }).from(tickets).where(and(eq(tickets.companyId, w.companyId), inArray(tickets.number, numbers)))));
+      if (numbers.length) named.push(...(await db.select(cols).from(tickets).where(and(eq(tickets.companyId, w.companyId), inArray(tickets.number, numbers)))));
     }
-    return named.length && named.every((x) => x.systemState === "done") ? "every ticket it named was already finished" : null;
+    // BOS-2356: BOS-2172's creation-time rule. A ticket counts as finished for this wake only if it closed after the wake was
+    // queued (at the same moment included, and with no close time recorded, as replayOfClosed does). A nudge sent about a ticket
+    // that was already done is something new (a follow-up, a question about the result) and is delivered: on 23 Nov the CEO's
+    // nudges to Florence naming finished tickets were dropped silently and she never woke.
+    const closedSince = (x: { systemState: string; stateChangedAt: Date | null }) => x.systemState === "done" && (!x.stateChangedAt || w.createdAt.getTime() <= x.stateChangedAt.getTime());
+    return named.length && named.every(closedSince) ? "every ticket it named was finished after it was sent" : null;
+  }
+
+  /**
+   * BOS-2356: tells each agent whose nudge was dropped (by any of the drops in tick()), once per dropped nudge, why, so
+   * a dropped nudge is never silent. The notice is a "nudge dropped" wake, never a nudge, so it has no nudges row and
+   * can't be dropped into another notice: no loop. It is ticketless (a wake with a ticket would start that ticket) and,
+   * through notify(), goes straight into the sender's live run when there is one, or joins a notice already waiting.
+   * The Scrum Master's nudges come from the watchdog, which tracks its own actions, so it isn't woken for them.
+   */
+  async function tellNudgeSenders(wakeIds: string[], why: string): Promise<void> {
+    if (!wakeIds.length) return;
+    const dropped = await db
+      .select({ fromId: nudges.fromAgentId, toId: nudges.toAgentId, why: nudges.why, number: tickets.number, title: tickets.title, prefix: companies.ticketPrefix })
+      .from(nudges)
+      .leftJoin(tickets, eq(tickets.id, nudges.ticketId))
+      .leftJoin(companies, eq(companies.id, nudges.companyId))
+      .where(inArray(nudges.wakeId, wakeIds));
+    if (!dropped.length) return;
+    const people = await db
+      .select({ id: agents.id, name: agents.name, duty: agents.duty, retiredAt: agents.retiredAt })
+      .from(agents)
+      .where(inArray(agents.id, [...new Set(dropped.flatMap((d) => [d.fromId, d.toId]))]));
+    const who = new Map(people.map((p) => [p.id, p]));
+    for (const d of dropped) {
+      const from = who.get(d.fromId);
+      if (!from || from.retiredAt || from.duty === SCRUM_MASTER_DUTY) continue;
+      const to = who.get(d.toId)?.name ?? "a colleague";
+      // A nudge on a ticket names it; a ticketless one names its tickets in the quoted text below.
+      const about = d.number != null ? ` about ${ticketRef(d.prefix, d.number) ?? "a ticket"} "${d.title ?? ""}"` : "";
+      const note = [
+        `Your nudge to ${to}${about} was not delivered: ${why}. ${to} was not woken for it.`,
+        untrusted(`agent ${from.name}`, `What you sent: ${(d.why ?? "(not recorded)").slice(0, 300)}`),
+        `If it still matters, write it on an open ticket with ticket_reply, or nudge again with that ticket.`,
+      ].join("\n");
+      await self.notify(from.id, { reason: NUDGE_DROPPED_REASON, note }).catch((err) => deps.log?.(`telling ${from.name} a nudge was dropped failed: ${(err as Error).message}`));
+    }
   }
 
   /** Whether the agent has a ready or in-progress ticket that hasn't started a run yet, so a ticketless wake must not take its slot (BOS-1136). */
@@ -1098,7 +1143,7 @@ export function schedulerService(
     const [company] = await db.select().from(companies).where(eq(companies.id, w.companyId));
     const [runner] = await db.select().from(runners).where(eq(runners.companyId, w.companyId));
     if (!agent || !company) return { ok: false, reason: "agent or company gone" };
-    if (!runner || !deps.runners.isConnected(runner.id)) return { ok: false, reason: "runner offline" };
+    if (!runner || !deps.runners.isConnected(runner.id)) return { ok: false, reason: RUNNER_OFFLINE };
 
     const runId = randomUUID();
     // Claim the wake before any side effect, so it can never start two runs.
@@ -1224,7 +1269,7 @@ export function schedulerService(
       if (chapter) await deps.chapters?.onLaunchFailed(runId);
       await db.delete(runs).where(eq(runs.id, runId));
       await db.update(wakes).set({ runId: null }).where(eq(wakes.id, w.id));
-      return { ok: false, reason: "runner offline" };
+      return { ok: false, reason: RUNNER_OFFLINE };
     }
     // A wake the WIP limit refused is marked, so the idle-slot sweeps don't count it against the ticket's daily allowance (BOS-1180).
     await db.update(wakes).set({ status: "launched", runId, launchedAt: now(), statusReason: wipRefused ? WIP_REFUSED_REASON : null }).where(eq(wakes.id, w.id));
@@ -1574,6 +1619,11 @@ export function schedulerService(
       return outcomeOf(row!);
     },
 
+    /** BOS-2356: for a drop outside the scheduler (the owner stops or parks a ticket): tells the senders of any nudges among these dropped wakes. */
+    nudgesDropped(wakeIds: string[], why: string): Promise<void> {
+      return tellNudgeSenders(wakeIds, why);
+    },
+
     /**
      * Tells an agent something (R86), the one way to do it. A live run on the same ticket (or
      * none, for a ticketless notice) is told directly; otherwise the note joins a wake already
@@ -1859,9 +1909,12 @@ export function schedulerService(
 
       // A server-wide maintenance hold (runner update drain): nothing new starts in any company. The wakes
       // stay queued with that reason, like a paused company's, and the first pass after the hold lifts launches them.
-      // The owner's chat (and the CEO's reply) is the exception (BOS-349): while at least one work run is still
-      // going, the update cannot apply anyway, so chatting costs no delay. Once no work run is left the update
-      // may swap at any moment, so chats are held too, exactly as before.
+      // The owner's chat is never held by it (BOS-2404, DR on the wiki: "Owner chat passes every update hold"). It used to
+      // pass only while the swap waited on something on a list (runs BOS-349, checks BOS-1877, merges and "unknown"
+      // BOS-1951), and each wait not on the list held it silently: 23 Nov 20:28-20:47. The swap waits for a chat run that
+      // started during the hold, so passing never cuts a chat off. The only time a chat waits is the swap itself: its
+      // runner is being recreated, launch() says RUNNER_OFFLINE, and the chat screen names the swap and a time (chat.ts).
+      // The CEO's reply lane still passes only while work runs or checks go.
       let pass = queue;
       const hold = await getHold(db);
       if (hold && !holdBlocksStarts(hold, t)) {
@@ -1873,11 +1926,7 @@ export function schedulerService(
         // BOS-1877: running checks the swap waits on keep it from landing just as work runs do, so chat goes through
         // for them too (the swap then waits for that chat run). Not for a wrap-up hold, or once checks are not waited on.
         const checksWaited = hold.kind !== "wrapup" && !hold.force && !hold.ignoreChecks ? [...(await checkJobsByCompany(db, true, t)).values()].reduce((a, n) => a + n, 0) : 0;
-        // While work runs or checks are still going, only chat and reply wakes go on to launch; every other wake is held.
-        // BOS-1951: nor is the swap near while a merge is being pushed to main, or while it waits on something Boss Man can't
-        // name (the 19 Nov update sat 86 minutes with chat paused): chat pauses only for the swap itself.
-        const merging = hold.kind !== "wrapup" && work === 0 && checksWaited === 0 && deps.landingMergeIds ? (await deps.landingMergeIds().catch(() => [] as string[])).length : 0;
-        const mystery = work === 0 && checksWaited === 0 && merging === 0 && unknownWait(hold, t);
+        // While work runs or checks are still going, reply wakes go on to launch too; every other wake is held.
         // BOS-2058: a wake that reports on the update itself (wake-classes.ts PASSES_UPDATE_HOLD: UPDATE_ALERT_REASON, which
         // carries every "update is late" note) is never held by it. On 20 Nov at 11:48 the CEO's late-swap wake sat "update
         // pending" because a landing and then nothing nameable was what the swap waited on. Its run is a short reply-lane
@@ -1891,7 +1940,7 @@ export function schedulerService(
         const passes = (w: (typeof queue)[number]) => {
           if (duringUpdate(w.reason) === "passes") return true;
           if (passesByTicket(w)) return true;
-          if (w.reason === CHAT_REASON) return busy || merging > 0 || mystery;
+          if (w.reason === CHAT_REASON) return true;
           return busy && w.reason === CEO_REPLY_REASON;
         };
         const through = queue.filter(passes);
@@ -1944,7 +1993,7 @@ export function schedulerService(
       const paused = new Set((await db.select({ id: companies.id }).from(companies).where(eq(companies.paused, true))).map((c) => c.id));
       const pausedAgents = new Set((await db.select({ id: agents.id }).from(agents).where(eq(agents.paused, true))).map((a) => a.id));
       // The fence hold (BOS-373, DR-047): a company's agent work waits while its connected runner can't fence, unless
-      // the owner chose Off. An offline runner is left to launch()'s own "runner offline".
+      // the owner chose Off. An offline runner is left to launch()'s own RUNNER_OFFLINE.
       const fenceRows = await db
         .select({ companyId: companies.id, fenceMode: companies.fenceMode, fenceModeChosenAt: companies.fenceModeChosenAt, fenceOffFingerprint: companies.fenceOffFingerprint, guardOffChosenAt: companies.guardOffChosenAt, guardOffFingerprint: companies.guardOffFingerprint, runnerId: runners.id, sandbox: runners.sandbox, sandboxCheckedAt: runners.sandboxCheckedAt })
         .from(companies)
@@ -2014,6 +2063,7 @@ export function schedulerService(
           // BOS-2172: one line on the ticket, so its activity shows why nobody was woken.
           const n = ids.length;
           await record(db, { companyId: w.companyId, agentId: w.agentId, ticketId: w.ticketId, kind: "wake_dropped", summary: `Dropped ${n === 1 ? "a wake" : `${n} wakes`} (${finished.reasons.join(", ")}) queued before this ticket was finished, instead of starting a run`, at: now() });
+          await tellNudgeSenders(ids, "the ticket it was about was finished after you sent it");
           result.dropped += n;
           continue;
         }
@@ -2021,6 +2071,7 @@ export function schedulerService(
         const parked = await parkedTicketWake(w);
         if (parked) {
           await db.update(wakes).set({ status: "dropped", statusReason: parked }).where(eq(wakes.id, w.id));
+          await tellNudgeSenders([w.id], parked);
           result.dropped++;
           continue;
         }
@@ -2031,6 +2082,7 @@ export function schedulerService(
           await db.update(nudges).set({ dropped: true }).where(eq(nudges.wakeId, w.id));
           const [who] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, w.agentId));
           await record(db, { companyId: w.companyId, agentId: w.agentId, ticketId: null, kind: "nudge", summary: `A "${w.reason}" wake for ${who?.name ?? "an agent"} was dropped instead of delivered: ${stale}`, at: now() });
+          await tellNudgeSenders([w.id], stale);
           result.dropped++;
           continue;
         }
@@ -2223,7 +2275,7 @@ export function schedulerService(
           await wait(launched.reason);
           // "Runner offline" clears by itself: the wake stays queued and starts when the runner is
           // back, and the runner watch (BOS-467) is the one alert about an offline runner (BOS-480).
-          if (launched.reason !== "runner offline") await flagFailedStart(w, launched.reason);
+          if (launched.reason !== RUNNER_OFFLINE) await flagFailedStart(w, launched.reason);
           continue;
         }
         result.launched++;

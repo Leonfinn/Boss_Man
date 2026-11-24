@@ -18,19 +18,22 @@ import { ImagePreviews, useImageAttach, withAttachments } from "../components/Im
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { ThinkingTrace } from "../components/ThinkingTrace";
 import { linkPieces, type LinkContext } from "../links";
+import { countHits, dayStart, findQuery, findSpots, firstOnOrAfter, spotIndex, splitHits, stepSpot, type FindSpot, type Segment } from "../chat-find";
+import { isFarUp, messageLink, newSince } from "../chat-scroll";
+import { copyText } from "../clipboard";
 import type { TraceBody } from "@boss-man/shared";
 
 type Message = { id: string; role: "owner" | "assistant" | "system"; text: string; createdAt: string; trace?: TraceBody };
 type Chat = { agentId: string; items: Message[]; hasMore?: boolean; state: string; live?: TraceBody | null };
 /** The runner-update hold, from App's /api/maintenance poll (BOS-349). */
-type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; runs: number; chatOpen: boolean; /** BOS-1951 */ merges?: number; checks?: number; unknownWait?: boolean; /** BOS-1877 */ phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean };
+type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; runs: number; chatOpen: boolean; /** BOS-2404: while a runner is being swapped, when chat answers again at the latest. */ chatBackBy?: string | null; /** BOS-1951 */ merges?: number; checks?: number; unknownWait?: boolean; /** BOS-1877 */ phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean };
 type Thread = { id: string; name: string; role: "ceo" | "manager" | "worker"; duty: string | null; state: string; last: { role: Message["role"]; text: string; createdAt: string } | null };
 
 /** Plain text with in-app links made clickable (BOS-358): one shared builder, see links.ts. */
-export function linked(text: string, wikiCompanyId?: string, ctx: LinkContext = {}): ReactNode {
+export function linked(text: string, wikiCompanyId?: string, ctx: LinkContext = {}, mark: (words: string) => ReactNode = (w) => w): ReactNode {
   return linkPieces(text, { ...ctx, companyId: wikiCompanyId ?? ctx.companyId }).map((p, i) =>
     p.kind === "text" ? (
-      <Fragment key={i}>{p.text}</Fragment>
+      <Fragment key={i}>{mark(p.text)}</Fragment>
     ) : p.kind === "image" ? (
       <a key={i} href={p.src} target="_blank" rel="noreferrer" className="msg-img">
         <img src={p.src} alt={p.alt} loading="lazy" />
@@ -41,11 +44,14 @@ export function linked(text: string, wikiCompanyId?: string, ctx: LinkContext = 
       </a>
     ) : (
       <a key={i} href={p.href}>
-        {p.text}
+        {mark(p.text)}
       </a>
     ),
   );
 }
+
+/** What a message shows as words (plain text and link text), for the find box: never the markup or an image. */
+export const visibleParts = (text: string) => linkPieces(text, {}).flatMap((p) => (p.kind === "text" || p.kind === "link" ? [p.text] : []));
 
 /** The whole conversation as Markdown (BOS-2313): oldest first, no thinking traces; attachments stay as their links. */
 export function chatMarkdown(agentName: string, date: string, items: Message[]): string {
@@ -82,9 +88,15 @@ function busyText(state: string, name: string) {
   return state.replace(/^waiting: /, "Waiting: ");
 }
 
-/** One plain line while a runner update waits (BOS-349): chat stays open while agents work, then holds briefly for the swap. */
+/** One plain line while a runner update waits: chat stays open the whole time (BOS-2404) and holds only while a runner is being swapped, with a time. */
 export function UpdateNote({ m }: { m: Maintenance | null }) {
   if (!m?.on) return null;
+  if (!m.chatOpen)
+    return (
+      <p className="banner" role="status">
+        {`${m.kind === "settings" ? "Restarting the runners with the new setting" : "Swapping the runners to the new version"} now, usually under a minute${m.chatBackBy ? ` (chat answers again by ${atTime(m.chatBackBy)} at the latest)` : ""}. New messages are saved and answered then.`}
+      </p>
+    );
   if (m.kind === "building")
     return (
       <p className="banner" role="status">
@@ -94,24 +106,29 @@ export function UpdateNote({ m }: { m: Maintenance | null }) {
   if (m.kind === "settings")
     return (
       <p className="banner" role="status">
-        {m.chatOpen
-          ? `Applying a runner setting change (not an update): waiting for ${m.runs} agent${m.runs === 1 ? "" : "s"} to finish. Chat stays open until then.`
-          : "Applying a runner setting change (not an update), back in a moment. New messages are saved and answered when it is done."}
+        {m.runs > 0
+          ? `Applying a runner setting change (not an update): waiting for ${m.runs} agent${m.runs === 1 ? "" : "s"} to finish. Chat stays open.`
+          : "Applying a runner setting change (not an update). Chat stays open."}
       </p>
     );
+  if (m.kind === "wrapup")
+    return (
+      <p className="banner" role="status">
+        {`Agents were asked to wrap up${m.runs > 0 ? `: ${m.runs} still finishing` : ""}. Nothing new starts, but chat stays open.`}
+      </p>
+    );
+  const expected = m.expectedFinishAt ? `, expected about ${atTime(m.expectedFinishAt)}` : m.overdue ? " (taking longer than expected)" : "";
   return (
     <p className="banner" role="status">
-      {m.chatOpen
-        ? m.runs === 0 && m.unknownWait
-          ? "Update running late: Boss Man cannot say what it is waiting for. Chat stays open; see Settings → Server and runner → Updates to stop waiting or cancel."
-          : m.runs === 0 && (m.merges ?? 0) > 0 && !(m.checks ?? 0)
-            ? `Update waiting for ${m.merges === 1 ? "a merge" : `${m.merges} merges`} being pushed to main${m.expectedFinishAt ? `, expected about ${atTime(m.expectedFinishAt)}` : m.overdue ? " (taking longer than expected)" : ""}: chat stays open until then.`
-          : m.runs === 0
-          ? `Update waiting for running checks to finish${m.expectedFinishAt ? `, expected about ${atTime(m.expectedFinishAt)}` : m.overdue ? " (taking longer than expected)" : ""}: chat stays open until then.`
-          : `Update waiting for ${m.runs} agent${m.runs === 1 ? "" : "s"} to finish: chat stays open until then.`
-        : m.phase === "swapping"
-          ? "Swapping the runners now, back in a moment. New messages are saved and answered when it is done."
-          : `Update pending${m.expectedFinishAt ? `: expected to finish about ${atTime(m.expectedFinishAt)}` : m.overdue ? ": taking longer than expected" : ""}. New messages are saved and answered when it is done.`}
+      {m.runs === 0 && m.unknownWait
+        ? "Update running late: Boss Man cannot say what it is waiting for. Chat stays open; see Settings → Server and runner → Updates to stop waiting or cancel."
+        : m.runs === 0 && (m.merges ?? 0) > 0 && !(m.checks ?? 0)
+          ? `Update waiting for ${m.merges === 1 ? "a merge" : `${m.merges} merges`} being pushed to main${expected}. Chat stays open.`
+          : m.runs === 0 && (m.checks ?? 0) > 0
+            ? `Update waiting for running checks to finish${expected}. Chat stays open.`
+            : m.runs > 0
+              ? `Update waiting for ${m.runs} agent${m.runs === 1 ? "" : "s"} to finish. Chat stays open.`
+              : `Update about to swap the runners${expected}. Chat stays open until the swap itself, which usually takes under a minute.`}
     </p>
   );
 }
@@ -198,6 +215,14 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
   const [loadingOlder, setLoadingOlder] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
   const keep = useRef<{ height: number; top: number } | null>(null);
+  // BOS-2440: the reader is more than a screen up the log. `anchor` is the newest message when they scrolled up.
+  const farUp = useRef(false);
+  const [far, setFar] = useState(false);
+  const [anchor, setAnchor] = useState<string | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
+  const [linkShown, setLinkShown] = useState<{ id: string; link: string } | null>(null);
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(copyTimer.current), []);
   const convKey = `${company?.id ?? "none"}/${current?.id ?? "none"}`;
   const olderHere = older?.key === convKey ? older : null;
   const newest = chat.data?.items ?? [];
@@ -256,6 +281,36 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
   const [stepOpen, setStepOpen] = useState<Record<string, Record<number, boolean>>>({});
   const liveKey = `live:${current?.id ?? ""}`;
   const latest = items.at(-1)?.createdAt;
+  const onLogScroll = () => {
+    const log = logRef.current;
+    if (!log) return;
+    const up = isFarUp(log);
+    if (up === farUp.current) return;
+    farUp.current = up;
+    setFar(up);
+    setAnchor(up ? (newest.at(-1)?.id ?? null) : null);
+  };
+  const jumpToNewest = () => {
+    farUp.current = false;
+    setFar(false);
+    setAnchor(null);
+    end.current?.scrollIntoView({ block: "end" });
+  };
+  const copyMessageLink = async (id: string) => {
+    if (!company || !current) return;
+    const link = messageLink(window.location, company.id, current.id, id);
+    const ok = await copyText(link);
+    clearTimeout(copyTimer.current);
+    if (ok) {
+      setLinkShown(null);
+      setCopied(id);
+      copyTimer.current = setTimeout(() => setCopied(null), 2000);
+    } else {
+      setCopied(null);
+      setLinkShown({ id, link });
+    }
+  };
+  const newBelow = far ? newSince(newest.map((m) => m.id), anchor) : 0;
   useEffect(() => setBusy(state !== "idle"), [state]);
   // Braces: scrollIntoView returns a Promise in Chromium 150+, and React would call it as the clean-up.
   // A search result names one message (BOS-2192): scroll to it once it has loaded. If the conversation
@@ -267,6 +322,9 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
   // Declared before the scroll effect so it runs first in the same commit.
   useEffect(() => {
     target.current = messageId;
+    farUp.current = false;
+    setFar(false);
+    setAnchor(null);
     setOlderThanShown(false);
   }, [messageId, current?.id]);
   // Only this conversation's data counts: right after a switch the previous agent's page is still in
@@ -286,6 +344,8 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
       setOlderThanShown(true);
     }
     // Keyed on the polled newest page (BOS-2167), so loading older messages doesn't jump to the end.
+    // BOS-2440: a reader who has scrolled up keeps their place; "Jump to newest" takes them down.
+    if (farUp.current) return;
     end.current?.scrollIntoView({ block: "end" });
   }, [newest.length, newest.at(-1)?.id, current?.id, loaded, messageId]);
   useEffect(() => {
@@ -295,6 +355,138 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
   }, [current?.id, latest]);
 
   const ceo = team.find((t) => t.role === "ceo");
+
+  // Find in this conversation and Go to date (BOS-2411). `at` is the current match as "the nth in message X", so
+  // loading older messages above it moves nothing; the matches are counted over the words a message shows.
+  const shownText = (m: Message) => (m.text.includes(ASK_CEO) && ceo ? m.text.split(ASK_CEO)[0]! : m.text);
+  const partsOf = (m: Message) => ({ id: m.id, parts: visibleParts(shownText(m)) });
+  const [findText, setFindText] = useState("");
+  const [query, setQuery] = useState("");
+  const [at, setAt] = useState<FindSpot | null>(null);
+  const [findNote, setFindNote] = useState<string | null>(null);
+  const [dateNote, setDateNote] = useState<string | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [jump, setJump] = useState<{ id: string } | null>(null);
+  const searchRun = useRef(0);
+  // After a short pause in typing; clearing the box takes effect at once.
+  useEffect(() => {
+    if (!findQuery(findText)) {
+      setQuery("");
+      return;
+    }
+    const t = setTimeout(() => setQuery(findText), 250);
+    return () => clearTimeout(t);
+  }, [findText]);
+  useEffect(() => {
+    setAt(null);
+    setFindNote(null);
+  }, [query]);
+  useEffect(() => {
+    searchRun.current++;
+    setSearching(false);
+    setFindText("");
+    setQuery("");
+    setAt(null);
+    setFindNote(null);
+    setDateNote(null);
+  }, [convKey]);
+  const spots = query ? findSpots(items.map(partsOf), query) : [];
+  const here = spotIndex(spots, at);
+  const curSpot = here >= 0 ? spots[here]! : null;
+  const curKey = curSpot ? `${curSpot.id}:${curSpot.n}` : "";
+  // The first match shown is current until the owner steps.
+  useEffect(() => {
+    if (spots.length && here < 0) setAt(spots[0]!);
+  }, [spots.length, here, query]);
+  useEffect(() => {
+    if (curKey) logRef.current?.querySelector(".find-hit.current")?.scrollIntoView({ block: "center" });
+  }, [curKey, query]);
+  useEffect(() => {
+    if (jump) document.getElementById(`chat-msg-${jump.id}`)?.scrollIntoView({ block: "start" });
+  }, [jump]);
+  const step = (dir: 1 | -1) => setAt(stepSpot(spots, curSpot, dir));
+  const onFindKey = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+      e.preventDefault();
+      step(e.shiftKey ? -1 : 1);
+    }
+  };
+  // Loads older pages until one has a match or the start is reached.
+  const searchOlder = async () => {
+    const first = items[0];
+    if (!company || !current || !first || searching || !query) return;
+    const run = ++searchRun.current;
+    setSearching(true);
+    setFindNote(null);
+    setDateNote(null);
+    try {
+      let all = olderHere?.items ?? [];
+      let top = first;
+      let more = hasMore;
+      let page: Message[] = [];
+      let hits = 0;
+      while (more && !hits) {
+        const res = await api<Chat>(`/api/companies/${company.id}/chat?agentId=${current.id}&before=${top.id}`);
+        if (searchRun.current !== run) return;
+        page = res.items;
+        all = [...page, ...all];
+        more = (res.hasMore ?? false) && page.length > 0;
+        top = page[0] ?? top;
+        hits = page.reduce((sum, m) => sum + countHits(partsOf(m).parts, query), 0);
+      }
+      setOlder({ key: convKey, items: all, hasMore: more });
+      if (hits) {
+        setAt(findSpots(page.map(partsOf), query).at(-1) ?? null);
+        setFindNote(`${hits} more found`);
+      } else {
+        setFindNote("No more matches; start of the conversation");
+      }
+      setError(null);
+    } catch (err) {
+      if (searchRun.current === run) setError((err as Error).message);
+    } finally {
+      if (searchRun.current === run) setSearching(false);
+    }
+  };
+  const goToDate = async (value: string) => {
+    setDateNote(null);
+    const start = dayStart(value);
+    if (start === null || !company || !current || !items.length || searching) return;
+    const run = ++searchRun.current;
+    setSearching(true);
+    try {
+      let list = items;
+      let all = olderHere?.items ?? [];
+      let more = hasMore;
+      let loaded = false;
+      while (more && new Date(list[0]!.createdAt).getTime() >= start) {
+        const res = await api<Chat>(`/api/companies/${company.id}/chat?agentId=${current.id}&before=${list[0]!.id}`);
+        if (searchRun.current !== run) return;
+        loaded = true;
+        all = [...res.items, ...all];
+        list = [...res.items, ...list];
+        more = (res.hasMore ?? false) && res.items.length > 0;
+      }
+      if (loaded) setOlder({ key: convKey, items: all, hasMore: more });
+      const target = firstOnOrAfter(list, start);
+      const nextDay = new Date(start);
+      nextDay.setDate(nextDay.getDate() + 1);
+      const day = (iso: string) => new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "long", year: "numeric" });
+      if (!target) {
+        setDateNote(`There are no messages on or after ${day(new Date(start).toISOString())}.`);
+      } else {
+        if (new Date(target.createdAt).getTime() >= nextDay.getTime()) {
+          setDateNote(!more && target.id === list[0]!.id ? `This chat doesn't go back that far: it starts on ${day(target.createdAt)}.` : `No messages on that day; showing the next one, on ${day(target.createdAt)}.`);
+        }
+        setJump({ id: target.id });
+      }
+      setError(null);
+    } catch (err) {
+      if (searchRun.current === run) setError((err as Error).message);
+    } finally {
+      if (searchRun.current === run) setSearching(false);
+    }
+  };
   const send = (e?: FormEvent, to = current, body = text) => {
     e?.preventDefault();
     // From the box, the attachment links go on when sending; a message passed in whole (Ask the CEO) is sent as it is.
@@ -392,7 +584,46 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
                   {preparing ? "Preparing" : "Download"}
                 </button>
               </header>
-              <div className="chat-log" role="log" aria-live="polite" ref={logRef}>
+              <div className="chat-find" role="search">
+                <input
+                  type="search"
+                  aria-label="Find in this conversation"
+                  placeholder="Find in this conversation"
+                  value={findText}
+                  onChange={(e) => setFindText(e.target.value)}
+                  onKeyDown={onFindKey}
+                />
+                {query && (
+                  <span className="muted" role="status">
+                    {spots.length ? `${here + 1} of ${spots.length}` : "No matches"}
+                  </span>
+                )}
+                {query && (
+                  <>
+                    <button type="button" className="btn" onClick={() => step(-1)} disabled={spots.length < 2} title="Previous match">
+                      Previous
+                    </button>
+                    <button type="button" className="btn" onClick={() => step(1)} disabled={spots.length < 2} title="Next match">
+                      Next
+                    </button>
+                  </>
+                )}
+                {query && hasMore && (
+                  <button type="button" className="btn" onClick={() => void searchOlder()} disabled={searching}>
+                    {searching ? "Searching…" : "Search older messages"}
+                  </button>
+                )}
+                <label className="chat-date">
+                  Go to date
+                  <input type="date" onChange={(e) => void goToDate(e.target.value)} disabled={searching} />
+                </label>
+                {(findNote || dateNote) && (
+                  <p className="muted" role="status">
+                    {dateNote ?? findNote}
+                  </p>
+                )}
+              </div>
+              <div className="chat-log" role="log" aria-live="polite" ref={logRef} onScroll={onLogScroll}>
                 {hasMore && (
                   <button type="button" className="btn" onClick={() => void loadOlder()} disabled={loadingOlder}>
                     {loadingOlder ? "Loading…" : "Load older messages"}
@@ -408,6 +639,20 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
                 )}
                 {items.map((m, i) => {
                   const trace = m.trace;
+                  // Matches are numbered in the order they are drawn, the same order findSpots counted them.
+                  let seq = 0;
+                  const mark = (words: string): ReactNode =>
+                    !query
+                      ? words
+                      : splitHits(words, query).map((s: Segment, k) =>
+                          s.hit ? (
+                            <mark key={k} className={`find-hit${curSpot?.id === m.id && curSpot.n === seq++ ? " current" : ""}`}>
+                              {s.text}
+                            </mark>
+                          ) : (
+                            <Fragment key={k}>{s.text}</Fragment>
+                          ),
+                        );
                   return (
                     <div key={m.id} id={`chat-msg-${m.id}`} className={`chat-msg ${m.role}${trace ? " has-trace" : ""}${m.id === messageId ? " found" : ""}`}>
                       {trace && m.role === "assistant" && (
@@ -422,19 +667,34 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
                       <p>
                         {m.text.includes(ASK_CEO) && ceo ? (
                           <>
-                            {linked(m.text.split(ASK_CEO)[0]!)}
+                            {linked(m.text.split(ASK_CEO)[0]!, undefined, {}, mark)}
                             <button type="button" className="linkish" onClick={() => send(undefined, ceo, items.slice(0, i).reverse().find((x) => x.role === "owner")?.text ?? "")}>
                               Ask the CEO
                             </button>
                           </>
                         ) : (
-                          linked(m.text)
+                          linked(m.text, undefined, {}, mark)
                         )}
                       </p>
                       <small>
                         {m.role === "owner" ? "You" : m.role === "assistant" ? current.name : "Boss Man"} · {when(m.createdAt)}
                       </small>
                       {m.role === "owner" && <RememberThis companyId={company.id} text={m.text} />}
+                      <button type="button" className="linkish msg-link-btn" onClick={() => void copyMessageLink(m.id)}>
+                        {copied === m.id ? "Link copied" : "Copy link"}
+                      </button>
+                      {linkShown?.id === m.id && (
+                        <label className="msg-link-box">
+                          Couldn't copy here. Copy the link by hand:
+                          <input
+                            className="mono"
+                            readOnly
+                            autoFocus
+                            value={linkShown.link}
+                            onFocus={(e) => e.currentTarget.select()}
+                          />
+                        </label>
+                      )}
                     </div>
                   );
                 })}
@@ -454,6 +714,11 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
                   </div>
                 )}
                 <div ref={end} />
+                {far && (
+                  <button type="button" className="btn primary jump-newest" onClick={jumpToNewest}>
+                    {newBelow > 0 ? `${newBelow} new ↓` : "Jump to newest ↓"}
+                  </button>
+                )}
               </div>
               <form onSubmit={send} className="chat-form">
                 <OwnerMessageBox

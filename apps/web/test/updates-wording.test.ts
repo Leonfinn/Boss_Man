@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { atTime, checkSentence, drainTiming, deployerLine, historyWhat, inAbout, isReplaced, runsSentence, waitCancelLabel, waitLine, type DeployWaitView, type HistoryRow, type RunnerCheckView, type SelfDeployView, type WrapUpRun } from "../src/pages/settings/updates";
+import { atTime, checkSentence, drainTiming, deployerLine, historyWhat, inAbout, isReplaced, runsSentence, waitCancelLabel, waitLine, wrapUpFor, type DeployWaitView, type HistoryRow, type RunnerCheckView, type SelfDeployView, type WrapUpRun } from "../src/pages/settings/updates";
 import { when } from "../src/pages/Runs";
 
 // BOS-1846: the sentences the owner reads in Settings → Updates, pinned with a fixed clock. Clock times are built
@@ -148,5 +148,23 @@ describe("historyWhat", () => {
   });
   it("a server row with no changes is just Server", () => {
     expect(historyWhat(row({ changes: 0 }))).toBe("Server");
+  });
+});
+
+describe("wrapUpFor (BOS-2056)", () => {
+  it("an explicit answer wins over the kind", () => {
+    expect(wrapUpFor({ kind: "wrapup", wrapForUpdate: "server" })).toEqual({ forUpdate: "server", at: null });
+    expect(wrapUpFor({ kind: "update", wrapForUpdate: "runner" })).toEqual({ forUpdate: "runner", at: null });
+    expect(wrapUpFor({ kind: "update", wrapForUpdate: "none" })).toEqual({ forUpdate: "none", at: null });
+  });
+  it("a plain wrap-up is for no update; a hold that joined an update is for the runner update", () => {
+    expect(wrapUpFor({ kind: "wrapup" })).toEqual({ forUpdate: "none", at: null });
+    expect(wrapUpFor({ kind: "update" })).toEqual({ forUpdate: "runner", at: null });
+    expect(wrapUpFor({})).toEqual({ forUpdate: "runner", at: null });
+  });
+  it("names when it was asked: wrapSince first, then since, then null", () => {
+    expect(wrapUpFor({ kind: "update", wrapSince: iso(0), since: iso(-5) })).toEqual({ forUpdate: "runner", at: iso(0) });
+    expect(wrapUpFor({ kind: "wrapup", since: iso(-5) })).toEqual({ forUpdate: "none", at: iso(-5) });
+    expect(wrapUpFor({ kind: "update", wrapSince: undefined, since: undefined })).toEqual({ forUpdate: "runner", at: null });
   });
 });

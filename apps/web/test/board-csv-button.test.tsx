@@ -55,7 +55,7 @@ describe("Board Download CSV (BOS-2258)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Download CSV" }));
     const text = await got.text();
     expect(got.name).toMatch(/^board-my-app-\d{4}-\d{2}-\d{2}\.csv$/);
-    expect(text.startsWith("Reference,Title,Column,Assignee,Risk,Size,Feature,Priority 1,Last activity\r\n")).toBe(true);
+    expect(text.startsWith("Reference,Title,Column,Assignee,Risk,Size,Feature,Priority 1,Last activity,Days in state,Build\r\n")).toBe(true);
     expect(text).toContain('APP-1,"Fix, ""it""\nnow",Backlog,Developer,high,3,Export,yes,');
     expect(text.trimEnd().split("\r\n").length).toBe(4);
   });

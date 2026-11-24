@@ -68,6 +68,8 @@ export function serverAdminRoutes(
 
   // The runner update hold (docs/09-self-deploy.md, phase 2): the banner's numbers, a manual start, and cancel.
   owner.get("/api/maintenance", async () => maintenance.status());
+  // BOS-2408: each past update wait, kept in the database (start, swap tries, notable moments, how it ended).
+  owner.get("/api/maintenance/history", async (req) => ({ holds: await maintenance.history(z.coerce.number().int().min(1).max(100).catch(20).parse((req.query as { limit?: string }).limit)) }));
   // The Settings → Runner update panel: the live state first, then the last update as history (BOS-465).
   owner.get("/api/runner-report", async () => runnerReport.updatePanel());
   owner.post("/api/maintenance/start", async (req, reply) => {
@@ -182,10 +184,13 @@ export function serverAdminRoutes(
   };
   owner.get("/api/companies/:id/deploy-targets", async (req) => {
     const { id } = IdParam.parse(req.params);
-    const [targets, last] = await Promise.all([deploysSvc.listTargets(id), deploysSvc.lastSucceeded(id)]);
+    const [targets, last, latest] = await Promise.all([deploysSvc.listTargets(id), deploysSvc.lastSucceeded(id), deploysSvc.latestAttempts(id)]);
     return targets.map((t) => {
       const d = last.get(t.id);
-      return { ...t, lastDeploy: d ? { id: d.id, ref: d.ref, commit: d.commit, at: d.finishedAt, tagName: d.tagName, tagResult: d.tagResult, tagFrom: d.tagFrom, tagTo: d.tagTo } : null };
+      const n = latest.get(t.id);
+      // BOS-2464: only when the newest deploy is not the last success (failed, refused, waiting or running).
+      const latestAttempt = n && n.id !== d?.id ? { status: n.status, outcome: n.outcome, at: (n.finishedAt ?? n.createdAt).toISOString() } : null;
+      return { ...t, latestAttempt, lastDeploy: d ? { id: d.id, ref: d.ref, commit: d.commit, at: d.finishedAt, tagName: d.tagName, tagResult: d.tagResult, tagFrom: d.tagFrom, tagTo: d.tagTo } : null };
     });
   });
   owner.post("/api/companies/:id/deploy-targets", async (req, reply) => {
@@ -206,10 +211,21 @@ export function serverAdminRoutes(
     if (r.result === "has_history") return reply.code(409).send({ error: "has_history", field: "has_history", message: `This target has ${r.count} past deploy${r.count === 1 ? "" : "s"}, and removing it would erase ${r.count === 1 ? "it" : "them"} and the target's secret grants.` });
     return reply.code(404).send({ error: "not_found" });
   });
+  // BOS-2329: ship an earlier successful deploy's commit again; approval and the tag step apply as for any deploy.
+  owner.post("/api/deploys/:id/redeploy", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    const { companyId } = z.object({ companyId: Uuid }).parse(req.body);
+    return deploysSvc.redeploy(companyId, id).then((r) => reply.code(201).send(r)).catch(deployErrors(reply));
+  });
+  // The last 30 days of one target's deploys: counts, median time to finish, last success.
+  owner.get("/api/deploys/summary", async (req) => {
+    const { targetId } = z.object({ targetId: Uuid }).parse(req.query);
+    return deploysSvc.summary(targetId);
+  });
   owner.get("/api/deploys", async (req) => {
-    const q = z.object({ companyId: Uuid.optional(), targetId: Uuid.optional(), limit: z.coerce.number().int().min(1).optional(), before: Uuid.optional() }).parse(req.query);
+    const q = z.object({ companyId: Uuid.optional(), targetId: Uuid.optional(), limit: z.coerce.number().int().min(1).optional(), before: Uuid.optional(), status: z.enum(["succeeded", "failed"]).optional() }).parse(req.query);
     // No paging parameters: the whole list, as before. Any of them: one newest-first page.
-    const paged = q.targetId !== undefined || q.limit !== undefined || q.before !== undefined;
-    return deploysSvc.list(q.companyId, paged ? { targetId: q.targetId, limit: q.limit, before: q.before } : undefined);
+    const paged = q.targetId !== undefined || q.limit !== undefined || q.before !== undefined || q.status !== undefined;
+    return deploysSvc.list(q.companyId, paged ? { targetId: q.targetId, limit: q.limit, before: q.before, status: q.status } : undefined);
   });
 }

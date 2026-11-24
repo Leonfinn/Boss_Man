@@ -1,7 +1,7 @@
 // BOS-2288: a ticket in "Merged, watching" may name the event that wakes it (set_ticket_state watching_for +
 // watch_trigger). When the event happens, the watchers of that trigger are woken once each, on their own ticket.
 // BOS-2082 sat watching while 20 GitHub runs failed and nothing woke its owner; this closes that gap.
-import { and, eq, isNotNull } from "drizzle-orm";
+import { and, eq, isNotNull, ne, or } from "drizzle-orm";
 import { WATCH_TRIGGERS, type WatchTrigger } from "@boss-man/shared";
 import { tickets } from "../db/schema.js";
 import type { Db } from "../db/client.js";
@@ -24,7 +24,14 @@ export async function wakeWatchers(db: Db, notify: WatchNotify | undefined, trig
   const rows = await db
     .select({ id: tickets.id, agentId: tickets.assigneeAgentId, title: tickets.title, watchingFor: tickets.watchingFor })
     .from(tickets)
-    .where(and(eq(tickets.watchTrigger, trigger), eq(tickets.systemState, "blocked"), isNotNull(tickets.mergeCommit), isNotNull(tickets.assigneeAgentId)));
+    .where(
+      and(
+        eq(tickets.watchTrigger, trigger),
+        isNotNull(tickets.assigneeAgentId),
+        // BOS-2417: a check ticket that took the watch of its parent (closed at go-live) has no merge of its own.
+        or(and(eq(tickets.systemState, "blocked"), isNotNull(tickets.mergeCommit)), and(ne(tickets.systemState, "done"), isNotNull(tickets.checksTicketId))),
+      ),
+    );
   let woken = 0;
   for (const r of rows) {
     if (!r.agentId || r.id === opts?.exceptTicketId) continue;

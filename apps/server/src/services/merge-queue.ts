@@ -16,6 +16,7 @@ import { clashWords } from "./merge-line.js";
 import { mergeLineHealth, startBrakeOff, type StartBrakeOff, type HeldBehindFix, type HeldFix, type MergeLineHealth } from "./merge-line-health.js";
 import { goLiveWaitOf } from "./go-live-wait.js";
 import { goLiveWaitWords } from "@boss-man/shared";
+import { landingEtas, turnOverdue } from "./landing-turn-eta.js";
 
 /** BOS-1942: the place a check job's record names: a check worker by its name, or the company runner (the server's own machine). */
 const placeOf = (workerId: string | null, worker: string | null) => (workerId ? (worker ?? "a check worker") : "company runner");
@@ -156,7 +157,27 @@ export type RunningNow = {
  * when it began that step (a running check's own start, never the landing's), `next` what happens after, `blocker` what is
  * in the way (null when nothing is).
  */
-export type StatusLine = { step: string; since: string; next: string; blocker: string | null };
+export type StatusLine = {
+  step: string;
+  since: string;
+  next: string;
+  blocker: string | null;
+  /** BOS-2359: when the ticket is estimated to land (ISO): one usual GitHub wait after its run began, or after the landing turn ahead of it. Absent when not known. */
+  landsAt?: string;
+};
+
+/**
+ * BOS-2359: a project's landing turn as the Merges tab shows it: who holds it, what it waits for, when it should land, and the
+ * usual GitHub wait that estimate rests on (the median of recent passed waits; null with too few). `overdue`: held for over
+ * twice the usual wait (the CEO's alert fires at the same point).
+ */
+export type LandingTurnView = {
+  projectId: string;
+  holder: { ticketId: string; ref: string | null; title: string | null; since: string; waitingFor: string; waitingSince: string | null; landsAt: string | null; overdue: boolean };
+  usualWaitMin: number | null;
+  samples: number;
+  line: Array<{ ticketId: string; ref: string | null; title: string | null; landsAt: string | null }>;
+};
 
 /**
  * waiting_for_ci (BOS-1871): its landing is under way, its check holds no slot any more, and it waits only for GitHub CI on its merge copy.
@@ -265,6 +286,8 @@ export type MergeQueueView = {
   line: MergeLineHealth;
   /** R47: set while the start brake has no limit and the line has grown for an hour; the banner and the CEO's wake read it. */
   startBrakeOff?: StartBrakeOff | null;
+  /** BOS-2359: each project's landing turn in this company, with the estimates; empty when no turn is held. */
+  landingTurns?: LandingTurnView[];
 };
 
 /** One plain line from a check's last output: the first error-looking line, or the last line. */
@@ -464,6 +487,10 @@ export function mergeQueueService(
     emptySeatSince?: (companyId: string) => Promise<number | null>;
     /** BOS-1594: whether a check worker is connected and ready for this company; the capacity advice names a worker only when it is not. */
     workerReady?: (companyId: string) => Promise<boolean>;
+    /** BOS-2359: the company's landing turns (review.landingTurnStatus); absent: none are shown. */
+    landingTurns?: (companyId: string) => Promise<Array<{ projectId: string; holder: { ticketId: string; ref: string | null; title: string | null; since: string } | null; line: Array<{ ticketId: string; ref: string | null; title: string | null }> }>>;
+    /** BOS-2359: the usual GitHub wait of a landing (landing-turn-eta.ts usualCiWait); null with too few recent landings. */
+    usualCiWait?: (companyId: string) => Promise<{ ms: number; samples: number } | null>;
     now?: () => Date;
   },
 ) {
@@ -953,6 +980,35 @@ export function mergeQueueService(
         }
         w.statusLine = { step: stepOf.get(w.ticketId) ?? w.label, since: sinceOf.get(w.ticketId) ?? t.toISOString(), next: w.next ?? "", blocker: blockerOf.get(w.ticketId) ?? null };
       }
+      // BOS-2359: who holds each landing turn, what it waits for, and when it and the tickets behind it should land: one usual
+      // GitHub wait (the median of recent passed waits) per landing. The estimate goes onto the same status line (BOS-1517).
+      const landingTurns: LandingTurnView[] = [];
+      const turns = deps.landingTurns ? await deps.landingTurns(companyId).catch(() => []) : [];
+      const usual = turns.some((s) => s.holder) && deps.usualCiWait ? await deps.usualCiWait(companyId).catch(() => null) : null;
+      const lineOf = (id: string) => running.find((r) => r.ticketId === id)?.statusLine ?? waiting.find((w) => w.ticketId === id)?.statusLine;
+      for (const s of turns) {
+        if (!s.holder) continue;
+        const h = s.holder;
+        const ci = ciWait.get(h.ticketId);
+        const run = running.find((r) => r.ticketId === h.ticketId);
+        const waitingFor = ci ? "GitHub run" : run ? "its check" : "its merge to go on";
+        const etas = landingEtas({ holderSinceMs: Date.parse(h.since), ciSinceMs: ci ? Date.parse(ci.since) : null, lineIds: s.line.map((x) => x.ticketId), usualMs: usual?.ms ?? null, nowMs: t.getTime() });
+        const at = (ms: number | null | undefined) => (ms == null ? null : new Date(ms).toISOString());
+        const hl = lineOf(h.ticketId);
+        if (hl && etas.holder !== null) hl.landsAt = at(etas.holder)!;
+        for (const x of s.line) {
+          const l = lineOf(x.ticketId);
+          const when = etas.line.get(x.ticketId);
+          if (l && when !== undefined) l.landsAt = at(when)!;
+        }
+        landingTurns.push({
+          projectId: s.projectId,
+          holder: { ...h, waitingFor, waitingSince: ci ? new Date(ci.since).toISOString() : null, landsAt: at(etas.holder), overdue: turnOverdue(Date.parse(h.since), usual?.ms ?? null, t.getTime()) },
+          usualWaitMin: usual ? mins(usual.ms) : null,
+          samples: usual?.samples ?? 0,
+          line: s.line.map((x) => ({ ...x, landsAt: at(etas.line.get(x.ticketId)) })),
+        });
+      }
       waiting.sort((a, b) => (a.place ?? Infinity) - (b.place ?? Infinity) || Number(b.urgent) - Number(a.urgent) || b.minutes - a.minutes);
 
       const recentRows = await recent(companyId, prefix, t);
@@ -984,6 +1040,7 @@ export function mergeQueueService(
         // BOS-1594: the side-menu "stuck" badge follows the same verdict as the banner: 1 while the line is stuck, 0 when merging (even slowly) or healthy.
         stuckCount: line.state === "stuck" ? 1 : 0,
         line,
+        ...(landingTurns.length ? { landingTurns } : {}),
       };
     },
     /** BOS-1517: a ticket's status line for its page: from the same live view as the queue, or null when it isn't in the merge pipeline. */

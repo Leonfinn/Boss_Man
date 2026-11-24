@@ -1,7 +1,9 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { isInfiniteModel } from "@boss-man/shared";
-import { api, type Company, type Transcript, type TranscriptItem } from "../api";
+import { api, usd, type Company, type RunRow, type Transcript, type TranscriptItem } from "../api";
+import { ticketSiblings, type Siblings } from "../run-siblings";
+import { LoadError } from "../components/LoadError";
 import { download } from "../csv";
 import { away } from "../server-watch";
 import { stopRun } from "../stop-run";
@@ -9,9 +11,10 @@ import { useDraft } from "../drafts";
 import { useImageAttach, withAttachments } from "../components/ImageAttach";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { describe, MAX_ITEMS, useTranscript } from "../transcript";
+import { runTimeSplit, spanWords } from "../run-time-split";
 import { usePoll } from "../hooks";
 import { permissionAnsweredBy, permissionOutcome, permissionRule, type PermissionRow } from "../permissions-in-run";
-import { failureReason, outcomeTag, usage, when } from "./Runs";
+import { failureReason, outcomeTag, tokens, usage, when } from "./Runs";
 import { NotFoundBlock } from "../components/NotFoundBlock";
 import { Loader } from "../components/Loader";
 import { CopyLinkButton } from "../components/CopyLinkButton";
@@ -148,6 +151,23 @@ function PermissionsInRun({ runId, live }: { runId: string; live: boolean }) {
 
 const CUT = 2_000;
 /** One run as Markdown (BOS-2322): what the Run page shows, in order; long text is cut with "(cut)". */
+/**
+ * The run's model, token counts and cost as one line (BOS-2367). A count the agent didn't report reads
+ * "not reported", never 0; a plan (subscription) run costs allowance, so it says "plan use" not money.
+ */
+export function runFigures(run: Pick<Transcript["run"], "model" | "inputTokens" | "outputTokens" | "cachedReadTokens" | "cachedWriteTokens" | "fundingKind" | "costMicros">): string {
+  const part = (n: number | null | undefined, what: string) => (n == null ? `${what} not reported` : `${tokens(n)} ${what}`);
+  const cost = run.fundingKind === "subscription" ? "plan use" : usd(run.costMicros ?? 0);
+  return [
+    run.model ?? "default model",
+    part(run.inputTokens, "in"),
+    part(run.outputTokens, "out"),
+    part(run.cachedReadTokens, "cache read"),
+    part(run.cachedWriteTokens, "cache write"),
+    cost,
+  ].join(" · ");
+}
+
 export function runMarkdown(run: Transcript["run"], ticketRef: string | null, items: TranscriptItem[]): string {
   const utc = (iso: string) => `${iso.slice(0, 16).replace("T", " ")} UTC`;
   const cut = (s: string) => (s.length > CUT ? `${s.slice(0, CUT)} (cut)` : s);
@@ -168,8 +188,110 @@ export function runMarkdown(run: Transcript["run"], ticketRef: string | null, it
   return `${head.join("\n")}\n${lines.join("\n")}`;
 }
 
+/** "Where the time went": the run's time by tool, its longest calls and permission waits. A plain fold, no button. */
+export function TimeSplitFold({ run, items, onGoTo }: { run: Transcript["run"]; items: TranscriptItem[]; onGoTo: (index: number) => void }) {
+  const live = !run.endedAt;
+  const split = runTimeSplit(items, run.endedAt ? Date.parse(run.endedAt) : null, Date.now());
+  return (
+    <details data-testid="run-time-split" style={{ margin: "8px 0" }}>
+      <summary>Where the time went{split && live ? " (so far)" : ""}</summary>
+      {!split ? (
+        <p className="muted">Not available for this run.</p>
+      ) : (
+        <>
+          <p className="muted" style={{ fontSize: 13 }}>
+            {live ? "So far, " : ""}
+            {spanWords(split.totalMs)} in all.
+          </p>
+          <table>
+            <tbody>
+              {split.rows.map((r) => (
+                <tr key={r.key}>
+                  <td>{r.label}</td>
+                  <td className="mono">{spanWords(r.ms)}</td>
+                  <td className="mono muted">{Math.round(r.share * 100)}%</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {split.longest.length > 0 && (
+            <>
+              <h3 style={{ fontSize: 14 }}>Longest tool calls</h3>
+              <ol>
+                {split.longest.map((c, i) => (
+                  <li key={i}>
+                    {c.tool}: {c.what || "(no detail)"} · <span className="mono">{spanWords(c.ms)}</span>
+                    {c.noResult && <span className="tag"> no result</span>}{" "}
+                    <a
+                      href={window.location.hash || "#"}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        onGoTo(c.index);
+                      }}
+                    >
+                      Go to step
+                    </a>
+                  </li>
+                ))}
+              </ol>
+            </>
+          )}
+        </>
+      )}
+    </details>
+  );
+}
+
+/** "Other runs on this ticket": every run of the same ticket, oldest first, this one marked. */
+export function SiblingRunsFold({ runId, sibs, error, onRetry }: { runId: string; sibs: Siblings | null; error: Error | null; onRetry: () => void }) {
+  return (
+    <details data-testid="run-siblings" style={{ margin: "8px 0" }}>
+      <summary>Other runs on this ticket{sibs ? ` (${sibs.rows.length})` : ""}</summary>
+      {error && !sibs ? (
+        <LoadError what="the ticket's other runs" message={error.message} onRetry={onRetry} />
+      ) : !sibs ? (
+        <Loader label="Loading the ticket's runs" />
+      ) : (
+        <table>
+          <thead>
+            <tr>
+              <th>Started</th>
+              <th>Agent</th>
+              <th>Result</th>
+              <th>Length</th>
+              <th>Cost</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {sibs.rows.map((r) => (
+              <tr key={r.id} aria-current={r.id === runId ? "true" : undefined}>
+                <td>
+                  <a href={`#/runs/${r.id}`}>{when(r.startedAt)}</a>
+                </td>
+                <td>{r.agent ?? "An agent"}</td>
+                <td>{outcomeTag(r.endedAt ? (r.outcome ?? "end_turn") : null)}</td>
+                <td className="mono">{r.endedAt ? spanWords(Date.parse(r.endedAt) - Date.parse(r.startedAt)) : "running"}</td>
+                <td className="mono">{r.fundingKind === "subscription" ? "plan use" : usd(r.costMicros ?? 0)}</td>
+                <td>{r.id === runId && <strong>This run</strong>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </details>
+  );
+}
+
 export function Run({ runId, companies }: { runId: string; companies: Company[] }) {
   const { run, items, dropped, error } = useTranscript(runId);
+  const sibQuery = run?.ticketId ? (run.runTicketRef ?? run.ticket ?? "") : "";
+  const sibRes = usePoll(
+    async (signal) => (run?.ticketId && sibQuery ? ticketSiblings(await api<RunRow[]>(`/api/runs/recent?q=${encodeURIComponent(sibQuery)}&limit=200`, { signal }), run) : null),
+    60_000,
+    `siblings:${runId}:${run?.ticketId ?? ""}`,
+  );
+  const sibs = run?.ticketId ? sibRes.data : null;
   const [preparing, setPreparing] = useState(false);
   const [dlError, setDlError] = useState<string | null>(null);
   const downloadRun = async () => {
@@ -229,14 +351,13 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
               {outcomeTag(run.endedAt ? (run.outcome ?? "end_turn") : null)}
               <span>Started {when(run.startedAt)}</span>
               {run.endedAt && <span>Ended {when(run.endedAt)}</span>}
-              <span className="mono">{run.model ?? "default model"}</span>
               {isInfiniteModel(run.model) && (
                 <span className="tag" title="Synthetic Infinite mode: free (doesn't spend the plan's credits) and slow, in a background run slot.">
                   Infinite mode · free, slow
                 </span>
               )}
-              <span className="mono" title={usage(run).title}>
-                {usage(run).text}
+              <span className="mono" title={usage(run).title} data-testid="run-figures">
+                {runFigures(run)}
               </span>
             </p>
           )}
@@ -247,6 +368,16 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
           )}
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {sibs?.previous && (
+            <a className="btn" href={`#/runs/${sibs.previous.id}`}>
+              Previous run
+            </a>
+          )}
+          {sibs?.next && (
+            <a className="btn" href={`#/runs/${sibs.next.id}`}>
+              Next run
+            </a>
+          )}
           {run && (
             <button type="button" className="btn" onClick={() => void downloadRun()} disabled={preparing}>
               {preparing ? "Preparing" : "Download"}
@@ -256,6 +387,8 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
         </div>
       </header>
       {dlError && <p className="error" role="alert">{dlError}</p>}
+      {run?.ticketId && sibQuery && <SiblingRunsFold runId={runId} sibs={sibs} error={sibRes.error} onRetry={sibRes.reload} />}
+      {run && <TimeSplitFold run={run} items={items} onGoTo={(i) => { follow.current = false; rows.scrollToIndex(i, { align: "center" }); }} />}
       {run && !run.endedAt && <Steer runId={runId} companyId={run.companyId} ticketId={run.ticketId} />}
       {dropped > 0 && (
         <p className="muted" style={{ fontSize: 13 }}>

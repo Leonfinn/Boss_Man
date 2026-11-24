@@ -9,9 +9,11 @@ sections:
   - Needs you …
   - Recent tasks
   - Right now …
+  - Weekly summary
 reads: 
   - /api/companies/:id/dashboard
   - /api/companies/:id/merge-queue
+  - /api/companies/:id/weekly-summary/view
 
 ## #/agents
 sections: 
@@ -24,6 +26,7 @@ reads:
   - /api/agent-templates
   - /api/agents/:id/history
   - /api/agents/:id/notes
+  - /api/agents/:id/record
   - /api/companies/:id/agents
   - /api/companies/:id/models
   - /api/companies/:id/review-policy
@@ -36,6 +39,7 @@ sections:
   - Costliest tasks
   - Filter tasks
   - Merged, watching
+  - Month by month
   - On your subscriptions
   - Passed, held
   - Pay-as-you-go spend
@@ -72,11 +76,13 @@ sections:
   - Needs you …
   - Recent tasks
   - Right now …
+  - Weekly summary
 reads: 
   - /api/companies/:id/dashboard
   - /api/companies/:id/merge-queue
   - /api/companies/:id/setup-checklist
   - /api/companies/:id/skill-proposals/:id
+  - /api/companies/:id/weekly-summary/view
   - /api/decisions/answered
   - /api/decisions/tally
   - /api/funding-sources
@@ -90,6 +96,7 @@ sections:
   - Engagements
   - Terms
   - Thread
+  - Work
 reads: 
   - /api/engagements
   - /api/engagements/:id
@@ -118,9 +125,16 @@ reads:
   - /api/companies/:id/feedback
   - /api/companies/:id/feedback-customers
   - /api/companies/:id/feedback-settings
+  - /api/companies/:id/feedback-summary
   - /api/feedback/:id
   - /api/feedback/unprocessed
   - /api/host-facts
+
+## #/merge-history
+sections: 
+  - Merge history
+reads: 
+  - /api/companies/:id/merge-history
 
 ## #/merge-queue
 sections: 
@@ -149,6 +163,7 @@ sections:
   - Projects (…)
 reads: 
   - /api/companies/:id/projects
+  - /api/companies/:id/projects-summary
   - /api/companies/:id/review-policy
 
 ## #/roadmap
@@ -162,13 +177,17 @@ reads:
 ## #/runs
 sections: 
   - Finished
+  - Longest tool calls
   - Permissions in this run
   - Running now
   - Runs
+  - Waiting to start
 reads: 
+  - /api/companies/:id/wakes/waiting
   - /api/runs
   - /api/runs/:id/permissions
   - /api/runs/:id/transcript
+  - /api/runs/recent
 
 ## #/scrum-master
 sections: 
@@ -178,6 +197,12 @@ reads:
   - /api/companies/:id/watchdog
   - /api/companies/:id/watchdog/actions
   - /api/companies/:id/watchdog/issues
+
+## #/search
+sections: 
+  - Search
+reads: 
+  - /api/companies/:id/search
 
 ## #/settings
 sections: 
@@ -211,6 +236,7 @@ sections:
   - Budgets
   - Costliest tasks
   - Funding sources
+  - Month by month
   - On your subscriptions
   - Pay-as-you-go spend
   - Spending limit
@@ -235,6 +261,8 @@ reads:
   - /api/host-facts
   - /api/run-limits
   - /api/settings/check-queue
+  - /api/settings/check-workers/line
+  - /api/settings/check-workers/stats
   - /api/settings/merge-carry
   - /api/settings/wait-for-ci
   - /api/wip-limits
@@ -252,6 +280,7 @@ reads:
   - /api/notification-settings
   - /api/notification-settings/phone-login/:id
   - /api/notifications/pushes
+  - /api/notifications/week
   - /api/setup
 
 ## #/settings/<company>/permissions
@@ -269,6 +298,8 @@ reads:
   - /api/companies/:id/second-opinion
   - /api/companies/:id/second-opinion/stats
   - /api/policy-rules
+  - /api/policy-rules/most-asked
+  - /api/policy-rules/usage
   - /api/secrets
 
 ## #/settings/<company>/reviews
@@ -329,6 +360,7 @@ reads:
   - /api/companies/:id/chapters
   - /api/companies/:id/retro-settings
   - /api/companies/:id/standing-rules
+  - /api/companies/:id/standing-rules/history
 
 ## #/settings/<company>/tools
 sections: 
@@ -341,6 +373,7 @@ reads:
   - /api/companies/:id/penpot
   - /api/companies/:id/projects
   - /api/deploys
+  - /api/deploys/summary
 
 ## #/settings/<company>/transfer
 sections: 
@@ -354,11 +387,14 @@ sections:
   - Now running
   - Other actions
   - Recent updates
+  - Server health
   - Stop all work
   - Updates
 reads: 
+  - /api/data-health
   - /api/kill-switch
   - /api/maintenance
+  - /api/maintenance/history
   - /api/runner-report
   - /api/self-deploy
   - /api/self-deploy/history
@@ -392,16 +428,20 @@ sections:
   - Add a skill
   - Add from another company
   - Files
+  - History
   - Skill proposals
   - Skills
 reads: 
   - /api/companies/:id/skill-proposals
   - /api/companies/:id/skills
   - /api/companies/:id/skills/:id
+  - /api/companies/:id/skills/:id/history
   - /api/companies/:id/skills/elsewhere
+  - /api/companies/:id/skills/updates
 
 ## #/spend
 sections: 
+  - Costliest tickets
   - Spend
 reads: 
   - /api/companies/:id/spend-report
@@ -410,6 +450,7 @@ reads:
 sections: 
   - About
   - Activity
+  - Checks
   - Feature
   - Related
   - Roadmap, feature and dependencies
@@ -425,6 +466,7 @@ reads:
   - /api/runs/:id/transcript
   - /api/tickets/:id
   - /api/tickets/:id/artifacts
+  - /api/tickets/:id/checks
   - /api/tickets/:id/ci
   - /api/tickets/:id/diff
   - /api/tickets/:id/images
@@ -435,15 +477,18 @@ reads:
   - /api/tickets/:id/related
   - /api/tickets/:id/reviews
   - /api/tickets/:id/runs
+  - /api/tickets/:id/state-history
 
 ## #/wiki
 sections: 
   - Company brief
+  - Links
   - Wiki
 reads: 
   - /api/companies/:id/brief
   - /api/companies/:id/wiki
   - /api/companies/:id/wiki-deleted
+  - /api/companies/:id/wiki-link-health
   - /api/companies/:id/wiki-revisions/:id
   - /api/companies/:id/wiki-semantic
   - /api/companies/:id/wiki/:id
@@ -457,7 +502,9 @@ sections:
   - Latest retro
   - Roles
   - Sizes
+  - Week by week
   - What this shows
+  - Where tickets wait
   - Workflow report
 reads: 
   - /api/companies/:id/retros/latest

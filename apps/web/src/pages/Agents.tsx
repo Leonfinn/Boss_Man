@@ -1,6 +1,6 @@
 // Agents (R62): who works for the company, what each is doing and has used this month, and
 // hiring from role templates. Every change is kept with what it was before, and can be undone.
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { NoCompany } from "../components/NoCompany";
 import { Star } from "lucide-react";
 import { DAY_NAMES, describeRoles, HARNESSES, isInfiniteModel, reviewRolesOf, SENIOR_DEV_TEMPLATE, THINKING_LEVELS, type ReviewPolicy as SharedPolicy } from "@boss-man/shared";
@@ -12,11 +12,13 @@ import { RowMenu } from "../components/RowMenu";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
+import { span } from "./Workflow";
 import { buildCsv, download } from "../csv";
 import { clearDraft, saveDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
 import { MoreAbout } from "../components/MoreAbout";
 
+type AgentRecord = { days: number; finished: number; passedFirstTime: number; sendBacks: number; medianMergeMs: number | null; costPerFinishedMicros: number | null; recent: Array<{ id: string; ref: string | null; title: string; size: number | null; finishedAt: string; sendBacks: number; costMicros: number }> };
 type Template = { id: string; title: string; role: "manager" | "worker"; modelTier: string; summary: string; instructions: string };
 export type AgentRow = {
   id: string;
@@ -433,6 +435,7 @@ function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: Ag
   // The instructions box is kept in this browser as it is typed (DR-045); it goes once saved.
   const instructionsKey = `agent-instructions/${a.id}`;
   const history = usePoll((signal) => api<Change[]>(`/api/agents/${a.id}/history`, { signal }), 60_000, `history-${a.id}`);
+  const record = usePoll((signal) => api<AgentRecord>(`/api/agents/${a.id}/record`, { signal }), 60_000, `record-${a.id}`);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const sv = useSaveState(form);
   const [busy, setBusy] = useState(false);
@@ -534,6 +537,50 @@ function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: Ag
           {note.text}
         </p>
       )}
+      <details>
+        <summary className="section-label">Record (last 30 days)</summary>
+        {record.data ? (
+          record.data.finished === 0 ? (
+            <p className="muted">Nothing finished in the last 30 days</p>
+          ) : (
+            <>
+              <p>
+                {record.data.finished} finished · {record.data.passedFirstTime} passed review first time · {record.data.sendBacks} send-backs · median {span(record.data.medianMergeMs)} to merge · {usd(record.data.costPerFinishedMicros ?? 0)} per finished ticket
+              </p>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Ticket</th>
+                    <th>Title</th>
+                    <th>Size</th>
+                    <th>Finished</th>
+                    <th>Send-backs</th>
+                    <th>Cost</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {record.data.recent.map((t) => (
+                    <tr key={t.id}>
+                      <td>
+                        <a href={`#/tickets/${t.id}`}>{t.ref ?? "a task"}</a>
+                      </td>
+                      <td>{t.title}</td>
+                      <td>{t.size ?? "–"}</td>
+                      <td>{when(t.finishedAt)}</td>
+                      <td>{t.sendBacks}</td>
+                      <td>{usd(t.costMicros)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          )
+        ) : record.error ? (
+          <LoadError what="the record" message={record.error.message} onRetry={record.reload} />
+        ) : (
+          <Loader label="Loading record" size={16} />
+        )}
+      </details>
       <h3 className="section-label">History</h3>
       {history.data?.length ? (
         <ol className="history">
@@ -764,17 +811,27 @@ function CeoNotes({ agentId }: { agentId: string }) {
 }
 
 
-export function Agents({ company, onChanged }: { company: Company | undefined; onChanged: () => void }) {
+export function Agents({ company, agentId, onChanged }: { company: Company | undefined; agentId?: string; onChanged: () => void }) {
   const list = usePoll((signal) => (company ? api<AgentRow[]>(`/api/companies/${company.id}/agents`, { signal }) : Promise.resolve([])), 15_000, `agents-${company?.id ?? "none"}`);
   const templates = usePoll((signal) => api<{ templates: Template[]; ceo?: Omit<Template, "role"> }>("/api/agent-templates", { signal }), 3_600_000, "agent-templates");
   const sources = usePoll((signal) => api<FundingSource[]>("/api/funding-sources", { signal }), 60_000, "sources");
   const models = usePoll((signal) => (company ? api<ModelLists>(`/api/companies/${company.id}/models`, { signal }) : Promise.resolve(null)), 300_000, `models-${company?.id ?? "none"}`);
   const reviewPolicy = usePoll((signal) => (company ? api<ReviewPolicy>(`/api/companies/${company.id}/review-policy`, { signal }) : Promise.resolve(null)), 60_000, `agent-reviews-${company?.id ?? "none"}`);
   const [hiring, setHiring] = useState(false);
-  const [open, setOpen] = useState<string | null>(null);
+  // #/agents/<id> (the search box, BOS-2347) opens that agent's panel. App remounts the page on every address
+  // change, so the first value is enough; the panel is scrolled into view once the list has drawn it.
+  const [open, setOpen] = useState<string | null>(agentId ?? null);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState("");
+  const shown = useRef(false);
+  useEffect(() => {
+    if (!agentId || shown.current || !list.data) return;
+    const panel = document.getElementById(`agent-panel-${agentId}`);
+    if (!panel) return;
+    shown.current = true;
+    panel.closest("li")?.scrollIntoView?.({ block: "start" });
+  }, [agentId, list.data]);
   if (!company) return <NoCompany />;
   const refreshModels = async () => {
     const r = await api<{ probed: Record<string, { ok: boolean; error?: string }> }>(`/api/companies/${company!.id}/models/refresh`, { method: "POST" });

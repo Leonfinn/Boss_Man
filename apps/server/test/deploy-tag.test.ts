@@ -267,3 +267,43 @@ describe("the deploy tag setting (DR-033)", () => {
     expect(t!.lastDeploy.at).toBeTruthy();
   });
 });
+
+describe("deploying an earlier version again (BOS-2329)", () => {
+  it("creates one request for the earlier commit (not the branch tip), linked to it, waiting for approval; and refuses the rest with nothing created", async () => {
+    const c = (ctx = await setup());
+    await c.target({ name: "Production", kind: "ssh", endpoint: "deploy@host.example", isProduction: true, liveTag: liveTag(c) });
+    const old = await c.deploy("Production", "feature", "succeeded"); // commit F, the earlier good deploy
+    const latest = await c.deploy("Production", "main", "succeeded"); // commit B
+    const bad = await c.deploy("Production", "main", "failed");
+    expect([old.commit, latest.commit, bad.commit]).toEqual([c.o.F, c.o.B, c.o.B]);
+    const before = (await c.db.select().from(deploys)).length;
+
+    const r = await c.req("POST", `/api/deploys/${old.id}/redeploy`, { companyId: c.company.id });
+    expect(r.statusCode).toBe(201);
+    const rows = await c.db.select().from(deploys);
+    expect(rows).toHaveLength(before + 1);
+    const again = rows.find((x) => x.redeployOf === old.id)!;
+    // Same target, the earlier commit (the branch tip is B), still waiting for the owner like any production deploy.
+    expect(again).toMatchObject({ status: "pending_approval", commit: c.o.F, ref: c.o.F, targetId: old.targetId, agentId: old.agentId });
+    const card = (await c.db.select().from(decisions)).find((x) => x.status === "open" && (x.context as { deployId?: string }).deployId === again.id)!;
+    expect(card.question).toContain("You asked to deploy again");
+    expect(card.question).toContain(c.o.F.slice(0, 7));
+    // The list the fold reads carries the link.
+    const list = (await c.req("GET", `/api/deploys?companyId=${c.company.id}&targetId=${old.targetId}&limit=20`)).json() as { deploy: { id: string; redeployOf: string | null } }[];
+    expect(list.find((x) => x.deploy.id === again.id)!.deploy.redeployOf).toBe(old.id);
+
+    // A deploy that failed, one that doesn't exist and another company's: refused, nothing created.
+    const count = async () => (await c.db.select().from(deploys)).length;
+    const n = await count();
+    expect((await c.req("POST", `/api/deploys/${bad.id}/redeploy`, { companyId: c.company.id })).statusCode).toBe(409);
+    const other = (await c.req("POST", `/api/companies`, { name: "Other Co" })).json() as { company: { id: string } };
+    const cross = await c.req("POST", `/api/deploys/${old.id}/redeploy`, { companyId: other.company.id });
+    expect(cross.statusCode).toBe(404);
+    // The commit is gone from the repository: a clear message, nothing created.
+    await c.db.update(deploys).set({ commit: "0".repeat(40) }).where(eq(deploys.id, latest.id));
+    const gone = await c.req("POST", `/api/deploys/${latest.id}/redeploy`, { companyId: c.company.id });
+    expect(gone.statusCode).toBe(409);
+    expect(gone.json().message).toContain("no longer in the repository");
+    expect(await count()).toBe(n);
+  });
+});

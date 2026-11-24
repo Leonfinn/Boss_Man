@@ -22,6 +22,12 @@ export class LandingTurns {
 
   private readonly epochs = new Map<string, number>();
 
+  /**
+   * BOS-2361: told when a turn is promoted from the line ("taken") or released by snapshot() ("expired"). The server sets
+   * it once to write the merge-line row; the turn-taking paths that already write their own row don't call it.
+   */
+  onEvent?: (e: { action: "taken" | "expired"; projectId: string; ticketId: string; capMs: number }) => void;
+
   constructor(private readonly now: () => number = Date.now) {}
 
   /**
@@ -89,8 +95,15 @@ export class LandingTurns {
     return (this.next.get(projectId) ?? []).map((x) => x.ticketId);
   }
 
-  /** BOS-2119: every project with a turn held or a line, for server_status. Read only, like line(). */
+  /**
+   * BOS-2119: every project with a turn held or a line, for server_status. BOS-2361: a turn past its cap is released here
+   * (and recorded through onEvent), not shown as held; when no merge polls the turn, nothing else would end it.
+   */
   snapshot(): Array<{ projectId: string; holder: Turn | null; line: string[] }> {
+    for (const projectId of [...this.turns.keys()]) {
+      const c = this.check(projectId);
+      if (c.expired) this.onEvent?.({ action: "expired", projectId, ticketId: c.expired.ticketId, capMs: c.expired.capMs });
+    }
     const ids = new Set([...this.turns.keys(), ...[...this.next].filter(([, l]) => l.length).map(([id]) => id)]);
     return [...ids].map((projectId) => ({ projectId, holder: this.turns.get(projectId) ?? null, line: this.line(projectId) }));
   }
@@ -113,7 +126,10 @@ export class LandingTurns {
   private promote(projectId: string) {
     const line = this.next.get(projectId);
     const n = line?.shift();
-    if (n) this.turns.set(projectId, { ticketId: n.ticketId, since: this.now(), capMs: n.capMs });
+    if (!n) return;
+    this.turns.set(projectId, { ticketId: n.ticketId, since: this.now(), capMs: n.capMs });
+    // BOS-2361: a promotion from the line is a take like a direct one, so it gets its own record.
+    this.onEvent?.({ action: "taken", projectId, ticketId: n.ticketId, capMs: n.capMs });
   }
 }
 

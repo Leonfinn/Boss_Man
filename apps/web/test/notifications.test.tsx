@@ -44,6 +44,25 @@ describe("notifications", () => {
     expect(screen.queryByRole("button", { name: "Show older" })).toBeNull();
   });
 
+  it("groups by day and 'Mark this day read' sends only that day's unread ids (BOS-2441)", async () => {
+    const today = new Date();
+    const old = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 5, 12);
+    const items = [
+      { ...notice("a"), id: "t1", title: "T1" },
+      { ...notice("b"), id: "t2", title: "T2", readAt: today.toISOString() },
+      { ...notice("c"), id: "o1", title: "O1", createdAt: old.toISOString() },
+    ];
+    const f = vi.fn(() => Promise.resolve(new Response("{}", { status: 200, headers: { "content-type": "application/json" } })));
+    vi.stubGlobal("fetch", f);
+    render(<Notifications feed={{ items, unread: 2 }} onChanged={() => {}} />);
+    expect(screen.getByRole("heading", { name: "Today" })).toBeTruthy();
+    expect(screen.getAllByText("1 new").length).toBe(2);
+    fireEvent.click(screen.getAllByRole("button", { name: "Mark this day read" })[0]!);
+    await waitFor(() => expect(f).toHaveBeenCalled());
+    const call = (f.mock.calls as unknown as [string, RequestInit][]).find((c) => c[0] === "/api/notifications/read")!;
+    expect(JSON.parse(call[1].body as string)).toEqual({ ids: ["t1"] });
+  });
+
   it("keeps the rows and shows the error when an older load fails", async () => {
     const first = Array.from({ length: 50 }, (_, i) => ({ ...notice("x"), id: `n${i}`, title: `Notice ${i}` }));
     vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(JSON.stringify({ error: "boom" }), { status: 500, headers: { "content-type": "application/json" } }))));
@@ -89,8 +108,30 @@ describe("notifications", () => {
       fireEvent.click(screen.getByRole("button", { name: /^Asks/ }));
       fireEvent.click(screen.getByRole("button", { name: /^No company/ }));
       await waitFor(() => expect(urls(f).some((u) => u.includes("status=unread") && u.includes("level=ask") && u.includes("company=none"))).toBe(true));
-      expect(JSON.parse(sessionStorage.getItem("notifications-filters")!)).toEqual({ status: "unread", level: "ask", company: "none" });
+      expect(JSON.parse(sessionStorage.getItem("notifications-filters")!)).toEqual({ status: "unread", level: "ask", company: "none", text: "" });
       expect(await screen.findByText("No notifications match")).toBeTruthy();
+    });
+
+    it("searches after a pause, saves the text, keeps it on Show older, and Clear filters empties the box (BOS-2316)", async () => {
+      const mk = (i: number): Notice => ({ ...notice("x"), id: `n${i}`, title: `Runner ${i}`, createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, 100 - i)).toISOString() });
+      const page = Array.from({ length: 50 }, (_, i) => mk(i));
+      const f = vi.fn((u: string) => Promise.resolve(new Response(JSON.stringify({ items: u.includes("before=") ? [mk(60)] : page, unread: 1 }), { status: 200, headers: { "content-type": "application/json" } })));
+      vi.stubGlobal("fetch", f);
+      render(<Notifications feed={{ items: [notice("hello")], unread: 1 }} onChanged={() => {}} companies={companies} />);
+      const box = screen.getByLabelText("Search notifications") as HTMLInputElement;
+      fireEvent.change(box, { target: { value: "run" } });
+      fireEvent.change(box, { target: { value: "runner" } });
+      // Nothing is asked for while the typing continues; one request follows the pause, with the whole text.
+      expect(urls(f as ReturnType<typeof stubFetch>).some((u) => u.includes("q="))).toBe(false);
+      await waitFor(() => expect(urls(f as ReturnType<typeof stubFetch>).filter((u) => u.includes("q=")).length).toBeGreaterThan(0));
+      expect(urls(f as ReturnType<typeof stubFetch>).filter((u) => u.includes("q=")).every((u) => u.includes("q=runner"))).toBe(true);
+      expect(JSON.parse(sessionStorage.getItem("notifications-filters")!).text).toBe("runner");
+      fireEvent.click(await screen.findByRole("button", { name: "Show older" }));
+      expect(await screen.findByText("Runner 60")).toBeTruthy();
+      expect(urls(f as ReturnType<typeof stubFetch>).find((u) => u.includes("before="))).toContain("q=runner");
+      fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
+      await waitFor(() => expect(box.value).toBe(""));
+      expect(JSON.parse(sessionStorage.getItem("notifications-filters")!).text).toBe("");
     });
 
     it("clears every filter from the empty state", async () => {

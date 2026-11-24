@@ -1,5 +1,6 @@
 // The home screen (R74): what the company's agents are doing, the headline numbers, the last
 // 14 days at a glance, and what happened recently.
+import { useEffect, useState } from "react";
 import { setCompanyPause } from "./settings/Team";
 import { api, type Company, type Decision, type DecisionTally, type RunRow } from "../api";
 import { NoCompany } from "../components/NoCompany";
@@ -26,7 +27,7 @@ type AgentCard = {
 type Day = { day: string } & Record<string, number | string>;
 type DashboardData = {
   agents: AgentCard[];
-  stats: { agents: number; running: number; paused: number; inProgress: number; inReview: number; /** inReview split (BOS-667); missing from an older server. */ awaitingReview?: number; approvedToMerge?: number; /** BOS-1909: in progress without the work that can't move, and the groups that move by themselves; missing from an older server. */ inProgressCounted?: number; nextUp?: number; beingChecked?: number; watching?: number; open: number; blocked: number; /** Merged work in Blocked that only waits for its live check, not counted in blocked (BOS-1636); missing from an older server. */ waitingLiveCheck?: number; decisionsWaiting: number; monthCostMicros: number; monthSubscriptionTokens: { input: number; output: number }; monthSubscriptionRuns: number; monthSubscriptionUnrecorded: number };
+  stats: { agents: number; running: number; paused: number; inProgress: number; inReview: number; /** inReview split (BOS-667); missing from an older server. */ awaitingReview?: number; approvedToMerge?: number; /** BOS-1909: in progress without the work that can't move, and the groups that move by themselves; missing from an older server. */ inProgressCounted?: number; nextUp?: number; beingChecked?: number; watching?: number; open: number; blocked: number; /** Merged work in Blocked that only waits for its live check, not counted in blocked (BOS-1636); missing from an older server. */ waitingLiveCheck?: number; /** BOS-2467: the longest real block; missing from an older server. */ oldestBlocked?: { at: string; ticketId: string; ref: string | null } | null; decisionsWaiting: number; monthCostMicros: number; monthSubscriptionTokens: { input: number; output: number }; monthSubscriptionRuns: number; monthSubscriptionUnrecorded: number };
   runsByDay: Day[];
   ticketsByDay: Day[];
   recentTickets: Array<{ id: string; title: string; state: string; outcome: string | null; assignee: string | null; lastActivityAt: string }>;
@@ -37,6 +38,16 @@ type DashboardData = {
 /** "just now", "5 min ago", "3h ago", "2d ago": age.ts's words, so every page agrees. */
 export function ago(iso: string, now = Date.now()) {
   return raisedAgo(iso, now);
+}
+
+/** BOS-2467: how long the longest real block has lasted, linking to that ticket. A sibling of the card's own link (links can't nest). Nothing when none is blocked. */
+export function OldestBlocked({ oldest, now = Date.now() }: { oldest?: { at: string; ticketId: string; ref: string | null } | null; now?: number }) {
+  if (!oldest) return null;
+  return (
+    <small className="stat-oldest muted">
+      <a href={`#/tickets/${oldest.ticketId}`}>Oldest block: {oldest.ref ? `${oldest.ref}, ` : ""}{ago(oldest.at, now)}</a>
+    </small>
+  );
 }
 
 const compact = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
@@ -53,7 +64,7 @@ function NoData({ children }: { children: string }) {
   return <span className="chart-empty muted">{children}</span>;
 }
 
-function Chart({ title, days, series, emptyText }: { title: string; days: Day[]; series: Array<{ key: string; label: string; tone: string }>; emptyText: string }) {
+export function Chart({ title, days, series, emptyText, failedLink }: { title: string; days: Day[]; series: Array<{ key: string; label: string; tone: string }>; emptyText: string; failedLink?: string }) {
   const totals = days.map((d) => series.reduce((n, s) => n + Number(d[s.key] ?? 0), 0));
   const max = Math.max(1, ...totals);
   const label = (d: string) => `${Number(d.slice(8, 10))}/${Number(d.slice(5, 7))}`;
@@ -81,11 +92,15 @@ function Chart({ title, days, series, emptyText }: { title: string; days: Day[];
         <span>{label(String(days.at(-1)?.day ?? ""))}</span>
       </div>
       <ul className="legend">
-        {series.map((s) => (
-          <li key={s.key}>
-            <span className={`swatch ${s.tone}`} aria-hidden="true" /> {s.label}
-          </li>
-        ))}
+        {series.map((s) => {
+          const failed = s.key === "failed" && failedLink ? days.reduce((n, d) => n + Number(d.failed ?? 0), 0) : 0;
+          return (
+            <li key={s.key}>
+              <span className={`swatch ${s.tone}`} aria-hidden="true" />{" "}
+              {failed > 0 ? <a href={failedLink}>{failed} failed in 14 days</a> : s.label}
+            </li>
+          );
+        })}
       </ul>
     </figure>
   );
@@ -117,6 +132,48 @@ function SuccessChart({ days }: { days: Day[] }) {
         <span>{label(String(rates.at(-1)?.day ?? ""))}</span>
       </div>
     </figure>
+  );
+}
+
+type WeekView = { week: "this" | "last"; merged: Array<{ title: string; feature: string | null; id?: string }>; spentMicros: number; beforeMicros: number; released: string[]; waiting: number; oldestWaitingMs: number | null; text: string };
+const usd = (micros: number) => `$${(micros / 1_000_000).toFixed(2)}`;
+
+/** One fold of the weekly summary (BOS-2390): loads its week when first opened; the same facts the Monday email carries. */
+export function WeekFold({ companyId, week, title }: { companyId: string; week: "this" | "last"; title: string }) {
+  const [open, setOpen] = useState(false);
+  const [view, setView] = useState<WeekView | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const load = () => {
+    setError(null);
+    api<WeekView>(`/api/companies/${companyId}/weekly-summary/view?week=${week}`).then(setView, (e: Error) => setError(e.message));
+  };
+  useEffect(() => {
+    if (open && !view) load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+  const hours = view?.oldestWaitingMs != null ? Math.max(1, Math.round(view.oldestWaitingMs / 3_600_000)) : 0;
+  return (
+    <details className="card fold" onToggle={(e) => setOpen(e.currentTarget.open)}>
+      <summary>{title}</summary>
+      <div style={{ padding: "0 18px 14px" }}>
+        {error ? <LoadError what="this summary" message={error} onRetry={load} /> : !view ? <p className="muted">{open ? "Loading…" : ""}</p> : (
+          <>
+            <p>Merged: {view.merged.length === 0 ? "nothing" : `${view.merged.length} ticket${view.merged.length === 1 ? "" : "s"}`}</p>
+            {view.merged.length > 0 && (
+              <ul>
+                {view.merged.slice(0, 10).map((m, i) => (
+                  <li key={m.id ?? i}>{m.id ? <a href={`#/tickets/${m.id}`}>{m.title}</a> : m.title}{m.feature ? <span className="muted"> · {m.feature}</span> : null}</li>
+                ))}
+                {view.merged.length > 10 && <li className="muted">and {view.merged.length - 10} more</li>}
+              </ul>
+            )}
+            <p>Spent: {usd(view.spentMicros)} <span className="muted">(the week before: {usd(view.beforeMicros)})</span></p>
+            {view.released.length > 0 && <p>Features released: {view.released.join(", ")}</p>}
+            <p>{view.waiting ? `Waiting for you now: ${view.waiting} card${view.waiting === 1 ? "" : "s"}, oldest ${hours} hour${hours === 1 ? "" : "s"}` : "Nothing is waiting for you."}</p>
+          </>
+        )}
+      </div>
+    </details>
   );
 }
 
@@ -200,6 +257,7 @@ export function Dashboard({ company, decisions = null, tally = null, onChanged }
             {s.running} running, {s.paused} paused
           </small>
         </a>
+        <div className="stat-cell">
         <a className="card stat" href="#/board">
           <strong>{s.inProgressCounted ?? s.inProgress}</strong>
           <span>Tasks in progress</span>
@@ -213,6 +271,8 @@ export function Dashboard({ company, decisions = null, tally = null, onChanged }
             {s.awaitingReview != null && s.approvedToMerge != null ? `${s.awaitingReview} awaiting review, ${s.approvedToMerge} approved, waiting to merge` : `${s.inReview} in review`}, {s.open} open, {s.blocked} blocked{s.waitingLiveCheck ? `, ${s.waitingLiveCheck} merged, waiting for a live check` : ""}
           </small>
         </a>
+        {s.blocked > 0 && <OldestBlocked oldest={s.oldestBlocked} />}
+        </div>
         {/* The API-money card opens the Spend page (BOS-2194); the subscription-tokens card still opens Funding. */}
         <a className="card stat" href={s.monthSubscriptionRuns > 0 ? "#/funding" : `#/spend/${company.id}`}>
           {/* Subscription use is tokens, not money (R67); money is only what API use cost. */}
@@ -244,6 +304,7 @@ export function Dashboard({ company, decisions = null, tally = null, onChanged }
         <Chart
           title="Run activity"
           emptyText="No runs in the last 14 days"
+          failedLink="#/runs?result=failed"
           days={d.runsByDay}
           series={[
             { key: "succeeded", label: "Finished", tone: "green" },
@@ -286,6 +347,14 @@ export function Dashboard({ company, decisions = null, tally = null, onChanged }
           <p className="muted">What happened recently is in <a href="#/notifications">Notifications</a>.</p>
         </section>
       </div>
+
+      <section aria-labelledby="dash-weekly">
+        <h2 id="dash-weekly" className="section-label">
+          Weekly summary
+        </h2>
+        <WeekFold companyId={company.id} week="this" title="This week so far" />
+        <WeekFold companyId={company.id} week="last" title="Last week" />
+      </section>
     </>
   );
 }

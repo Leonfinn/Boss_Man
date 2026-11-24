@@ -9,6 +9,7 @@ import { OWNER_MESSAGE_MAX, THINKING_LEVELS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agentAvatars, agentNotes, agents } from "../db/schema.js";
 import { AgentError, type agentsService } from "../services/agents.js";
+import { AgentRecordError, agentRecordService } from "../services/agent-record.js";
 import { NOTE_LIMITS, NoteError, type notesService } from "../services/agent-notes.js";
 import { logoType } from "../services/image-type.js";
 import { permissionsForRun } from "../services/permission-store.js";
@@ -87,6 +88,13 @@ export function agentRunsRoutes(
   });
   owner.post("/api/agents/:id/retire", async (req, reply) => agentsSvc.retire(IdParam.parse(req.params).id).catch(agentErrors(reply)));
   owner.get("/api/agents/:id/history", async (req, reply) => agentsSvc.history(IdParam.parse(req.params).id).catch(agentErrors(reply)));
+  // One agent's last 30 days (BOS-2389): finished tickets, first-time passes, send-backs, time to merge, cost.
+  owner.get("/api/agents/:id/record", async (req, reply) =>
+    agentRecordService(db).record(IdParam.parse(req.params).id).catch((err: unknown) => {
+      if (err instanceof AgentRecordError) return reply.code(404).send({ error: "not_found", message: err.message });
+      throw err;
+    }),
+  );
 
   // The CEO's lasting notes (BOS-85): the owner sees, adds, edits and deletes them, within the same caps, and sees colleagues' requests.
   const noteErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
@@ -130,6 +138,27 @@ export function agentRunsRoutes(
     const { id } = IdParam.parse(req.params);
     const b = z.object({ text: z.string().trim().min(1).max(OWNER_MESSAGE_MAX), interrupt: z.boolean().optional() }).parse(req.body);
     return runsSvc.message(id, { ...b, from: "the owner" }).catch(runErrors(reply));
+  });
+  // Agents woken but not started yet, and why (BOS-2320). Read-only; no notes text.
+  owner.get("/api/companies/:id/wakes/waiting", async (req) => runsSvc.waiting(IdParam.parse(req.params).id));
+  // Start now / Cancel on a waiting agent (BOS-2328). Start now only clears the wait: the scheduler still applies every limit.
+  const WaitingBody = z.object({ reason: z.string().trim().max(200).optional() });
+  const WakeParams = z.object({ id: Uuid, wakeId: Uuid });
+  owner.post("/api/companies/:id/wakes/:wakeId/start-now", async (req, reply) => {
+    const { id, wakeId } = WakeParams.parse(req.params);
+    const b = WaitingBody.parse(req.body ?? {});
+    const done = await runsSvc.startWaiting(id, wakeId, b.reason || undefined).catch(runErrors(reply));
+    if (!done || !("id" in done)) return done;
+    await scheduler.tick().catch((err) => log.error({ err }, "tick after start now failed"));
+    const now = await runsSvc.wakeState(id, wakeId);
+    // Started: a run took the wake. Still deferred or queued: say why instead of pretending.
+    if (now?.runId) return { ok: true, started: true, waitingReason: null };
+    return { ok: true, started: false, waitingReason: now?.statusReason ?? "Waiting for a free run slot." };
+  });
+  owner.post("/api/companies/:id/wakes/:wakeId/cancel", async (req, reply) => {
+    const { id, wakeId } = WakeParams.parse(req.params);
+    const b = WaitingBody.parse(req.body ?? {});
+    return runsSvc.cancelWaiting(id, wakeId, b.reason || undefined).then(() => ({ ok: true }), runErrors(reply));
   });
   owner.get("/api/runs/recent", async (req) => {
     const q = z

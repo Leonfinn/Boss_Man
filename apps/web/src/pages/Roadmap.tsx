@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { NoCompany } from "../components/NoCompany";
-import { api, FEATURE_STATUS_LABEL, today, type Company, type FeatureRoadmapCompany, type Horizon, type MilestoneStatus, type RoadmapCompany, type RoadmapFeature, type RoadmapMilestone, type RoadmapObjective } from "../api";
+import { api, FEATURE_STATUS_LABEL, today, type Company, type FeatureRoadmapCompany, type Horizon, type BurnupPoint, type MilestoneStatus, type RoadmapCompany, type RoadmapFeature, type RoadmapMilestone, type RoadmapObjective } from "../api";
 import { usePoll } from "../hooks";
 import { Loader } from "../components/Loader";
 import { LoadError } from "../components/LoadError";
@@ -55,6 +55,74 @@ function lanes(ms: RoadmapMilestone[], x: (m: RoadmapMilestone) => number, width
   return { lane, count: Math.max(1, ends.length) };
 }
 
+/** "21 of 34 points done · 13 left · at this pace about 2 Dec" and what is worth a warning. */
+export function forecastLines(f: RoadmapMilestone["forecast"]): { text: string; late: boolean; note: string | null } {
+  const total = f.pointsDone + f.pointsLeft;
+  const base = `${f.pointsDone} of ${total} points done · ${f.pointsLeft} left`;
+  const note = f.unsized ? `${f.unsized} ticket${f.unsized === 1 ? " has" : "s have"} no size` : null;
+  if (f.pointsLeft === 0) return { text: `${base}`, late: false, note };
+  if (!f.expectedFinish) return { text: `${base} · No finished work in the last 4 weeks to estimate from.`, late: false, note };
+  const when = short(f.expectedFinish);
+  return f.daysLate > 0
+    ? { text: `${base} · at this pace about ${when}, ${f.daysLate} day${f.daysLate === 1 ? "" : "s"} after the target`, late: true, note }
+    : { text: `${base} · at this pace about ${when}`, late: false, note };
+}
+
+/** "Pace: 12 points a week (last 4 weeks)": the weekly pace the forecast uses. */
+export function paceLine(pace: number): string {
+  if (!(pace > 0)) return "Pace: no finished work in the last 4 weeks";
+  return `Pace: ${Number.isInteger(pace) ? pace : pace.toFixed(1)} points a week (last 4 weeks)`;
+}
+
+/** The sentence a screen reader gets for a burn-up: how done and total moved over the 8 weeks. */
+export function burnupLabel(b: BurnupPoint[]): string {
+  const first = b[0]!;
+  const last = b.at(-1)!;
+  const move = (a: number, z: number) => (a === z ? `stayed at ${z}` : `${z > a ? "rose" : "fell"} from ${a} to ${z}`);
+  return `Done ${move(first.done, last.done)} points; total ${move(first.total, last.total)} points, over the last 8 weeks`;
+}
+
+/** Two lines, done (solid) and total (dashed), one point a week. Same colours as the rest of the app, no chart library. */
+function Burnup({ b }: { b: BurnupPoint[] }) {
+  const W = 160;
+  const H = 40;
+  const max = Math.max(1, ...b.map((p) => p.total));
+  const pts = (key: "done" | "total") => b.map((p, i) => `${((i / (b.length - 1)) * (W - 4) + 2).toFixed(1)},${(H - 3 - (p[key] / max) * (H - 6)).toFixed(1)}`).join(" ");
+  const label = burnupLabel(b);
+  return (
+    <svg className="rm-burnup" width={W} height={H} viewBox={`0 0 ${W} ${H}`} role="img" aria-label={label} style={{ display: "block", marginTop: 4 }}>
+      <title>{label}</title>
+      <polyline points={pts("total")} fill="none" stroke="var(--muted)" strokeWidth="2" strokeDasharray="4 3" />
+      <polyline points={pts("done")} fill="none" stroke="var(--accent-ink)" strokeWidth="2" />
+    </svg>
+  );
+}
+
+function Forecasts({ ms }: { ms: RoadmapMilestone[] }) {
+  const open = ms.filter((m) => m.status !== "done" && m.forecast.pointsDone + m.forecast.pointsLeft + m.forecast.unsized > 0);
+  if (!open.length) return null;
+  return (
+    <>
+      {/* Every milestone of an objective belongs to one company, so they share its pace. */}
+      <p className="rm-pace muted" style={{ margin: "8px 0 0", fontSize: 13 }}>
+        {paceLine(open[0]!.forecast.pace)}
+      </p>
+      <ul className="rm-forecasts" style={{ listStyle: "none", margin: "8px 0 0", padding: 0, fontSize: 13 }}>
+        {open.map((m) => {
+          const l = forecastLines(m.forecast);
+          return (
+            <li key={m.id}>
+              <b>{m.title}</b>: <span style={l.late ? { color: "var(--amber)" } : undefined}>{l.text}</span>
+              {l.note && <span className="muted"> · {l.note}</span>}
+              {m.burnup && m.burnup.length > 1 && <Burnup b={m.burnup} />}
+            </li>
+          );
+        })}
+      </ul>
+    </>
+  );
+}
+
 function Timeline({ o, win, now, selected, onSelect }: { o: RoadmapObjective; win: { start: number; end: number }; now: string; selected: string | null; onSelect: (id: string) => void }) {
   const ref = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(800);
@@ -69,6 +137,7 @@ function Timeline({ o, win, now, selected, onSelect }: { o: RoadmapObjective; wi
   const { lane, count } = lanes(dated, x, width);
   const todayX = ((dayOf(now) - win.start) / (win.end - win.start)) * 100;
   return (
+    <>
     <div ref={ref} className="rm-track" style={{ height: 34 + count * 46 }}>
       {months(win).map((mo) => (
         <span key={mo.at} className="rm-month" style={{ left: `${((mo.at - win.start) / (win.end - win.start)) * 100}%` }}>
@@ -99,6 +168,8 @@ function Timeline({ o, win, now, selected, onSelect }: { o: RoadmapObjective; wi
         );
       })}
     </div>
+    <Forecasts ms={o.milestones} />
+    </>
   );
 }
 
@@ -191,6 +262,20 @@ function AddMilestone({ objectiveId, onAdded, horizon }: { objectiveId: string; 
   );
 }
 
+const STALE_KEY_RESULT_DAYS = 14;
+
+/** A small line of recent values, left oldest (BOS-2458). */
+function Sparkline({ values, label }: { values: number[]; label: string }) {
+  const lo = Math.min(...values);
+  const span = Math.max(...values) - lo || 1;
+  const pts = values.map((v, i) => `${(i / (values.length - 1)) * 60},${16 - ((v - lo) / span) * 14 - 1}`).join(" ");
+  return (
+    <svg width={60} height={16} role="img" aria-label={label} style={{ verticalAlign: "middle" }}>
+      <polyline points={pts} fill="none" stroke="currentColor" strokeWidth={1.5} />
+    </svg>
+  );
+}
+
 /** A key result with "Change" (an inline form) and "Remove" (asks first). BOS-2250. */
 function KeyResultRow({ k, onChanged }: { k: RoadmapObjective["keyResults"][number]; onChanged: () => void }) {
   const [editing, setEditing] = useState(false);
@@ -245,6 +330,11 @@ function KeyResultRow({ k, onChanged }: { k: RoadmapObjective["keyResults"][numb
         </form>
       </li>
     );
+  const readings = k.readings ?? [];
+  const last = readings.length ? readings[readings.length - 1]! : null;
+  const days = last ? Math.max(0, Math.floor((Date.now() - new Date(last.at).getTime()) / 86_400_000)) : null;
+  const stale = days === null || days >= STALE_KEY_RESULT_DAYS;
+  const spark = readings.slice(-12).map((r) => r.value);
   return (
     <li>
       <span>{k.title}</span>
@@ -258,6 +348,9 @@ function KeyResultRow({ k, onChanged }: { k: RoadmapObjective["keyResults"][numb
         {k.target !== null ? ` / ${k.target}` : ""}
         {k.unit ? ` ${k.unit}` : ""}
       </span>
+      {spark.length >= 2 && <Sparkline values={spark} label={`Last ${spark.length} readings of ${k.title}`} />}
+      <span className="muted">{days === null ? "never updated" : days === 0 ? "updated today" : `updated ${days} day${days === 1 ? "" : "s"} ago`}</span>
+      {stale && <span className="tag">Not updated in {STALE_KEY_RESULT_DAYS} days</span>}
       <button type="button" className="btn small" aria-label={`Change the key result ${k.title}`} onClick={open}>
         Change
       </button>
@@ -270,6 +363,19 @@ function KeyResultRow({ k, onChanged }: { k: RoadmapObjective["keyResults"][numb
         Remove
       </button>
       {error && <span className="error">{error}</span>}
+      {readings.length > 0 && (
+        <details style={{ width: "100%" }}>
+          <summary className="muted">Readings ({readings.length})</summary>
+          <ul>
+            {[...readings].reverse().map((r) => (
+              <li key={`${r.at}-${r.value}-${r.by}`} className="muted">
+                {new Date(r.at).toLocaleString()}: {r.value}
+                {k.unit ? ` ${k.unit}` : ""} ({r.by})
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
     </li>
   );
 }

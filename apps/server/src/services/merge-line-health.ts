@@ -173,15 +173,20 @@ export function mergeLineHealth(view: HealthInput, opts: HealthOpts): MergeLineH
     };
   }
   // Nothing landed for a long time while mergeable work has waited as long. A fresh approval after a quiet night is not stuck.
-  const quietMin = sinceLandingMin ?? oldestWait;
-  if (mergeable.length && quietMin >= NO_LANDING_MIN && oldestWait >= NO_LANDING_MIN) {
+  // BOS-2361: merges waiting for another ticket's landing turn count here too: a turn held long with nothing landing is
+  // this stall (they were left out, so a line where every merge waited on the holder read healthy).
+  const turnWaiting = waiting.filter((w) => w.actor === "system" && !w.decisionId && w.state === "waiting_for_turn");
+  const stalled = mergeable.length + turnWaiting.length;
+  const stalledOldest = Math.max(oldestWait, ...turnWaiting.map((w) => w.minutes));
+  const quietMin = sinceLandingMin ?? stalledOldest;
+  if (stalled && quietMin >= NO_LANDING_MIN && stalledOldest >= NO_LANDING_MIN) {
     return {
       state: "stuck",
       cause: "no_landing",
-      title: sinceLandingMin === null ? `Nothing has merged lately, with ${figureText("mergeQueue.forBossMan", mergeable.length)}` : `Nothing has merged for ${waitedText(sinceLandingMin)}`,
-      reason: `${figureText("mergeQueue.forBossMan", mergeable.length)}, and none has landed in that time${running.length ? "; the running check is not finishing" : "; no check is running"}`,
-      fix: "The CEO looks at the line (seats, running checks, runner) and gets it moving.",
-      others: mergeable.length - 1,
+      title: sinceLandingMin === null ? `Nothing has merged lately, with ${figureText("mergeQueue.forBossMan", stalled)}` : `Nothing has merged for ${waitedText(sinceLandingMin)}`,
+      reason: `${figureText("mergeQueue.forBossMan", stalled)}, and none has landed in that time${running.length ? "; the running check is not finishing" : "; no check is running"}${turnWaiting.length ? `; ${turnWaiting.length} wait${turnWaiting.length === 1 ? "s" : ""} for another ticket's landing turn` : ""}`,
+      fix: "The CEO looks at the line (seats, running checks, runner, the landing turn's holder) and gets it moving.",
+      others: stalled - 1,
     };
   }
 

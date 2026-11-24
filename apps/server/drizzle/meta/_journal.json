@@ -1212,6 +1212,48 @@
       "when": 1795385728792,
       "tag": "0191_watch_trigger",
       "breakpoints": true
+    },
+    {
+      "idx": 192,
+      "version": "7",
+      "when": 1795438907816,
+      "tag": "0192_deploy_redeploy_of",
+      "breakpoints": true
+    },
+    {
+      "idx": 193,
+      "version": "7",
+      "when": 1795467093073,
+      "tag": "0193_funding_history",
+      "breakpoints": true
+    },
+    {
+      "idx": 194,
+      "version": "7",
+      "when": 1795480896145,
+      "tag": "0194_server_size_readings",
+      "breakpoints": true
+    },
+    {
+      "idx": 195,
+      "version": "7",
+      "when": 1795507244091,
+      "tag": "0195_runner_connections",
+      "breakpoints": true
+    },
+    {
+      "idx": 196,
+      "version": "7",
+      "when": 1795507244092,
+      "tag": "0196_key_result_readings",
+      "breakpoints": true
+    },
+    {
+      "idx": 197,
+      "version": "7",
+      "when": 1795507244093,
+      "tag": "0197_update_holds",
+      "breakpoints": true
     }
   ]
 }

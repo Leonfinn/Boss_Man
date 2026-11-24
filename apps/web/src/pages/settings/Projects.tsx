@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { api, type Agent, type Company, type Project } from "../../api";
-import { usePoll } from "../../hooks";
+import { api, usd, type Agent, type Company, type Project } from "../../api";
+import { hashQuery, usePoll } from "../../hooks";
 import { SaveButton, useSaveState } from "../../components/SaveButton";
 import { Loader } from "../../components/Loader";
 import { LoadError } from "../../components/LoadError";
@@ -341,7 +341,52 @@ export function ProjectBrief({ p }: { p: Project }) {
  * One project as a collapsed row: name, star, Kanban button and a one-line summary. "Edit settings" opens the form.
  * The form stays mounted while collapsed (just hidden), so unsaved edits are never lost by collapsing.
  */
-function ProjectCard({ p, go, agents, onStar, starBusy, onChanged }: { p: Project; go: (to: string) => void; agents: Agent[]; onStar: () => void; starBusy?: boolean; onChanged: () => void }) {
+export type ProjectSummary = { projectId: string; open: number; inReview: number; blocked?: number; pointsLeft: number; unsized: number; finishedLast30Days: number; monthMicros: number; monthlyCapMicros: number | null; lastMergeAt: string | null };
+
+/** The second line of a project row (BOS-2421): open work, points left, finished lately, this month's spend and the last merge. */
+export function projectSummaryLine(s: ProjectSummary): string {
+  const points = `${s.pointsLeft} point${s.pointsLeft === 1 ? "" : "s"} left${s.unsized ? ` (${s.unsized} unsized)` : ""}`;
+  const spend = `${usd(s.monthMicros)} ${s.monthlyCapMicros ? `of ${usd(s.monthlyCapMicros)} this month` : "this month, no cap"}`;
+  const merge = s.lastMergeAt ? `last merge ${new Date(s.lastMergeAt).toLocaleDateString()}` : "last merge: never";
+  // BOS-2463: said only when something is stuck, so a healthy project's line stays as it was.
+  const blocked = s.blocked ? `, ${s.blocked} blocked` : "";
+  return `${s.open} open, ${s.inReview} in review${blocked} · ${points} · ${s.finishedLast30Days} done in the last 30 days · ${spend} · ${merge}`;
+}
+
+/** The orders of the active project list (BOS-2463), kept in the link as `?sort=`. "name" is the default and is left out of the link. */
+export const PROJECT_SORTS = [
+  { id: "name", label: "Name" },
+  { id: "open", label: "Most open" },
+  { id: "blocked", label: "Most blocked" },
+  { id: "merge", label: "Latest merge" },
+] as const;
+export type ProjectSort = (typeof PROJECT_SORTS)[number]["id"];
+
+export function readProjectSort(q: URLSearchParams): ProjectSort {
+  const v = q.get("sort");
+  return PROJECT_SORTS.find((s) => s.id === v)?.id ?? "name";
+}
+
+/**
+ * `list` comes in name order from the server. Highest first for the figures; a project without figures (or never merged)
+ * goes last. Array sort is stable, so ties keep the server's name order, and "name" is the list as it came.
+ */
+export function sortProjects<P extends { id: string }>(list: P[], sort: ProjectSort, statsFor: (id: string) => ProjectSummary | undefined): P[] {
+  if (sort === "name") return list;
+  const key = (p: P): number => {
+    const s = statsFor(p.id);
+    if (!s) return -Infinity;
+    if (sort === "open") return s.open;
+    if (sort === "blocked") return s.blocked ?? 0;
+    return s.lastMergeAt ? Date.parse(s.lastMergeAt) : -Infinity;
+  };
+  return [...list].sort((a, b) => {
+    const ka = key(a), kb = key(b);
+    return ka === kb ? 0 : kb > ka ? 1 : -1;
+  });
+}
+
+function ProjectCard({ p, go, agents, onStar, starBusy, onChanged, stats }: { p: Project; go: (to: string) => void; agents: Agent[]; onStar: () => void; starBusy?: boolean; onChanged: () => void; stats?: ProjectSummary }) {
   const [open, setOpen] = useState(false);
   const summary = `${p.repoUrl ? "Repo set" : "No repo"} · ${p.landing === "pull_request" ? "opens pull requests" : "merges into the default branch"}`;
   return (
@@ -357,6 +402,7 @@ function ProjectCard({ p, go, agents, onStar, starBusy, onChanged }: { p: Projec
         </button>
       </div>
       <p className="muted" style={{ fontSize: 13, margin: "4px 0 0" }}>{summary}</p>
+      {stats && <p className="muted" style={{ fontSize: 13, margin: "2px 0 0" }}>{projectSummaryLine(stats)}</p>}
       <div id={`settings-${p.id}`} hidden={!open} style={{ marginTop: 10 }}>
         <ProjectRow p={p} agents={agents} onChanged={onChanged} />
         <GithubWatch projectId={p.id} />
@@ -369,11 +415,27 @@ function ProjectCard({ p, go, agents, onStar, starBusy, onChanged }: { p: Projec
 export function ProjectsPage({ companies, companyId, go, onChanged }: { companies: Company[]; companyId: string | undefined; go: (to: string) => void; onChanged?: () => void }) {
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
   const projects = usePoll((signal) => (company ? api<Project[]>(`/api/companies/${company.id}/projects`, { signal }) : Promise.resolve([])), 60_000, `projects-${company?.id ?? "none"}`);
+  // One read for every project's figures (BOS-2421); a failure keeps today's line and shows Retry.
+  const summary = usePoll((signal) => (company ? api<{ projects?: ProjectSummary[] }>(`/api/companies/${company.id}/projects-summary`, { signal }) : Promise.resolve({ projects: [] })), 60_000, `projects-summary-${company?.id ?? "none"}`);
+  const statsFor = (id: string) => summary.data?.projects?.find((s) => s.projectId === id);
+  const [sort, setSort] = useState<ProjectSort>(() => readProjectSort(hashQuery()));
+  const changeSort = (s: ProjectSort) => {
+    setSort(s);
+    // In the link without a history entry or a re-route, as Plan does, so a reload or a shared link keeps the order.
+    const q = hashQuery();
+    if (s === "name") q.delete("sort");
+    else q.set("sort", s);
+    const base = window.location.hash.split("?")[0] || "#/projects";
+    const qs = q.toString();
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${base}${qs ? `?${qs}` : ""}`);
+  };
+  const active = projects.data?.filter((p) => !p.archivedAt) ?? [];
   const act = useAction();
   const patch = (id: string, body: Record<string, boolean>) =>
     void act.run(async () => {
       await api(`/api/projects/${id}`, { method: "PATCH", body });
       projects.reload();
+      summary.reload();
       onChanged?.();
     });
   return (
@@ -396,22 +458,36 @@ export function ProjectsPage({ companies, companyId, go, onChanged }: { companie
               }}
             />
           </Section>
-          <Section id="projects-h" title={`Projects (${projects.data?.filter((p) => !p.archivedAt).length ?? 0})`}>
+          <Section id="projects-h" title={`Projects (${active.length})`}>
             <p className="muted" style={{ fontSize: 14 }}>
               With a repo, each task gets its own branch and its own copy of the code to work in. Approved work is checked, then merged into the default branch or sent as a pull request. The token in <span className="mono">GIT_TOKEN</span> is used to clone, push and open pull requests. Don't put a token in the URL.
             </p>
+            {active.length > 1 && (
+              <div className="field" style={{ maxWidth: 240 }}>
+                <label htmlFor="projects-sort">Sort by</label>
+                <select id="projects-sort" value={sort} onChange={(e) => changeSort(e.target.value as ProjectSort)}>
+                  {PROJECT_SORTS.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
             {projects.data?.length
-              ? projects.data.filter((p) => !p.archivedAt).map((p) => (
-                  <ProjectCard key={p.id} p={p} go={go} agents={company.agents} onStar={() => patch(p.id, { starred: !p.starred })} starBusy={act.busy} onChanged={() => { projects.reload(); onChanged?.(); }} />
+              ? sortProjects(active, sort, statsFor).map((p) => (
+                  <ProjectCard key={p.id} p={p} go={go} agents={company.agents} onStar={() => patch(p.id, { starred: !p.starred })} starBusy={act.busy} stats={statsFor(p.id)} onChanged={() => { projects.reload(); onChanged?.(); }} />
                 ))
               : projects.data && <p>No projects yet.</p>}
             {act.view}
+            {summary.error && <LoadError what="the project figures" message={summary.error.message} onRetry={summary.reload} />}
             {projects.data?.some((p) => p.archivedAt) && (
               <details>
                 <summary>Archived ({projects.data.filter((p) => p.archivedAt).length})</summary>
                 {projects.data.filter((p) => p.archivedAt).map((p) => (
                   <div key={p.id} style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
                     <a href={`#/board/${p.id}`}>{p.name}</a>
+                    {statsFor(p.id) && <span className="muted" style={{ fontSize: 13 }}>{projectSummaryLine(statsFor(p.id)!)}</span>}
                     <button type="button" className="btn small" disabled={act.busy} onClick={() => patch(p.id, { archived: false })}>
                       {act.busy ? "Saving…" : "Unarchive"}
                     </button>

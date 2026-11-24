@@ -11,6 +11,19 @@ import { skillChangeEntry, skillSide } from "../services/skill-files.js";
 import type { skillProposalsService } from "../services/skill-proposals.js";
 import { PageQuery } from "../services/list-page.js";
 
+import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
+import { activity, agents } from "../db/schema.js";
+
+const HISTORY_WORDS: Record<string, string> = {
+  "skill.added_by_owner": "Added by you",
+  "skill.edited_by_owner": "Edited by you",
+  "skill.reverted_by_retro": "Put back by a workflow retro",
+  "skill.proposed": "A new version was proposed",
+  "skill.updated": "A newer version was approved",
+  "skill.installed": "Added to the library after review",
+};
+const HISTORY_KINDS = Object.keys(HISTORY_WORDS);
+
 const Uuid = z.string().uuid();
 const IdParam = z.object({ id: Uuid });
 
@@ -51,6 +64,8 @@ export function skillRoutes(
       return skillErrors(reply)(err);
     }
   });
+  // Which linked skills have a newer version at their source (BOS-2410): read-only, cached 6 hours per source.
+  owner.get("/api/companies/:id/skills/updates", async (req) => skillsSvc.upstream(IdParam.parse(req.params).id));
   // Other companies' skills, to copy into this one (not which agents hold them).
   owner.get("/api/companies/:id/skills/elsewhere", async (req) => {
     const { id } = IdParam.parse(req.params);
@@ -65,6 +80,38 @@ export function skillRoutes(
   owner.get("/api/companies/:id/skills/:skillId", async (req, reply) => {
     const { id, skillId } = SkillParams.parse(req.params);
     return skillsSvc.get(id, skillId).catch(skillErrors(reply));
+  });
+  // What changed in one skill and when (BOS-2376): the activity log's skill rows, newest first. Edits, newer
+  // versions and retro reverts carry the skill id in `detail`; a proposal or install names it in the summary.
+  owner.get("/api/companies/:id/skills/:skillId/history", async (req, reply) => {
+    const { id, skillId } = SkillParams.parse(req.params);
+    const skill = await skillsSvc.get(id, skillId).catch(skillErrors(reply));
+    if (!skill) return reply;
+    const rows = await db
+      .select({ id: activity.id, at: activity.at, kind: activity.kind, summary: activity.summary, detail: activity.detail, agentName: agents.name })
+      .from(activity)
+      .leftJoin(agents, eq(agents.id, activity.agentId))
+      .where(
+        and(
+          eq(activity.companyId, id),
+          inArray(activity.kind, [...HISTORY_KINDS]),
+          or(sql`${activity.detail}->>'skillId' = ${skillId}`, sql`strpos(lower(${activity.summary}), lower(${`skill ${skill.name}`})) > 0`, sql`strpos(lower(${activity.summary}), lower(${`installed ${skill.name} `})) = 1`, sql`strpos(lower(${activity.summary}), lower(${`installed ${skill.name},`})) = 1`),
+        ),
+      )
+      .orderBy(desc(activity.at))
+      .limit(50);
+    return rows.map((r) => {
+      const d = r.detail as { skillMd?: { before?: string; after?: string } } | null;
+      const text = d?.skillMd && typeof d.skillMd.before === "string" && typeof d.skillMd.after === "string" ? { before: d.skillMd.before, after: d.skillMd.after } : null;
+      return {
+        id: r.id,
+        at: r.at.toISOString(),
+        what: HISTORY_WORDS[r.kind] ?? r.kind,
+        who: r.agentName ?? (r.kind.endsWith("_by_owner") ? "you" : "Boss Man"),
+        summary: r.summary,
+        change: text && text.before !== text.after ? text : null,
+      };
+    });
   });
   owner.put("/api/companies/:id/skills/:skillId", async (req, reply) => {
     const { id, skillId } = SkillParams.parse(req.params);

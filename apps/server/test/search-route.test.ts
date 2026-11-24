@@ -1,6 +1,6 @@
 // The search box's route (BOS-2192): tickets, wiki pages and chat messages of one company, grouped, with snippets.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { agents, companies, decisions, features, ownerChatMessages, projects, runs, tickets, wikiPages } from "../src/db/schema.js";
+import { agents, companies, decisions, features, feedbackNotes, ownerChatMessages, projects, runs, skills, tickets, wikiPages } from "../src/db/schema.js";
 import { decisionTitle, refOf, runResultWord, SEARCH_EXTRA_MAX, SEARCH_GROUP_MAX, snippetOf, type SearchResults } from "../src/routes/search.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
@@ -148,6 +148,67 @@ describe("search route (BOS-2192)", () => {
     expect(r.runs[0]!.snippet).toBe("Running");
   });
 
+  it("finds agents by name or job and skills by name or description, never their instructions or another company's (BOS-2347)", async () => {
+    for (const c of [A, B]) {
+      await t.db.insert(agents).values([
+        { companyId: c.company, name: "Zippy", title: "Senior Developer", role: "worker", agentKind: "claude", instructions: "Secret plan: wombat" },
+        { companyId: c.company, name: "Old Zippy", title: "Tester", role: "worker", agentKind: "claude", retiredAt: new Date("2026-11-01T00:00:00Z") },
+      ]);
+      await t.db.insert(skills).values([
+        { companyId: c.company, name: "penpot", description: "Draw mock-ups in the company's Penpot, board by board.", source: "written", files: [{ path: "SKILL.md", content: "d29tYmF0" }], sizeBytes: 6 },
+        { companyId: c.company, name: "drawing-help", description: `${"Filler words. ".repeat(30)}Exports a Penpot board as a PNG.`, source: "written", files: [], sizeBytes: 0 },
+      ]);
+    }
+    const r = await find(A.company, "zippy");
+    // The working agent before the retired one; the job in the Agents page's words.
+    expect(r.agents.map((a) => [a.title, a.snippet])).toEqual([["Zippy", "Senior Developer"], ["Old Zippy", "Tester · Retired"]]);
+    expect(r.agents[0]!.link).toBe(`agents/${r.agents[0]!.id}`);
+    expect((await find(A.company, "senior dev")).agents.map((a) => a.title)).toEqual(["Zippy"]);
+    // The instructions are never searched or returned.
+    expect((await find(A.company, "wombat")).agents).toEqual([]);
+    const s = await find(A.company, "PENPOT");
+    // A name match first, its description from the start; a description match shows the text around the match.
+    expect(s.skills.map((x) => x.title)).toEqual(["penpot", "drawing-help"]);
+    expect(s.skills[0]).toMatchObject({ snippet: "Draw mock-ups in the company's Penpot, board by board.", link: `skills/${s.skills[0]!.id}` });
+    expect(s.skills[1]!.snippet).toMatch(/^….*Penpot board as a PNG\.$/);
+    expect(JSON.stringify([r, s])).not.toContain("wombat");
+    // Beta's rows have the same names but never show in Alpha's search.
+    const b = await find(B.company, "zippy");
+    const aIds = new Set([...r.agents, ...s.skills].map((x) => x.id));
+    expect([...b.agents, ...(await find(B.company, "penpot")).skills].some((x) => aIds.has(x.id))).toBe(false);
+    expect(b.agents).toHaveLength(2);
+  });
+
+  it("caps agents and skills at 5 each (BOS-2347)", async () => {
+    await t.db.insert(agents).values(Array.from({ length: 8 }, (_, i) => ({ companyId: A.company, name: `Puffin ${i}`, role: "worker" as const, agentKind: "claude" })));
+    await t.db.insert(skills).values(Array.from({ length: 8 }, (_, i) => ({ companyId: A.company, name: `puffin-${i}`, description: "x", source: "written" as const, files: [], sizeBytes: 0 })));
+    const r = await find(A.company, "puffin");
+    expect([r.agents.length, r.skills.length]).toEqual([SEARCH_EXTRA_MAX, SEARCH_EXTRA_MAX]);
+    // An agent with no job title is an "Agent", as on the Agents page.
+    expect(r.agents[0]!.snippet).toBe("Agent");
+  });
+
+  it("finds feedback notes by text or title, links to the note, and never shows an unconfirmed or another company's note (BOS-2433)", async () => {
+    await t.db.insert(feedbackNotes).values([
+      { companyId: A.company, title: "Dark mode please", text: "Someone asked for dark mode on the phone." },
+      { companyId: A.company, text: "A call: they would love a heron view." },
+      { companyId: A.company, text: "Unconfirmed heron note", confirmTokenHash: "h".repeat(64), confirmExpiresAt: new Date(Date.now() + 86_400_000) },
+      { companyId: B.company, title: "Heron elsewhere", text: "heron heron" },
+    ]);
+    const dark = await find(A.company, "dark mode");
+    expect(dark.counts.feedback).toBe(1);
+    expect(dark.feedback[0]).toMatchObject({ title: "Dark mode please", link: `feedback/${A.company}/${dark.feedback[0]!.id}` });
+    const heron = await find(A.company, "heron");
+    // The untitled note is shown by the start of its text; the unconfirmed and the other company's notes are not there.
+    expect(heron.counts.feedback).toBe(1);
+    expect(heron.feedback[0]!.title).toMatch(/^A call/);
+    const only = await t.app.inject({ method: "GET", url: `/api/companies/${A.company}/search?q=dark&kind=feedback&limit=5`, headers: { cookie } });
+    expect((only.json() as SearchResults).feedback).toHaveLength(1);
+    // The since filter works on a note's creation date: nothing was made after tomorrow.
+    const later = await t.app.inject({ method: "GET", url: `/api/companies/${A.company}/search?q=dark&since=${encodeURIComponent(new Date(Date.now() + 86_400_000).toISOString())}`, headers: { cookie } });
+    expect((later.json() as SearchResults).counts.feedback).toBe(0);
+  });
+
   it("caps each group at 8", async () => {
     await t.db.insert(tickets).values(Array.from({ length: 12 }, (_, i) => ({ companyId: A.company, projectId: A.project, title: `Heron task ${i}` })));
     expect((await find(A.company, "heron")).tickets).toHaveLength(SEARCH_GROUP_MAX);
@@ -176,6 +237,85 @@ describe("search route (BOS-2192)", () => {
     }
     expect(Math.min(...times)).toBeLessThan(LIMIT_MS);
   }, 120_000);
+});
+
+describe("the Search page's asks: counts, one kind a page at a time, a date filter (BOS-2378)", () => {
+  const ask = async (companyId: string, query: string) => {
+    const res = await t.app.inject({ method: "GET", url: `/api/companies/${companyId}/search?${query}`, headers: { cookie } });
+    expect(res.statusCode, res.body).toBe(200);
+    return res.json() as SearchResults;
+  };
+
+  it("counts every match of each kind, not just the few the box shows", async () => {
+    const r = await find(A.company, "osprey");
+    expect(r.counts).toMatchObject({ tickets: 1, wiki: 0, chats: 0, features: 1, decisions: 2, runs: 1 });
+    // Beta holds the same osprey rows: they are never counted for Alpha.
+    await t.db.insert(tickets).values(Array.from({ length: 3 }, (_, i) => ({ companyId: B.company, projectId: B.project, title: `Osprey extra ${i}` })));
+    expect((await find(A.company, "osprey")).counts.tickets).toBe(1);
+    expect((await find(B.company, "osprey")).counts.tickets).toBe(4);
+  });
+
+  it("pages through one kind 25 at a time, every match once, the other kinds empty but counted", async () => {
+    await t.db.insert(tickets).values(Array.from({ length: 40 }, (_, i) => ({ companyId: A.company, projectId: A.project, title: `Albatross task ${i}`, number: 1000 + i })));
+    await t.db.insert(wikiPages).values({ companyId: A.company, slug: "albatross", title: "Albatross notes", body: "Wings." });
+    const first = await ask(A.company, "q=albatross&kind=tickets");
+    expect(first.tickets).toHaveLength(25);
+    expect(first.counts).toMatchObject({ tickets: 40, wiki: 1 });
+    expect(first.wiki).toEqual([]);
+    const second = await ask(A.company, "q=albatross&kind=tickets&offset=25&limit=25");
+    expect(second.tickets).toHaveLength(15);
+    const ids = [...first.tickets, ...second.tickets].map((x) => x.id);
+    expect(new Set(ids).size).toBe(40);
+    // The wiki page on its own: the same hit the box shows.
+    const wiki = await ask(A.company, "q=albatross&kind=wiki");
+    expect(wiki.wiki.map((x) => x.link)).toEqual([`wiki/${A.company}/albatross`]);
+    expect(wiki.tickets).toEqual([]);
+    expect(wiki.counts.tickets).toBe(40);
+    // Without a kind the box's limits hold, whatever limit is sent.
+    expect((await ask(A.company, "q=albatross&limit=100")).tickets).toHaveLength(SEARCH_GROUP_MAX);
+  });
+
+  it("keeps an exact reference first and pages the rest after it without losing or repeating one", async () => {
+    await t.db.insert(tickets).values([
+      { companyId: A.company, projectId: A.project, title: "Puffin chore", number: 5050 },
+      { companyId: A.company, projectId: A.project, title: "Follow-up to BOS-5050", number: 5051 },
+      { companyId: A.company, projectId: A.project, title: "More on BOS-5050", number: 5052 },
+    ]);
+    const p1 = await ask(A.company, "q=BOS-5050&kind=tickets&limit=1");
+    expect(p1.tickets.map((x) => [x.ref, x.exact])).toEqual([["BOS-5050", true]]);
+    expect(p1.counts.tickets).toBe(3);
+    const p2 = await ask(A.company, "q=BOS-5050&kind=tickets&limit=1&offset=1");
+    const p3 = await ask(A.company, "q=BOS-5050&kind=tickets&limit=1&offset=2");
+    expect([...p2.tickets, ...p3.tickets].map((x) => x.ref).sort()).toEqual(["BOS-5051", "BOS-5052"]);
+    expect(p2.tickets[0]!.exact).toBeUndefined();
+  });
+
+  it("keeps only what changed since the date given, in the counts too: last 7 days drops 10 days ago, keeps 2 days ago", async () => {
+    const daysAgo = (d: number) => new Date(Date.now() - d * 86_400_000);
+    await t.db.insert(tickets).values([
+      { companyId: A.company, projectId: A.project, title: "Gannet old", stateChangedAt: daysAgo(10) },
+      { companyId: A.company, projectId: A.project, title: "Gannet new", stateChangedAt: daysAgo(2) },
+    ]);
+    await t.db.insert(ownerChatMessages).values([
+      { companyId: A.company, agentId: A.agent, role: "owner", text: "gannet then", createdAt: daysAgo(10) },
+      { companyId: A.company, agentId: A.agent, role: "owner", text: "gannet now", createdAt: daysAgo(2) },
+    ]);
+    const all = await find(A.company, "gannet");
+    expect(all.counts).toMatchObject({ tickets: 2, chats: 2 });
+    // What the page sends for "Last 7 days".
+    const recent = await ask(A.company, `q=gannet&since=${encodeURIComponent(daysAgo(7).toISOString())}`);
+    expect(recent.counts).toMatchObject({ tickets: 1, chats: 1 });
+    expect(recent.tickets.map((x) => x.title)).toEqual(["Gannet new"]);
+    expect(recent.chats.map((x) => x.snippet)).toEqual(["gannet now"]);
+  });
+
+  it("refuses a kind it doesn't know, a limit over the max and a date it can't read", async () => {
+    for (const query of ["q=gannet&kind=emails", "q=gannet&kind=tickets&limit=101", "q=gannet&since=yesterday", "q=gannet&offset=-1"]) {
+      const res = await t.app.inject({ method: "GET", url: `/api/companies/${A.company}/search?${query}`, headers: { cookie } });
+      expect(res.statusCode, query).toBeGreaterThanOrEqual(400);
+      expect(res.statusCode, query).toBeLessThan(500);
+    }
+  });
 });
 
 describe("search helpers", () => {

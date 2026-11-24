@@ -13,25 +13,26 @@ afterEach(() => {
 const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200 });
 const company = { id: "c1", name: "App Co", agents: [{ id: "a1", name: "Radagast", role: "ceo" }] } as unknown as Company;
 
-describe("chat while a runner update waits (BOS-349)", () => {
+// BOS-2404: chat stays open through every update hold; the banner says what the update waits on, and holds the chat only
+// while a runner is being swapped, with the time it answers again at the latest.
+describe("chat while a runner update waits (BOS-349, BOS-2404)", () => {
   it("says the update is waiting for N agents while chat stays open", () => {
     render(<UpdateNote m={{ on: true, runs: 2, chatOpen: true }} />);
-    expect(screen.getByRole("status").textContent).toBe("Update waiting for 2 agents to finish: chat stays open until then.");
+    expect(screen.getByRole("status").textContent).toBe("Update waiting for 2 agents to finish. Chat stays open.");
   });
 
-  it("gives the real expected time, or says it is overdue, instead of 'back in a moment' (BOS-1877)", () => {
+  it("gives the real expected time for checks, or says it is overdue (BOS-1877)", () => {
     const iso = new Date(2026, 10, 19, 14, 5).toISOString();
-    const { unmount } = render(<UpdateNote m={{ on: true, runs: 0, chatOpen: false, phase: "waiting", expectedFinishAt: iso }} />);
-    expect(screen.getByRole("status").textContent).toMatch(/^Update pending: expected to finish about .*\. New messages are saved/);
-    expect(screen.getByRole("status").textContent).not.toMatch(/back in a moment/);
+    const { unmount } = render(<UpdateNote m={{ on: true, runs: 0, chatOpen: true, phase: "waiting", checks: 1, expectedFinishAt: iso }} />);
+    expect(screen.getByRole("status").textContent).toMatch(/^Update waiting for running checks to finish, expected about .*\. Chat stays open\.$/);
     unmount();
-    render(<UpdateNote m={{ on: true, runs: 0, chatOpen: false, phase: "waiting", expectedFinishAt: null, overdue: true }} />);
+    render(<UpdateNote m={{ on: true, runs: 0, chatOpen: true, phase: "waiting", checks: 1, expectedFinishAt: null, overdue: true }} />);
     expect(screen.getByRole("status").textContent).toMatch(/taking longer than expected/);
   });
 
   it("says a merge being pushed, or a wait on nothing it can name, keeps chat open (BOS-1951)", () => {
     const { unmount } = render(<UpdateNote m={{ on: true, runs: 0, chatOpen: true, phase: "waiting", merges: 1 }} />);
-    expect(screen.getByRole("status").textContent).toBe("Update waiting for a merge being pushed to main: chat stays open until then.");
+    expect(screen.getByRole("status").textContent).toBe("Update waiting for a merge being pushed to main. Chat stays open.");
     unmount();
     render(<UpdateNote m={{ on: true, runs: 0, chatOpen: true, phase: "waiting", overdue: true, unknownWait: true }} />);
     expect(screen.getByRole("status").textContent).toMatch(/running late.*Chat stays open.*stop waiting or cancel/);
@@ -39,10 +40,21 @@ describe("chat while a runner update waits (BOS-349)", () => {
 
   it("says it in the singular for one agent", () => {
     render(<UpdateNote m={{ on: true, runs: 1, chatOpen: true }} />);
-    expect(screen.getByRole("status").textContent).toBe("Update waiting for 1 agent to finish: chat stays open until then.");
+    expect(screen.getByRole("status").textContent).toBe("Update waiting for 1 agent to finish. Chat stays open.");
   });
 
-  it("warns the swap is imminent when no agent is left, without blocking the composer", async () => {
+  it("a wrap-up keeps chat open (BOS-2404)", () => {
+    render(<UpdateNote m={{ on: true, kind: "wrapup", runs: 0, chatOpen: true }} />);
+    expect(screen.getByRole("status").textContent).toBe("Agents were asked to wrap up. Nothing new starts, but chat stays open.");
+  });
+
+  it("while a runner is being swapped, says so and when chat answers again (BOS-2404)", () => {
+    const iso = new Date(2026, 10, 23, 20, 34).toISOString();
+    render(<UpdateNote m={{ on: true, runs: 0, chatOpen: false, chatBackBy: iso, phase: "swapping" }} />);
+    expect(screen.getByRole("status").textContent).toMatch(/^Swapping the runners to the new version now, usually under a minute \(chat answers again by .+ at the latest\)\. New messages are saved and answered then\.$/);
+  });
+
+  it("with no agent left, says the swap is next and chat is open; the composer still sends", async () => {
     const posts: unknown[] = [];
     vi.stubGlobal(
       "fetch",
@@ -53,10 +65,9 @@ describe("chat while a runner update waits (BOS-349)", () => {
         return json([]);
       }),
     );
-    render(<ChatPage companies={[company]} companyId="c1" agentId="a1" maintenance={{ on: true, runs: 0, chatOpen: false }} go={() => {}} onChanged={() => {}} />);
+    render(<ChatPage companies={[company]} companyId="c1" agentId="a1" maintenance={{ on: true, runs: 0, chatOpen: true }} go={() => {}} onChanged={() => {}} />);
     // The loader is a status too while the first load runs, so find the banner by its words.
-    expect(await screen.findByText("Update pending. New messages are saved and answered when it is done.")).toBeTruthy();
-    // The message is still sent: it is stored and answered once the update is done.
+    expect(await screen.findByText("Update about to swap the runners. Chat stays open until the swap itself, which usually takes under a minute.")).toBeTruthy();
     const box = (await screen.findByLabelText("Message to Radagast")) as HTMLTextAreaElement;
     fireEvent.change(box, { target: { value: "wind up please" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
