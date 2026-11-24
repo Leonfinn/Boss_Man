@@ -2,11 +2,11 @@
 // files changed, read from Boss Man's own records so the owner can set them beside the agent's "done".
 // Read-only. The caller passes its owner scope, so requireOwner and the app's error handler apply.
 import type { FastifyInstance } from "fastify";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Db } from "../db/client.js";
 import { firstFailingLine } from "@boss-man/shared";
-import { checkJobs, checkWorkers, costEvents, projects, runs, tickets } from "../db/schema.js";
+import { checkJobs, checkWorkers, costEvents, projects, runs, ticketTransitions, tickets } from "../db/schema.js";
 import { mergeHistory } from "../services/merge-history.js";
 
 const IdParam = z.object({ id: z.string().uuid() });
@@ -88,6 +88,26 @@ export function ticketRecordRoutes(owner: FastifyInstance, db: Db, deps: { files
         machine: r.workerId ? (r.worker ?? "a check worker") : r.runnerId ? "company runner" : null,
         firstLine: r.state === "failed" || r.state === "stuck" ? (firstFailingLine(r.logTail ?? "") ?? r.reason ?? null) : null,
       })),
+    };
+  });
+
+  // BOS-2419: every state change the ticket has had, oldest first, for the "State history" fold. The first
+  // row of a ticket made after transitions were recorded has no from-state; if it has one, the ticket is older
+  // than the records, so the page says where the history starts instead of totalling a partial story.
+  owner.get("/api/tickets/:id/state-history", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    const [t] = await db.select({ id: tickets.id, state: tickets.systemState }).from(tickets).where(eq(tickets.id, id));
+    if (!t) return reply.code(404).send({ error: "not_found", message: "No such ticket." });
+    const rows = await db
+      .select({ fromState: ticketTransitions.fromState, toState: ticketTransitions.toState, at: ticketTransitions.at })
+      .from(ticketTransitions)
+      .where(eq(ticketTransitions.ticketId, id))
+      .orderBy(asc(ticketTransitions.at), asc(ticketTransitions.id))
+      .limit(500);
+    return {
+      state: t.state,
+      complete: rows.length > 0 && rows[0]!.fromState === null,
+      transitions: rows.map((r) => ({ from: r.fromState, to: r.toState, at: r.at.toISOString() })),
     };
   });
 }

@@ -64,6 +64,8 @@ export function skillRoutes(
       return skillErrors(reply)(err);
     }
   });
+  // Which linked skills have a newer version at their source (BOS-2410): read-only, cached 6 hours per source.
+  owner.get("/api/companies/:id/skills/updates", async (req) => skillsSvc.upstream(IdParam.parse(req.params).id));
   // Other companies' skills, to copy into this one (not which agents hold them).
   owner.get("/api/companies/:id/skills/elsewhere", async (req) => {
     const { id } = IdParam.parse(req.params);

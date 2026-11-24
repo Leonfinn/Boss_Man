@@ -13,6 +13,7 @@ import type { feedbackService } from "../services/feedback.js";
 import { WorkError } from "../services/ticket-links.js";
 import { OBJECTIVE_STATUSES, type planningService } from "../services/planning.js";
 import type { workService } from "../services/work.js";
+import { roadmapBurnup } from "../services/roadmap-burnup.js";
 
 const Uuid = z.string().uuid();
 const IdParam = z.object({ id: Uuid });
@@ -129,7 +130,11 @@ export function roadmapRoutes(
 
   owner.get("/api/roadmap", async (req) => {
     const q = z.object({ today: DateStr.optional(), closed: z.enum(["1"]).optional() }).parse(req.query);
-    return planning.roadmap(q.today ?? dateIn(now?.() ?? new Date(), "UTC"), { includeClosed: !!q.closed });
+    const today = q.today ?? dateIn(now?.() ?? new Date(), "UTC");
+    const cos = await planning.roadmap(today, { includeClosed: !!q.closed });
+    // Each milestone also carries its 8-week burn-up (BOS-2397).
+    const burnup = await roadmapBurnup(db, cos.flatMap((c) => c.objectives.flatMap((o) => o.milestones.map((m) => m.id))), today);
+    return cos.map((c) => ({ ...c, objectives: c.objectives.map((o) => ({ ...o, milestones: o.milestones.map((m) => ({ ...m, burnup: burnup.get(m.id) ?? [] })) })) }));
   });
   /** Features for the roadmap's Now / Next / Later columns, grouped by objective on the client. */
   owner.get("/api/roadmap/features", async () => {

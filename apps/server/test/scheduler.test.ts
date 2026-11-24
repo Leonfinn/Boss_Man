@@ -5,7 +5,7 @@ import { BUILT_IN_RULES, type RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { appCache, sharedDatabase } from "./helpers/shared-server.js";
-import { activity, decisions, fundingSources, notifications, nudges, quotaSamples, runners, runTokens, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { activity, decisions, fundingQuotaHolds, fundingSources, notifications, nudges, quotaSamples, runners, runTokens, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { hashToken } from "../src/auth.js";
 import type { Limits } from "../src/services/scheduler.js";
 
@@ -438,10 +438,13 @@ describe("scheduler", () => {
     await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: meta(0.99) });
     await ctx.tick();
     expect((await ctx.db.select().from(notifications)).filter((n) => /Routine work paused/.test(n.title))).toHaveLength(1);
+    // The funding page's history records the hold as open.
+    expect((await ctx.db.select().from(fundingQuotaHolds)).map((h) => [h.window, h.endedAt])).toEqual([["seven_day", null]]);
     await new Promise((r) => setTimeout(r, 5));
     await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: meta(0.2) });
     await ctx.tick();
     expect((await ctx.db.select().from(notifications)).filter((n) => /running again/.test(n.title))).toHaveLength(1);
+    expect((await ctx.db.select().from(fundingQuotaHolds))[0]!.endedAt).not.toBeNull();
   });
 
   it("says once that extra-usage credits are being used", async () => {

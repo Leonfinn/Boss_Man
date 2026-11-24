@@ -18,11 +18,15 @@ import type { HostFactsView } from "../host-facts-display";
 import { DraftTextarea } from "../components/DraftTextarea";
 
 type State = "unprocessed" | "processed" | "archived";
-const TABS: Array<{ id: State; label: string }> = [
+type Tab = State | "delivered";
+const TABS: Array<{ id: Tab; label: string }> = [
   { id: "unprocessed", label: "Unprocessed" },
   { id: "processed", label: "Processed" },
   { id: "archived", label: "Archived" },
+  { id: "delivered", label: "Delivered" },
 ];
+/** The list's filter: a state, or "delivered" (notes whose linked features are all released, whatever the note's state). */
+export const noteFilter = (tab: string) => (tab === "delivered" ? "delivered=true" : `state=${tab}`);
 const SOURCE: Record<string, string> = { owner: "You", chat: "Chat", agent: "An agent", portal: "Portal", email: "Email", import: "Import" };
 
 function AddNote({ companyId, onAdded }: { companyId: string; onAdded: (id: string) => void }) {
@@ -589,7 +593,7 @@ export async function fetchAllNotes(companyId: string, tab: string, search: stri
   const seen = new Set<string>();
   let before: string | null = null;
   for (let page = 0; page < 500; page++) {
-    const url: string = `/api/companies/${companyId}/feedback?state=${tab}&limit=${EXPORT_PAGE}${search ? `&q=${encodeURIComponent(search)}` : ""}${before ? `&before=${encodeURIComponent(before)}` : ""}`;
+    const url: string = `/api/companies/${companyId}/feedback?${noteFilter(tab)}&limit=${EXPORT_PAGE}${search ? `&q=${encodeURIComponent(search)}` : ""}${before ? `&before=${encodeURIComponent(before)}` : ""}`;
     const rows: NoteSummary[] = await api<NoteSummary[]>(url);
     for (const r of rows) if (!seen.has(r.id)) (seen.add(r.id), all.push(r));
     if (rows.length < EXPORT_PAGE) break;
@@ -600,14 +604,14 @@ export async function fetchAllNotes(companyId: string, tab: string, search: stri
 
 export function Feedback({ companies, companyId, noteId, go }: { companies: Company[]; companyId: string | undefined; noteId: string | undefined; go: (to: string) => void }) {
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
-  const [tab, setTab] = useState<State>("unprocessed");
+  const [tab, setTab] = useState<Tab>("unprocessed");
   const [q, setQ] = useState("");
   const [search, setSearch] = useState("");
   const [portal, setPortal] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const list = usePoll(
-    (signal) => (company ? api<NoteSummary[]>(`/api/companies/${company.id}/feedback?state=${tab}${search ? `&q=${encodeURIComponent(search)}` : ""}`, { signal }) : Promise.resolve([])),
+    (signal) => (company ? api<NoteSummary[]>(`/api/companies/${company.id}/feedback?${noteFilter(tab)}${search ? `&q=${encodeURIComponent(search)}` : ""}`, { signal }) : Promise.resolve([])),
     30_000,
     `fb-${company?.id}-${tab}-${search}`,
   );
@@ -682,6 +686,11 @@ export function Feedback({ companies, companyId, noteId, go }: { companies: Comp
                 </button>
               </form>
               {exportError && <p role="alert" className="muted">{exportError}</p>}
+              {tab === "delivered" && !!list.data?.length && (
+                <p className="muted">
+                  {list.data.length} {list.data.length === 1 ? "note is" : "notes are"} delivered: their features are all released.
+                </p>
+              )}
               {list.data && !list.data.length && <p className="muted">{search ? "Nothing matches." : tab === "unprocessed" ? "Nothing waiting. Add feedback above." : "Nothing here."}</p>}
               <ul className="note-list">
                 {(list.data ?? []).map((n) => (
@@ -695,7 +704,15 @@ export function Feedback({ companies, companyId, noteId, go }: { companies: Comp
                       <span className="note-meta">
                         {n.title && n.customer && <span>{n.customer}</span>}
                         <span>{SOURCE[n.source] ?? n.source}</span>
-                        {n.insightCount > 0 && <span className="tag blue">{n.insightCount} linked</span>}
+                        {n.features.length === 0 ? (
+                          <span className="muted">Not linked yet</span>
+                        ) : (
+                          n.features.map((f) => (
+                            <span key={f.id} className={`tag ${STATUS_TONE[f.status]}`} title={f.title}>
+                              {f.title.length > 24 ? `${f.title.slice(0, 23)}…` : f.title}: {FEATURE_STATUS_LABEL[f.status]}
+                            </span>
+                          ))
+                        )}
                         {n.untrusted && <span className="tag">from outside</span>}
                       </span>
                     </button>

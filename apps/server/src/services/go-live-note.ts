@@ -11,7 +11,7 @@ import { decisions, tickets } from "../db/schema.js";
  * check ticket whose parent is merged and not done. Counts of "blocked" tickets leave these out.
  */
 export const liveCheckWaitSql = sql`(${tickets.systemState} = 'blocked' and (${tickets.mergeCommit} is not null
-  or exists (select 1 from tickets p where p.id = ${tickets.checksTicketId} and p.merge_commit is not null and p.system_state <> 'done')))`;
+  or exists (select 1 from tickets p where p.id = ${tickets.checksTicketId} and p.merge_commit is not null and (p.system_state <> 'done' or p.outcome is distinct from 'cancelled'))))`;
 
 /** Blocked tickets of a company that really are blocked, and those that are only merged work waiting for a live check. */
 export async function blockedSplit(db: Db, companyId: string): Promise<{ blocked: number; liveCheck: number }> {

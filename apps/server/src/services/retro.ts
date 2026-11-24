@@ -27,6 +27,7 @@ import {
   ticketRef,
   untrusted,
   type ReviewPolicy,
+  type RetroFailure,
   type RetroFinding,
   type WatchdogRule,
   type WorkflowLever,
@@ -258,7 +259,42 @@ export function retroService(
     async status(companyId: string) {
       const r = await runner(companyId);
       const p = await period(companyId);
+      // Past retros (BOS-2429): the last 8, with who ran each and what became of its changes (two queries).
+      const past = await db
+        .select({ r: retros, agentName: agents.name })
+        .from(retros)
+        .leftJoin(agents, eq(agents.id, retros.agentId))
+        .where(eq(retros.companyId, companyId))
+        .orderBy(desc(retros.startedAt))
+        .limit(8);
+      const pastChanges = past.length
+        ? await db
+            .select({ retroId: workflowChanges.retroId, status: workflowChanges.status, metric: workflowChanges.metric, baseline: workflowChanges.baseline, result: workflowChanges.result })
+            .from(workflowChanges)
+            .where(inArray(workflowChanges.retroId, past.map((x) => x.r.id)))
+        : [];
+      const history = past.map(({ r, agentName }) => {
+        const mine = pastChanges.filter((c) => c.retroId === r.id);
+        const checked = mine.filter((c) => c.result && c.result.value !== null && c.baseline !== null);
+        const kinds = new Map<RetroFailure, number>();
+        for (const f of r.findings ?? []) kinds.set(f.failure, (kinds.get(f.failure) ?? 0) + 1);
+        return {
+          id: r.id,
+          startedAt: r.startedAt,
+          agentName: agentName ?? null,
+          doneCount: r.doneCount,
+          findings: [...kinds].map(([failure, count]) => ({ failure, label: RETRO_FAILURE_LABEL[failure], count })),
+          changes: {
+            applied: mine.filter((c) => ["applied", "kept", "reverted"].includes(c.status)).length,
+            skipped: mine.filter((c) => c.status === "skipped").length,
+            waiting: mine.filter((c) => c.status === "proposed").length,
+            checked: checked.length,
+            met: checked.filter((c) => (HIGHER_IS_BETTER[c.metric] ? c.result!.value! >= c.baseline! : c.result!.value! <= c.baseline!)).length,
+          },
+        };
+      });
       return {
+        history,
         agentId: await configured(companyId),
         runner: r ? { id: r.agent.id, name: r.agent.name, source: r.source } : null,
         last: p.last ? { id: p.last.id, startedAt: p.last.startedAt, doneCount: p.last.doneCount, savedAt: p.last.savedAt } : null,

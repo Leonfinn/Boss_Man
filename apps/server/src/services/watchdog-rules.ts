@@ -30,7 +30,7 @@ export type SnapTicket = {
    * (null while queued or running). An in-progress ticket waits on these, so it is not chased while one is live, and its
    * idle clock restarts when the last one ends. Absent in the backtest, which has no check history.
    */
-  checks?: Array<{ from: Date; to: Date | null }>;
+  checks?: Array<{ from: Date; to: Date | null; /** Place in the check line while queued (1 = next). Absent once running or ended. */ position?: number }>;
 };
 
 export type SnapRun = { id: string; ticketId: string; agentId: string | null; startedAt: Date; endedAt: Date | null; outcome: string | null };
@@ -46,8 +46,11 @@ export type Snapshot = { tickets: SnapTicket[]; runs: SnapRun[]; holds: SnapHold
 export type Trip = {
   ticketId: string;
   rule: WatchdogRule;
-  detail: { idleMs?: number; limitMs?: number; runId?: string; runOutcome?: string | null; decisionId?: string; holds?: number; bounces?: number; blockedUntil?: string };
+  detail: { idleMs?: number; limitMs?: number; runId?: string; runOutcome?: string | null; decisionId?: string; holds?: number; bounces?: number; blockedUntil?: string; queuePosition?: number };
 };
+
+/** BOS-2416: a quick check of a ticket in review that has waited this long in the check line (queued, not yet running) raises one "check line backed up" note. */
+export const CHECK_LINE_BACKED_UP_MS = 3 * 3_600_000;
 
 /**
  * How long after a run ends before "crashed" or "ended without moving" trips. Long enough for
@@ -188,6 +191,17 @@ export function evaluate(snap: Snapshot, s: WatchdogSettings, now: Date): Trip[]
     } else if (x.state === "review") {
       // Approved by everyone: the merge sweep owns it, and raises a merge card of its own if it can't land.
       if (x.mergeWaiting || x.held) continue;
+      // BOS-2416: "Being checked": its quick check is queued or running, so nobody can act. No stale-review alert while it
+      // is; one "check line backed up" note once a queued check has waited past CHECK_LINE_BACKED_UP_MS.
+      const liveChecks = (x.checks ?? []).filter((c) => c.from.getTime() <= t && (!c.to || c.to.getTime() > t));
+      if (liveChecks.length) {
+        const waited = Math.max(...liveChecks.filter((c) => c.position !== undefined).map((c) => t - c.from.getTime()), 0);
+        if (waited >= CHECK_LINE_BACKED_UP_MS) {
+          const place = liveChecks.find((c) => c.position !== undefined)!.position;
+          add("check_line_backed_up", { idleMs: waited, limitMs: CHECK_LINE_BACKED_UP_MS, queuePosition: place });
+        }
+        continue;
+      }
       const idle = t - since - covered(runs.map((r) => [r.startedAt.getTime(), (r.endedAt ?? now).getTime()]), since, t);
       if (idle >= s.reviewHours * H) add("stale_review", { idleMs: idle, limitMs: s.reviewHours * H });
     } else if (x.state === "blocked") {
@@ -219,6 +233,7 @@ export function ruleLimitMs(rule: WatchdogRule, s: WatchdogSettings) {
       return 24 * H;
     case "idle_agent":
     case "unstarted":
+    case "check_line_backed_up":
       // One hand-off per condition until it clears (BOS-659): nothing repeats this for a day; a run that
       // gets the agent going closes the flag on the next sweep.
       return BACKOFF_CAP_MS;

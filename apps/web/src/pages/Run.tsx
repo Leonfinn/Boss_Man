@@ -9,6 +9,7 @@ import { useDraft } from "../drafts";
 import { useImageAttach, withAttachments } from "../components/ImageAttach";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { describe, MAX_ITEMS, useTranscript } from "../transcript";
+import { runTimeSplit, spanWords } from "../run-time-split";
 import { usePoll } from "../hooks";
 import { permissionAnsweredBy, permissionOutcome, permissionRule, type PermissionRow } from "../permissions-in-run";
 import { failureReason, outcomeTag, tokens, usage, when } from "./Runs";
@@ -185,6 +186,60 @@ export function runMarkdown(run: Transcript["run"], ticketRef: string | null, it
   return `${head.join("\n")}\n${lines.join("\n")}`;
 }
 
+/** "Where the time went": the run's time by tool, its longest calls and permission waits. A plain fold, no button. */
+export function TimeSplitFold({ run, items, onGoTo }: { run: Transcript["run"]; items: TranscriptItem[]; onGoTo: (index: number) => void }) {
+  const live = !run.endedAt;
+  const split = runTimeSplit(items, run.endedAt ? Date.parse(run.endedAt) : null, Date.now());
+  return (
+    <details data-testid="run-time-split" style={{ margin: "8px 0" }}>
+      <summary>Where the time went{split && live ? " (so far)" : ""}</summary>
+      {!split ? (
+        <p className="muted">Not available for this run.</p>
+      ) : (
+        <>
+          <p className="muted" style={{ fontSize: 13 }}>
+            {live ? "So far, " : ""}
+            {spanWords(split.totalMs)} in all.
+          </p>
+          <table>
+            <tbody>
+              {split.rows.map((r) => (
+                <tr key={r.key}>
+                  <td>{r.label}</td>
+                  <td className="mono">{spanWords(r.ms)}</td>
+                  <td className="mono muted">{Math.round(r.share * 100)}%</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {split.longest.length > 0 && (
+            <>
+              <h3 style={{ fontSize: 14 }}>Longest tool calls</h3>
+              <ol>
+                {split.longest.map((c, i) => (
+                  <li key={i}>
+                    {c.tool}: {c.what || "(no detail)"} · <span className="mono">{spanWords(c.ms)}</span>
+                    {c.noResult && <span className="tag"> no result</span>}{" "}
+                    <a
+                      href={window.location.hash || "#"}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        onGoTo(c.index);
+                      }}
+                    >
+                      Go to step
+                    </a>
+                  </li>
+                ))}
+              </ol>
+            </>
+          )}
+        </>
+      )}
+    </details>
+  );
+}
+
 export function Run({ runId, companies }: { runId: string; companies: Company[] }) {
   const { run, items, dropped, error } = useTranscript(runId);
   const [preparing, setPreparing] = useState(false);
@@ -272,6 +327,7 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
         </div>
       </header>
       {dlError && <p className="error" role="alert">{dlError}</p>}
+      {run && <TimeSplitFold run={run} items={items} onGoTo={(i) => { follow.current = false; rows.scrollToIndex(i, { align: "center" }); }} />}
       {run && !run.endedAt && <Steer runId={runId} companyId={run.companyId} ticketId={run.ticketId} />}
       {dropped > 0 && (
         <p className="muted" style={{ fontSize: 13 }}>

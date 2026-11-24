@@ -231,3 +231,22 @@ describe("in progress waiting on the check queue (BOS-1760)", () => {
     expect(rules([ticket({ stateChangedAt: ago(15), checks: [{ from: ago(300), to: ago(20) }] })])).toEqual(["t1:idle_agent"]);
   });
 });
+
+describe("review tickets 'Being checked' (BOS-2416)", () => {
+  const review = (over: Partial<SnapTicket> = {}) => ticket({ state: "review", stateChangedAt: ago(300), ...over });
+  it("raises no stale-review alert while the quick check is queued or running", () => {
+    expect(rules([review()])).toEqual(["t1:stale_review"]);
+    expect(rules([review({ checks: [{ from: ago(115), to: null, position: 4 }] })])).toEqual([]);
+    expect(rules([review({ checks: [{ from: ago(100), to: null }] })])).toEqual([]);
+  });
+  it("raises one 'check line backed up' note, with the place in line, once a queued check passes the limit", () => {
+    const trips = evaluate({ tickets: [review({ checks: [{ from: ago(181), to: null, position: 7 }] })], runs: [], holds: [] }, s, NOW);
+    expect(trips.map((x) => x.rule)).toEqual(["check_line_backed_up"]);
+    expect(trips[0]!.detail.queuePosition).toBe(7);
+    // A check that is already running is not a line problem.
+    expect(rules([review({ checks: [{ from: ago(400), to: null }] })])).toEqual([]);
+  });
+  it("keeps the stale-review alert once the check has finished", () => {
+    expect(rules([review({ checks: [{ from: ago(250), to: ago(200) }] })])).toEqual(["t1:stale_review"]);
+  });
+});

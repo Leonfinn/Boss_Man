@@ -7,6 +7,7 @@ import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, lt, ne, or, sql,
 import { featureHorizon, demandScore, IMPORTANCE_LABEL, IMPORTANCE_POINTS, portalShows, PORTAL_STATUSES, portalTitle, portalVerdict, priorityScore, suggestFeatures, untrusted, type FeatureStatus, type Horizon, type Importance, type NoteSource } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { scheduleGoalCheck } from "./goal-check.js";
+import { featureForecasts } from "./feature-forecast.js";
 import { agents, companies, deploys, deployTargets, feedbackCustomers, feedbackNotes, feedbackSettings, featureAreas, featureDrivers, features, insights, milestones, objectives, portalConfirmedAddresses, tickets } from "../db/schema.js";
 
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -168,6 +169,7 @@ export function feedbackService(
           .where(and(inArray(tickets.featureId, fs.map((f) => f.id)), isNull(tickets.parentTicketId)))
           .orderBy(asc(tickets.createdAt))
       : [];
+    const forecasts = await featureForecasts(db, companyId, fs.map((f) => f.id), new Date().toISOString().slice(0, 10));
     // A feature's demand includes its subfeatures'.
     const childrenOf = new Map<string, string[]>();
     for (const f of fs) if (f.parentId) childrenOf.set(f.parentId, [...(childrenOf.get(f.parentId) ?? []), f.id]);
@@ -193,7 +195,8 @@ export function feedbackService(
         const criteria = Object.keys(scores).map((id) => drivers.find((x) => x.id === id)?.name ?? "");
         const portal = portalVerdict({ title: f.title, description: f.description, publicTitle: f.publicTitle, publicSummary: f.publicSummary, area: f.areaId ? (areaName.get(f.areaId) ?? null) : null, criteria, keepOffPortal: f.keepOffPortal, hasPublicSummary: !!f.publicSummary?.trim() });
         const portalShow = portalShows({ portalVisible: f.portalVisible, keepOffPortal: f.keepOffPortal, status: f.status, publicTitle: f.publicTitle, publicSummary: f.publicSummary });
-        return { ...f, portalShow, driverScores: scores, demand: d.demand, insightCount: d.insights, customerCount: d.customers, value: p.value, demandPart: p.demandPart, priority: p.priority, portal, tickets: { total: items.length, done: items.filter((x) => x.state === "done").length, items } };
+        const fc = forecasts.get(f.id)!;
+        return { ...f, pointsDone: fc.pointsDone, pointsTotal: fc.pointsDone + fc.pointsLeft, portalShow, driverScores: scores, demand: d.demand, insightCount: d.insights, customerCount: d.customers, value: p.value, demandPart: p.demandPart, priority: p.priority, portal, tickets: { total: items.length, done: items.filter((x) => x.state === "done").length, items } };
       }),
     };
   }
@@ -389,8 +392,11 @@ export function feedbackService(
         .leftJoin(feedbackCustomers, eq(feedbackCustomers.id, feedbackNotes.customerId))
         .where(and(inArray(insights.featureId, ids), counted))
         .orderBy(desc(insights.createdAt));
+      // Released and declined features have nothing left to forecast.
+      const forecast = me.status === "released" || me.status === "declined" ? null : (await featureForecasts(db, f.companyId, [id], new Date().toISOString().slice(0, 10))).get(id)!;
       return {
         feature: me,
+        forecast,
         drivers: all.drivers,
         settings: { demandWeight: all.settings.demandWeight },
         maxDemand: all.maxDemand,
@@ -485,8 +491,12 @@ export function feedbackService(
 
     // ---- Notes and insights ----
     createNote,
-    async notes(companyId: string, opts: { state?: "unprocessed" | "processed" | "archived"; q?: string; before?: Date; limit?: number } = {}) {
+    async notes(companyId: string, opts: { state?: "unprocessed" | "processed" | "archived"; q?: string; before?: Date; limit?: number; delivered?: boolean } = {}) {
       const q = opts.q?.trim();
+      // Delivered: at least one linked feature, and none that is not released.
+      const delivered = opts.delivered
+        ? sql`exists (select 1 from ${insights} where ${insights.noteId} = ${feedbackNotes.id}) and not exists (select 1 from ${insights} join ${features} on ${features.id} = ${insights.featureId} where ${insights.noteId} = ${feedbackNotes.id} and ${features.status} <> 'released')`
+        : undefined;
       const like = q ? `%${q.replace(/[%_\\]/g, "\\$&")}%` : null;
       const rows = await db
         .select({ note: feedbackNotes, customer: feedbackCustomers.name, insightCount: sql<number>`(select count(*) from ${insights} where ${insights.noteId} = ${feedbackNotes.id})`.mapWith(Number) })
@@ -497,13 +507,34 @@ export function feedbackService(
             eq(feedbackNotes.companyId, companyId),
             counted,
             opts.state ? eq(feedbackNotes.state, opts.state) : undefined,
+            delivered,
             opts.before ? lt(feedbackNotes.createdAt, opts.before) : undefined,
             like ? or(ilike(feedbackNotes.text, like), ilike(feedbackNotes.title, like), ilike(feedbackCustomers.name, like)) : undefined,
           ),
         )
         .orderBy(desc(feedbackNotes.createdAt))
         .limit(Math.min(opts.limit ?? 50, 200));
-      return rows.map((r) => ({ ...r.note, customer: r.customer, insightCount: r.insightCount }));
+      // One query for every listed note's linked features.
+      const links = rows.length
+        ? await db
+            .select({ noteId: insights.noteId, id: features.id, title: features.title, status: features.status })
+            .from(insights)
+            .innerJoin(features, eq(features.id, insights.featureId))
+            .where(inArray(insights.noteId, rows.map((r) => r.note.id)))
+            .orderBy(asc(insights.createdAt))
+        : [];
+      const byNote = new Map<string, Array<{ id: string; title: string; status: (typeof links)[number]["status"] }>>();
+      for (const l of links) {
+        const list = byNote.get(l.noteId) ?? [];
+        list.push({ id: l.id, title: l.title, status: l.status });
+        byNote.set(l.noteId, list);
+      }
+      return rows.map((r) => ({
+        ...r.note,
+        customer: r.customer,
+        insightCount: r.insightCount,
+        features: byNote.get(r.note.id) ?? [],
+      }));
     },
     async unprocessedCount(companyId?: string) {
       const rows = await db

@@ -63,6 +63,17 @@ export function forecastMilestone(rows: Array<{ size: number | null; done: boole
   return { pointsDone, pointsLeft, unsized, pace, expectedFinish, daysLate };
 }
 
+/** Points each company finished per week over the last PACE_DAYS days (companies with none are absent). */
+export async function paceByCompany(db: Db, today: string): Promise<Map<string, number>> {
+  const since = new Date(Date.parse(`${addDays(today, -PACE_DAYS)}T00:00:00Z`));
+  const paceRows = await db
+    .select({ companyId: tickets.companyId, points: sql<number>`coalesce(sum(${tickets.size}), 0)`.mapWith(Number) })
+    .from(tickets)
+    .where(and(eq(tickets.systemState, "done"), sql`${tickets.outcome} is distinct from 'cancelled'`, gte(tickets.stateChangedAt, since)))
+    .groupBy(tickets.companyId);
+  return new Map(paceRows.map((p) => [p.companyId, p.points / (PACE_DAYS / 7)]));
+}
+
 export function planningService(db: Db, deps: { release: (ticketId: string) => Promise<unknown> }) {
   async function companyOfObjective(id: string) {
     const [o] = await db.select({ companyId: objectives.companyId }).from(objectives).where(eq(objectives.id, id));
@@ -112,13 +123,7 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
         const msId = r.milestoneId && msIds.includes(r.milestoneId) ? r.milestoneId : r.featureId ? msOfFeature.get(r.featureId) : undefined;
         if (msId) rowsOf.set(msId, [...(rowsOf.get(msId) ?? []), { size: r.size, done: r.done }]);
       }
-      const since = new Date(Date.parse(`${addDays(today, -PACE_DAYS)}T00:00:00Z`));
-      const paceRows = await db
-        .select({ companyId: tickets.companyId, points: sql<number>`coalesce(sum(${tickets.size}), 0)`.mapWith(Number) })
-        .from(tickets)
-        .where(and(eq(tickets.systemState, "done"), sql`${tickets.outcome} is distinct from 'cancelled'`, gte(tickets.stateChangedAt, since)))
-        .groupBy(tickets.companyId);
-      const paceOf = new Map(paceRows.map((p) => [p.companyId, p.points / (PACE_DAYS / 7)]));
+      const paceOf = await paceByCompany(db, today);
       return cos
         .map((c) => ({
           ...c,

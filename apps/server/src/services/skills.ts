@@ -166,7 +166,11 @@ export type FetchScope = { companyId?: string; runId?: string };
  */
 type Auth = { token: string | null; had: boolean; refused: boolean };
 
-const ADD_TOKEN = "add a git token that can read it: Settings → Secrets, a GIT_TOKEN granted to this company";
+/** How long a source's answer is kept before GitHub is asked again (BOS-2410). */
+export const UPSTREAM_TTL_MS = 6 * 60 * 60 * 1000;
+export type UpstreamResult = { status: "current" | "unchecked" } | { status: "newer"; commit: string; date: string | null } | { status: "error"; reason: string };
+
+const ADD_TOKEN ="add a git token that can read it: Settings → Secrets, a GIT_TOKEN granted to this company";
 
 export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (host: string) => Promise<string[]>; gitToken?: (companyId: string, runId?: string) => Promise<string | undefined> } = {}) {
   const get = deps.fetch ?? fetch;
@@ -336,7 +340,45 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (ho
     }
   }
 
+  // lost on restart, harmless because it only means one more GitHub call; no file or row depends on it (BOS-2410).
+  const upstreamCache = new Map<string, { at: number; result: UpstreamResult }>();
+
+  /** The latest commit that touched a skill's folder, on the source's branch and as of the pinned commit. Read-only. */
+  async function checkUpstream(companyId: string, s: { sourceUrl: string; sourceRef: string }): Promise<UpstreamResult> {
+    const gh = parseGitHub(s.sourceUrl);
+    if (!gh) return { status: "unchecked" };
+    const key = `${companyId}|${s.sourceUrl}|${s.sourceRef}`;
+    const hit = upstreamCache.get(key);
+    if (hit && Date.now() - hit.at < UPSTREAM_TTL_MS) return hit.result;
+    let result: UpstreamResult;
+    try {
+      const auth = await authFor({ companyId });
+      const api = `https://api.github.com/repos/${gh.owner}/${gh.repo}/commits`;
+      const last = async (sha: string | null) => {
+        const q = `per_page=1${sha ? `&sha=${encodeURIComponent(sha)}` : ""}${gh.path ? `&path=${encodeURIComponent(gh.path)}` : ""}`;
+        const rows = (await fetchOk(`${api}?${q}`, "json", LIMITS.bytes, auth)) as Array<{ sha: string; commit?: { committer?: { date?: string }; author?: { date?: string } } }>;
+        return rows[0] ?? null;
+      };
+      const latest = await last(gh.ref);
+      if (!latest) throw new SkillError(404, "Nothing found at that link any more.");
+      // The pin is the repository's head when the skill was added, so compare the folder's last commit then and now.
+      const pinned = latest.sha === s.sourceRef ? latest : await last(s.sourceRef);
+      result = pinned && pinned.sha === latest.sha ? { status: "current" } : { status: "newer", commit: latest.sha, date: latest.commit?.committer?.date ?? latest.commit?.author?.date ?? null };
+    } catch (e) {
+      result = { status: "error", reason: e instanceof SkillError ? e.message : "GitHub didn't answer." };
+    }
+    upstreamCache.set(key, { at: Date.now(), result });
+    return result;
+  }
+
   return {
+    /** For each skill added from a GitHub link: has its source moved on? Cached 6 hours per source; one bad source never fails the rest. */
+    async upstream(companyId: string): Promise<Record<string, UpstreamResult>> {
+      const rows = await db.select({ id: skills.id, sourceUrl: skills.sourceUrl, sourceRef: skills.sourceRef }).from(skills).where(and(eq(skills.companyId, companyId), eq(skills.source, "link")));
+      const out: Record<string, UpstreamResult> = {};
+      for (const r of rows) if (r.sourceUrl && r.sourceRef && /^[0-9a-f]{40}$/.test(r.sourceRef)) out[r.id] = await checkUpstream(companyId, { sourceUrl: r.sourceUrl, sourceRef: r.sourceRef });
+      return out;
+    },
     /** For the proposals flow: read a link, optionally at an exact commit (never re-resolving a branch). */
     readGitHub,
     /** For the proposals flow: the bytes at a non-GitHub link. */

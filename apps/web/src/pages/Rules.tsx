@@ -157,6 +157,50 @@ export function RuleUsageLine({ name, usage }: { name: string; usage: Usage | un
   );
 }
 
+export type AskedCard = { kind: string | null; title: string; asked: number; toOwner: number; toCeo: number; allowed: number; refused: number; open: number; lastAt: string };
+
+/** A title as a regex that matches exactly that text (BOS-2418). */
+export const literalTitlePattern = (title: string): string => `^${title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`;
+
+const answeredText = (c: AskedCard) => {
+  const parts = [c.allowed && `${c.allowed} allowed`, c.refused && `${c.refused} refused`, c.open && `${c.open} still open`].filter(Boolean);
+  return parts.length ? parts.join(", ") : "not answered by a person";
+};
+
+/** The 10 kinds of request that reached the owner or the CEO most in 30 days, each with "Make a rule" (BOS-2418). */
+export function MostAskedCards({ cards, error, onRetry, onMake }: { cards: AskedCard[] | undefined; error: Error | null; onRetry: () => void; onMake: (c: AskedCard) => void }) {
+  return (
+    <details className="card">
+      <summary style={{ fontSize: 17, fontWeight: 600 }}>Most-asked cards (last 30 days)</summary>
+      {error && !cards && <LoadError what="the most-asked cards" message={error.message} onRetry={onRetry} />}
+      {!error && !cards && <p className="muted">Loading the cards…</p>}
+      {cards && cards.length === 0 && <p className="muted">No cards reached you in the last 30 days.</p>}
+      {cards && cards.length > 0 && (
+        <div style={{ overflowX: "auto" }}>
+          <table>
+            <thead>
+              <tr><th>Kind</th><th>Title</th><th>Asked you</th><th>Sent to the CEO</th><th>How you answered</th><th>Last asked</th><th /></tr>
+            </thead>
+            <tbody>
+              {cards.map((c) => (
+                <tr key={`${c.kind ?? ""}\u0000${c.title}`}>
+                  <td>{c.kind ?? "other"}</td>
+                  <td className="mono" style={{ overflowWrap: "anywhere" }}>{c.title || "(no title)"}</td>
+                  <td>{c.toOwner}</td>
+                  <td>{c.toCeo}</td>
+                  <td>{answeredText(c)}</td>
+                  <td>{agoText(c.lastAt)}</td>
+                  <td>{c.title && <button type="button" className="btn" onClick={() => onMake(c)}>Make a rule</button>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </details>
+  );
+}
+
 type RuleFilter ={ text: string; outcome: Outcome | "" };
 const filterOn = (f: RuleFilter) => Boolean(f.text.trim() || f.outcome);
 
@@ -256,6 +300,9 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
   // Usage is a nice-to-have: a failed or odd reply just hides the lines (a rule with no usage shown is not marked unused).
   const usageList = usePoll((signal) => api<{ rules?: Usage }>(`/api/policy-rules/usage${scopeId ? `?companyId=${scopeId}` : ""}`, { signal }), 300_000, `usage-${scopeId ?? "all"}`);
   const usage = usageList.data?.rules && typeof usageList.data.rules === "object" ? usageList.data.rules : undefined;
+  const askedList = usePoll((signal) => api<{ cards?: AskedCard[] }>(`/api/policy-rules/most-asked${scopeId ? `?companyId=${scopeId}` : ""}`, { signal }), 300_000, `asked-${scopeId ?? "all"}`);
+  const asked = Array.isArray(askedList.data?.cards) ? askedList.data!.cards : undefined;
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState({ name: "", kinds: [] as string[], commandPattern: "", titlePattern: "", outcome: "owner" as Outcome });
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -358,6 +405,18 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
         </p>
       )}
 
+      <MostAskedCards
+        cards={asked}
+        error={askedList.error}
+        onRetry={askedList.reload}
+        onMake={(c) => {
+          // Fills the form only; nothing is saved until the owner saves it. The outcome stays as it was for them to pick.
+          setForm({ name: "", kinds: c.kind ? [c.kind] : [], commandPattern: "", titlePattern: literalTitlePattern(c.title), outcome: "owner" });
+          setAdvancedOpen(true);
+          setTimeout(() => document.getElementById("rule-name")?.focus(), 0);
+        }}
+      />
+
       <section className="card" aria-labelledby="rules-h" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <h2 id="rules-h" style={{ fontSize: 17, fontWeight: 600 }}>
           {company ? `${company.name}'s rules` : "Rules for every company"}
@@ -440,7 +499,7 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
             {sentTo && <p role="status">Sent to {sentTo}. Their proposal will appear in your Decisions queue.</p>}
           </form>
         )}
-        <details style={scopeId ? { paddingTop: 12, borderTop: "1px solid var(--line)" } : undefined}>
+        <details open={advancedOpen} onToggle={(e) => setAdvancedOpen(e.currentTarget.open)} style={scopeId ? { paddingTop: 12, borderTop: "1px solid var(--line)" } : undefined}>
           <summary>Advanced: write the rule yourself</summary>
         <form onSubmit={add} style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", alignItems: "end", paddingTop: 12 }}>
           <div className="field" style={{ gridColumn: "1 / -1" }}>

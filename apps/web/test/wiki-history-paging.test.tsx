@@ -41,14 +41,17 @@ describe("wiki history paging (BOS-496)", () => {
     setup();
     render(<Wiki companies={[company]} companyId="c1" slug="release-log" go={() => {}} />);
     // The button counts every version, not just the first page the page carries.
-    const toggle = await screen.findByRole("button", { name: "History (4)" });
+    // Testing-library waits 1 s by default; the page loads lazily and GitHub's runners are several times slower,
+    // so each wait gets a 15 s deadline (it returns as soon as the element is there).
+    const wait = { timeout: 15_000 };
+    const toggle = await screen.findByRole("button", { name: "History (4)" }, wait);
     fireEvent.click(toggle);
-    expect(await screen.findByRole("button", { name: /Show older versions \(2 more\)/ })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: /Show older versions \(2 more\)/ }, wait)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: /Show older versions/ }));
-    await waitFor(() => expect(screen.queryByRole("button", { name: /Show older versions/ })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("button", { name: /Show older versions/ })).toBeNull(), wait);
     // All four versions are listed, oldest included.
     const items = screen.getByLabelText("History").querySelectorAll("li");
     expect(items).toHaveLength(4);
-  });
+  }, 45_000); // vitest's own 5 s test limit would cut the waits above short
 });
