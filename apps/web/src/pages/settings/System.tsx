@@ -263,7 +263,7 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
     );
   }
   const s =v?.status ?? null;
-  const progress = runnerProgress(report.data?.live, maint.data);
+  const progress = runnerProgress(report.data?.live, maint.data, v?.runnerImage?.needed);
   const st = updateStatus(v, maint.data, wait.data, now, { runnersAt: report.data?.update?.at ?? null });
   const wrap = maint.data && maint.data.on && ((maint.data as WrapUpStatus).wrapAsked || maint.data.kind === "wrapup") ? (maint.data as WrapUpStatus) : null;
   const busy = act.busy || !v;

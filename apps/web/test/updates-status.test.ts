@@ -341,4 +341,15 @@ describe("runner swap in progress: every part of the page agrees (BOS-1558)", ()
     expect(tagFor(all)).toBe("Swapping (3 of 3 companies done)");
     expect(connectedCount(all)).toBe(3);
   });
+
+  // BOS-2546: "done" is measured against the image the update is for, not the newest any runner reports.
+  it("every runner still on the old image reads 0 of 3 when the update's image is known", () => {
+    const m = maintUpdate({ runs: 1 });
+    const live = [row("a", "202611241201"), row("b", "202611241201"), row("c", "202611241201")];
+    expect(historyTag(hist, runnerProgress(live, m, "202611241722")).tag).toBe("Swapping (0 of 3 companies done)");
+    // Without a known target the fleet's newest stands in (the old reading).
+    expect(historyTag(hist, runnerProgress(live, m, null)).tag).toBe("Swapping (3 of 3 companies done)");
+    const p = runnerProgress(live, m, "202611241722");
+    expect(renderToStaticMarkup(createElement(LiveState, { r: live[0]!, progress: p }))).toContain("Waiting for runs to finish");
+  });
 });
