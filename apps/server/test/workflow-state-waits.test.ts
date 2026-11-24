@@ -85,7 +85,7 @@ afterEach(async () => {
 });
 
 describe("scorecard stateWaits", () => {
-  it("times tickets finished in the period, counts those left out, and skips cancelled and older ones", async () => {
+  it("times tickets finished in the period, counts those left out, skips cancelled, unfinished and older ones, and follows the period", async () => {
     t = await makeApp();
     const { cookie } = await signIn(t);
     const req = (method: "GET" | "POST", url: string, payload?: object) => t!.app.inject({ method, url, headers: { cookie }, ...(payload ? { payload } : {}) });
@@ -98,24 +98,44 @@ describe("scorecard stateWaits", () => {
       for (const [state, at] of rest) await db.update(tickets).set({ systemState: state as "done", stateChangedAt: ago(at) }).where(eq(tickets.id, row!.id));
       return row!;
     };
-    const slow = await ticket([["backlog", 5 * D], ["in_progress", 4 * D], ["review", 2 * D], ["done", 1 * D]], { title: "Slow one" });
-    await db.insert(reviewRequests).values({ ticketId: slow.id, kind: "code", round: 1, status: "approved", createdAt: ago(2 * D - H), decidedAt: ago(1 * D + H) });
-    await ticket([["backlog", 3 * D], ["in_progress", 3 * D - 2 * H], ["done", 3 * D - 3 * H]], { title: "Quick one" });
+    // A: 2h in progress, 1h blocked, 1h in progress, then 5h in review (reviews open at once, approved as it lands).
+    const a = await ticket([["backlog", 10 * D], ["in_progress", 5 * D], ["blocked", 5 * D - 2 * H], ["in_progress", 5 * D - 3 * H], ["review", 5 * D - 4 * H], ["done", 5 * D - 9 * H]], { title: "A" });
+    await db.insert(reviewRequests).values({ ticketId: a.id, kind: "code", round: 1, status: "approved", createdAt: ago(5 * D - 4 * H), decidedAt: ago(5 * D - 9 * H) });
+    // B: 4h in progress, 1h being checked, 2h in review, 1h merging.
+    const b = await ticket([["backlog", 4 * D], ["in_progress", 3 * D], ["review", 3 * D - 4 * H], ["done", 3 * D - 8 * H]], { title: "B" });
+    await db.insert(reviewRequests).values({ ticketId: b.id, kind: "code", round: 1, status: "approved", createdAt: ago(3 * D - 5 * H), decidedAt: ago(3 * D - 7 * H) });
+    // C: 6h in progress. D: 10h in progress, finished 10 days ago (in the 14-day period, not the 7-day one).
+    await ticket([["backlog", 3 * D], ["in_progress", 2 * D], ["done", 2 * D - 6 * H]], { title: "C" });
+    await ticket([["backlog", 11 * D], ["in_progress", 10 * D + 10 * H], ["done", 10 * D]], { title: "D" });
     // Finished in the period but its history was lost: left out and counted.
     const old = await ticket([["backlog", 6 * D], ["in_progress", 5 * D], ["done", 2 * D]]);
     await db.delete(ticketTransitions).where(eq(ticketTransitions.ticketId, old.id));
-    // Cancelled, and finished before the period: neither counts at all.
+    // Cancelled, unfinished, and finished before the period: none counts at all.
     await ticket([["in_progress", 4 * D], ["done", 1 * D]], { outcome: "cancelled" });
+    await ticket([["backlog", 3 * D], ["in_progress", 1 * D]]);
     await ticket([["in_progress", 30 * D], ["done", 20 * D]]);
 
-    const sc = await workflowService(db, { now: () => NOW }).scorecard(company.id, 14);
-    expect(sc.stateWaits.timed).toBe(2);
+    const svc = workflowService(db, { now: () => NOW });
+    const sc = await svc.scorecard(company.id, 14);
+    const row = (s: string) => sc.stateWaits.rows.find((r) => r.state === s)!;
+    expect(sc.stateWaits.timed).toBe(4);
     expect(sc.stateWaits.leftOut).toBe(1);
-    expect(sc.stateWaits.slowest.map((s) => s.title)).toEqual(["Slow one", "Quick one"]);
-    expect(sc.stateWaits.slowest[0]).toMatchObject({ totalMs: 3 * D, longest: "in_progress", longestMs: 2 * D });
-    expect(sc.stateWaits.rows.find((r) => r.state === "checking")).toMatchObject({ tickets: 1, p50Ms: H });
-    expect(sc.stateWaits.rows.find((r) => r.state === "in_review")).toMatchObject({ tickets: 1, p50Ms: 22 * H });
-    expect(sc.stateWaits.rows.find((r) => r.state === "merging")).toMatchObject({ tickets: 1, p50Ms: H });
+    // In progress: 3h, 4h, 6h, 10h; all time 9 + 8 + 6 + 10 = 33h.
+    expect(row("in_progress")).toMatchObject({ tickets: 4, p50Ms: 5 * H, p90Ms: 31_680_000 }); // 8.8h
+    expect(row("in_progress").share).toBeCloseTo(23 / 33);
+    expect(row("blocked")).toMatchObject({ tickets: 1, p50Ms: H, p90Ms: H });
+    expect(row("blocked").share).toBeCloseTo(1 / 33);
+    expect(row("in_review")).toMatchObject({ tickets: 2, p50Ms: 3.5 * H });
+    expect(row("in_review").share).toBeCloseTo(7 / 33);
+    expect(row("checking")).toMatchObject({ tickets: 1, p50Ms: H });
+    expect(row("merging")).toMatchObject({ tickets: 1, p50Ms: H });
+    expect(sc.stateWaits.slowest.map((s) => [s.title, s.totalMs / H, s.longest])).toEqual([["D", 10, "in_progress"], ["A", 9, "in_review"], ["B", 8, "in_progress"], ["C", 6, "in_progress"]]);
+
+    // A shorter period counts only its own finished tickets.
+    const week = await svc.scorecard(company.id, 7);
+    expect(week.stateWaits.timed).toBe(3);
+    expect(week.stateWaits.slowest.map((s) => s.title)).toEqual(["A", "B", "C"]);
+    expect(week.stateWaits.rows.find((r) => r.state === "in_progress")).toMatchObject({ tickets: 3, p50Ms: 4 * H });
     // The route passes it through unchanged.
     const res = await req("GET", `/api/companies/${company.id}/workflow?days=14`);
     expect(res.statusCode).toBe(200);
