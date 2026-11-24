@@ -14,6 +14,7 @@ import { WorkError } from "../services/ticket-links.js";
 import { OBJECTIVE_STATUSES, type planningService } from "../services/planning.js";
 import type { workService } from "../services/work.js";
 import { roadmapBurnup } from "../services/roadmap-burnup.js";
+import { setKeyResultValue } from "../services/key-result-readings.js";
 
 const Uuid = z.string().uuid();
 const IdParam = z.object({ id: Uuid });
@@ -60,13 +61,15 @@ export function objectiveRoutes(
   owner.post("/api/objectives/:id/key-results", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
     const body = z.object({ title: z.string().trim().min(1).max(200), target: z.number().optional(), current: z.number().optional(), unit: z.string().max(20).optional(), method: z.enum(["manual", "agent", "check"]).optional() }).parse(req.body);
-    return reply.code(201).send(await work.addKeyResult(id, body));
+    const created = await work.addKeyResult(id, body);
+    if (typeof body.current === "number") await setKeyResultValue(db, created.id, body.current, { kind: "owner" });
+    return reply.code(201).send(created);
   });
 
   /** The company and title of a key result's objective, for the note the CEO reads (BOS-2250). */
   const keyResultContext = async (id: string) => {
     const [k] = await db
-      .select({ title: keyResults.title, companyId: objectives.companyId, objective: objectives.title })
+      .select({ title: keyResults.title, current: keyResults.current, companyId: objectives.companyId, objective: objectives.title })
       .from(keyResults)
       .innerJoin(objectives, eq(objectives.id, keyResults.objectiveId))
       .where(eq(keyResults.id, id));
@@ -88,6 +91,8 @@ export function objectiveRoutes(
     }
     const [k] = await db.update(keyResults).set(body).where(eq(keyResults.id, id)).returning();
     if (!k) throw new WorkError(404, "No such key result.");
+    // A new value is a reading; saving the form with the value unchanged is not (BOS-2458).
+    if (typeof body.current === "number" && body.current !== before.current) await setKeyResultValue(db, id, body.current, { kind: "owner" });
     await teamCheck(before.companyId, `changed the key result "${before.title}" under the objective "${before.objective}"`);
     return k;
   });
