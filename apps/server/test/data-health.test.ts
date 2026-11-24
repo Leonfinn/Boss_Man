@@ -32,6 +32,17 @@ describe("maskQuery", () => {
     expect(maskQuery("select " + "a, ".repeat(60)).length).toBe(80);
     expect(maskQuery("insert into t values ('it''s secret', 7)")).not.toMatch(/secret|7/);
   });
+  it("masks dollar-quoted text, with and without a tag", () => {
+    expect(maskQuery("update t set a = $$top secret$$ where b = $tag$it's hidden$tag$ and c = 1")).toBe("update t set a = ? where b = ? and c = ?");
+  });
+  it("masks E'…' strings with escaped quotes", () => {
+    expect(maskQuery("select * from t where a = E'it\\'s secret' and b = 2")).toBe("select * from t where a = ? and b = ?");
+  });
+  it("masks from a quote left open by the text limit to the end", () => {
+    expect(maskQuery("select * from t where a = 'half a secret")).toBe("select * from t where a = ?");
+    expect(maskQuery("select * from t where a = E'half \\'secret")).toBe("select * from t where a = ?");
+    expect(maskQuery("select * from t where a = $$half secret")).toBe("select * from t where a = ?");
+  });
 });
 
 describe("limit counts", () => {
