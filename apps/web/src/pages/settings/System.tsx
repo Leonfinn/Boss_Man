@@ -816,7 +816,7 @@ export function PrivateDetails() {
 }
 
 /** Settings → Server and runner → Limits and checks (BOS-798): the owner's switch for the server-owned check queue (DR-003). */
-export function CheckQueueSetting() {
+export function CheckQueueSetting({ companyId }: { companyId?: string } = {}) {
   const view = usePoll((signal) => api<CheckQueueView>("/api/settings/check-queue", { signal }), 30_000, "check-queue");
   const act = useAction();
   const [edit, setEdit] = useState<{ mode: "legacy" | "server"; slots: string; train: boolean; policy: SlotPolicy; laneAge: string } | null>(null);
@@ -912,7 +912,7 @@ export function CheckQueueSetting() {
           </p>
         </div>
       )}
-      <CheckWorkers workers={d.workers ?? []} maxSlots={d.maxSlots} reload={view.reload} />
+      <CheckWorkers workers={d.workers ?? []} maxSlots={d.maxSlots} reload={view.reload} companyId={companyId} />
       <p className="muted" style={{ fontSize: 14 }}>
         Switching back to legacy cancels checks that are still waiting (their agents are told to run the check themselves); checks already running finish.
       </p>

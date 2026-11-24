@@ -97,6 +97,15 @@ import { runFolder } from "./run-folder.js";
 import { heldTicketIds } from "./review-holds.js";
 import { runCapabilities } from "./run-capabilities.js";
 
+/**
+ * (BOS-2382) The Answered list's kind of card: a plan card is "plan" whatever its type; a merge review is "merge",
+ * a model change "model", the deploy cards "deploy"; every other card keeps its context type.
+ */
+const ANSWERED_KIND = sql<string>`case when ${decisions.context}->>'plan' = 'true' then 'plan' when ${decisions.context}->>'type' = 'risk_review' then 'merge' when ${decisions.context}->>'type' = 'model_change' then 'model' when ${decisions.context}->>'type' in ('self_deploy', 'deploy_wait', 'deploy') then 'deploy' else coalesce(${decisions.context}->>'type', ${decisions.kind}::text) end`;
+/** The CEO's own answers (a settled card carrying the settler's name). */
+const ANSWERED_BY_CEO = sql`(${decisions.status} = 'answered' and ${decisions.context}->'settled'->>'name' is not null)`;
+const ANSWERED_BY_AUTO = sql`(${decisions.status} = 'answered' and ${decisions.context}->'settled'->>'name' is null and ${decisions.context}->'settledByRepeat' is not null)`;
+
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
 type Sender = (runnerId: string, command: RunnerCommand) => boolean;
 
@@ -572,7 +581,7 @@ export function ceoFirstMergeNote(title: string, cardId: string, what: string) {
  */
 export async function raiseOwnerTodo(
   db: Db,
-  t: { companyId: string; question: string; key: string; steps: string[]; check?: string; rollback?: string; ofDecisionId: string; raisedByAgentId?: string | null; target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; update?: DeployUpdate; doAfter?: OrderLink[]; /** Offer "Quiet the machine first" (a hand-applied server update, BOS-420). */ quietFirst?: boolean },
+  t: { companyId: string; question: string; key: string; steps: string[]; check?: string; rollback?: string; ofDecisionId: string; raisedByAgentId?: string | null; target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; update?: DeployUpdate; doAfter?: OrderLink[]; /** Offer "Quiet the machine first" (a hand-applied server update, BOS-420). */ quietFirst?: boolean; /** An extra answer that closes the card for good (the CI-identity card's "Keep the emails"); "A step failed" never does. */ extraOption?: string },
 ) {
   const [row] = await db
     .insert(decisions)
@@ -580,7 +589,7 @@ export async function raiseOwnerTodo(
       companyId: t.companyId,
       kind: "question",
       question: t.question,
-      options: t.quietFirst ? [QUIET_FIRST, TODO_DONE, TODO_FAILED] : [TODO_DONE, TODO_FAILED],
+      options: [...(t.quietFirst ? [QUIET_FIRST] : []), TODO_DONE, ...(t.extraOption ? [t.extraOption] : []), TODO_FAILED],
       recommendedOption: t.quietFirst ? QUIET_FIRST : TODO_DONE,
       tier: "owner",
       raisedByAgentId: t.raisedByAgentId ?? null,
@@ -2339,11 +2348,18 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
      * (BOS-2187) Answered and withdrawn cards, newest first, a page at a time. The cursor is the last row's
      * "when|id" from the page before. `q` keeps cards whose question contains the text.
      */
-    async answeredList(opts: { limit?: number; cursor?: string; q?: string; companyId?: string; id?: string } = {}) {
+    async answeredList(opts: { limit?: number; cursor?: string; q?: string; companyId?: string; id?: string; by?: "owner" | "ceo" | "auto" | "withdrawn"; kind?: string; weeks?: number } = {}) {
       const limit = Math.min(Math.max(opts.limit ?? 50, 1), 100);
       const when = sql<Date>`coalesce(${decisions.answeredAt}, ${decisions.createdAt})`;
       const conds = [ne(decisions.status, "open")];
       if (opts.companyId) conds.push(eq(decisions.companyId, opts.companyId));
+      // (BOS-2382) Who answered, what kind of card, and how far back (at most 8 weeks when asked).
+      if (opts.by === "withdrawn") conds.push(eq(decisions.status, "withdrawn"));
+      else if (opts.by === "ceo") conds.push(ANSWERED_BY_CEO);
+      else if (opts.by === "auto") conds.push(ANSWERED_BY_AUTO);
+      else if (opts.by === "owner") conds.push(sql`(${decisions.status} = 'answered' and not ${ANSWERED_BY_CEO} and not ${ANSWERED_BY_AUTO})`);
+      if (opts.kind) conds.push(sql`${ANSWERED_KIND} = ${opts.kind}`);
+      if (opts.weeks && !opts.id) conds.push(sql`${when} >= ${new Date(now().getTime() - Math.min(opts.weeks, 8) * 7 * 86_400_000).toISOString()}::timestamptz`);
       // (BOS-2326) One closed card, for a #/decisions/<id> link from the search box.
       if (opts.id) conds.push(eq(decisions.id, opts.id));
       if (opts.q?.trim()) conds.push(sql`position(lower(${opts.q.trim()}) in lower(${decisions.question})) > 0`);
@@ -2352,7 +2368,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (at && cid && !Number.isNaN(Date.parse(at))) conds.push(sql`(${when}, ${decisions.id}) < (${new Date(at).toISOString()}::timestamptz, ${cid}::uuid)`);
       }
       const rows = await db
-        .select({ d: decisions, when, companyName: companies.name })
+        .select({ d: decisions, when, companyName: companies.name, kind: ANSWERED_KIND })
         .from(decisions)
         .innerJoin(companies, eq(companies.id, decisions.companyId))
         .where(and(...conds))
@@ -2360,17 +2376,19 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .limit(limit + 1);
       const page = rows.slice(0, limit);
       const items = [];
-      for (const { d, when: at, companyName } of page) {
+      for (const { d, when: at, companyName, kind } of page) {
         const c = d.context as { settled?: { name?: string; note?: string | null }; settledByRepeat?: unknown; judge?: unknown; answerNote?: string | null };
         const ids = await decisionTicketIds(db, d).catch(() => [] as string[]);
         const ts = ids.length
           ? await db
-              .select({ id: tickets.id, title: tickets.title, number: tickets.number, prefix: companies.ticketPrefix })
+              .select({ id: tickets.id, title: tickets.title, number: tickets.number, prefix: companies.ticketPrefix, systemState: tickets.systemState, mergedAt: tickets.mergedAt })
               .from(tickets)
               .innerJoin(companies, eq(companies.id, tickets.companyId))
               .where(and(eq(tickets.companyId, d.companyId), inArray(tickets.id, ids)))
           : [];
         const t = ts[0];
+        // What happened next to the ticket the card was about: merged, closed without a merge, or still open.
+        const outcome = t ? (t.mergedAt ? "merged" : t.systemState === "done" ? "closed" : "open") : null;
         const by = d.status === "withdrawn" ? "withdrawn" : c.settled?.name ? "ceo" : c.settledByRepeat ? "auto" : "owner";
         items.push({
           id: d.id,
@@ -2383,11 +2401,26 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           note: d.status === "answered" ? c.settled?.note ?? c.answerNote ?? null : null,
           at: new Date(at).toISOString(),
           ticket: t ? { id: t.id, title: t.title, ref: ticketRef(t.prefix, t.number) } : null,
+          kind,
+          outcome,
+          state: t?.systemState ?? null,
         });
       }
       const last = page[page.length - 1];
       const next = rows.length > limit && last ? `${new Date(last.when).toISOString()}|${last.d.id}` : null;
-      return { items, next };
+      // (BOS-2382) On the first page: what the CEO answered for the owner in the last 7 days, by kind.
+      let ceoWeek: { total: number; byKind: Array<{ kind: string; count: number }> } | undefined;
+      if (!opts.cursor && !opts.id) {
+        const weekAgo = new Date(now().getTime() - 7 * 86_400_000).toISOString();
+        const week = await db
+          .select({ kind: ANSWERED_KIND, count: sql<number>`count(*)::int` })
+          .from(decisions)
+          .where(and(...(opts.companyId ? [eq(decisions.companyId, opts.companyId)] : []), ANSWERED_BY_CEO, sql`${when} >= ${weekAgo}::timestamptz`))
+          .groupBy(ANSWERED_KIND)
+          .orderBy(desc(sql`count(*)`));
+        ceoWeek = { total: week.reduce((n, w) => n + w.count, 0), byKind: week.map((w) => ({ kind: w.kind, count: w.count })) };
+      }
+      return { items, next, ...(ceoWeek ? { ceoWeek } : {}) };
     },
 
     /** Boss Man's alerts the team is still handling (BOS-64), for the owner's collapsed "being handled" line. */

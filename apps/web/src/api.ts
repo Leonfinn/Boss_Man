@@ -281,6 +281,8 @@ export type Ticket = {
   body?: string | null;
   parentTitle?: string | null;
   lastActivityAt?: string;
+  /** BOS-2400: when the ticket last changed state (the board sends the whole ticket row). */
+  stateChangedAt?: string;
   /** In review with an owner sign-off decision still open (the "Your review" lane). */
   waitingOnOwner?: boolean;
   waitingDecisionId?: string | null;
@@ -421,6 +423,8 @@ export type EngagementView = EngagementRow & {
   deliverables: string | null;
   acceptanceCriteria: string[];
   spentUsd: number;
+  /** The provider's tickets doing the work; absent in the requester's view. */
+  tickets?: Array<{ id: string; ref: string | null; title: string; state: string; assignee: string | null; spentUsd: number }>;
   counterTerms: unknown;
   delivery: { summary?: string; refs?: string[] } | null;
   thread: Array<{ from: string; fromCompanyId: string; kind: string; body: string; at: string }>;
@@ -473,7 +477,8 @@ export type NotifySettings = {
 
 export type MilestoneStatus = "done" | "late" | "at_risk" | "on_track" | "no_work" | "unscheduled";
 export type Horizon = "now" | "next" | "later";
-export type RoadmapMilestone = { id: string; title: string; targetDate: string | null; total: number; done: number; blocked: number; active: number; status: MilestoneStatus; horizon: Horizon; pinned: Horizon | null };
+export type RoadmapMilestone = { id: string; title: string; targetDate: string | null; total: number; done: number; blocked: number; active: number; status: MilestoneStatus; horizon: Horizon; pinned: Horizon | null; forecast: MilestoneForecast };
+export type MilestoneForecast = { pointsDone: number; pointsLeft: number; unsized: number; pace: number; expectedFinish: string | null; daysLate: number };
 export type RoadmapObjective = {
   id: string;
   title: string;

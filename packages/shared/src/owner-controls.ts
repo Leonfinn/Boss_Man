@@ -113,7 +113,7 @@ export const OWNER_CONTROLS = {
   // The Runs page's emergency stop: every run going now, in every company (BOS-837).
   // The Engagements list: the paged list's own buttons come from "Any screen"; its "Show" filter is a field (OWNER_FIELDS).
   Engagements: [],
-  Runs: ["End all running runs", "Ending", "Loading", "Show more", "Retry", "Download CSV"],
+  Runs: ["End all running runs", "Ending", "Loading", "Show more", "Retry", "Download CSV", "Start now", "Cancel", "Starting", "Cancelling"],
   // The Merge queue page's two views (BOS-1174).
   // Below three recently finished checks, "Show N more" opens the rest (BOS-1239).
   "Merge queue": ["Merges", "Quick checks", "Show …", "Move to front"],
@@ -204,6 +204,8 @@ export const OWNER_CONTROLS = {
     "Remove anyway",
     // The Deploys fold under each deploy target (BOS-2318): the next page of older deploys.
     "Show older",
+    // A past successful deploy in that fold: ship that version again (BOS-2329).
+    "Deploy this version again",
   ],
   // Who approves and reviews work at each risk level, and whether it moved the goal.
   Reviews: ["Reset to defaults"],
@@ -256,6 +258,7 @@ export const OWNER_FIELDS = {
     "Your answer, in your own words. It goes to …", "What's unclear (optional, one line)",
     "Every agent in this company",
     "Your one-line reason, or the corrected lesson (needed for Edit)",
+    "Who answered", "Kind",
   ],
   // The "Remember this" box under the owner's own message (BOS-2184).
   Chat: ["Add this to the standing rules every agent reads"],

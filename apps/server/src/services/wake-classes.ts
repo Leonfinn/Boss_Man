@@ -88,6 +88,9 @@ const WAKE_TABLE = {
   "deploy left the server unchanged": "scheduled",
   // The nightly secrets pass found a key-shaped string on main, or one whose closed ticket is still there (BOS-1932). Never dropped.
   "secret scan": "scheduled",
+  // BOS-2356: Boss Man tells an agent its nudge was dropped, and why. Ticketless; scheduled so it never takes the
+  // agent's hourly allowance of ticketless wakes or is itself dropped as stale (it would be silent again).
+  "nudge dropped": "scheduled",
   // Started by agents.
   nudge: "agent",
   chased: "agent",

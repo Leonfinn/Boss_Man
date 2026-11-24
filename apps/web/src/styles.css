@@ -1844,4 +1844,15 @@ details.pushes[open] > summary { margin-bottom: 8px; }
 /* BOS-2330: the card j/k moved to. Inside the outline, as a lane's scroll box would clip one drawn outside. */
 [data-shortcut-card]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .search-snippet { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The box's "See all N results" link and the Search page (BOS-2378). */
+.search-all { margin: 0; padding: 10px 16px; border-top: 1px solid var(--line); }
+.search-filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 16px; }
+.search-filters input { flex: 1 1 260px; min-width: 0; }
+.search-group { margin: 0 0 20px; }
+.search-group h2 { font-size: 15px; margin: 0 0 6px; }
+.search-list { list-style: none; margin: 0; padding: 0; }
+.search-list li { border-bottom: 1px solid var(--line); }
+.search-list a { display: flex; flex-direction: column; gap: 2px; padding: 8px 4px; min-height: 44px; justify-content: center; color: var(--ink); text-decoration: none; }
+.search-list a:hover, .search-list a:focus-visible { background: var(--accent-soft); }
+.search-more { margin: 8px 0 0; }
 .chat-msg.found p { outline: 2px solid var(--badge); outline-offset: 2px; }

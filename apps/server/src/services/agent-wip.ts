@@ -2,7 +2,7 @@
 // One counting rule decides what counts as WIP, for a board column and for an agent alike:
 // tickets whose state is in_progress (a ticket that only waits on a queued check still counts;
 // review, blocked and done don't). moveTicket asks `agentWipHold` on every move into in_progress.
-import { and, asc, eq, inArray, isNotNull, isNull, ne, or, sql, type SQL, type SQLWrapper } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, isNull, lte, ne, or, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import { figureText, ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { openBlockers } from "./ticket-links.js";
@@ -97,11 +97,9 @@ export function wipExemptKind(t: { planFirst: boolean; planApprovedAt: Date | nu
 export const agentWipCount = (db: Db, agentId: string, exceptId?: string) => countInProgress(db, eq(tickets.assigneeAgentId, agentId), exceptId);
 
 /**
- * BOS-1906: tickets an agent may have in "Being checked" (in review, held for a quick check) before its next start waits. They
- * count toward neither WIP limit (they are not in progress), so this is what keeps BOS-1479's brake: an agent can't keep starting
- * work and adding checks to a long line. A third hand-in is accepted; only the next start waits.
+ * BOS-1906: tickets an agent has in "Being checked" (in review, held for a quick check). They count toward neither WIP limit
+ * (they are not in progress), and since BOS-2385 they no longer hold the agent's next start either; only displays read this.
  */
-export const BEING_CHECKED_CAP = 2;
 export const beingCheckedCount = (db: Db, agentId: string, exceptId?: string) =>
   countWip(db, and(eq(tickets.systemState, "review"), isNotNull(tickets.checkHoldAt), eq(tickets.assigneeAgentId, agentId)), exceptId);
 
@@ -225,11 +223,7 @@ export async function agentWipHold(db: Db, t: typeof tickets.$inferSelect, opts:
       const [a] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, t.assigneeAgentId));
       hold = { limit: limits.agent, scope: "agent", reason: `Waiting: ${a?.name ?? "the agent"} is at the limit of ${limits.agent} in-progress ticket${limits.agent === 1 ? "" : "s"}; starts when one finishes.` };
     }
-    // BOS-1906: with no room-limit hit, too many tickets waiting for their check also hold the next start (the owner's "No limit" lifts this too).
-    if (!hold && (await beingCheckedCount(db, t.assigneeAgentId)) >= BEING_CHECKED_CAP) {
-      const [a] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, t.assigneeAgentId));
-      hold = { limit: BEING_CHECKED_CAP, scope: "agent", reason: `Waiting: ${a?.name ?? "the agent"} has ${BEING_CHECKED_CAP} tickets being checked; starts when one clears.` };
-    }
+    // BOS-2385: tickets "Being checked" (in review, waiting on a queued quick check) no longer hold the next start: waiting for checks is not in progress.
   }
   if (!hold && limits.company != null) {
     const n = await countInProgress(db, eq(tickets.companyId, t.companyId), t.id, "company");
@@ -292,11 +286,11 @@ export async function agentBusy(db: Db, agentId: string, ticketId?: string): Pro
   return !!queued;
 }
 
-/** Every busy agent at once (the same rule as `agentBusy`), for sweeps that look at many agents. */
-export async function busyAgentIds(db: Db): Promise<Set<string | null>> {
+/** Every busy agent at once (the same rule as `agentBusy`), for sweeps that look at many agents. A deferred wake not due yet uses no slot (BOS-2358), so it doesn't count. */
+export async function busyAgentIds(db: Db, now: Date = new Date()): Promise<Set<string | null>> {
   const ids = [
     ...(await db.select({ id: runs.agentId }).from(runs).where(and(isNull(runs.endedAt), workingRunSql))).map((r) => r.id),
-    ...(await db.select({ id: wakes.agentId }).from(wakes).where(inArray(wakes.status, ["queued", "deferred"]))).map((w) => w.id),
+    ...(await db.select({ id: wakes.agentId }).from(wakes).where(or(eq(wakes.status, "queued"), and(eq(wakes.status, "deferred"), or(isNull(wakes.notBefore), lte(wakes.notBefore, now)))))).map((w) => w.id),
   ];
   return new Set(ids.filter((id): id is string => !!id));
 }

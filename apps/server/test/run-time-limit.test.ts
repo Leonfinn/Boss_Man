@@ -6,6 +6,7 @@ import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { companies, decisions, runners, runs } from "../src/db/schema.js";
+import { runLimitReason } from "../src/services/run-time-limit.js";
 
 const MIN = 60_000;
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -151,5 +152,14 @@ describe("run time limit", () => {
     const res = await ctx.app.inject({ method: "PATCH", url: `/api/companies/${ctx.company.id}`, payload: { maxRunMinutes: 5 } });
     expect(res.statusCode).toBe(401);
     expect((await ctx.db.select().from(companies).where(eq(companies.id, ctx.company.id)))[0]!.maxRunMinutes).toBeNull();
+  });
+});
+
+// BOS-2352: the reason text the stop carries (and the outcome is built from), on its own.
+describe("runLimitReason (BOS-2352)", () => {
+  it("names the limit in minutes in the form the run's outcome reads", () => {
+    expect(runLimitReason(60)).toBe("run time limit (60 min)");
+    expect(runLimitReason(1)).toBe("run time limit (1 min)");
+    expect(runLimitReason(90.5)).toBe("run time limit (90.5 min)");
   });
 });

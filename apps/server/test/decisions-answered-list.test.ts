@@ -119,6 +119,33 @@ describe("answered cards list (BOS-2187)", () => {
     expect(new Set(seen).size).toBe(5);
   });
 
+  it("filters by who answered, kind and weeks, and sums the CEO's last 7 days by kind (BOS-2382)", async () => {
+    ctx = await setup();
+    const day = 86_400_000;
+    const ago = (d: number) => new Date(Date.now() - d * day);
+    const base = { companyId: ctx.companyId, options: [], recommendedOption: "a", status: "answered" as const, answer: "a" };
+    const ceo = { settled: { name: "Casey", note: "Looked safe", at: "x" } };
+    await ctx.db.insert(decisions).values([
+      { ...base, kind: "approval", question: "Merge it", answeredAt: ago(1), context: { type: "risk_review", ...ceo } },
+      { ...base, kind: "question", question: "Plan it", answeredAt: ago(2), context: { type: "question", plan: true, ...ceo } },
+      { ...base, kind: "question", question: "Old CEO merge", answeredAt: ago(20), context: { type: "risk_review", ...ceo } },
+      { ...base, kind: "question", question: "Owner one", answeredAt: ago(1), context: { type: "question" } },
+      { ...base, kind: "permission", question: "Auto one", answeredAt: ago(1), context: { type: "permission", settledByRepeat: { sameAs: "x", at: "x" } } },
+      { ...base, kind: "question", question: "Ancient", answeredAt: ago(80), context: { type: "question" } },
+    ]);
+    type R = { items: Array<{ question: string; kind: string }>; ceoWeek?: { total: number; byKind: Array<{ kind: string; count: number }> } };
+    const q = async (s: string) => ((await ctx!.get(`/api/decisions/answered?${s}`)).json() as R);
+    expect((await q("by=ceo")).items.map((i) => i.question).sort()).toEqual(["Merge it", "Old CEO merge", "Plan it"]);
+    expect((await q("by=auto")).items.map((i) => i.question)).toEqual(["Auto one"]);
+    expect((await q("by=owner&weeks=8")).items.map((i) => i.question)).toEqual(["Owner one"]);
+    expect((await q("kind=merge")).items.map((i) => i.question).sort()).toEqual(["Merge it", "Old CEO merge"]);
+    expect((await q("weeks=8")).items.map((i) => i.question)).not.toContain("Ancient");
+    const week = (await q("")).ceoWeek!;
+    expect(week.total).toBe(2);
+    expect(week.byKind.map((k) => k.kind).sort()).toEqual(["merge", "plan"]);
+    expect((await q("by=ceo")).items.find((i) => i.question === "Merge it")).toMatchObject({ kind: "merge" });
+  });
+
   it("is refused without the owner's session", async () => {
     ctx = await setup();
     const r = await ctx.app.inject({ method: "GET", url: "/api/decisions/answered" });

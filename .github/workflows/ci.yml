@@ -401,7 +401,7 @@ jobs:
           for i in $(seq 1 30); do curl -fsS http://127.0.0.1:5000/v2/ >/dev/null 2>&1 && break; sleep 1; done
           reg=localhost:5000/ci
           images='[]'
-          for pair in server:boss-man-server:ci launcher:boss-man-launcher:current netguard:boss-man-netguard:current runner:boss-man-runner:ci; do
+          for pair in server:boss-man-server:ci launcher:boss-man-launcher:current netguard:boss-man-netguard:current runner:boss-man-runner:ci updater:boss-man-updater:ci; do
             short="${pair%%:*}"; local_tag="${pair#*:}"
             docker tag "$local_tag" "$reg/boss-man-$short:ci"
             docker push -q "$reg/boss-man-$short:ci" >/dev/null

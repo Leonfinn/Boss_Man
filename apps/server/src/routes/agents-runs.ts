@@ -131,6 +131,27 @@ export function agentRunsRoutes(
     const b = z.object({ text: z.string().trim().min(1).max(OWNER_MESSAGE_MAX), interrupt: z.boolean().optional() }).parse(req.body);
     return runsSvc.message(id, { ...b, from: "the owner" }).catch(runErrors(reply));
   });
+  // Agents woken but not started yet, and why (BOS-2320). Read-only; no notes text.
+  owner.get("/api/companies/:id/wakes/waiting", async (req) => runsSvc.waiting(IdParam.parse(req.params).id));
+  // Start now / Cancel on a waiting agent (BOS-2328). Start now only clears the wait: the scheduler still applies every limit.
+  const WaitingBody = z.object({ reason: z.string().trim().max(200).optional() });
+  const WakeParams = z.object({ id: Uuid, wakeId: Uuid });
+  owner.post("/api/companies/:id/wakes/:wakeId/start-now", async (req, reply) => {
+    const { id, wakeId } = WakeParams.parse(req.params);
+    const b = WaitingBody.parse(req.body ?? {});
+    const done = await runsSvc.startWaiting(id, wakeId, b.reason || undefined).catch(runErrors(reply));
+    if (!done || !("id" in done)) return done;
+    await scheduler.tick().catch((err) => log.error({ err }, "tick after start now failed"));
+    const now = await runsSvc.wakeState(id, wakeId);
+    // Started: a run took the wake. Still deferred or queued: say why instead of pretending.
+    if (now?.runId) return { ok: true, started: true, waitingReason: null };
+    return { ok: true, started: false, waitingReason: now?.statusReason ?? "Waiting for a free run slot." };
+  });
+  owner.post("/api/companies/:id/wakes/:wakeId/cancel", async (req, reply) => {
+    const { id, wakeId } = WakeParams.parse(req.params);
+    const b = WaitingBody.parse(req.body ?? {});
+    return runsSvc.cancelWaiting(id, wakeId, b.reason || undefined).then(() => ({ ok: true }), runErrors(reply));
+  });
   owner.get("/api/runs/recent", async (req) => {
     const q = z
       .object({

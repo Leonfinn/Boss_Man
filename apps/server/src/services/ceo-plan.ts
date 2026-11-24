@@ -16,6 +16,12 @@ export function ceoPlanText(t: PlanFields, now: Date, max = 300): string | null 
 /** The plan only while its deadline is still ahead (an expired plan no longer holds the ticket). */
 export const unexpiredPlan = (t: PlanFields, now: Date): boolean => !!t.ceoPlan?.trim() && !!t.ceoPlanDeadline && t.ceoPlanDeadline.getTime() > now.getTime();
 
+/** How long after a plan's deadline the stuck-type alerts stay quiet (BOS-612). */
+export const PLAN_GRACE_MS = 30 * 60_000;
+
+/** True while a CEO plan's deadline plus the grace is still ahead: the looks-stuck and parked-by-date alerts stay quiet (BOS-2402). */
+export const planHoldsAlerts = (t: PlanFields, now: Date, graceMs: number = PLAN_GRACE_MS): boolean => !!t.ceoPlanDeadline && now.getTime() < t.ceoPlanDeadline.getTime() + graceMs;
+
 /** Moves that leave a plan: out to Blocked or Backlog, or back from In progress to Ready. */
 export const leavesPlan = (from: string, to: string): boolean => from !== to && (to === "blocked" || to === "backlog" || (from === "in_progress" && to === "ready"));
 

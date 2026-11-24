@@ -21,19 +21,68 @@ export type SpendRow = {
   tickets: number;
   micros: number;
 };
-export type SpendData = { timeZone: string; days: string[]; rows: SpendRow[]; totalMicros: number };
-export type Split = "agent" | "feature" | "project";
+export type SpendTopTicket = {
+  ticketId: string | null;
+  ref: string | null;
+  title: string;
+  state: string | null;
+  feature: string | null;
+  micros: number;
+  runs: number;
+};
+/** One model's use (BOS-2401): plan use is list price of subscription runs, kept apart from pay-as-you-go. `date` is "" in the period totals. */
+export type SpendModelRow = {
+  date: string;
+  model: string;
+  micros: number;
+  planMicros: number;
+  payMicros: number;
+  runs: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+};
+export type SpendData = {
+  timeZone: string;
+  days: string[];
+  rows: SpendRow[];
+  totalMicros: number;
+  topTickets?: SpendTopTicket[];
+  models?: SpendModelRow[];
+  modelDays?: SpendModelRow[];
+};
+export type Split = "agent" | "feature" | "project" | "model";
 
 const PERIODS = [7, 30, 90] as const;
 const SPLITS: Array<{ id: Split; label: string }> = [
   { id: "agent", label: "By agent" },
   { id: "feature", label: "By feature" },
   { id: "project", label: "By project" },
+  { id: "model", label: "By model" },
 ];
+
+/** The chart's data for a split: the model split charts the per-day model rows (plan and pay-as-you-go together), the rest the money rows. */
+export function chartData(data: SpendData, by: Split): SpendData {
+  if (by !== "model") return data;
+  const rows: SpendRow[] = (data.modelDays ?? []).map((m) => ({
+    date: m.date,
+    agentId: null,
+    agent: m.model,
+    featureId: null,
+    feature: m.model,
+    projectId: m.model,
+    project: m.model,
+    tickets: 0,
+    micros: m.micros,
+  }));
+  return { ...data, rows, totalMicros: rows.reduce((n, r) => n + r.micros, 0) };
+}
 const TONES = ["blue", "green", "amber", "purple", "teal"];
 const TOP = TONES.length;
 
-const nameOf = (r: SpendRow, by: Split) => r[by];
+// The model split's rows come from chartData, which puts the model name in the project fields.
+const nameOf = (r: SpendRow, by: Split) => r[by === "model" ? "project" : by];
 const keyOf = (r: SpendRow, by: Split) => (by === "agent" ? r.agentId : by === "feature" ? r.featureId : r.projectId) ?? `none:${nameOf(r, by)}`;
 
 export type Total = { key: string; name: string; micros: number; share: number; tone: string };
@@ -81,7 +130,15 @@ export function toCsv(rows: SpendRow[]): string {
   );
 }
 
-const dayLabel = (d: string) => `${Number(d.slice(8, 10))}/${Number(d.slice(5, 7))}`;
+/** One row per day per model, with runs, tokens, and plan use apart from pay-as-you-go; cost in dollars to four places. */
+export function toModelCsv(rows: SpendModelRow[]): string {
+  return buildCsv(
+    ["date", "model", "runs", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "plan_usd", "pay_as_you_go_usd", "cost_usd"],
+    rows.map((r) => [r.date, r.model, r.runs, r.inputTokens, r.outputTokens, r.cacheReadTokens, r.cacheWriteTokens, (r.planMicros / 1e6).toFixed(4), (r.payMicros / 1e6).toFixed(4), (r.micros / 1e6).toFixed(4)]),
+  );
+}
+
+const dayLabel =(d: string) => `${Number(d.slice(8, 10))}/${Number(d.slice(5, 7))}`;
 const pct = (share: number) => (share > 0 && share < 0.01 ? "<1%" : `${Math.round(share * 100)}%`);
 
 export function SpendChart({ data, by }: { data: SpendData; by: Split }) {
@@ -157,6 +214,100 @@ export function SpendTable({ data, by }: { data: SpendData; by: Split }) {
   );
 }
 
+const num = (n: number) => n.toLocaleString("en-US");
+
+/** The model split's table (BOS-2401): spend, runs, tokens, share, and plan use apart from pay-as-you-go. */
+export function ModelTable({ models }: { models: SpendModelRow[] }) {
+  const all = models.reduce((n, m) => n + m.micros, 0);
+  const right = { textAlign: "right" } as const;
+  return (
+    <div className="table-wrap">
+      <table style={{ minWidth: 0 }}>
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th style={right}>Spend</th>
+            <th style={right}>Share</th>
+            <th style={right}>Plan use</th>
+            <th style={right}>Pay-as-you-go</th>
+            <th style={right}>Runs</th>
+            <th style={right}>Tokens in</th>
+            <th style={right}>Tokens out</th>
+            <th style={right}>Cache read</th>
+            <th style={right}>Cache write</th>
+          </tr>
+        </thead>
+        <tbody>
+          {models.map((m) => (
+            <tr key={m.model}>
+              <td>{m.model}</td>
+              <td className="mono" style={right}>{usd(m.micros)}</td>
+              <td className="mono" style={right}>{pct(all ? m.micros / all : 0)}</td>
+              <td className="mono" style={right}>{usd(m.planMicros)}</td>
+              <td className="mono" style={right}>{usd(m.payMicros)}</td>
+              <td className="mono" style={right}>{num(m.runs)}</td>
+              <td className="mono" style={right}>{num(m.inputTokens)}</td>
+              <td className="mono" style={right}>{num(m.outputTokens)}</td>
+              <td className="mono" style={right}>{num(m.cacheReadTokens)}</td>
+              <td className="mono" style={right}>{num(m.cacheWriteTokens)}</td>
+            </tr>
+          ))}
+          <tr>
+            <th scope="row">Total</th>
+            <td className="mono" style={{ ...right, fontWeight: 600 }}>{usd(all)}</td>
+            <td colSpan={8} />
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** The period's costliest tickets (BOS-2370), each title a link to its ticket, with its share of the period's total. */
+export function TopTicketsTable({ data }: { data: SpendData }) {
+  const list = data.topTickets ?? [];
+  if (list.length === 0) return null;
+  return (
+    <section>
+      <h2>Costliest tickets</h2>
+      <div className="table-wrap">
+        <table style={{ minWidth: 0 }}>
+          <thead>
+            <tr>
+              <th>Ticket</th>
+              <th>State</th>
+              <th>Feature</th>
+              <th style={{ textAlign: "right" }}>Runs</th>
+              <th style={{ textAlign: "right" }}>Spend</th>
+              <th style={{ textAlign: "right" }}>Share</th>
+            </tr>
+          </thead>
+          <tbody>
+            {list.map((t) => (
+              <tr key={t.ticketId ?? "none"}>
+                <td>
+                  {t.ticketId ? (
+                    <>
+                      {t.ref ? <span className="mono">{t.ref}</span> : null} <a href={`#/tickets/${t.ticketId}`}>{t.title}</a>
+                    </>
+                  ) : (
+                    t.title
+                  )}
+                </td>
+                <td>{t.state ? t.state.replace(/_/g, " ") : ""}</td>
+                <td>{t.feature ?? ""}</td>
+                <td className="mono" style={{ textAlign: "right" }}>{t.runs}</td>
+                <td className="mono" style={{ textAlign: "right" }}>{usd(t.micros)}</td>
+                <td className="mono" style={{ textAlign: "right" }}>{pct(data.totalMicros ? t.micros / data.totalMicros : 0)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 export function SpendReport({ company }: { company: Company | undefined }) {
   const [days, setDays] = useState<number>(30);
   const [by, setBy] = useState<Split>("agent");
@@ -176,12 +327,12 @@ export function SpendReport({ company }: { company: Company | undefined }) {
           <p className="label">{company.name}</p>
           <h1>Spend</h1>
         </div>
-        <button type="button" disabled={!data || data.rows.length === 0} onClick={() => data && download(`spend-${company.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}-${data.days.at(-1)}-last-${days}-days.csv`, toCsv(data.rows))}>
+        <button type="button" disabled={!data || (by === "model" ? (data.modelDays ?? []).length === 0 : data.rows.length === 0)} onClick={() => data && download(`spend-${company.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}-${data.days.at(-1)}-last-${days}-days.csv`, (by === "model" ? toModelCsv(data.modelDays ?? []) : toCsv(data.rows)))}>
           Download CSV
         </button>
       </header>
       <p className="muted" style={{ fontSize: 14, margin: 0 }}>
-        What API and credit use cost, as list-price estimates, not a bill. Runs paid from a subscription are not money and are left out; the Dashboard counts them in tokens.
+        What API and credit use cost, as list-price estimates, not a bill. Runs paid from a subscription are not money and are left out; the Dashboard counts them in tokens. "By model" is the exception: it also shows plan use at list price, apart from pay-as-you-go.
       </p>
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "center" }}>
         <div className="segmented" role="group" aria-label="Period">
@@ -204,8 +355,15 @@ export function SpendReport({ company }: { company: Company | undefined }) {
         report.error ? null : <Loader label="Loading the spend" />
       ) : (
         <>
-          <SpendChart data={data} by={by} />
-          {data.rows.length === 0 ? <p className="muted">No spend in the last {days} days.</p> : <SpendTable data={data} by={by} />}
+          <SpendChart data={chartData(data, by)} by={by} />
+          {by === "model" ? (
+            (data.models ?? []).length === 0 ? <p className="muted">No model use in the last {days} days.</p> : <ModelTable models={data.models ?? []} />
+          ) : data.rows.length === 0 ? (
+            <p className="muted">No spend in the last {days} days.</p>
+          ) : (
+            <SpendTable data={data} by={by} />
+          )}
+          <TopTicketsTable data={data} />
         </>
       )}
     </>

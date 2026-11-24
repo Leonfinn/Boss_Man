@@ -66,6 +66,24 @@ const iconProps = { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", 
 function age(iso: string | undefined, now = Date.now()) {
   return iso ? ageShort(now - new Date(iso).getTime()) : "";
 }
+const STATE_AGE_WORDS: Record<string, string> = { in_progress: "in progress", review: "in Review", blocked: "blocked" };
+/** BOS-2400: how long a ticket has sat in its state ("2 d", "5 h"). Only in progress, review and blocked show one. */
+export function stateAge(t: { systemState: string; stateChangedAt?: string }, now = Date.now()): { text: string; label: string; days: number; old: boolean } | null {
+  const word = STATE_AGE_WORDS[t.systemState];
+  if (!word || !t.stateChangedAt) return null;
+  const ms = Math.max(0, now - new Date(t.stateChangedAt).getTime());
+  if (Number.isNaN(ms)) return null;
+  const hours = Math.floor(ms / 3_600_000);
+  const days = Math.floor(ms / 86_400_000);
+  const text = hours < 24 ? `${hours} h` : `${days} d`;
+  return { text, label: `${word} ${text}`, days: ms / 86_400_000, old: ms > 3 * 86_400_000 };
+}
+/** The lane header's "oldest 4 d": the longest-sitting card shown in the lane. */
+export function oldestAge(ts: Array<{ systemState: string; stateChangedAt?: string }>, now = Date.now()): string | null {
+  const ages = ts.map((t) => stateAge(t, now)).filter((a): a is NonNullable<typeof a> => !!a);
+  if (!ages.length) return null;
+  return `oldest ${ages.reduce((a, b) => (b.days > a.days ? b : a)).text}`;
+}
 /** The card footer's time: how long the run has been going ("23m"), or "now" in its first minute. */
 export function workingFor(since: string | null | undefined, now = Date.now()) {
   return age(since ?? undefined, now) || "now";
@@ -565,8 +583,11 @@ type BoardTicket = BoardData["columns"][number]["tickets"][number];
 /** The Board's "Download CSV": one row per ticket shown, in the order the lanes show them. */
 export function boardToCsv(rows: Array<{ t: BoardTicket; column: string; assignee: string; ref: string }>): string {
   return buildCsv(
-    ["Reference", "Title", "Column", "Assignee", "Risk", "Size", "Feature", "Priority 1", "Last activity"],
-    rows.map(({ t, column, assignee, ref }) => [ref, t.title, column, assignee, t.risk ?? "", t.size ?? "", t.featureTitle ?? "", t.urgentByOwner ? "yes" : "no", t.lastActivityAt ?? ""]),
+    ["Reference", "Title", "Column", "Assignee", "Risk", "Size", "Feature", "Priority 1", "Last activity", "Days in state"],
+    rows.map(({ t, column, assignee, ref }) => {
+      const a = stateAge(t);
+      return [ref, t.title, column, assignee, t.risk ?? "", t.size ?? "", t.featureTitle ?? "", t.urgentByOwner ? "yes" : "no", t.lastActivityAt ?? "", a ? (Math.floor(a.days * 10) / 10).toString() : ""];
+    }),
   );
 }
 
@@ -812,6 +833,10 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
         </span>
         <span className="end">
           <span className="mono">{t.dueDate ? `Due ${t.dueDate}` : t.working?.length ? workingFor(t.workingSince) : age(t.lastActivityAt)}</span>
+          {(() => {
+            const sa = stateAge(t);
+            return sa ? <span className={`mono state-age${sa.old ? " old" : ""}`} title={sa.old ? `${sa.label}: more than 3 days in this state` : `Time in this state: ${sa.label}`} style={sa.old ? { color: "var(--amber-ink)" } : undefined}>{sa.label}</span> : null;
+          })()}
           {(titleCut || noteCut || waitsCut || open) && (
             <button type="button" className="icon-btn expand" aria-expanded={open} aria-controls={bodyId} aria-label={`${open ? "Show less of" : "Show all of"} ${ticketRefText}`} onClick={() => setOpen(!open)}>
               <svg width="16" height="16" {...iconProps} style={{ transform: open ? "rotate(180deg)" : undefined }}><path d="M6 9l6 6 6-6" /></svg>
@@ -1397,6 +1422,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                       <span className="mono" style={full ? { color: "var(--amber-ink)" } : undefined}>
                         {col.wipLimit != null ? `${counted} / ${col.wipLimit}` : done && !words.length && shown.length === tickets.length && board.data?.doneTotal != null ? board.data.doneTotal : shown.length}
                       </span>
+                      {oldestAge(shown) && <span className="mono" title="The longest any card here has sat in its state">{oldestAge(shown)}</span>}
                       <button type="button" className="icon-btn" aria-label={`Rename the ${label(col)} column`} title="Rename this column. Agents always see the fixed state." onClick={() => setRenaming(col.id)}>
                         <svg width="15" height="15" {...iconProps}>{PENCIL}</svg>
                       </button>

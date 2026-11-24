@@ -4,9 +4,9 @@ import { afterAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { openPglite } from "../src/db/client.js";
 import { agents, checkJobs, checkWorkers, companies, projects, runners, settings, tickets } from "../src/db/schema.js";
-import { CHECK_QUEUE_MODE_KEY, CHECK_SLOTS_KEY, checkQueue } from "../src/services/check-queue.js";
+import { CHECK_QUEUE_MODE_KEY, CHECK_SLOTS_KEY, MAX_CHECK_SLOTS, checkQueue } from "../src/services/check-queue.js";
 import { checkDispatcher } from "../src/services/check-dispatcher.js";
-import { BUNDLE_FEATURE, WORKER_REPLACED_CLOSE, checkWorkersService } from "../src/services/check-workers.js";
+import { BUNDLE_FEATURE, WORKER_REPLACED_CLOSE, checkWorkersService, workerLimit, workerMemoryWarning } from "../src/services/check-workers.js";
 import { hashToken } from "../src/auth.js";
 
 const shared = openPglite();
@@ -474,5 +474,39 @@ describe("check workers: memory the machine reports (BOS-2217)", () => {
     const { worker } = await s.workers.register({ name: "W", companyIds: [s.co.id], slots: 4, checkThreads: null, checkMemoryMb: 6144, enabled: true });
     await s.workers.touch(worker.id, { imageCommit: COMMIT, imageVersion: "1", checkSlots: 1, memoryMb: 8192, features: ["check-jobs", BUNDLE_FEATURE] });
     expect((await s.workers.list()).find((x) => x.id === worker.id)!.memoryWarning).toBeNull();
+  });
+});
+
+// BOS-2352: the two helpers the worker list is built from, tested on their own rather than through the service.
+describe("workerLimit and workerMemoryWarning (BOS-2352)", () => {
+  const w = (slots: number, reportedSlots: number | null) => ({ slots, reportedSlots });
+
+  it("takes the owner's slots unless the worker reports fewer, and never fewer than one", () => {
+    expect(workerLimit(w(4, null))).toBe(4);
+    expect(workerLimit(w(4, 2))).toBe(2);
+    expect(workerLimit(w(2, 4))).toBe(2);
+    expect(workerLimit(w(1, 0))).toBe(1);
+    expect(workerLimit(w(0, null))).toBe(1);
+  });
+
+  it("never goes above the server's check-slot cap", () => {
+    expect(workerLimit(w(100, null))).toBe(MAX_CHECK_SLOTS);
+    expect(workerLimit(w(100, 100))).toBe(MAX_CHECK_SLOTS);
+  });
+
+  it("passes the lowered slot count and the memory figures to the shared warning", () => {
+    const warning = (slots: number, reportedSlots: number | null, checkMemoryMb: number | null, reportedMemoryMb: number | null) =>
+      workerMemoryWarning({ slots, reportedSlots, checkMemoryMb, reportedMemoryMb });
+    // 4 owner slots lowered to the 1 the worker reports: 6 GB of checks fit in the 8 GB it has.
+    expect(warning(4, 1, 6144, 8192)).toBeNull();
+    // 2 × 12,544 MB is more than the 8 GB it reports; the text names the figures and a way out.
+    expect(warning(2, null, 12_544, 8192)).toMatch(/2 checks at once.*24\.5 GB.*8 GB.*lower/);
+    // The cap counts too: 100 slots become 8, and 8 × 4 GB does not fit in 8 GB.
+    expect(warning(100, null, 4096, 8192)).toMatch(/8 checks at once/);
+    // Unset memory per check falls back to the shared real peak (5 GB), not zero.
+    expect(warning(2, null, null, 8192)).toMatch(/10 GB/);
+    // Nothing to compare against, or it fits: silent.
+    expect(warning(4, null, 4096, null)).toBeNull();
+    expect(warning(2, null, 4096, 8192)).toBeNull();
   });
 });

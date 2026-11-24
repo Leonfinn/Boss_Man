@@ -22,7 +22,35 @@ import { CopyLinkButton } from "../components/CopyLinkButton";
 type PageRow = { id: string; slug: string; folder: string; title: string; ticketId: string | null; updatedAt: string; updatedBy: string | null };
 type Revision = { id: string; createdAt: string; agent: string | null; runId: string | null; size?: number };
 // revisionCount is every version, which can be more than the first page the page carries (BOS-496).
-type PageDetail = { id: string; slug: string; folder: string; title: string; body: string; updatedAt: string; updatedBy: string | null; revisions: Revision[]; revisionCount?: number; tickets: Array<{ id: string; title: string }> };
+type PageDetail = { id: string; slug: string; folder: string; title: string; body: string; updatedAt: string; updatedBy: string | null; revisions: Revision[]; revisionCount?: number; tickets: Array<{ id: string; title: string }>; links?: string[]; missingLinks?: string[]; linkedFrom?: string[] };
+
+/** Under the page body: the pages it links to, its [[slug]]s to no page, and the pages that link to it (BOS-2366). */
+function PageLinks({ companyId, p }: { companyId: string; p: PageDetail }) {
+  const rows: Array<[string, string[], boolean]> = [
+    ["Links to", p.links ?? [], true],
+    ["Missing pages", p.missingLinks ?? [], false],
+    ["Linked from", p.linkedFrom ?? [], true],
+  ];
+  if (rows.every(([, slugs]) => !slugs.length)) return null;
+  return (
+    <section aria-label="Links" style={{ borderTop: "1px solid var(--line)", paddingTop: 10, display: "flex", flexDirection: "column", gap: 6, fontSize: 14 }}>
+      <h3 style={{ fontSize: 15, fontWeight: 600 }}>Links</h3>
+      {rows.map(([label, slugs, live]) =>
+        slugs.length ? (
+          <p key={label}>
+            <span className="muted">{label}: </span>
+            {slugs.map((s, i) => (
+              <span key={s}>
+                {i > 0 && ", "}
+                {live ? <a href={`#/wiki/${companyId}/${s}`}>{s}</a> : <span title="No page has this address yet">{s} (no such page)</span>}
+              </span>
+            ))}
+          </p>
+        ) : null,
+      )}
+    </section>
+  );
+}
 type OldVersion = { id: string; title: string; body: string; createdAt: string; agent: string | null };
 
 type Draft = { title: string; body: string; folder: string };
@@ -188,7 +216,9 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
     else page.reload();
   };
   const remove = async () => {
-    if (!p || !window.confirm(`Delete "${p.title}"? It waits 30 days under Deleted pages, where you can restore it.`)) return;
+    const from = p?.linkedFrom?.length ?? 0;
+    const linkedHere = from ? ` ${from} ${from === 1 ? "page links" : "pages link"} here.` : "";
+    if (!p || !window.confirm(`Delete "${p.title}"?${linkedHere} It waits 30 days under Deleted pages, where you can restore it.`)) return;
     try {
       await api(`/api/companies/${companyId}/wiki/${slug}`, { method: "DELETE" });
       onChanged();
@@ -337,6 +367,7 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
         </div>
       )}
       <Markdown text={(old ?? p).body} linkContext={{ companyId }} />
+      {!old && <PageLinks companyId={companyId} p={p} />}
       {error && (
         <p className="error" role="alert">
           {error}

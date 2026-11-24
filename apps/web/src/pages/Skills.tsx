@@ -10,6 +10,7 @@ import { Loader } from "../components/Loader";
 import { LoadError } from "../components/LoadError";
 import { useOlder, usePoll } from "../hooks";
 import { ShowOlder } from "../components/ShowOlder";
+import { diffLines } from "../line-diff";
 import { away } from "../server-watch";
 import { when } from "./Runs";
 import { SaveButton } from "../components/SaveButton";
@@ -444,7 +445,55 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
           </ul>
         </section>
       )}
+      <SkillHistory companyId={company.id} id={id} />
     </article>
+  );
+}
+
+type HistoryEntry = { id: string; at: string; what: string; who: string; summary: string; change: { before: string; after: string } | null };
+const DIFF_MARK = { add: "+", del: "−", same: " " } as const;
+
+// What changed in this skill and when (BOS-2376); an edit or revert folds out a line diff of SKILL.md.
+function SkillHistory({ companyId, id }: { companyId: string; id: string }) {
+  const history = usePoll((signal) => api<HistoryEntry[]>(`/api/companies/${companyId}/skills/${id}/history`, { signal }), 60_000, id);
+  return (
+    <section aria-labelledby="skill-history-h">
+      <h3 id="skill-history-h" style={{ fontWeight: 600, marginBottom: 6 }}>
+        History
+      </h3>
+      {history.error ? (
+        <LoadError what="the history" message={history.error.message} onRetry={history.reload} />
+      ) : !history.data ? (
+        <Loader />
+      ) : history.data.length === 0 ? (
+        <p className="muted">No changes recorded for this skill yet.</p>
+      ) : (
+        <ul className="link-list">
+          {history.data.map((h) => (
+            <li key={h.id} style={{ flexDirection: "column", alignItems: "stretch" }}>
+              <span>
+                <strong>{h.what}</strong> · {h.who} · <small className="muted">{when(h.at)}</small>
+              </span>
+              <small className="muted">{h.summary}</small>
+              {h.change && (
+                <details>
+                  <summary>What changed</summary>
+                  <div style={{ fontFamily: "var(--mono)", fontSize: 13, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+                    {diffLines(h.change.before, h.change.after).map((l, i) => (
+                      <div key={i} style={l.kind === "add" ? { background: "var(--green-soft)", color: "var(--green-ink)" } : l.kind === "del" ? { background: "var(--red-soft)", color: "var(--red-ink)" } : undefined}>
+                        <span aria-hidden="true">{DIFF_MARK[l.kind]} </span>
+                        {l.kind !== "same" && <span className="sr-only">{l.kind === "add" ? "Added: " : "Removed: "}</span>}
+                        {l.text || " "}
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -597,9 +646,14 @@ function Proposals({ companyId }: { companyId: string }) {
   );
 }
 
-export function Skills({ company }: { company: Company | undefined }) {
+export function Skills({ company, skillId }: { company: Company | undefined; skillId?: string }) {
   const list = usePoll((signal) => (company ? api<SkillRow[]>(`/api/companies/${company.id}/skills`, { signal }) : Promise.resolve([])), 30_000, company?.id ?? "none");
-  const [picked, setPicked] = useState<string | null>(null);
+  // #/skills/<id> (the search box, BOS-2347) shows that skill, its pack folded open. App remounts the page on every
+  // address change, so the first value is enough. On a phone the view sits under the list, so it is scrolled to.
+  const [picked, setPicked] = useState<string | null>(skillId ?? null);
+  useEffect(() => {
+    if (skillId && list.data?.some((s) => s.id === skillId)) document.getElementById("skill-view")?.scrollIntoView?.({ block: "start" });
+  }, [skillId, !!list.data]);
   const [pickedPack, setPickedPack] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [added, setAdded] = useState<string | null>(null);
@@ -680,7 +734,7 @@ export function Skills({ company }: { company: Company | undefined }) {
             {loose.map(item)}
           </ul>
         </nav>
-        <div>
+        <div id="skill-view">
           {adding || (!picked && !pickedPack && rows.length === 0) ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             <AddSkill
