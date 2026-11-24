@@ -304,4 +304,25 @@ describe("runner swap in progress: every part of the page agrees (BOS-1558)", ()
     expect(updateStatus(view, m, null, NOW).tag).not.toBe("Updating");
     expect(renderToStaticMarkup(createElement(LiveState, { r: live[1]!, progress: p }))).not.toContain("old image");
   });
+
+  // BOS-2525: the badge count and the "Now running" list use one test, even with a leftover swap mark.
+  it("badge count matches the list: 0 of 3, 2 of 3 and 3 of 3", () => {
+    const m = maintUpdate({ runs: 1 });
+    const NEW = "202611241722";
+    const OLD = "202611241201";
+    const tagFor = (live: LiveRow[]) => historyTag(hist, runnerProgress(live, m)).tag;
+    const connectedCount = (live: LiveRow[]) => live.filter((l) => renderToStaticMarkup(createElement(LiveState, { r: l, progress: runnerProgress(live, m) })).includes(">Connected<")).length;
+
+    const two = [row("a", NEW, { swap: { id: "s" } }), row("b", NEW, { swap: { id: "s" } }), row("c", OLD)];
+    expect(tagFor(two)).toBe("Swapping (2 of 3 companies done)");
+    expect(connectedCount(two)).toBe(2);
+
+    const none = [row("a", OLD), row("b", OLD), row("c", NEW, { connected: false })];
+    expect(tagFor(none)).toBe("Swapping (0 of 3 companies done)");
+
+    // Held but every runner already connected on the new image: the hold has not lifted yet, so "3 of 3" still reads "Swapping".
+    const all = [row("a", NEW), row("b", NEW), row("c", NEW)];
+    expect(tagFor(all)).toBe("Swapping (3 of 3 companies done)");
+    expect(connectedCount(all)).toBe(3);
+  });
 });
