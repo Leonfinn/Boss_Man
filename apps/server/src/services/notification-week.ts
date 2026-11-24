@@ -52,6 +52,7 @@ export function summarizeWeek(rows: WeekRow[], timeZone: string, now: Date): Wee
   const keys = lastSevenDays(timeZone, now);
   const byDay = new Map(keys.map((k) => [k, zero()]));
   const totals = zero();
+  // not state: a local of one call, gone when it returns
   const agents = new Map<string, { agentId: string; name: string; notices: number; pushed: number }>();
   let last: WeekRow | null = null;
   for (const r of rows) {

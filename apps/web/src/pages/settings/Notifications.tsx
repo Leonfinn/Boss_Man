@@ -574,7 +574,7 @@ type WeekView = {
 /** "Last 7 days" (BOS-2420): what quiet hours and the per-agent cap did, failed pushes, and the noisiest agents. */
 export function LastSevenDays({ companyId }: { companyId: string }) {
   const week = usePoll((signal) => api<WeekView>(`/api/notifications/week?company=${encodeURIComponent(companyId)}`, { signal }), 60_000, `notifications-week-${companyId}`);
-  const w = week.data;
+  const w = week.data?.totals ? week.data : null;
   return (
     <details className="pushes">
       <summary>
