@@ -303,7 +303,8 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
         throw err;
       }
       maint.reload();
-      return "The runners are being swapped now. The checks start again afterwards.";
+      // BOS-2531: the press only lets the swap go ahead; the status above says "being swapped now" once a runner is.
+      return "The checks are stopped and the runners are swapped next. The checks start again afterwards.";
     });
   const press = (id: NonNullable<UpdateStatus["primary"]>["id"]) => {
     if (id === "ask-wrapup") return wrapUp();
