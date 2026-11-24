@@ -402,6 +402,7 @@ export const OWNER_FIELDS = {
   Permissions: [
     "Rules for", "Filter rules", "Show rules that", "What should this rule do", "New rule", "Rule name", "Command matches (regex)", "Tool title matches (regex)", "Then", "An agent of",
     "Ask a model for a second opinion", "Provider address", "Model", "API key", "Fence", "Advice",
+    "Download CSV",
     // The "Try a command" box can include the rule being typed (BOS-2188).
     "Try it with the rule I'm typing under \"Add a rule\" first (nothing is saved)",
   ],
