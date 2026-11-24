@@ -3,7 +3,7 @@
 // that leave a plan or send an urgent ticket backwards are recognised, and the mover and the CEO get the
 // right words about it. No database and no clock of its own: every "now" is passed in.
 import { describe, expect, it } from "vitest";
-import { ceoMoveNote, ceoPlanText, leavesPlan, planMoveWarning, unexpiredPlan, urgentBackwards } from "../src/services/ceo-plan.js";
+import { ceoMoveNote, ceoPlanText, leavesPlan, PLAN_GRACE_MS, planHoldsAlerts, planMoveWarning, unexpiredPlan, urgentBackwards } from "../src/services/ceo-plan.js";
 
 const NOW = new Date("2026-11-15T09:00:00.000Z");
 const FUTURE = new Date("2026-11-16T12:00:00.000Z");
@@ -173,5 +173,18 @@ describe("ceoMoveNote", () => {
 
   it("leaves the ticket ref out when there is none", () => {
     expect(ceoMoveNote({ ...base, ref: null })).toMatch(/^"Split it in two" moved /);
+  });
+});
+
+// BOS-2402: the parked-by-date alert and the looks-stuck alert share this check.
+describe("planHoldsAlerts", () => {
+  it("holds while the deadline is ahead and through the grace, then lets the alert fire", () => {
+    const p = plan("Refresh daily", FUTURE);
+    expect(planHoldsAlerts(p, NOW)).toBe(true);
+    expect(planHoldsAlerts(p, new Date(FUTURE.getTime() + PLAN_GRACE_MS - 1))).toBe(true);
+    expect(planHoldsAlerts(p, new Date(FUTURE.getTime() + PLAN_GRACE_MS))).toBe(false);
+  });
+  it("does not hold a ticket with no deadline", () => {
+    expect(planHoldsAlerts(plan(null, null), NOW)).toBe(false);
   });
 });

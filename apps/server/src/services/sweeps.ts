@@ -37,6 +37,7 @@ import { fenceDefaultSweep, guardHoldSweep } from "./fence-default.js";
 import { HELD_AGENT } from "./fair-share.js";
 import { CARRY_ON_NOTE, IDLE_AGENTS_REASON, IDLE_SLOT_REASON, MISSED_REASON, NOTHING_STARTABLE_REASON, REVIEW_REASON, URGENT_IDLE_REASON, type WakeInput } from "./scheduler.js";
 import { goLiveWaitOf } from "./go-live-wait.js";
+import { PLAN_GRACE_MS, planHoldsAlerts } from "./ceo-plan.js";
 import { GIT_RETRY_NOTE } from "./git-transport-fault.js";
 
 export type SweepLimits = {
@@ -117,7 +118,7 @@ export const DEFAULT_SWEEP_LIMITS: SweepLimits = {
   idleFillEveryMs: 60 * 60_000,
   idleFillsPerDay: 4,
   emptyRunsBeforeReassign: 3,
-  planGraceMs: 30 * 60_000,
+  planGraceMs: PLAN_GRACE_MS,
   idleAskEveryMs: 30 * 60_000,
   mergeLineLongAt: 10,
   nothingStartableAfterMs: 30 * 60_000,
@@ -1090,7 +1091,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
 
       // A CEO plan with a deadline holds the card until the deadline plus a grace; after that one card says it passed (BOS-612).
       const planAt = ticket.ceoPlanDeadline;
-      if (planAt && t.getTime() < planAt.getTime() + limits.planGraceMs && recent.length >= MISSED_NUDGES_PER_DAY) continue;
+      if (planAt && planHoldsAlerts(ticket, t, limits.planGraceMs) && recent.length >= MISSED_NUDGES_PER_DAY) continue;
       if (planAt && t.getTime() >= planAt.getTime() + limits.planGraceMs && !ticket.ceoPlanAlertedAt && recent.length >= MISSED_NUDGES_PER_DAY) {
         const row = await opts.alert({
             companyId: ticket.companyId,
