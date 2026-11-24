@@ -415,12 +415,13 @@ export function deployerLine(v: SelfDeployView): string {
 
 /** How far the runner swap has got (BOS-1558): the newest image any runner reports is the new one; the rest are still waiting. */
 export type RunnerProgress = { inProgress: boolean; done: number; total: number; newest: string | null };
-export function runnerProgress(live: LiveRow[] | null | undefined, maint: MaintenanceView | null | undefined): RunnerProgress {
+export function runnerProgress(live: LiveRow[] | null | undefined, maint: MaintenanceView | null | undefined, needed?: string | null): RunnerProgress {
   const runners = (live ?? []).filter((l) => l.registered);
   const stamps = runners.map((l) => l.imageVersion).filter((v): v is string => !!v);
-  const newest = stamps.length ? stamps.reduce((a, b) => (b > a ? b : a)) : null;
+  // BOS-2546: "done" is measured against the image the update is for (`runnerImage.needed`); only without one does the fleet's newest stand in.
+  const newest = needed || (stamps.length ? stamps.reduce((a, b) => (b > a ? b : a)) : null);
   // Same test as LiveState's "Connected" (a leftover swap mark must not hide a runner that is already up on the new image, BOS-2525).
-  const done = runners.filter((l) => l.connected && l.imageVersion === newest).length;
+  const done = runners.filter((l) => l.connected && !!l.imageVersion && !!newest && l.imageVersion >= newest).length;
   // A runner update's hold (not a setting change or a wrap-up) is on, so the swap is not finished whatever the images say.
   const held = !!maint && maint.on && maint.kind !== "settings" && maint.kind !== "wrapup" && maint.kind !== "building";
   return { inProgress: held, done, total: runners.length, newest };
