@@ -141,8 +141,8 @@ export function ProjectBudget({ project }: { project: Project }) {
           </dl>
         </>
       )}
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", marginTop: 24 }}>
-        <h2 style={{ fontSize: 16, margin: 0 }}>Costliest tasks</h2>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "baseline" }}>
+        <h2 style={{ fontSize: 16, marginTop: 24 }}>Costliest tasks</h2>
         {s.topTickets.length > 0 && (
           <button type="button" className="btn" onClick={() => download(costliestTasksCsvName(project.name), costliestTasksCsv(s.topTickets))}>
             Download CSV
