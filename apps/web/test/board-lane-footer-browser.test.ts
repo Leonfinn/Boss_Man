@@ -80,7 +80,7 @@ describe.skipIf(skip)("board lane header and card footer (BOS-2509, real page)",
           mkdirSync(dir, { recursive: true });
           await page.screenshot({ path: path.join(dir, `bos-2509-${process.env.BOS_2509_TAG ?? "after"}-${label}.png`), fullPage: false });
         }
-        const m = await measure(page);
+        const m: { heads: Array<{ name: string | null; nameLines: number; old: string | null; oldLines: number; oldBelowTitle: boolean }>; rows: Array<{ avatarW: number; overlap: boolean; endRight: boolean; marks: number; split: boolean }> } = await measure(page);
         const withAge = m.heads.filter((x) => x.old);
         expect(withAge.length).toBeGreaterThanOrEqual(3);
         for (const x of m.heads) expect(x.nameLines, `${x.name} stays on one line`).toBe(1);
