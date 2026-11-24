@@ -118,10 +118,12 @@ describe("find in this run (BOS-2476)", () => {
     expect(await screen.findByText("1 of 3")).toBeTruthy();
     await waitFor(() => expect(scrollTo).toHaveBeenCalled());
     // Let the end-follow frame (if any) settle, then count the moves so far.
+    // test-lines-ok: absence check, there is no event to wait for when nothing may scroll
     await new Promise((r) => setTimeout(r, 50));
     const before = scrollTo.mock.calls.length;
     // The next poll (2 s) brings one more event; the page must not scroll to it.
     await screen.findByText("Brand new late message", {}, { timeout: 6000 });
+    // test-lines-ok: absence check, there is no event to wait for when nothing may scroll
     await new Promise((r) => setTimeout(r, 50));
     expect(polls).toBeGreaterThan(1);
     expect(scrollTo.mock.calls.length).toBe(before);
