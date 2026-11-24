@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { WATCHDOG_RULE_LABEL, watchdogLimitRule, type WatchdogRule, type WatchdogSettings } from "@boss-man/shared";
 import { api, type Company } from "../../api";
 import { when } from "../Runs";
+import { buildCsv, download } from "../../csv";
 import { Section, useAction } from "./shared";
 import { Loader } from "../../components/Loader";
 import { SaveButton } from "../../components/SaveButton";
@@ -36,6 +37,14 @@ export function problemCounts(flags: Backtest["flags"]): Array<{ rule: WatchdogR
     by.set(f.rule, row);
   }
   return [...by.values()].sort((a, b) => b.flags - a.flags);
+}
+
+/** (BOS-2541) The test result rows shown in the table as CSV: ticket, title, problem (same words as the table), first seen, outcome, hand-offs. */
+export function flagsToCsv(flags: Backtest["flags"]): string {
+  return buildCsv(
+    ["Ticket", "Title", "Problem", "First seen", "Outcome", "Hand-offs"],
+    flags.map((f) => [f.ref, f.title, WATCHDOG_RULE_LABEL[f.rule], f.firstAt, f.verdict, f.handOffs]),
+  );
 }
 
 /** The limits the owner edits, with their labels and units; `term` is the technical name, shown small after the plain label (BOS-1494). */
@@ -274,9 +283,18 @@ export function Watchdog({ company }: { company: Company }) {
                   </li>
                 ))}
               </ul>
-              <div style={{ display: "flex", gap: 8, alignItems: "center", margin: "6px 0" }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", margin: "6px 0" }}>
                 <input id="wd-hide-cleared" type="checkbox" checked={hideCleared} onChange={(e) => setHideCleared(e.target.checked)} />
                 <label htmlFor="wd-hide-cleared">Hide ones that cleared by themselves</label>
+                <button
+                  className="btn"
+                  type="button"
+                  disabled={shown.length === 0}
+                  title="Downloads the flags in the table below"
+                  onClick={() => download(`watchdog-test-${btDays}d-${new Date().toISOString().slice(0, 10)}.csv`, flagsToCsv(shown))}
+                >
+                  Download CSV
+                </button>
               </div>
             </>
           )}
