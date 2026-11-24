@@ -55,6 +55,8 @@ export function wikiRoutes(owner: FastifyInstance, deps: { wiki: ReturnType<type
     const { id, slug } = SlugParams.parse(req.params);
     return wiki.remove(id, slug).then(() => reply.code(204).send(), wikiErrors(reply));
   });
+  // The whole wiki's missing-page links and pages nothing links to: the page list's "Link health" fold (BOS-2395).
+  owner.get("/api/companies/:id/wiki-link-health", async (req) => wiki.linkHealth(IdParam.parse(req.params).id));
   // The Deleted pages list and Restore (BOS-2197). The slug goes in the body, as for wiki-restore.
   owner.get("/api/companies/:id/wiki-deleted", async (req) => ({ pages: await wiki.listDeleted(IdParam.parse(req.params).id) }));
   owner.post("/api/companies/:id/wiki-deleted/restore", async (req, reply) => {
