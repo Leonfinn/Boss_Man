@@ -558,7 +558,7 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
       <header className="page-head">
         <div>
           <h1>Merge queue</h1>
-          {company && <p className="sub">{company.name}: approved work on its way to merge.</p>}
+          {company && <p className="sub">{company.name}: approved work on its way to merge. <a href="#/merge-history">Merge history</a></p>}
         </div>
       </header>
       {data &&

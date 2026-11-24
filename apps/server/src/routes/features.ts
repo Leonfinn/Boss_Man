@@ -156,9 +156,11 @@ export function featureRoutes(
   owner.get("/api/feedback/unprocessed", async () => feedback.unprocessedCount());
   owner.get("/api/companies/:id/feedback", async (req) => {
     const { id } = IdParam.parse(req.params);
-    const q = z.object({ state: z.enum(["unprocessed", "processed", "archived"]).optional(), q: z.string().max(200).optional(), before: z.coerce.date().optional(), limit: z.coerce.number().int().min(1).max(200).optional(), delivered: z.enum(["true", "false"]).optional() }).parse(req.query);
-    return feedback.notes(id, { ...q, delivered: q.delivered === "true" });
+    const q = z.object({ state: z.enum(["unprocessed", "processed", "archived"]).optional(), q: z.string().max(200).optional(), before: z.coerce.date().optional(), after: z.coerce.date().optional(), order: z.enum(["newest", "oldest"]).optional(), limit: z.coerce.number().int().min(1).max(200).optional(), delivered: z.enum(["true", "false"]).optional() }).parse(req.query);
+    const { order, ...rest } = q;
+    return feedback.notes(id, { ...rest, oldestFirst: order === "oldest", delivered: q.delivered === "true" });
   });
+  owner.get("/api/companies/:id/feedback-summary", async (req) => feedback.inboxSummary(IdParam.parse(req.params).id));
   owner.post("/api/companies/:id/feedback", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
     const b = z.object({ title: z.string().trim().max(200).nullable().optional(), text: Text(20_000), source: z.enum(NOTE_SOURCES).exclude(["portal", "agent", "chat"]).optional(), customerId: Uuid.nullable().optional(), customer: CustomerIn.nullable().optional() }).parse(req.body);

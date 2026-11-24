@@ -125,9 +125,16 @@ reads:
   - /api/companies/:id/feedback
   - /api/companies/:id/feedback-customers
   - /api/companies/:id/feedback-settings
+  - /api/companies/:id/feedback-summary
   - /api/feedback/:id
   - /api/feedback/unprocessed
   - /api/host-facts
+
+## #/merge-history
+sections: 
+  - Merge history
+reads: 
+  - /api/companies/:id/merge-history
 
 ## #/merge-queue
 sections: 
@@ -180,6 +187,7 @@ reads:
   - /api/runs
   - /api/runs/:id/permissions
   - /api/runs/:id/transcript
+  - /api/runs/recent
 
 ## #/scrum-master
 sections: 
@@ -253,6 +261,7 @@ reads:
   - /api/host-facts
   - /api/run-limits
   - /api/settings/check-queue
+  - /api/settings/check-workers/line
   - /api/settings/check-workers/stats
   - /api/settings/merge-carry
   - /api/settings/wait-for-ci

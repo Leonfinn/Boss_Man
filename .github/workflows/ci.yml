@@ -452,14 +452,17 @@ jobs:
           # A copy owned by the image's user (uid 1000); the checkout belongs to the CI user.
           work="$RUNNER_TEMP/work"
           mkdir -p "$work" && cp -a . "$work/repo" && sudo chown -R 1000:1000 "$work"
-          # The log is kept in a file and its tail is repeated as an error annotation, which anyone can read through the
+          # The log is kept in a file and its tail is repeated as a warning annotation, which anyone can read through the
           # public check-runs API (the raw job log needs a login). BOS-1553: the first failure here left no trace.
           set +e
+          # BOS-2448: the copy is mounted at the checkout's own path, not /work, so vitest's failure annotations name a file
+          # under $GITHUB_WORKSPACE as in every other job, and the merge gate's flake retry can read which test failed (run
+          # 45323213260 named /work/apps/launcher/test/docker.test.ts, which it refuses as an unknown absolute path).
           # The image sets NODE_ENV=production for the runner; React's production build has no act(), so the web
           # component tests fail under it ("React.act is not a function"). Tests run as tests, as in the other jobs.
           # GITHUB_ACTIONS is passed in too: the server's hot-path budget test gives GitHub's slow runners 300 ms, and
           # without it the container (still on a GitHub runner) held the dev-machine 100 ms limit and failed.
-          docker run --rm -v "$work/repo:/work" -w /work --entrypoint sh \
+          docker run --rm -v "$work/repo:$GITHUB_WORKSPACE" -w "$GITHUB_WORKSPACE" --entrypoint sh \
             -e CI=1 -e GITHUB_ACTIONS=true -e NODE_ENV=test -e BOSSMAN_REQUIRE_BROWSER=1 -e CHECK_ALL_FORCE=1 -e HOME=/home/node boss-man-check-worker:ci -c '
               pnpm install --frozen-lockfile --store-dir /tmp/pnpm-store &&
               pnpm -r --no-bail typecheck; tc=$?;
@@ -472,8 +475,11 @@ jobs:
             clean="$RUNNER_TEMP/worker-check.clean.log"
             sed 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/worker-check.log" > "$clean"
             # GitHub workflow-command escaping: % becomes %25 (first) and a carriage return %0D; newlines already became '|'.
-            echo "::error title=check worker image: first errors::$(grep -E -m4 -A6 'FAIL|Error|error TS' "$clean" | tr '\n' '|' | cut -c1-3000 | sed -e 's/%/%25/g' -e 's/\r/%0D/g')"
-            echo "::error title=check worker image: failed tests::$(grep -E '✗|×' "$clean" | head -40 | tr '\n' '|' | cut -c1-3000 | sed -e 's/%/%25/g' -e 's/\r/%0D/g')"
+            # BOS-2448: warnings, not errors. They name no file, and a failure note with no file makes the merge gate treat
+            # the whole job as "names no test file" and send the ticket back, even when vitest's own note names the one
+            # test that failed by chance. The job still fails on its exit code; these stay readable on the run's page.
+            echo "::warning title=check worker image: first errors::$(grep -E -m4 -A6 'FAIL|Error|error TS' "$clean" | tr '\n' '|' | cut -c1-3000 | sed -e 's/%/%25/g' -e 's/\r/%0D/g')"
+            echo "::warning title=check worker image: failed tests::$(grep -E '✗|×' "$clean" | head -40 | tr '\n' '|' | cut -c1-3000 | sed -e 's/%/%25/g' -e 's/\r/%0D/g')"
           fi
           exit "$rc"
 

@@ -13,8 +13,11 @@ const dayKey = (d: Date) => d.toISOString().slice(0, 10);
 
 /** First 80 characters of a query with every value removed: quoted text, numbers and $n placeholders become "?". Never parameters. */
 export function maskQuery(text: string): string {
+  // One left-to-right pass, closed forms first: $tag$…$tag$, E'…' (backslash escapes), '…' (doubled quotes). Then a string left open
+  // (Postgres cut the text off inside it) masks from its opening quote to the end.
+  const strings = /\$([A-Za-z_]\w*)?\$[\s\S]*?\$\1\$|\b[Ee]'(?:[^'\\]|\\[\s\S]|'')*'|'(?:[^']|'')*'|\$([A-Za-z_]\w*)?\$[\s\S]*|(?:\b[Ee])?'[\s\S]*/g;
   const flat = text
-    .replace(/'(?:[^']|'')*'/g, "?")
+    .replace(strings, "?")
     .replace(/\$\d+/g, "?")
     .replace(/\b\d+(?:\.\d+)?\b/g, "?")
     .replace(/\s+/g, " ")

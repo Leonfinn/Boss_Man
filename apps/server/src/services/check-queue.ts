@@ -21,6 +21,10 @@ import { softHold } from "./deploy-wait-hold.js";
 import { blocksClass } from "./update-waits.js";
 import { agedTier, retierWaiting, setTrainLaneAge, trainView } from "./merge-train.js";
 import { landingTurns } from "./landing-turn.js";
+import { GATE_RERUN_MARK } from "./ci-flake.js";
+
+/** BOS-2453: the merge gate's re-run of the test files GitHub CI failed (gateRerunCommand), which starts at the front. */
+export const isGateRerun = (j: Pick<CheckJob, "kind" | "command">) => j.kind === "merge" && !!j.command?.startsWith(GATE_RERUN_MARK);
 
 export const CHECK_SLOTS_KEY = "check_slots";
 /** The merge train switch (BOS-1366): approved tickets land in order, each checked on main plus the ones ahead. Off by default. */
@@ -402,6 +406,10 @@ export function checkQueue(db: Db) {
     // own tier and place, and spent up to 14 of the turn's 25 minutes waiting for a slot (18 Nov). The turn is in memory
     // in this process, the one that runs the landings and serves the queue.
     const turn = (j: CheckJob) => j.kind === "merge" && landingTurns.holds(j.projectId, j.ticketId);
+    // BOS-2453: the gate's re-run of the test files GitHub CI failed is part of a merge already under way, and small (only the
+    // named files), so it starts next after a fix for main and the landing turn, whatever the ticket's own tier. It used to rank
+    // at the ticket's tier (read from the ticket, so a background-lane merge's re-run was tier 2): BOS-2365's waited 45 minutes
+    // on 24 Nov, hit the re-run's time limit and sent the ticket back. A red main still holds it back like any merge.
     const order = queued
       .filter((j) => !(red.has(j.projectId) && j.kind === "merge" && !j.fixesMain) && !trainHeld.has(j.id))
       .sort((a, b) => {
@@ -410,6 +418,7 @@ export function checkQueue(db: Db) {
         return (
           Number(b.fixesMain) - Number(a.fixesMain) ||
           Number(turn(b)) - Number(turn(a)) ||
+          Number(isGateRerun(b)) - Number(isGateRerun(a)) ||
           (trainFirst ? Number(seatOf.has(b.id)) - Number(seatOf.has(a.id)) : 0) ||
           Number(withMerges(b)) - Number(withMerges(a)) ||
           kb.front - ka.front ||
@@ -810,14 +819,14 @@ export function checkQueue(db: Db) {
         minutes: minutes(j.state === "running" ? j.startedAt : j.queuedAt),
         fixesMain: j.fixesMain,
         // BOS-1384: why this one is ahead of the others, in the owner's words (null for an ordinary place).
-        why: j.state !== "queued" ? null : j.fixesMain ? "fixes main" : j.kind === "merge" && landingTurns.holds(j.projectId, j.ticketId) ? "holds the landing turn" : j.frontAt ? `moved to front by ${j.frontBy ?? "the owner"}` : r.urgent ? "urgent" : null,
+        why: j.state !== "queued" ? null : j.fixesMain ? "fixes main" : j.kind === "merge" && landingTurns.holds(j.projectId, j.ticketId) ? "holds the landing turn" : isGateRerun(j) ? "re-runs the tests GitHub failed, for a merge under way" : j.frontAt ? `moved to front by ${j.frontBy ?? "the owner"}` : r.urgent ? "urgent" : null,
         heldBy,
         // BOS-1517: held because the ticket has no merge-train seat yet (its check isn't waiting for a slot at all).
         heldBySeat: j.state === "queued" && served.trainHeld.has(j.id),
         // BOS-1803: place among the tickets waiting for a train seat (1 = seated next); null when not waiting for one.
         seatPlace: j.state === "queued" ? seatPlace(j) : null,
         // BOS-1803: "background lane: …" while it waits (null for ordinary work, an urgent one, or a moved-to-front one).
-        lane: j.state !== "queued" || j.frontAt || j.fixesMain ? null : laneWords(marks.get(j.ticketId) ?? j.priority, waitedMs, ageMs),
+        lane: j.state !== "queued" || j.frontAt || j.fixesMain || isGateRerun(j) ? null : laneWords(marks.get(j.ticketId) ?? j.priority, waitedMs, ageMs),
         // True only for checks a red main holds back; "all slots are busy" fills heldBy too but is plain queueing (BOS-1262).
         heldByMain: heldBy !== null && heldBy.startsWith("main is red"),
         // BOS-1435: where a running check runs: the company's runner, or a check worker by name.

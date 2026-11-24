@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { windowHasReset } from "@boss-man/shared";
-import { quotaSamples } from "../src/db/schema.js";
+import { engagements, quotaSamples } from "../src/db/schema.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
 let t: TestApp;
@@ -37,6 +37,73 @@ describe("API credit tracking from Boss Man's own runs (spike S3 fallback)", () 
     expect(status.credit.spentMicros).toBe(82_400_000);
     expect(status.credit.remainingMicros).toBe(117_600_000);
     expect(status.coverage).toBe("boss_man_runs_only");
+  });
+
+  it("says who used a source in the last 7 days, with shares, and nothing for an unused one", async () => {
+    const appCo = await company("App Co");
+    const payg = (await post("/api/funding-sources", { name: "Ollama", kind: "api_payg", provider: "ollama" })).json();
+    const idle = (await post("/api/funding-sources", { name: "Idle", kind: "api_payg", provider: "ollama" })).json();
+    await post("/api/cost-events", { fundingSourceId: payg.id, companyId: appCo, costUsd: 3, inputTokens: 600, outputTokens: 200 });
+    await post("/api/cost-events", { fundingSourceId: payg.id, companyId: appCo, costUsd: 1, inputTokens: 100, outputTokens: 100 });
+    await post("/api/cost-events", { fundingSourceId: payg.id, companyId: appCo, costUsd: 50, inputTokens: 5000, occurredAt: new Date(Date.now() - 9 * 86_400_000).toISOString() });
+    const who = (await get(`/api/funding-sources/${payg.id}/status`)).json().whoUsedIt;
+    expect(who.totalMicros).toBe(4_000_000);
+    expect(who.totalTokens).toBe(1000);
+    expect(who.agents).toHaveLength(1);
+    expect(who.agents[0]).toMatchObject({ tokens: 1000, costMicros: 4_000_000, share: 1 });
+    expect(who.projects[0]).toMatchObject({ name: "No project", company: "App Co", share: 1 });
+    const none = (await get(`/api/funding-sources/${idle.id}/status`)).json().whoUsedIt;
+    expect(none).toMatchObject({ totalTokens: 0, totalMicros: 0, agents: [], projects: [] });
+  });
+
+  it("lists the top 5 of 7 agents, sums the rest as everyone else, drops older events and counts engagement work under the charged company and project", async () => {
+    const appCo = await company("App Co");
+    const provider = await company("Provider Co");
+    const project = (await post(`/api/companies/${appCo}/projects`, { name: "Customer app" })).json().id as string;
+    const providerProject = (await post(`/api/companies/${provider}/projects`, { name: "Provider work" })).json().id as string;
+    const src = (await post("/api/funding-sources", { name: "Plan", kind: "subscription", provider: "anthropic" })).json();
+    const agentIds: string[] = [];
+    for (let i = 1; i <= 7; i++) agentIds.push((await post(`/api/companies/${provider}/agents`, { name: `Agent ${i}` })).json().id);
+    const [eng] = await t.db.insert(engagements).values({ requesterCompanyId: appCo, requesterProjectId: project, providerCompanyId: provider, title: "Help", scope: "Help" }).returning();
+    // Agent i uses i * 100 tokens, no money: a plan-only source. Agent 7's work is an engagement charged to App Co.
+    for (let i = 1; i <= 7; i++) {
+      await post("/api/cost-events", {
+        fundingSourceId: src.id,
+        companyId: provider,
+        projectId: providerProject,
+        agentId: agentIds[i - 1],
+        costUsd: 0,
+        inputTokens: i * 100,
+        ...(i === 7 ? { engagementId: eng!.id, chargedCompanyId: appCo, chargedProjectId: project } : {}),
+      });
+    }
+    await post("/api/cost-events", { fundingSourceId: src.id, companyId: provider, agentId: agentIds[0], costUsd: 0, inputTokens: 9999, occurredAt: new Date(Date.now() - 9 * 86_400_000).toISOString() });
+    const who = (await get(`/api/funding-sources/${src.id}/status`)).json().whoUsedIt;
+    expect(who.totalTokens).toBe(2800);
+    expect(who.totalMicros).toBe(0);
+    expect(who.agents.map((a: { name: string }) => a.name)).toEqual(["Agent 7", "Agent 6", "Agent 5", "Agent 4", "Agent 3"]);
+    expect(who.agentsOthers).toMatchObject({ count: 2, tokens: 300 });
+    const shares = who.agents.reduce((n: number, a: { share: number }) => n + a.share, 0) + who.agentsOthers.share;
+    expect(shares).toBeCloseTo(1, 6);
+    const charged = who.projects.find((p: { name: string }) => p.name === "Customer app");
+    expect(charged).toMatchObject({ company: "App Co", tokens: 700, engagement: true });
+    const own = who.projects.find((p: { name: string }) => p.name === "Provider work");
+    expect(own).toMatchObject({ company: "Provider Co", tokens: 2100, engagement: false });
+  });
+
+  it("uses one basis (spend) for order and share when agents' token and money splits differ, so shares add to 1", async () => {
+    const co = await company("App Co");
+    const src = (await post("/api/funding-sources", { name: "Key", kind: "api_payg", provider: "anthropic" })).json();
+    const a = (await post(`/api/companies/${co}/agents`, { name: "Agent A" })).json().id as string;
+    const b = (await post(`/api/companies/${co}/agents`, { name: "Agent B" })).json().id as string;
+    // A: 90% of tokens, 10% of spend. B: 10% of tokens, 90% of spend.
+    await post("/api/cost-events", { fundingSourceId: src.id, companyId: co, agentId: a, costUsd: 1, inputTokens: 900 });
+    await post("/api/cost-events", { fundingSourceId: src.id, companyId: co, agentId: b, costUsd: 9, inputTokens: 100 });
+    const who = (await get(`/api/funding-sources/${src.id}/status`)).json().whoUsedIt;
+    expect(who.agents.map((r: { name: string }) => r.name)).toEqual(["Agent B", "Agent A"]);
+    expect(who.agents[0].share).toBeCloseTo(0.9, 6);
+    expect(who.agents[1].share).toBeCloseTo(0.1, 6);
+    expect(who.agents.reduce((n: number, r: { share: number }) => n + r.share, 0)).toBeCloseTo(1, 6);
   });
 
   it("splits the last 7 days by company, biggest first", async () => {

@@ -2,7 +2,8 @@ import { afterAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { openPglite } from "../src/db/client.js";
 import { agents, checkJobs, companies, projects, settings, tickets } from "../src/db/schema.js";
-import { checkQueue } from "../src/services/check-queue.js";
+import { checkQueue, isGateRerun } from "../src/services/check-queue.js";
+import { gateRerunCommand } from "../src/services/ci-flake.js";
 import { checkPriority, isBackgroundLaneTitle, laneWords } from "../src/services/check-gate.js";
 
 // BOS-1403: a background-lane ticket (its assignee's job title is Background Developer) merges after the ordinary ones.
@@ -20,10 +21,10 @@ async function setup() {
   const dev = await mk("Dev", "Developer");
   let n = 0;
   const q = checkQueue(db);
-  const merge = async (opts: { lane?: boolean; urgent?: boolean; fixesMain?: boolean; minutesAgo: number }) => {
+  const merge = async (opts: { lane?: boolean; urgent?: boolean; fixesMain?: boolean; minutesAgo: number; kind?: "merge" | "pre_review"; scope?: "quick" | "full"; command?: string; priority?: number }) => {
     n++;
     const [t] = await db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: `T${n}`, number: n, urgent: opts.urgent ?? false, assigneeAgentId: opts.lane ? lane : dev }).returning();
-    const { job } = await q.enqueue({ companyId: co!.id, projectId: p!.id, ticketId: t!.id, kind: "merge", scope: "full", commit: `c${n}`, tree: `t${n}`, fixesMain: opts.fixesMain, priority: 1 });
+    const { job } = await q.enqueue({ companyId: co!.id, projectId: p!.id, ticketId: t!.id, kind: opts.kind ?? "merge", scope: opts.scope ?? "full", commit: `c${n}`, tree: `t${n}`, fixesMain: opts.fixesMain, priority: opts.priority ?? 1, command: opts.command });
     await db.update(checkJobs).set({ queuedAt: new Date(Date.now() - opts.minutesAgo * 60_000) }).where(eq(checkJobs.id, job.id));
     return t!.id;
   };
@@ -115,6 +116,43 @@ describe("merge line: a background-lane merge ages up (BOS-1803)", () => {
     expect(await s.q.laneAge()).toBe(120);
     expect(laneWords(1, 0, 0)).toBeNull();
     expect(laneWords(2, 0, 0)).toBe("background lane: newer ordinary work goes first");
+  });
+});
+
+// BOS-2453: on 24 Nov BOS-2365 (background lane) had GitHub CI fail by chance; the gate's re-run of the failed test file was
+// queued at the ticket's tier 2, waited 45 minutes without starting, hit its time limit and sent the ticket back.
+describe("merge line: the gate's flake re-run starts at the front (BOS-2453)", () => {
+  const rerun = gateRerunCommand(["apps/web/test/chat-find.test.tsx"]);
+
+  it("a background-lane ticket's re-run goes ahead of waiting background, ordinary and quick checks; a fix for main still goes first", async () => {
+    const s = await setup();
+    const normal = await s.merge({ minutesAgo: 40 });
+    const lane = await s.merge({ lane: true, minutesAgo: 30 });
+    const quick = await s.merge({ kind: "pre_review", scope: "quick", minutesAgo: 60 });
+    const laneQuick = await s.merge({ lane: true, kind: "pre_review", scope: "quick", minutesAgo: 50 });
+    // Queued last, at the lane ticket's own tier, the way flakeRetry passes `priority: checkPrio`.
+    const flaky = await s.merge({ lane: true, scope: "quick", command: rerun, priority: 2, minutesAgo: 0 });
+    expect((await s.order())[0]).toBe(flaky);
+    expect(new Set((await s.order()).slice(1))).toEqual(new Set([normal, lane, quick, laneQuick]));
+    const row = (await s.q.list(s.co.id)).rows.find((r) => r.ticketId === flaky)!;
+    expect(row.why).toBe("re-runs the tests GitHub failed, for a merge under way");
+    expect(row.lane).toBeNull();
+    const [run] = await s.q.claimNext(null);
+    expect(run!.ticketId).toBe(flaky);
+  });
+
+  it("never jumps a fix for a broken main", async () => {
+    const s = await setup();
+    const flaky = await s.merge({ lane: true, scope: "quick", command: rerun, priority: 2, minutesAgo: 10 });
+    const fix = await s.merge({ lane: true, fixesMain: true, minutesAgo: 0 });
+    expect(await s.order()).toEqual([fix, flaky]);
+  });
+
+  it("only the gate's own re-run command counts, not any merge job", () => {
+    expect(isGateRerun({ kind: "merge", command: rerun })).toBe(true);
+    expect(isGateRerun({ kind: "pre_review", command: rerun })).toBe(false);
+    expect(isGateRerun({ kind: "merge", command: "pnpm test" })).toBe(false);
+    expect(isGateRerun({ kind: "merge", command: null })).toBe(false);
   });
 });
 

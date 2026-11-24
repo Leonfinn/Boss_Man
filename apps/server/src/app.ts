@@ -25,6 +25,7 @@ import { gitHostService } from "./services/git-hosts.js";
 import { setupService } from "./services/setup.js";
 import { secretGrants, secrets as secretsTable, watchdogActions, checkWorkers } from "./db/schema.js";
 import { runnersService } from "./services/runners.js";
+import { connectionSummary } from "./services/runner-connections.js";
 import { allowsPrivate, type HostLookup, LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { watchCiTokenGrant } from "./services/ci-identity-card.js";
 import { AnswerError, clearOwnerTodo, decisionsService, setDecisionSettledListener } from "./services/decisions.js";
@@ -538,6 +539,7 @@ export async function buildApp(opts: AppOptions) {
     // BOS-2116: lazy, because the semantic service is made further down.
     meaning: (companyId, ownerText) => meaningBriefLines(db, companyId, ownerText, { embedder: (c) => semantic.ticketEmbedder(c), wiki: (c, q) => semantic.similar(c, q) }),
     named: { addons: () => addonFacts(), serverHost: () => hostFacts.serverHost(), gitTokenProbe: (companyId) => gitTokenProbe(companyId), limits: async () => { const l = await scheduler.limitsInForce(); return { allCompanies: l.allCompanies, background: l.background }; }, now: opts.now },
+    now: opts.now,
   });
   const pa =paService(db, {
     notify: (agentId, input) => scheduler.notify(agentId, input),
@@ -555,7 +557,6 @@ export async function buildApp(opts: AppOptions) {
     limits: opts.limits,
     workspaceRoot: opts.workspaceRoot,
     now: opts.now,
-    landingMergeIds: () => review.landingMergeIds(), // `review` is built further down; this only runs during a drain
     quietHours: async () => (await notes.getSettings()).quietHours,
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     tickOnWake: opts.tickOnWake,
@@ -1888,7 +1889,8 @@ export async function buildApp(opts: AppOptions) {
       // One entry per safety feature for Settings' cards (DR-049 point 1): proven, or the owner chose to run without it on this platform.
       const [co] = await db.select().from(companies).where(eq(companies.id, id));
       const safety = co ? featureStates(co, r.sandbox) : null;
-      return { registered: true, runnerId: r.id, connected: runners.isConnected(r.id), lastSeenAt: r.lastSeenAt, imageVersion: r.imageVersion, diskUsedBytes: r.diskUsedBytes, diskCheckedAt: r.diskCheckedAt, addons: r.addons, sandbox: r.sandbox, sandboxCheckedAt: r.sandboxCheckedAt, safety, launcher, report, memoryLine: memory };
+      const connection = await connectionSummary(db, r.id);
+      return { registered: true, runnerId: r.id, connected: runners.isConnected(r.id), connection, lastSeenAt: r.lastSeenAt, imageVersion: r.imageVersion, diskUsedBytes: r.diskUsedBytes, diskCheckedAt: r.diskCheckedAt, addons: r.addons, sandbox: r.sandbox, sandboxCheckedAt: r.sandboxCheckedAt, safety, launcher, report, memoryLine: memory };
     });
 
     // Settings → Server and runner: the two buttons on a safety-feature card (DR-049 point 1). "run" is "Run agents without ...";

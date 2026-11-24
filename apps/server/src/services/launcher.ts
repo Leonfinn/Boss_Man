@@ -9,6 +9,7 @@ import { and, eq, isNotNull, isNull, like } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { companies, mcpServers, projects, runners, settings } from "../db/schema.js";
 import { DROPPED_PRIVATE, DROPPED_TIED_TO_SERVER, type AutomaticEntry } from "./netguard-allow.js";
+import { markStopped } from "./runner-connections.js";
 import { expectRestart } from "./runner-restarts.js";
 import type { runnersService } from "./runners.js";
 
@@ -516,7 +517,11 @@ export function launcherService(
     /** Stops and removes the container; the company's workspaces and sessions stay on disk. */
     async stop(companyId: string) {
       const slug = await slugFor(companyId);
+      const stoppingAt = new Date();
       await call("DELETE", `/runners/${slug}`);
+      // BOS-2459: the connection that ends with this stop is not a drop in the connection history.
+      const [stopped] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, companyId));
+      if (stopped) await markStopped(db, stopped.id, stoppingAt);
       // A deliberate stop is not an outage: forget when it was last seen so the runner watch stays quiet.
       await db.update(runners).set({ lastSeenAt: null }).where(eq(runners.companyId, companyId));
       // Run by the launcher from now on, not by hand (runner-watch.ts HAND_RUN_KEY).

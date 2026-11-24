@@ -314,6 +314,8 @@ export type Ticket = {
   reviewStage?: "awaiting_review" | "merging" | "held" | "checking" | null;
   /** BOS-1906: with reviewStage "checking", where its quick check stands ("running now", "no. 3 in line"). */
   checkLine?: string | null;
+  /** BOS-2435: the git host's build result for a card in Review; null with no git host or no branch. */
+  build?: { state: "passed" | "failed" | "running" | "none" | "unavailable"; failing: string[] } | null;
   /** A reviewer passed it but holds the merge (BOS-808). */
   hold?: ReviewHold | null;
   /** Where an approved ticket's merge is, in plain words ("Waiting for a check slot."). */
@@ -366,6 +368,16 @@ export type FundingStatus = {
   daily: Array<{ day: string; runs: number; inputTokens: number; outputTokens: number; costMicros: number }>;
   /** The last 7 days per company, biggest first. */
   byCompany?: Array<{ companyId: string; name: string; runs: number; tokens: number; costMicros: number }>;
+  /** The last 7 days by agent and by project: plan tokens, pay-as-you-go spend and share of the source's total. */
+  whoUsedIt?: {
+    days: number;
+    totalTokens: number;
+    totalMicros: number;
+    agents: Array<{ id: string | null; name: string; tokens: number; costMicros: number; share: number; engagement: boolean }>;
+    agentsOthers?: { tokens: number; costMicros: number; share: number; count: number } | null;
+    projects: Array<{ id: string | null; name: string; company: string | null; tokens: number; costMicros: number; share: number; engagement: boolean }>;
+    projectsOthers?: { tokens: number; costMicros: number; share: number; count: number } | null;
+  };
   /** The last 8 weeks, newest first: plan use at each reset, spend and the times work was held for this source's quota. */
   weeks?: Array<{
     start: string;

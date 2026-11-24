@@ -1,7 +1,7 @@
 // BOS-2137 (background lane): the two labels the merge queue shows for a waiting landing and a carried-work hold.
 // Both are pure and take their input as arguments (no clock, no database), so made-up values pin the exact words.
 import { describe, expect, it } from "vitest";
-import { CARRIED_NOTE_PREFIX, carriedHold, ciWaitLabel } from "../src/services/merge-queue.js";
+import { CARRIED_NOTE_PREFIX, carriedHold, ciWaitLabel, turnWaitLabel } from "../src/services/merge-queue.js";
 
 describe("ciWaitLabel (BOS-2137)", () => {
   it("names no job when GitHub has not reported one yet", () => {
@@ -66,5 +66,25 @@ describe("carriedHold (BOS-2137)", () => {
   it("reads an empty title list as a held note with no titles", () => {
     const note = `${sentence}\n[]`;
     expect(carriedHold(note)).toEqual({ titles: [], note: sentence });
+  });
+});
+
+describe("turnWaitLabel (BOS-2365)", () => {
+  it("says a rebuild wait re-checks once the holder lands", () => {
+    expect(turnWaitLabel("BOS-12", "rebuild")).toBe("waiting for BOS-12 to land, then re-checks");
+  });
+
+  it("says a push wait passed its check and only the push waits", () => {
+    expect(turnWaitLabel("BOS-12", "push")).toBe("check passed; waiting for BOS-12 to land, then pushes");
+  });
+
+  it("puts the holder in verbatim, including a quoted title or no holder at all", () => {
+    expect(turnWaitLabel('"Fix the login"', "rebuild")).toBe('waiting for "Fix the login" to land, then re-checks');
+    expect(turnWaitLabel("another ticket", "push")).toBe("check passed; waiting for another ticket to land, then pushes");
+    expect(turnWaitLabel("", "rebuild")).toBe("waiting for  to land, then re-checks");
+  });
+
+  it("gives different words for the two waits", () => {
+    expect(turnWaitLabel("BOS-12", "rebuild")).not.toBe(turnWaitLabel("BOS-12", "push"));
   });
 });
