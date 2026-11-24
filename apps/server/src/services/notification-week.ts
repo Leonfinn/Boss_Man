@@ -1,6 +1,8 @@
 // "Last 7 days" on Settings → Notifications (BOS-2420): the notices grouped by day in the owner's
 // time zone, so the owner can see what quiet hours and the per-agent cap did. Pure: the service reads the rows.
 
+import { dateFormat } from "@boss-man/shared";
+
 export type WeekRow = {
   id: string;
   createdAt: Date;
@@ -26,7 +28,7 @@ const zero = (): DayCounts => ({ notices: 0, pushed: 0, quiet: 0, cap: 0, failed
 
 /** The calendar day (YYYY-MM-DD) of an instant in a time zone. */
 export function dayIn(timeZone: string, t: Date): string {
-  const p = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(t);
+  const p = dateFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(t);
   const g = (type: string) => p.find((x) => x.type === type)!.value;
   return `${g("year")}-${g("month")}-${g("day")}`;
 }
