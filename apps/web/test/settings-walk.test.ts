@@ -43,6 +43,7 @@ const api = urlStub({
   "/api/bluegreen": { enabled: false },
   "/api/kill-switch": { paused: false },
   "/api/maintenance": { on: false, last: null },
+  "/api/maintenance/history": { holds: [] },
   "/api/runner-report": { live: [], update: null },
   "/api/self-deploy": { enabled: true, status: null, available: null },
   "/api/run-limits": { instance: 8, company: 4, background: 2, defaults: { instance: 8, company: 4, background: 2 } },

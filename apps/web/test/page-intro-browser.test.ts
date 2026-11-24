@@ -47,6 +47,7 @@ const api = urlStub({
   "/api/bluegreen": { enabled: false },
   "/api/kill-switch": { paused: false },
   "/api/maintenance": { on: false, last: null },
+  "/api/maintenance/history": { holds: [] },
   "/api/runner-report": { live: [], update: null },
   "/api/companies/c1/agents": [agent],
   "/api/companies/c1/projects": [],
