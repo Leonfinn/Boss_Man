@@ -298,6 +298,50 @@ describe("CI on a commit for the merge gate (BOS-1070, read through Actions sinc
       expect(f.paths).toEqual(["apps/web/test/self-deploy-waiting-changes.test.tsx"]);
     });
 
+    describe("run 45323213260 (BOS-2393's chance failure, check-worker-image job, 24 Nov 04:25): BOS-2448", () => {
+      // GitHub's annotations for check run 138206495160, as the public API returned them (messages cut where marked).
+      const exit = { annotation_level: "failure", path: ".github", start_line: 5760, title: "", message: "Process completed with exit code 1." };
+      const failedTests = {
+        annotation_level: "failure",
+        path: ".github",
+        start_line: 5759,
+        title: "check worker image: failed tests",
+        message: " × gives up at the caller's own deadline and reports not-stopped 79ms| ✓ fits the popover on screen at the Brave 1667×724 fold 5008ms|",
+      };
+      const firstErrors = {
+        annotation_level: "failure",
+        path: ".github",
+        start_line: 5758,
+        title: "check worker image: first errors",
+        message:
+          " FAIL test/docker.test.ts > docker wait for the Claude pack installer (BOS-972) > gives up at the caller's own deadline and reports not-stopped|AssertionError: expected 1 to be greater than 1| ❯ test/docker.test.ts:229:23|…",
+      };
+      const vitestNote = (path: string) => ({
+        annotation_level: "failure",
+        path,
+        start_line: 229,
+        title: "test/docker.test.ts > docker wait for the Claude pack installer (BOS-972) > gives up at the caller's own deadline and reports not-stopped",
+        message: "AssertionError: expected 1 to be greater than 1\n ❯ test/docker.test.ts:229:23\n\n",
+      });
+      const read = async (rows: unknown[]) => (await github([], {}, { 5: rows }).host.failures(cfg("github"), "t", [{ id: 5, name: "check-worker-image", url: "" }]))[0]!;
+
+      it("as it ran: the /work container path and the two file-less summary notes leave the job unnamed (why it bounced)", async () => {
+        const f = await read([exit, failedTests, firstErrors, vitestNote("/work/apps/launcher/test/docker.test.ts")]);
+        const named = namedTestFiles([{ job: "check-worker-image", paths: f.paths }]);
+        expect(named.files).toEqual([]);
+        expect(named.unnamed).toEqual(["check-worker-image"]);
+      });
+
+      it("with ci.yml's fix (repo mounted at the checkout's path, summaries as warnings) the one failed file is named", async () => {
+        const warn = (a: typeof failedTests) => ({ ...a, annotation_level: "warning" });
+        // GitHub's runner makes a path under the workspace repo-relative; either form is read as the same file.
+        for (const path of ["apps/launcher/test/docker.test.ts", "/home/runner/work/Boss_Man/Boss_Man/apps/launcher/test/docker.test.ts"]) {
+          const f = await read([exit, warn(failedTests), warn(firstErrors), vitestNote(path)]);
+          expect(namedTestFiles([{ job: "check-worker-image", paths: f.paths }])).toEqual({ files: ["apps/launcher/test/docker.test.ts"], unnamed: [], unsafe: [] });
+        }
+      });
+    });
+
     it("summaryCovered reads base names only from entry starts, and a cut entry is not covered", () => {
       const named = ["apps/runner/test/a.test.ts", "apps/runner/test/b.test.ts"];
       expect(summaryCovered("a.test.ts: waits: boom | b.test.ts: x: y", named)).toBe(true);
