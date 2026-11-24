@@ -26,7 +26,8 @@ const api = {
     issue("a", "BOS-1", "Fix the, merge", "owner", { done: [{ label: "Nudged", reason: "asked the reviewer", at: "2026-11-23T10:00:00Z" }, { label: "Looked", reason: "still waiting", at: "2026-11-23T11:00:00Z" }], nextAt: "2026-11-24T09:00:00Z" }),
     issue("b", "BOS-2", "=Handled by the team", "scrum_master"),
     issue("c", "BOS-3", "CEO has this one", "ceo"),
-    issue("d", "BOS-4", "A second one for you", "owner"),
+    issue("e", "BOS-5", "The CEO has this one too, with a very long title that goes on and on so that it has to wrap on a phone screen", "ceo"),
+    issue("d", "BOS-4", `=Say "hi" to me`, "owner"),
   ],
 };
 
@@ -45,9 +46,9 @@ describe.skipIf(!can)("Scrum Master log: Open now, With you only and Download CS
         await page.goto(`${server!.resolvedUrls.local[0]}#scrum-master/c1`, { waitUntil: "networkidle" });
         const root = page.locator("#open-now");
         await root.getByText("Fix the, merge").waitFor({ timeout: 15_000 });
-        expect(await root.locator("h2").textContent()).toBe("Open now (4)");
+        expect(await root.locator("h2").textContent()).toBe("Open now (5)");
         expect(await root.getByText("2 with you").count()).toBe(1);
-        expect(await root.locator("li").count()).toBe(4);
+        expect(await root.locator("li").count()).toBe(5);
 
         const toggle = root.getByRole("switch", { name: "With you only" });
         const button = root.getByRole("button", { name: "Download CSV" });
@@ -67,7 +68,7 @@ describe.skipIf(!can)("Scrum Master log: Open now, With you only and Download CS
 
         await toggle.check();
         expect(await root.locator("li").count()).toBe(2);
-        expect(await root.locator("h2").textContent()).toBe("Open now (4)");
+        expect(await root.locator("h2").textContent()).toBe("Open now (5)");
         expect(page.url()).toContain("#/scrum-master/c1?mine=1".replace("#/", "#"));
         if (out) await root.screenshot({ path: path.join(out, `open-issues-mine-${p.name}.png`) });
 
@@ -76,19 +77,40 @@ describe.skipIf(!can)("Scrum Master log: Open now, With you only and Download CS
         expect(readFileSync(await dl.path(), "utf8").split("\r\n")).toEqual([
           "ticket,title,warning,with,since,done so far,next,next at",
           `BOS-1,"Fix the, merge",Stuck in review for 3 days,you,2026-11-23T09:00:00Z,Nudged at 2026-11-23T10:00:00Z: asked the reviewer; Looked at 2026-11-23T11:00:00Z: still waiting,Checks again,2026-11-24T09:00:00Z`,
-          "BOS-4,A second one for you,Stuck in review for 3 days,you,2026-11-23T09:00:00Z,,Checks again,",
+          `BOS-4,"'=Say ""hi"" to me",Stuck in review for 3 days,you,2026-11-23T09:00:00Z,,Checks again,`,
           "",
         ]);
 
         // A link with ?mine=1 opens already filtered.
         await page.goto(`${server!.resolvedUrls.local[0]}#scrum-master/c1?mine=1`, { waitUntil: "networkidle" });
         await page.reload({ waitUntil: "networkidle" });
-        await root.getByText("A second one for you").waitFor();
+        await root.getByText("Fix the, merge").waitFor();
         expect(await root.locator("li").count()).toBe(2);
         expect(await root.getByRole("switch", { name: "With you only" }).isChecked()).toBe(true);
+        // Turning it off shows all again and takes ?mine=1 out of the link.
+        await root.getByRole("switch", { name: "With you only" }).uncheck();
+        expect(await root.locator("li").count()).toBe(5);
+        expect(page.url()).not.toContain("mine=1");
+        // The heading is clear of the controls.
+        const h = await root.locator("h2").boundingBox();
+        const t = await toggle.boundingBox();
+        expect(h!.y + h!.height).toBeLessThanOrEqual(t!.y + 1);
       } finally {
         await page.close();
       }
     }, 60_000);
   }
+
+  it("with nothing open there is no switch and no button", async () => {
+    const page = await browser!.newPage({ viewport: { width: 1550, height: 1000 } });
+    try {
+      await stubApi(page, { ...api, "/api/companies/c1/watchdog/issues": [] });
+      await page.goto(`${server!.resolvedUrls.local[0]}#scrum-master/c1`, { waitUntil: "networkidle" });
+      await page.locator("#open-now").getByText("Nothing open").waitFor({ timeout: 15_000 });
+      expect(await page.locator("#open-now").getByRole("switch").count()).toBe(0);
+      expect(await page.locator("#open-now").getByRole("button", { name: "Download CSV" }).count()).toBe(0);
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
 });

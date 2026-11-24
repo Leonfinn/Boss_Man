@@ -53,7 +53,7 @@ export function OpenIssues({ companyId }: { companyId: string }) {
   return (
     <section id="open-now" aria-label="Open now" style={{ scrollMarginTop: 16, marginBottom: 24 }}>
       <h2 className="section-label">Open now{issues.data ? ` (${all.length})` : ""}</h2>
-      {issues.data && (
+      {all.length > 0 && (
         <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
           <label style={{ display: "inline-flex", gap: 6, alignItems: "center", minHeight: 44 }}>
             <input type="checkbox" role="switch" checked={mine} onChange={(e) => change(e.target.checked)} /> With you only
