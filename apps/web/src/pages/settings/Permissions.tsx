@@ -116,23 +116,63 @@ export function FenceSetting({ company, onChanged }: { company: Company; onChang
 }
 
 type SecondOpinion = { enabled: boolean; baseUrl: string; model: string; secretId: string | null };
-type SecondOpinionStats = { answered: number; allowed: number; denied: number; fellBack: number; pending: number; reasons: Array<{ reason: string; count: number }> };
+type SecondOpinionWindow = {
+  answered: number; allowed: number; denied: number; fellBack: number; pending: number; reasons: Array<{ reason: string; count: number }>;
+  bothVerdicts: number; agreed: number; agreement: number | null; perDay: Array<{ day: string; cards: number }>;
+};
+type SecondOpinionStats = { last24h: SecondOpinionWindow; last7d: SecondOpinionWindow; last30d: SecondOpinionWindow };
+type SecondOpinionRange = "last24h" | "last7d" | "last30d";
+const RANGE_LABELS: Record<SecondOpinionRange, string> = { last24h: "Last 24 hours", last7d: "Last 7 days", last30d: "Last 30 days" };
+const RANGE_KEY = "second-opinion-range";
+const readRange = (): SecondOpinionRange => {
+  try {
+    const v = localStorage.getItem(RANGE_KEY);
+    return v === "last7d" || v === "last30d" ? v : "last24h";
+  } catch {
+    return "last24h";
+  }
+};
 
 const cards = (n: number) => `${n} card${n === 1 ? "" : "s"}`;
 
-/** BOS-1052: whether the model is really answering, from the last 24 h of cards. */
-function SecondOpinionLast24h({ stats }: { stats: SecondOpinionStats | undefined }) {
-  if (!stats) return null;
-  const total = stats.answered + stats.fellBack;
-  if (total === 0) return <p className="muted" style={{ fontSize: 14 }}>Last 24 hours: the model wasn't asked about any cards.</p>;
+/** BOS-1052, BOS-2428: whether the model is really answering, over the window the owner picked (remembered in the browser). */
+function SecondOpinionStatsView({ stats }: { stats: SecondOpinionStats | undefined }) {
+  const [range, setRange] = useState<SecondOpinionRange>(readRange);
+  const w = stats?.[range];
+  if (!stats || !w) return null;
+  const label = RANGE_LABELS[range];
+  const pick = (
+    <select aria-label="Time range" value={range} onChange={(e) => {
+      const r = e.target.value as SecondOpinionRange;
+      setRange(r);
+      try { localStorage.setItem(RANGE_KEY, r); } catch { /* private mode: the choice just isn't kept */ }
+    }}>
+      {(Object.keys(RANGE_LABELS) as SecondOpinionRange[]).map((k) => <option key={k} value={k}>{RANGE_LABELS[k]}</option>)}
+    </select>
+  );
+  const total = w.answered + w.fellBack;
+  if (total === 0) return <div style={{ fontSize: 14 }}>{pick} <span className="muted">{label}: the model wasn't asked about any cards.</span></div>;
+  const max = Math.max(1, ...w.perDay.map((d) => d.cards));
   return (
     <div style={{ fontSize: 14 }}>
-      <p style={{ margin: 0 }}>
-        <strong>Last 24 hours:</strong> the model answered {cards(stats.answered)} ({stats.allowed} allow, {stats.denied} deny); {cards(stats.fellBack)} fell back to the rules judge alone.
+      {pick}
+      <p style={{ margin: "4px 0 0" }}>
+        <strong>{label}:</strong> the model answered {cards(w.answered)} ({w.allowed} allow, {w.denied} deny); {cards(w.fellBack)} fell back to the rules judge alone.
       </p>
-      {stats.reasons.length > 0 && (
+      <p style={{ margin: "4px 0 0" }}>
+        Agreed with the rules judge: {w.agreement === null ? "not recorded" : `${Math.round(w.agreement * 100)}% (${w.agreed} of ${w.bothVerdicts} cards where both gave a verdict)`}.
+      </p>
+      {w.perDay.length > 0 && (
+        <div role="img" aria-label={`Cards per day, ${label.toLowerCase()}`} style={{ display: "flex", alignItems: "flex-end", gap: 2, height: 36, margin: "6px 0" }}>
+          {w.perDay.map((d) => (
+            <div key={d.day} title={`${d.day}: ${cards(d.cards)}`} style={{ flex: 1, minWidth: 2, height: `${Math.max(d.cards > 0 ? 8 : 2, (d.cards / max) * 100)}%`, background: "currentColor", opacity: d.cards > 0 ? 0.6 : 0.15 }} />
+          ))}
+        </div>
+      )}
+      {w.reasons.length > 0 && <p className="muted" style={{ margin: "4px 0 0" }}>Top reasons it fell back:</p>}
+      {w.reasons.length > 0 && (
         <ul style={{ margin: "4px 0", paddingLeft: 20 }} className="muted">
-          {stats.reasons.map((r) => (
+          {w.reasons.map((r) => (
             <li key={r.reason}>
               {r.count}× {r.reason}
             </li>
@@ -232,7 +272,7 @@ export function SecondOpinionSetting({ company }: { company: Company }) {
           </button>
         </div>
         {msg && <p role="status">{msg}</p>}
-        {(cur.data?.enabled || (stats.data && stats.data.answered + stats.data.fellBack > 0)) && <SecondOpinionLast24h stats={stats.data ?? undefined} />}
+        {(cur.data?.enabled || (stats.data?.last30d && stats.data.last30d.answered + stats.data.last30d.fellBack > 0)) && <SecondOpinionStatsView stats={stats.data ?? undefined} />}
       </form>
     </Section>
   );
