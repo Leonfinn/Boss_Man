@@ -276,7 +276,10 @@ export function updateStatus(view: SelfDeployView | null, maint: MaintenanceView
   // 1. Update failed: the last report was a failure and nothing newer has deployed.
   const failed = !!s && (s.result === "failed" || s.result === "rolled_back" || s.result === "rejected");
   const ignorable = !!s && s.result === "rejected" && (isReplaced(s.message) || s.target === "runner" || rateLimited);
-  if (s && failed && !ignorable && !view.active) {
+  // BOS-2556: a newer update already waiting on the server (approved, sent, or in its window) or queued for the host
+  // takes the banner; the older failure stays as its row in Recent updates and "Try again" is not offered twice.
+  const newerPending = !!w || view.pending;
+  if (s && failed && !ignorable && !view.active && !newerPending) {
     const what = s.target === "runner" ? "runner update" : s.target === "restart" ? "restart" : "update";
     const earlier = s.target === "runner" ? "the earlier runner image" : "the earlier version";
     const more = [`Why: ${plainReason(s.message)}.`, view.queueCancelled?.why].filter(Boolean).join(" ");
