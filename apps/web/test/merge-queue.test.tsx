@@ -338,8 +338,8 @@ describe("merge queue attention layout (BOS-1239)", () => {
   // BOS-2508: Running now is unnumbered, so with 3 running the 3 waiting merges are 4, 5, 6 and the last equals the tab count.
   it("numbers waiting merges from the running count + 1", async () => {
     const run = (n: number) => ({ ticketId: `r${n}`, ref: `APP-${n}`, title: `Running ${n}`, minutes: 2, slot: n, state: "running", label: "checking", stuck: false, ranOn: "company runner" });
-    const wait = (n: number) => ({ ...base, ticketId: `w${n}`, ref: `APP-${10 + n}`, title: `Waiting ${n}`, state: "waiting_for_check_capacity", label: "waiting for a check slot" });
-    serve({ ...data, running: [run(1), run(2), run(3)], waitingCount: 3, lineCount: 6, waiting: [wait(1), wait(2), wait(3)] } as never, noChecks);
+    const lined = (n: number) => ({ ...base, ticketId: `w${n}`, ref: `APP-${10 + n}`, title: `Waiting ${n}`, state: "waiting_for_check_capacity", label: "waiting for a check slot" });
+    serve({ ...data, running: [run(1), run(2), run(3)], waitingCount: 3, lineCount: 6, waiting: [lined(1), lined(2), lined(3)] } as never, noChecks);
     render(<MergeQueue companies={[company]} companyId="c1" />);
     await screen.findByText("Waiting 1");
     const rows = document.querySelectorAll("article[data-state-word]");
