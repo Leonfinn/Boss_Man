@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { WATCHDOG_ACTION_LABEL } from "@boss-man/shared";
 import { api } from "../api";
+import { buildCsv, download } from "../csv";
 import { usePoll } from "../hooks";
 import { when } from "../pages/Runs";
 import { Loader } from "./Loader";
@@ -51,6 +52,14 @@ export function actionHeading(a: Pick<SmAction, "kind" | "targetName" | "targetI
   return `Warning passed to ${to}${which}`;
 }
 
+/** The log entries as a CSV: time (ISO), kind, ticket id, agent, target, reason, recorded only, undone at (blank when not undone). */
+export function actionsToCsv(actions: SmAction[]): string {
+  return buildCsv(
+    ["time", "kind", "ticket", "agent", "target", "reason", "recorded_only", "undone_at"],
+    actions.map((a) => [new Date(a.createdAt).toISOString(), a.kind, a.ticketId ?? "", a.actorName ?? "", a.targetName ?? "", a.reason, a.recorded ? "yes" : "no", a.undoneAt ? new Date(a.undoneAt).toISOString() : ""]),
+  );
+}
+
 /** The time of an action on its own, e.g. "21:27" (or "27 Oct 21:27" on another day), for a one-line log. */
 export function actionTime(createdAt: string, now: Date = new Date()): string {
   const t = new Date(createdAt);
@@ -88,6 +97,7 @@ export function ScrumMasterLog({ companyId, ticketId, heading, folded, filterabl
   const [error, setError] = useState<string | null>(null);
   const [all, setAll] = useState(false);
   const [filter, setFilter] = useState("");
+  const [undoneOnly, setUndoneOnly] = useState(false);
   const undo = async (id: string) => {
     setBusy(id);
     setError(null);
@@ -103,12 +113,13 @@ export function ScrumMasterLog({ companyId, ticketId, heading, folded, filterabl
   const loaded = Array.isArray(log.data) ? log.data : [];
   if (ticketId && log.data && !loaded.length) return null;
   const words = filterable && !folded ? filter.toLowerCase().split(/\s+/).filter(Boolean) : [];
-  const rows = words.length
-    ? loaded.filter((a) => {
-        const text = [a.ticketRef, a.targetName, a.actorName, actionHeading(a), a.reason].join(" ").toLowerCase();
-        return words.every((w) => text.includes(w));
-      })
-    : loaded;
+  const undoneFilter = !!filterable && !folded && undoneOnly;
+  const rows = loaded.filter((a) => {
+    if (undoneFilter && !a.undoneAt) return false;
+    if (!words.length) return true;
+    const text = [a.ticketRef, a.targetName, a.actorName, actionHeading(a), a.reason].join(" ").toLowerCase();
+    return words.every((w) => text.includes(w));
+  });
 
   // One group per issue, newest first; rows without an issue stand on their own.
   const groups: Array<{ key: string; issueKey: string | null; status: SmAction["issueStatus"]; label: string | null; ticketRef: string | null; ticketId: string | null; rows: SmAction[] }> = [];
@@ -204,6 +215,13 @@ export function ScrumMasterLog({ companyId, ticketId, heading, folded, filterabl
         <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
           <label htmlFor="sm-log-filter">Filter</label>
           <input id="sm-log-filter" type="search" placeholder="Ticket, agent or reason" value={filter} onChange={(e) => setFilter(e.target.value)} style={{ maxWidth: 320 }} />
+          <label style={{ display: "flex", gap: 4, alignItems: "center" }}>
+            <input type="checkbox" checked={undoneOnly} onChange={(e) => setUndoneOnly(e.target.checked)} />
+            Undone only
+          </label>
+          <button type="button" disabled={!rows.length} onClick={() => download(`scrum-master-log-${new Date().toISOString().slice(0, 10)}.csv`, actionsToCsv(rows))} style={{ marginLeft: "auto" }}>
+            Download CSV
+          </button>
         </div>
       )}
       {error && <p role="alert" className="error">{error}</p>}

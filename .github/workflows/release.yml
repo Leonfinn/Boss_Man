@@ -150,8 +150,9 @@ jobs:
           set -euo pipefail
           # The image install needs all four images. Until the runner image is published (BOS-972) a release has no images.env;
           # say so and carry on, so the existing beta release is not held up.
-          if ! jq -e '[.. | strings | select(test("boss-man-runner"))] | length > 0' release.json >/dev/null; then
-            echo "::warning::release.json lists no boss-man-runner image, so this release has no images.env or docker-compose.images.yml."
+          # BOS-1227: the updater is in the default stack, so the install files need it too.
+          if ! jq -e '[.. | strings | select(test("boss-man-runner"))] | length > 0' release.json >/dev/null || ! jq -e '[.. | strings | select(test("boss-man-updater"))] | length > 0' release.json >/dev/null; then
+            echo "::warning::release.json lists no boss-man-runner or boss-man-updater image, so this release has no images.env or docker-compose.images.yml."
             exit 0
           fi
           # images.env is only release.json's digests in the form docker-compose.images.yml reads.

@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { api, ApiError, type Company, type Project } from "../../api";
 import { useOlder, usePoll } from "../../hooks";
+import { buildCsv, download } from "../../csv";
 import { when } from "../Runs";
 import { Section, useAction } from "./shared";
 import { Loader } from "../../components/Loader";
@@ -357,7 +358,7 @@ function tagResultText(r: string | null) {
   return r.replace(/^skipped: /, "tag not moved: ").replace(/^failed: /, "tag move failed: ");
 }
 
-type DeployHistoryRow = {
+export type DeployHistoryRow = {
   id: string;
   deploy: { id: string; ref: string; commit: string | null; notes: string | null; status: string; outcome: string | null; ticketId: string | null; tagName: string | null; tagResult: string | null; createdAt: string; finishedAt?: string | null; redeployOf?: string | null };
   agentName: string | null;
@@ -373,6 +374,24 @@ const DEPLOY_STATUS_TEXT: Record<string, string> = {
   failed: "failed",
   rejected: "refused",
 };
+
+/** The "Download CSV" file name: deploys-<target name>-<YYYY-MM-DD>.csv, with characters a file system dislikes turned into dashes. */
+export function deploysCsvName(target: string, now: Date) {
+  const safe = target.replace(/[^\w.-]+/g, "-").replace(/^-+|-+$/g, "") || "target";
+  return `deploys-${safe}-${now.toISOString().slice(0, 10)}.csv`;
+}
+
+/** One line per loaded deploy (BOS-2500). */
+export function deploysToCsv(rows: DeployHistoryRow[]): string {
+  const head = ["started_at", "finished_at", "minutes", "ref", "commit", "status", "outcome", "redeploy_of", "agent", "ticket", "tag", "tag_result", "notes"];
+  return buildCsv(
+    head,
+    rows.map(({ deploy: d, agentName, ticketRef }) => {
+      const mins = d.finishedAt ? Math.round(((Date.parse(d.finishedAt) - Date.parse(d.createdAt)) / 60000) * 10) / 10 : "";
+      return [d.createdAt, d.finishedAt ?? "", Number.isFinite(mins) ? mins : "", d.ref, d.commit ?? "", DEPLOY_STATUS_TEXT[d.status] ?? d.status, d.outcome ?? "", d.redeployOf ?? "", agentName ?? "", ticketRef ?? "", d.tagName ?? "", d.tagResult ?? "", d.notes ?? ""];
+    }),
+  );
+}
 
 /** A target's deploys, newest first, in a fold under its row (BOS-2318). Loads only once opened. */
 function DeployHistory({ companyId, targetId, name, latestSuccessId }: { companyId: string; targetId: string; name: string; latestSuccessId: string | null }) {
@@ -436,6 +455,9 @@ function DeployRows({ companyId, targetId, name, latestSuccessId, status }: { co
   if (!older.rows.length) return <p className="muted" style={{ fontSize: 13 }}>{status ? `No ${status === "failed" ? "failed or refused" : "succeeded"} deploys to ${name}.` : `No deploys to ${name} yet.`}</p>;
   return (
     <>
+      <button type="button" className="btn small" style={{ marginLeft: 8 }} onClick={() => download(deploysCsvName(name, new Date()), deploysToCsv(older.rows ?? []))}>
+        Download CSV
+      </button>
       <ul style={{ listStyle: "none", padding: 0, margin: "6px 0", display: "flex", flexDirection: "column", gap: 6, fontSize: 13 }}>
         {older.rows.map(({ deploy: d, agentName, ticketRef }) => (
           <li key={d.id}>

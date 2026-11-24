@@ -46,7 +46,7 @@ export async function liveRuns(db: Db, companyId: string) {
 /** The Runs page's result filter. The same split as its Failed / Interrupted / Finished tags (Runs.tsx outcomeTag). */
 export type RunResult = "finished" | "failed" | "interrupted";
 
-function resultWhere(result: RunResult) {
+export function resultWhere(result: RunResult) {
   const failed = sql`${runs.outcome} like 'error%'`;
   if (result === "failed") return failed;
   if (result === "interrupted") return eq(runs.outcome, "interrupted");
@@ -147,7 +147,31 @@ export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersSe
     },
 
     /** Runs that have finished, newest first, with what they cost. */
-    async recent(limit = 50, companyId?: string, filter: { agentId?: string; result?: RunResult; before?: Date; q?: string } = {}) {
+    /** Why runs that ended in the last `days` days started: per wake reason, runs and cost, largest first (BOS-2437). */
+    async reasonSummary(companyId?: string, days = 7, now = new Date()) {
+      const since = new Date(now.getTime() - days * 86_400_000);
+      const where = and(isNotNull(runs.endedAt), gt(runs.endedAt, since), companyId ? eq(runs.companyId, companyId) : undefined);
+      const counts = await db
+        .select({ reason: wakes.reason, runs: sql<number>`count(distinct ${runs.id})::int` })
+        .from(runs)
+        .leftJoin(wakes, eq(wakes.runId, runs.id))
+        .where(where)
+        .groupBy(wakes.reason);
+      const costs = await db
+        .select({ reason: wakes.reason, micros: sql<string>`coalesce(sum(${costEvents.costMicros}), 0)` })
+        .from(runs)
+        .leftJoin(wakes, eq(wakes.runId, runs.id))
+        .innerJoin(costEvents, eq(costEvents.runId, runs.id))
+        .where(where)
+        .groupBy(wakes.reason);
+      const costOf = new Map(costs.map((c) => [c.reason, Number(c.micros)]));
+      const total = counts.reduce((n, r) => n + r.runs, 0);
+      return counts
+        .map((r) => ({ reason: r.reason, runs: r.runs, costMicros: costOf.get(r.reason) ?? 0, share: total ? r.runs / total : 0 }))
+        .sort((a, b) => b.runs - a.runs || b.costMicros - a.costMicros);
+    },
+
+    async recent(limit = 50, companyId?: string, filter: { agentId?: string; result?: RunResult; before?: Date; q?: string; reason?: string } = {}) {
       // "BOS-2250" (any case) finds the runs on that ticket by its ref; other text matches the ticket title.
       const text = filter.q?.trim();
       const ref = text ? /^([a-z][a-z0-9]*)-(\d+)$/i.exec(text) : null;
@@ -172,6 +196,7 @@ export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersSe
             filter.before ? lt(runs.endedAt, filter.before) : undefined,
             filter.result ? resultWhere(filter.result) : undefined,
             byTicket,
+            filter.reason ? eq(wakes.reason, filter.reason) : undefined,
           ),
         )
         .orderBy(desc(runs.endedAt))

@@ -34,6 +34,15 @@ const OWNER_FACT_HELP: Record<string, { what: string; needs: string; where: stri
 // What counts as a failing check is one rule shared with the server's close gate (BOS-1586).
 export { CHECK_OK, CHECK_TROUBLE, isFailingCheck } from "@boss-man/shared";
 
+/**
+ * BOS-2481: facts a host reports as empty when all is well, so an empty value is not "missing": the reason the
+ * code-host read failed (empty when it worked) and the live blue/green colour (empty on a host without blue/green).
+ */
+export const NORMALLY_EMPTY_FACTS: ReadonlySet<string> = new Set(["repo.probeWhy", "compose.liveColour"]);
+
+/** The service names of unhealthy or restarting containers, "; "-joined (BOS-2481; the host writes it). */
+export const UNHEALTHY_CONTAINERS_KEY = "check.container_status.unhealthyNames";
+
 /** The flattened value of the named stopped containers (the server writes it; see host-facts.ts). */
 export const STOPPED_CONTAINERS_KEY = "check.container_status.stopped.names";
 
@@ -64,8 +73,11 @@ export function failingCheckText(key: string, d: HostFactsView, names: string[],
     };
   }
   if (key === "check.container_status.unhealthy") {
+    const unh = (d.facts[UNHEALTHY_CONTAINERS_KEY]?.value ?? "").split("; ").map((s) => s.trim()).filter(Boolean);
     return {
-      what: `${v} container${v === "1" ? " is" : "s are"} restarting or unhealthy`,
+      what: unh.length
+        ? `${v} container${v === "1" ? " is" : "s are"} restarting or unhealthy: ${unh.join(", ")}`
+        : `${v} container${v === "1" ? " is" : "s are"} restarting or unhealthy (this host's deployer is too old to name them)`,
       fix: "a container that keeps restarting is failing its own health check. The next update restarts the stack; if it comes back, its log on the host says why.",
     };
   }
@@ -81,7 +93,10 @@ export function failingCheckText(key: string, d: HostFactsView, names: string[],
   if (key === "check.state_file_sizes.ageSeconds" || key === "check.state_file_sizes.stale") {
     return { what: "the host's own record is out of date", fix: "the host deployer runs every minute; a stale record means it hasn't run. Check that Boss Man's update service is running on the host." };
   }
-  return { what: `${v}`, fix: "this is a check the host runs about itself; its log on the host says more." };
+  // BOS-2481: never an empty name. An empty value is a fact the host reported with nothing in it; otherwise the check
+  // is named by its key and its value.
+  if (!v) return { what: `The host reported "${key}" with no value`, fix: "the host's log says why it could not read it." };
+  return { what: `The check "${key}" reports "${v}"`, fix: "this is a check the host runs about itself; its log on the host says more." };
 }
 
 /** The line the "Worth a look" block adds for a missing fact or a failing check. */

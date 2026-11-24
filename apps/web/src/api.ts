@@ -623,6 +623,8 @@ export type Feature = {
   value: number;
   demandPart: number;
   priority: number;
+  /** When its latest task last changed state (BOS-2454); null with no tasks. */
+  lastMovedAt?: string | null;
   tickets: { total: number; done: number; items: Array<{ id: string; title: string; state: string; outcome: string | null; assignee: string | null }> };
 };
 export type ScoredFeatures = { settings: { demandWeight: number; ceoTriage: boolean }; drivers: Driver[]; maxDemand: number; features: Feature[] };

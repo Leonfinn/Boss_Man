@@ -10,7 +10,7 @@ import { buildApp } from "../src/app.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, agentSkills, agents, companies, decisions, skillProposals, skills, tickets } from "../src/db/schema.js";
-import { checkVerdict, hashFiles, numbered, RECONCILE_GRACE_MS, reviewBody, scriptFilesOf } from "../src/services/skill-proposals.js";
+import { checkVerdict, hashFiles, numbered, RECONCILE_GRACE_MS, reviewBody, reviewTitle, scriptFilesOf } from "../src/services/skill-proposals.js";
 import { conversationLines } from "../src/services/ticket-chat.js";
 import { SKILL_ADD, SKILL_CONDITIONS, SKILL_OVERRIDE, SKILL_REJECT } from "../src/services/decisions.js";
 
@@ -82,6 +82,16 @@ describe("script detection", () => {
     const a = hashFiles([{ path: "SKILL.md", content: b64("a") }]);
     expect(a.bundleHash).not.toBe(hashFiles([{ path: "SKILL.md", content: b64("b") }]).bundleHash);
     expect(a.fileHashes["SKILL.md"]).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+describe("reviewTitle", () => {
+  it("names the security review task after the skill", () => {
+    expect(reviewTitle({ name: "tidy", replacesSkillId: null })).toBe("Security review: skill tidy");
+  });
+
+  it("marks a new version of a skill already in the library", () => {
+    expect(reviewTitle({ name: "tidy", replacesSkillId: "00000000-0000-0000-0000-000000000000" })).toBe("Security review: skill tidy (new version)");
   });
 });
 

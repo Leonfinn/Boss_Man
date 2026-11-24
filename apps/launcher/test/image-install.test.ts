@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { checkSocket, prepareLauncherKeyDir, runSetup } from "../src/setup.js";
+import { checkSocket, prepareLauncherKeyDir, prepareUpdaterKey, runSetup } from "../src/setup.js";
 import { containerSpec, netguardSpec, parseImageRef, type LauncherConfig } from "../src/spec.js";
 import { dropToUnprivileged, hostPathOfMount, noteSocketGroup } from "../src/startup.js";
 
@@ -94,6 +94,20 @@ describe("launcher key folder", () => {
     expect(calls).toEqual(owned ? [] : ["1000:1000"]);
     expect(prepareLauncherKeyDir(path.join(d, "nope"), () => calls.push("x"))).toBe(false);
     expect(calls).not.toContain("x");
+  });
+});
+
+describe("updater key", () => {
+  it("is made once for uid 1000, long enough for the updater, never rewritten, skipped when not mounted", () => {
+    const d = tmp();
+    const calls: string[] = [];
+    expect(prepareUpdaterKey(d, (f, u, g) => calls.push(`${path.basename(f)} ${u}:${g}`))).toBe(true);
+    expect(calls).toEqual(["key 1000:1000"]);
+    const first = readFileSync(path.join(d, "key"), "utf8");
+    expect(first.trim().length).toBeGreaterThanOrEqual(32);
+    expect(prepareUpdaterKey(d, () => {})).toBe(false);
+    expect(readFileSync(path.join(d, "key"), "utf8")).toBe(first);
+    expect(prepareUpdaterKey(path.join(d, "nope"), () => {})).toBe(false);
   });
 });
 

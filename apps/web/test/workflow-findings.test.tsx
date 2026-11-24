@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
 import { Workflow } from "../src/pages/Workflow";
 import { findings, timeWords, type FindingsInput, type Part } from "../src/workflow-findings";
+import { stubFetchByUrl } from "./stub-fetch";
 
 afterEach(() => {
   cleanup();
@@ -107,13 +108,7 @@ const company: Company = { id: "c1", name: "App Co", mission: null, paused: fals
 const card = (over: Record<string, unknown>) => ({ days: 14, costBasis: null, byRole: [], byAgent: [], handoffs: [], features: [], sizes: [], sizeNotes: [], ...over });
 
 function stub(responder: (url: string) => unknown) {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (url: string) => {
-      if (url.includes("/retros/latest")) return new Response(JSON.stringify({ retro: null, changes: [] }), { status: 200 });
-      return new Response(JSON.stringify(responder(url)), { status: 200 });
-    }),
-  );
+  stubFetchByUrl({ "/api/companies/c1/retros/latest": { retro: null, changes: [] }, "/api/companies/c1/workflow": responder });
 }
 
 describe("What this shows card", () => {

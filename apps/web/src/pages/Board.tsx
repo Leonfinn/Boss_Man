@@ -10,7 +10,7 @@ import { RiskHelp, useRiskTiers, type RiskTiers } from "../components/RiskHelp";
 import { State } from "../components/State";
 import { Loader } from "../components/Loader";
 import { statusLineText, type StatusLine } from "./MergeQueue";
-import { usePoll } from "../hooks";
+import { hashQuery, usePoll } from "../hooks";
 import { useWheelToPage } from "../wheel-to-page";
 import { DRAFT_CHANGED, clearDraft, readDraftJson, saveFormDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
@@ -25,6 +25,7 @@ import { RunLabelLink } from "./Runs";
 import { ago } from "./Dashboard";
 import { ageShort } from "../age";
 import { yourReviewFirst } from "../board-lane-order";
+import { waitingOnThis, waitingWords } from "../board-waiting";
 import { WorkStands } from "../components/WorkStands";
 import { RecurringTag } from "../components/RecurringTag";
 import { HeldBehindFixLine, heldSummary, type MergeLine } from "../components/MergesStuckBanner";
@@ -498,7 +499,7 @@ function AddForm({ companyId, projectId, initial, agents, features, goals, tiers
 
 const FILTERS_KEY = "board-filters";
 type BoardView = "all" | "features" | "tasks";
-type SavedFilters = { feature: string; working: boolean; view: BoardView; assignee: string; stuckOnly: boolean; hideRecurring: boolean };
+type SavedFilters = { feature: string; working: boolean; view: BoardView; assignee: string; stuckOnly: boolean; hideRecurring: boolean; holding: boolean };
 /** The view, Assigned to, feature and "working now" filters, kept for the browser session like the feature states below. */
 function readFilters(): SavedFilters {
   try {
@@ -510,9 +511,10 @@ function readFilters(): SavedFilters {
       assignee: typeof saved?.assignee === "string" && saved.assignee ? saved.assignee : "anyone",
       stuckOnly: saved?.stuckOnly === true,
       hideRecurring: saved?.hideRecurring === true,
+      holding: saved?.holding === true,
     };
   } catch {
-    return { feature: "any", working: false, view: "all", assignee: "anyone", stuckOnly: false, hideRecurring: false };
+    return { feature: "any", working: false, view: "all", assignee: "anyone", stuckOnly: false, hideRecurring: false, holding: false };
   }
 }
 
@@ -594,12 +596,12 @@ export function buildTitle(b: BuildResult): string {
 }
 
 /** The Board's "Download CSV": one row per ticket shown, in the order the lanes show them. */
-export function boardToCsv(rows: Array<{ t: BoardTicket; column: string; assignee: string; ref: string }>): string {
+export function boardToCsv(rows: Array<{ t: BoardTicket; column: string; assignee: string; ref: string; waiting?: number }>): string {
   return buildCsv(
-    ["Reference", "Title", "Column", "Assignee", "Risk", "Size", "Feature", "Priority 1", "Last activity", "Days in state", "Build"],
-    rows.map(({ t, column, assignee, ref }) => {
+    ["Reference", "Title", "Column", "Assignee", "Risk", "Size", "Feature", "Priority 1", "Last activity", "Days in state", "Build", "Waiting on this"],
+    rows.map(({ t, column, assignee, ref, waiting }) => {
       const a = stateAge(t);
-      return [ref, t.title, column, assignee, t.risk ?? "", t.size ?? "", t.featureTitle ?? "", t.urgentByOwner ? "yes" : "no", t.lastActivityAt ?? "", a ? (Math.floor(a.days * 10) / 10).toString() : "", t.build ? (t.build.state === "failed" && t.build.failing.length ? `failed: ${t.build.failing.join(", ")}` : t.build.state) : ""];
+      return [ref, t.title, column, assignee, t.risk ?? "", t.size ?? "", t.featureTitle ?? "", t.urgentByOwner ? "yes" : "no", t.lastActivityAt ?? "", a ? (Math.floor(a.days * 10) / 10).toString() : "", t.build ? (t.build.state === "failed" && t.build.failing.length ? `failed: ${t.build.failing.join(", ")}` : t.build.state) : "", String(waiting ?? 0)];
     }),
   );
 }
@@ -659,7 +661,7 @@ export function BulkBar({ count, agents, busy, result, onRun, onClear }: { count
   );
 }
 
-function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRunNow, runState, mergeLine, quiet, select }: { select?: { checked: boolean; onClick: (id: string, shift: boolean) => void }; quiet?: boolean; runState?: { busy: boolean; error?: string }; mergeLine?: StatusLine; t: BoardTicket; mine: boolean; merging: boolean; who: Company["agents"][number] | undefined; name: string; prefix: string | null | undefined; tiers: RiskTiers; numberOf: (id: string) => number | null | undefined; onRunNow: (id: string) => void }) {
+function TicketCard({ waiters, t, mine, merging, who, name, prefix, tiers, numberOf, onRunNow, runState, mergeLine, quiet, select }: { waiters?: BoardTicket[]; select?: { checked: boolean; onClick: (id: string, shift: boolean) => void }; quiet?: boolean; runState?: { busy: boolean; error?: string }; mergeLine?: StatusLine; t: BoardTicket; mine: boolean; merging: boolean; who: Company["agents"][number] | undefined; name: string; prefix: string | null | undefined; tiers: RiskTiers; numberOf: (id: string) => number | null | undefined; onRunNow: (id: string) => void }) {
   const [open, setOpen] = useState(false);
   const bodyId = useId();
   const titleRef = useRef<HTMLAnchorElement>(null);
@@ -697,6 +699,11 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
         )}
         {t.planFirst && !t.planApprovedAt && <span className="tag blue">{t.plan ? "Plan waiting" : "Planning"}</span>}
         {t.blockedBy.length > 0 && <span className="tag amber">Blocked by {t.blockedBy.length === 1 ? (t.blockedBy[0]!.decisionId ? "a decision" : t.blockedBy[0]!.engagementId ? "an engagement" : "a task") : t.blockedBy.length}</span>}
+        {waiters && waiters.length > 0 && (
+          <span className="tag amber" tabIndex={0} title={waiters.map((w) => (w.number ? ticketRef(prefix, w.number) : w.title)).join(", ")}>
+            {waitingWords(waiters.length)}
+          </span>
+        )}
         {t.nextUp && t.systemState === "ready" && (
           <span className="tag" title="The agent is busy on another ticket. This one starts by itself when they finish, and counts toward no limit until then.">
             Next up
@@ -901,10 +908,23 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   const [adding, setAdding] = useState<(Adding & { n: number }) | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
-  const [filters, setFilters] = useState(readFilters);
+  // BOS-2475: "?holding=1" in the page link wins over the saved session value, so a shared link opens with it on.
+  const [filters, setFilters] = useState(() => {
+    const saved = readFilters();
+    const linked = hashQuery().get("holding");
+    return linked === "1" ? { ...saved, holding: true } : linked === "0" ? { ...saved, holding: false } : saved;
+  });
   const setFilter = (change: Partial<SavedFilters>) =>
     setFilters((cur) => {
       const next = { ...cur, ...change };
+      if ("holding" in change) {
+        // Keep the choice in the page link without adding history entries or re-routing.
+        const q = hashQuery();
+        if (next.holding) q.set("holding", "1");
+        else q.delete("holding");
+        const base = window.location.hash.split("?")[0] || "#/board";
+        window.history.replaceState(window.history.state, "", `${window.location.pathname}${window.location.search}${base}${q.toString() ? `?${q}` : ""}`);
+      }
       try {
         sessionStorage.setItem(FILTERS_KEY, JSON.stringify(next));
       } catch {
@@ -942,9 +962,9 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
     if (phone) setFilterOpen(false);
   }, [phone]);
   const filterCompany = companies.find((c) => c.id === current?.companyId);
-  const filterCount = (view !== "all" ? 1 : 0) + (assignee !== "anyone" ? 1 : 0) + (featureFilter !== "any" ? 1 : 0) + (filters.working ? 1 : 0) + (filters.hideRecurring ? 1 : 0);
+  const filterCount = (view !== "all" ? 1 : 0) + (assignee !== "anyone" ? 1 : 0) + (featureFilter !== "any" ? 1 : 0) + (filters.working ? 1 : 0) + (filters.hideRecurring ? 1 : 0) + (filters.holding ? 1 : 0);
   const clearFilters = () => {
-    setFilter({ view: "all", assignee: "anyone", feature: "any", working: false, stuckOnly: false, hideRecurring: false });
+    setFilter({ view: "all", assignee: "anyone", feature: "any", working: false, stuckOnly: false, hideRecurring: false, holding: false });
   };
   const assigneeName = assignee === "owner" ? "You" : (filterCompany?.agents.find((a) => a.id === assignee)?.name ?? "Unknown");
   const featureName = featureFilter === "none" ? "none" : (featureList.find((f) => f.id === featureFilter)?.title ?? "");
@@ -954,7 +974,10 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
     ...(featureFilter !== "any" ? [{ key: "feature", label: `Feature: ${featureName}`, remove: `feature ${featureName}`, clear: () => setFilter({ feature: "any" }) }] : []),
     ...(filters.working ? [{ key: "working", label: "Working now", remove: "working now", clear: () => setFilter({ working: false }) }] : []),
     ...(filters.hideRecurring ? [{ key: "recurring", label: "Recurring hidden", remove: "recurring hidden", clear: () => setFilter({ hideRecurring: false }) }] : []),
+    ...(filters.holding ? [{ key: "holding", label: "Holding others up", remove: "holding others up", clear: () => setFilter({ holding: false }) }] : []),
   ];
+  // BOS-2475: for each open card, the open cards waiting on it.
+  const waitersOf = waitingOnThis((board.data?.columns ?? []).flatMap((c) => c.tickets));
   const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
   // Every word must appear in the ticket's reference, title, feature or description.
   const passes = (t: BoardData["columns"][number]["tickets"][number]) =>
@@ -963,6 +986,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
     (!filters.working || !!t.working?.length) &&
     (!filters.stuckOnly || !!t.looksStuck) &&
     (!filters.hideRecurring || !t.recurring) &&
+    (!filters.holding || (waitersOf.get(t.id)?.length ?? 0) > 0) &&
     (!words.length || words.every((w) => [t.number ? ticketRef(filterCompany?.ticketPrefix, t.number) : "", t.title, t.featureTitle ?? "", t.body ?? ""].join("\n").toLowerCase().includes(w)));
   // The review column is three lanes (BOS-667): still with its reviewers, approved by all of them and
   // only merging, and every ticket, from any column, whose next step is the owner's. Approved work used
@@ -1004,7 +1028,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
         if (seen.has(t.id)) return [];
         seen.add(t.id);
         const a = t.assigneeAgentId ? companies.flatMap((c) => c.agents).find((x) => x.id === t.assigneeAgentId) : undefined;
-        return [{ t, column: l.col.name, assignee: a ? a.name : t.assignedToOwner ? "You" : "", ref: (t.number ? ticketRef(filterCompany?.ticketPrefix, t.number) : "") ?? "" }];
+        return [{ t, waiting: waitersOf.get(t.id)?.length ?? 0, column: l.col.name, assignee: a ? a.name : t.assignedToOwner ? "You" : "", ref: (t.number ? ticketRef(filterCompany?.ticketPrefix, t.number) : "") ?? "" }];
       }),
     );
     const slug = (current?.name ?? "project").replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase() || "project";
@@ -1308,6 +1332,8 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
               onWorking={(v) => setFilter({ working: v })}
               showRecurring={!filters.hideRecurring}
               onShowRecurring={(v) => setFilter({ hideRecurring: !v })}
+              holding={filters.holding}
+              onHolding={(v) => setFilter({ holding: v })}
               agents={company?.agents ?? []}
               features={featureList}
               workingCount={board.data?.workingAgents}
@@ -1499,6 +1525,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                     <TicketCard
                       key={t.id}
                       quiet={parked}
+                      waiters={waitersOf.get(t.id)}
                       select={selecting ? { checked: selected.has(t.id), onClick: pick } : undefined}
                       t={t}
                       mine={!!mine}

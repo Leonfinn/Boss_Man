@@ -31,6 +31,8 @@ export type FilterPanelProps = {
   /** BOS-2485: show the standing "Recurring" tickets (default on); off hides them. */
   showRecurring: boolean;
   onShowRecurring: (v: boolean) => void;
+  holding: boolean;
+  onHolding: (v: boolean) => void;
   agents: Array<{ id: string; name: string }>;
   features: Array<{ id: string; title: string }>;
   /** Agents working now, shown beside the switch; undefined until the board has loaded. */
@@ -204,6 +206,17 @@ export function FilterPanel(p: FilterPanelProps) {
             </button>
             <small className="muted" id="filter-recurring-desc">
               Show standing tickets that repeat
+            </small>
+          </div>
+          <div className="filter-group">
+            <span className="filter-label" id="filter-holding-label">
+              Holding others up
+            </span>
+            <button type="button" role="switch" aria-checked={p.holding} aria-labelledby="filter-holding-label filter-holding-desc" disabled={featuresView} className={`switch${p.holding ? " on" : ""}`} onClick={() => p.onHolding(!p.holding)}>
+              <span className="switch-knob" aria-hidden="true" />
+            </button>
+            <small className="muted" id="filter-holding-desc">
+              Only tasks other tasks wait on
             </small>
           </div>
         </div>

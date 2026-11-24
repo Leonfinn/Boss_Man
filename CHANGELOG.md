@@ -27,6 +27,17 @@ Release step: adding to this file is part of every release (Release Manager, on 
 Check before committing: pnpm --filter @boss-man/site build (it stops on a heading that is not a date, or one out of order).
 -->
 
+## 24 November 2026
+
+- The Feedback page has a summary above the list: how many notes are waiting to be triaged, how long the oldest has waited (with a link to it), and this week's notes by source. The list can be shown newest first or oldest first, the order is kept in the page address, "Show older" reads notes past the newest 50, and Download CSV follows the order you chose.
+- Settings → Team and CEO → Standing rules has a "Past versions" fold with the last 20 changes: who made each, when, and how many lines were added and removed. Each opens a before/after view, and "Put this version back" restores it after asking you first. Undo still reverses it.
+- Key results on the Roadmap keep their history. Each says "updated N days ago" (or "never updated"), shows a small trend, and is tagged "Not updated in 14 days" when it goes stale. A "Readings" fold lists every value with when and who. Key results from before this update say "never updated" until they get a new value.
+- Settings → Server and runner → Runner has a "Connection, last 7 days" fold: the share of time the runner was connected, how many times it dropped, the longest gap, and the last 10 gaps with their length and how each ended. Gaps under 30 seconds are counted but not listed. The history builds up by itself.
+- On the Projects page, each project's summary line says how many of its tickets are blocked, and the list can be sorted by name, most open, most blocked or latest merge. The sort is kept in the link.
+- In Settings → Tools → Deploy targets, each target's row shows its newest deploy when that failed, was refused, is waiting for your approval or is running (for example "Latest: failed" and when), not only inside the Deploys fold.
+- The Dashboard shows "Oldest block" with the ticket and how long it has been blocked, linking to the ticket that has waited longest. It only shows when something is blocked.
+- Chat keeps answering while Boss Man or the runners update. It pauses only while a runner is actually being swapped, usually under a minute, and says by when it will answer again.
+
 ## 23 November 2026
 
 - Parts of Boss Man that are still loading now say "Loading…", and a part that fails to load says what failed and offers Retry, instead of a blank space or a false "none yet". This covers the Dashboard, ticket pages, the Spend report, Settings → Funding → Budgets, the Features page, a feature's own page, Settings → Devices, the Roadmap tabs, the Notifications page, four Wiki loads, Settings → Reviews, the CEO's chapters, and Settings → Tools.

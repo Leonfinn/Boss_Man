@@ -109,8 +109,9 @@ describe("Spend page", () => {
     expect(within(table).getByText("75%")).toBeTruthy();
     expect(within(table).getByText("Not on a ticket").closest("a")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "7 days" }));
-    await waitFor(() => expect(screen.queryByText("Not on a ticket")).toBeNull());
-    expect(screen.getByRole("link", { name: "Fix the thing" })).toBeTruthy();
+    // The old rows vanish while the loader shows, so wait for the new period's table itself.
+    expect(await screen.findByRole("link", { name: "Fix the thing" })).toBeTruthy();
+    expect(screen.queryByText("Not on a ticket")).toBeNull();
   });
 
   it("downloads a CSV whose rows add up to the table's total", async () => {

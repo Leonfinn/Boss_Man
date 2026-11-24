@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { DEPLOY_UNCHANGED_REASON, selfDeployService } from "../src/services/self-deploy.js";
+import { setOwnerTodoFacts } from "../src/services/decisions.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { openPglite } from "../src/db/client.js";
 import { commandProblem, lintOwnerSteps, parseStep, sh, step } from "../src/services/steps.js";
@@ -1349,6 +1350,40 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       expect(await svcCards(c)).toHaveLength(1);
     });
 
+    // BOS-2336: each refusal below fails on the old code, which put the owner's card out whatever the host's facts said.
+    it("holds the database card when the host's own name is not the one its steps run on (R6): a CEO card, none for the owner", async () => {
+      const c = (ctx = await setup());
+      const svc = withQuiet(c, async () => true);
+      await deployedAndLater(c, { pendingServices: ["db"] });
+      setOwnerTodoFacts(async () => ({ serverHost: "other-box", hosts: [{ name: "other-box", ownership: [] }] }));
+      try {
+        await svc.sync();
+      } finally {
+        setOwnerTodoFacts(null);
+      }
+      expect(await svcCards(c)).toHaveLength(0);
+      const fix = (await c.db.select().from(decisions)).filter((d) => d.dedupeKey?.startsWith("owner-todo-fix:self-deploy:services:db:"));
+      expect(fix).toHaveLength(1);
+      expect(fix[0]!.tier).toBe("ceo");
+      expect(fix[0]!.question).toContain(`but Boss Man runs on "other-box"`); // the R6 host fence
+    });
+
+    it("holds the proxy card when its check names the standby colour (R31c): a CEO card, none for the owner", async () => {
+      const c = (ctx = await setup());
+      const svc = withQuiet(c, async () => true);
+      await deployedAndLater(c, { pendingServices: ["proxy"] });
+      setOwnerTodoFacts(async () => ({ serverHost: "nas01", values: { "compose.files": "docker-compose.yml,deploy/bluegreen.yml", "compose.bluegreen": "true", "compose.liveColour": "blue", "compose.cmd": "cd /srv/bm/src && docker compose -f docker-compose.yml -f deploy/bluegreen.yml", "paths.src": "/srv/bm/src" } }));
+      try {
+        await svc.sync();
+      } finally {
+        setOwnerTodoFacts(null);
+      }
+      expect(await svcCards(c)).toHaveLength(0);
+      const fix = (await c.db.select().from(decisions)).filter((d) => d.dedupeKey?.startsWith("owner-todo-fix:self-deploy:services:proxy:"));
+      expect(fix).toHaveLength(1);
+      expect(fix[0]!.question).toContain("R31");
+    });
+
     it("waits for a quiet host: nothing is raised while it is busy, and the next pass raises it", async () => {
       const c = (ctx = await setup());
       let quiet = false;
@@ -1838,6 +1873,47 @@ describe("an approval when main moves on before the host runs it (BOS-753)", () 
       expect(steps).toContain("cp -p /srv/bm/deployer/host-deployer.sh /srv/bm/deployer/host-deployer.sh.old && BOSSMAN_DEPLOYER=/srv/bm/deployer /srv/bm/src/scripts/install-deployer.sh");
       expect(steps).toContain('host="nas01" as="root"');
       expect((card!.context as { rollback: string }).rollback).toContain("cp -p /srv/bm/deployer/host-deployer.sh.old /srv/bm/deployer/host-deployer.sh");
+    });
+
+    // BOS-2336: the deployer-script card is checked when raised and when its steps are refreshed.
+    const fixCards = async (c: Awaited<ReturnType<typeof setup>>) => (await c.db.select().from(decisions)).filter((d) => d.dedupeKey === "owner-todo-fix:self-deploy:deployer-script");
+    // Its steps are a file copy, not a compose command, so R31 has nothing to refuse here (the proxy card above covers R31).
+    it("holds a new deployer-script card on an R6 refusal, and the owner gets none", async () => {
+      const c = (ctx = await setup());
+      await report(c, undefined);
+      setOwnerTodoFacts(async () => ({ serverHost: "other-box", hosts: [{ name: "other-box", ownership: [] }] }));
+      try {
+        await c.selfDeploy.sync();
+      } finally {
+        setOwnerTodoFacts(null);
+      }
+      expect(await cards(c)).toHaveLength(0);
+      const fix = await fixCards(c);
+      expect(fix).toHaveLength(1);
+      expect(fix[0]!.tier).toBe("ceo");
+      expect(fix[0]!.question).toContain(`but Boss Man runs on "other-box"`); // the R6 host fence
+    });
+
+    it("keeps the open deployer-script card's old steps when the refreshed ones are refused, and tells the CEO", async () => {
+      const c = (ctx = await setup());
+      await report(c, undefined);
+      await c.selfDeploy.sync();
+      const [first] = await cards(c);
+      const oldSteps = (first!.context as { steps: string[] }).steps;
+      // The host's folders change, so the steps are rewritten; the facts now say the server runs elsewhere (R6).
+      await writeFile(path.join(c.dir, "outbox", "host.json"), JSON.stringify({ version: 1, name: "nas01", writtenAt: "2026-10-20T12:05:00Z", ownership: [], paths: { ...PATHS, deployer: "/srv/bm/deployer2" } }));
+      await c.available();
+      setOwnerTodoFacts(async () => ({ serverHost: "other-box", hosts: [{ name: "other-box", ownership: [] }] }));
+      try {
+        await c.selfDeploy.sync();
+      } finally {
+        setOwnerTodoFacts(null);
+      }
+      const [after] = await cards(c);
+      expect((after!.context as { steps: string[] }).steps).toEqual(oldSteps);
+      const fix = await fixCards(c);
+      expect(fix).toHaveLength(1);
+      expect(fix[0]!.question).toContain(`but Boss Man runs on "other-box"`); // the R6 host fence
     });
 
     it("no report at all raises nothing", async () => {

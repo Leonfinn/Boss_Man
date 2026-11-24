@@ -3,6 +3,7 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
 import { Workflow } from "../src/pages/Workflow";
+import { stubFetchByUrl } from "./stub-fetch";
 
 afterEach(() => {
   cleanup();
@@ -29,10 +30,7 @@ describe("Workflow: week by week", () => {
       ],
     };
     // /retros/latest gets its own shape, or the "Latest retro" block throws after the test (BOS-2425).
-    vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(
-      JSON.stringify(String(url).includes("/retros/latest") ? { retro: null, changes: [] } : body),
-      { status: 200, headers: { "content-type": "application/json" } },
-    )));
+    stubFetchByUrl({ "/api/companies/c1/retros/latest": { retro: null, changes: [] }, "/api/companies/c1/workflow": body });
     render(<Workflow company={{ id: "c1", name: "Acme" } as Company} />);
     const h = await screen.findByRole("heading", { name: "Week by week" });
     const rows = within(h.closest("section")!).getAllByRole("row").slice(1);

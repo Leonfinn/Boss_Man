@@ -44,11 +44,12 @@ export async function setup(opts: { release?: object; cfg?: Record<string, strin
     network: cfg.network,
     networks: [cfg.network, sw.frontNetwork, sw.launcherNetwork, sw.selfNetwork],
     volumes: [...sw.serverMounts, ...sw.selfMounts].map((m) => m.source),
+    launcherVolumes: sw.helpers ? sw.helpers.launcherMounts.map((m) => m.source) : [],
     socketBind: `${sw.socketHostPath}:/var/run/docker.sock`,
   });
   const state = stateStore(cfg.stateDir);
   state.load();
   const gate = newGate();
-  const deps = { cfg, docker, state, gate, clock: daemon.clock, probe: daemon.probe, release: { verifyFn: async () => undefined }, pull: { sleep: async () => undefined }, pack: { sleep: async () => undefined } };
+  const deps = { cfg, docker, state, gate, launcherBusy: (async () => false) as () => Promise<boolean>, clock: daemon.clock, probe: daemon.probe, release: { verifyFn: async () => undefined }, pull: { sleep: async () => undefined }, pack: { sleep: async () => undefined } };
   return { cfg: cfg as SwapReady, daemon, docker, state, deps, gate };
 }

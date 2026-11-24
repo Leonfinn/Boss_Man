@@ -61,11 +61,43 @@ export function WorkspaceDisk({ company, onChanged }: { company: Company; onChan
 type ServerHealthView = {
   disk: { freeBytes: number; totalBytes: number; freePercent: number } | null;
   database: { bytes: number | null; dayAgoBytes: number | null; weekAgoBytes: number | null; growthPercent7d: number | null };
+  history?: { day: string; bytes: number }[];
   limits: { statementTimeouts: number; poolFull: number };
   slowQueries: { seconds: number; query: string }[];
   warnings: string[];
 };
 const healthGb = (b: number | null) => (b === null ? "not available" : b < 1024 ** 3 ? `${(b / 1024 ** 2).toFixed(0)} MB` : `${(b / 1024 ** 3).toFixed(1)} GB`);
+const healthChange = (diff: number) => `${diff < 0 ? "−" : "+"}${healthGb(Math.abs(diff))}`;
+const DAY_MS = 86_400_000;
+
+/** BOS-2487: one row per recorded day with the change from the day before; a day that grew over 10% is marked. */
+export function DbHistory({ history }: { history: { day: string; bytes: number }[] | undefined }) {
+  const rows = history ?? [];
+  if (!rows.length) return null;
+  return (
+    <details data-testid="health-db-history" style={{ fontSize: 14, marginTop: 6 }}>
+      <summary>Database size, last 14 days</summary>
+      {rows.length < 14 && <p className="muted" style={{ margin: "4px 0" }}>{rows.length === 1 ? "1 day recorded so far" : `${rows.length} days recorded so far`}</p>}
+      <table style={{ borderCollapse: "collapse" }}>
+        <tbody>
+          {rows.map((r, i) => {
+            const prev = rows[i - 1];
+            const consecutive = prev && Date.parse(r.day) - Date.parse(prev.day) === DAY_MS;
+            const diff = consecutive ? r.bytes - prev.bytes : null;
+            const jump = consecutive && prev.bytes > 0 && r.bytes / prev.bytes - 1 > 0.1;
+            return (
+              <tr key={r.day} data-testid={jump ? "health-db-jump" : undefined} style={jump ? { fontWeight: 600 } : undefined}>
+                <td style={{ paddingRight: 16 }}>{r.day}</td>
+                <td style={{ paddingRight: 16 }}>{healthGb(r.bytes)}</td>
+                <td className={jump ? "error" : "muted"}>{diff === null ? "" : healthChange(diff)}{jump ? " (grew over 10%)" : ""}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </details>
+  );
+}
 
 /** BOS-2380: the server's own disk, database size and query limits, read when the page loads. Read-only: no buttons. */
 export function ServerHealth() {
@@ -87,6 +119,7 @@ export function ServerHealth() {
             <li data-testid="health-db">
               Database: {healthGb(v.database.bytes)}. 1 day ago {healthGb(v.database.dayAgoBytes)}, 7 days ago {healthGb(v.database.weekAgoBytes)}
               {v.database.growthPercent7d !== null ? ` (growth: ${v.database.growthPercent7d > 0 ? "+" : ""}${v.database.growthPercent7d}% in 7 days)` : " (growth: not enough history yet)"}. Earlier days fill in as the server keeps one reading a day.
+              <DbHistory history={v.history} />
             </li>
             <li data-testid="health-limits">Last 24 hours (since the server started, if less): {v.limits.statementTimeouts} queries cut off for running too long, {v.limits.poolFull} times the connection pool was full.</li>
             <li data-testid="health-slow">
@@ -574,8 +607,39 @@ function RecentUpdates({ rows, liveRows, older, progress, wait, maint, queued }:
         </ul>
       )}
       <ShowOlder older={older} />
+      <PastWaits />
       <p style={{ fontSize: 13 }}><a href="#/decisions">All updates</a></p>
     </div>
+  );
+}
+
+/** BOS-2408: what each runner-update wait did, kept in the database so a restart doesn't erase it. */
+export type PastWait = { id: string; startedAt: string; kind: string; endedAt: string | null; endOk: boolean | null; endTitle: string | null; swapTries: { slug: string; n: number; at: string; outcome: string; error?: string }[]; events: { at: string; text: string }[] };
+export function pastWaitLine(w: PastWait): string {
+  const failed = w.swapTries.filter((t) => t.outcome === "failed").length;
+  const how = w.endedAt ? (w.endTitle ?? "ended") : "still going";
+  return `${how}${failed ? `, ${failed} swap ${failed === 1 ? "try" : "tries"} failed` : ""}${w.events.length ? `, ${w.events.length} noted ${w.events.length === 1 ? "moment" : "moments"}` : ""}`;
+}
+function PastWaits() {
+  const view = usePoll((signal) => api<{ holds: PastWait[] }>("/api/maintenance/history?limit=10", { signal }), 60_000, "maintenance-history");
+  const holds = Array.isArray(view.data?.holds) ? view.data.holds : [];
+  if (!holds.length) return null;
+  return (
+    <details data-testid="past-waits" style={{ fontSize: 13, margin: "6px 0" }}>
+      <summary>Past update waits ({holds.length})</summary>
+      <ul style={{ margin: 0, padding: 0 }}>
+        {holds.map((w) => (
+          <li key={w.id} style={{ listStyle: "none", marginTop: 6 }}>
+            <strong>{when(w.startedAt)}</strong> ({w.kind}): {pastWaitLine(w)}
+            {[...w.swapTries.map((t) => ({ at: t.at, text: `${t.slug} try ${t.n}: ${t.outcome}${t.error ? ` (${t.error})` : ""}` })), ...w.events]
+              .sort((a, b) => a.at.localeCompare(b.at))
+              .map((e, i) => (
+                <div key={i} className="muted">{atTime(e.at)} {e.text}</div>
+              ))}
+          </li>
+        ))}
+      </ul>
+    </details>
   );
 }
 

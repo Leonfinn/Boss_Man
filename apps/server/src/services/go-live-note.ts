@@ -1,10 +1,10 @@
 // BOS-1546: a merged ticket that only waits to go live says so in plain words on the board card and the ticket page,
 // so it doesn't look stalled in Blocked. Display only: it reads the wait the ticket already stores (goLiveWait) and the
 // owner's open update cards (the Updates waiting list); nothing here changes a state or a merge.
-import { and, eq, sql } from "drizzle-orm";
-import type { GoLiveWait } from "@boss-man/shared";
+import { and, asc, eq, sql } from "drizzle-orm";
+import { ticketRef, type GoLiveWait } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { decisions, tickets } from "../db/schema.js";
+import { companies, decisions, tickets } from "../db/schema.js";
 
 /**
  * BOS-1636: SQL twin of isLiveCheckWait (shared) for the Blocked half: in Blocked with a merge, or (BOS-1907) a split-out
@@ -14,13 +14,23 @@ export const liveCheckWaitSql = sql`(${tickets.systemState} = 'blocked' and (${t
   or exists (select 1 from tickets p where p.id = ${tickets.checksTicketId} and p.merge_commit is not null and (p.system_state <> 'done' or p.outcome is distinct from 'cancelled'))))`;
 
 /** Blocked tickets of a company that really are blocked, and those that are only merged work waiting for a live check. */
-export async function blockedSplit(db: Db, companyId: string): Promise<{ blocked: number; liveCheck: number }> {
+export async function blockedSplit(
+  db: Db,
+  companyId: string,
+): Promise<{ blocked: number; liveCheck: number; /** BOS-2467: the longest-blocked real block (not a live-check wait); null when none. */ oldest: { at: Date; ticketId: string; ref: string | null } | null }> {
   const [r] = await db
     .select({ live: sql<number>`count(*) filter (where ${liveCheckWaitSql})::int`, all: sql<number>`count(*)::int` })
     .from(tickets)
     .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "blocked")));
   const live = r?.live ?? 0;
-  return { blocked: (r?.all ?? 0) - live, liveCheck: live };
+  const [o] = await db
+    .select({ id: tickets.id, at: tickets.stateChangedAt, number: tickets.number, prefix: companies.ticketPrefix })
+    .from(tickets)
+    .innerJoin(companies, eq(companies.id, tickets.companyId))
+    .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "blocked"), sql`not ${liveCheckWaitSql}`))
+    .orderBy(asc(tickets.stateChangedAt), asc(tickets.id))
+    .limit(1);
+  return { blocked: (r?.all ?? 0) - live, liveCheck: live, oldest: o ? { at: o.at, ticketId: o.id, ref: ticketRef(o.prefix, o.number) ?? null } : null };
 }
 
 /** The owner's open server-update and runner-update cards of a company, by target (null when there is none). */

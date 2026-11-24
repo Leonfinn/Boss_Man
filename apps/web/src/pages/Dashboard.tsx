@@ -27,7 +27,7 @@ type AgentCard = {
 type Day = { day: string } & Record<string, number | string>;
 type DashboardData = {
   agents: AgentCard[];
-  stats: { agents: number; running: number; paused: number; inProgress: number; inReview: number; /** inReview split (BOS-667); missing from an older server. */ awaitingReview?: number; approvedToMerge?: number; /** BOS-1909: in progress without the work that can't move, and the groups that move by themselves; missing from an older server. */ inProgressCounted?: number; nextUp?: number; beingChecked?: number; watching?: number; open: number; blocked: number; /** Merged work in Blocked that only waits for its live check, not counted in blocked (BOS-1636); missing from an older server. */ waitingLiveCheck?: number; decisionsWaiting: number; monthCostMicros: number; monthSubscriptionTokens: { input: number; output: number }; monthSubscriptionRuns: number; monthSubscriptionUnrecorded: number };
+  stats: { agents: number; running: number; paused: number; inProgress: number; inReview: number; /** inReview split (BOS-667); missing from an older server. */ awaitingReview?: number; approvedToMerge?: number; /** BOS-1909: in progress without the work that can't move, and the groups that move by themselves; missing from an older server. */ inProgressCounted?: number; nextUp?: number; beingChecked?: number; watching?: number; open: number; blocked: number; /** Merged work in Blocked that only waits for its live check, not counted in blocked (BOS-1636); missing from an older server. */ waitingLiveCheck?: number; /** BOS-2467: the longest real block; missing from an older server. */ oldestBlocked?: { at: string; ticketId: string; ref: string | null } | null; decisionsWaiting: number; monthCostMicros: number; monthSubscriptionTokens: { input: number; output: number }; monthSubscriptionRuns: number; monthSubscriptionUnrecorded: number };
   runsByDay: Day[];
   ticketsByDay: Day[];
   recentTickets: Array<{ id: string; title: string; state: string; outcome: string | null; assignee: string | null; lastActivityAt: string }>;
@@ -38,6 +38,16 @@ type DashboardData = {
 /** "just now", "5 min ago", "3h ago", "2d ago": age.ts's words, so every page agrees. */
 export function ago(iso: string, now = Date.now()) {
   return raisedAgo(iso, now);
+}
+
+/** BOS-2467: how long the longest real block has lasted, linking to that ticket. A sibling of the card's own link (links can't nest). Nothing when none is blocked. */
+export function OldestBlocked({ oldest, now = Date.now() }: { oldest?: { at: string; ticketId: string; ref: string | null } | null; now?: number }) {
+  if (!oldest) return null;
+  return (
+    <small className="stat-oldest muted">
+      <a href={`#/tickets/${oldest.ticketId}`}>Oldest block: {oldest.ref ? <><span className="nowrap">{oldest.ref}</span>, </> : ""}<span className="nowrap">{ago(oldest.at, now)}</span></a>
+    </small>
+  );
 }
 
 const compact = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
@@ -247,6 +257,7 @@ export function Dashboard({ company, decisions = null, tally = null, onChanged }
             {s.running} running, {s.paused} paused
           </small>
         </a>
+        <div className="stat-cell">
         <a className="card stat" href="#/board">
           <strong>{s.inProgressCounted ?? s.inProgress}</strong>
           <span>Tasks in progress</span>
@@ -260,6 +271,8 @@ export function Dashboard({ company, decisions = null, tally = null, onChanged }
             {s.awaitingReview != null && s.approvedToMerge != null ? `${s.awaitingReview} awaiting review, ${s.approvedToMerge} approved, waiting to merge` : `${s.inReview} in review`}, {s.open} open, {s.blocked} blocked{s.waitingLiveCheck ? `, ${s.waitingLiveCheck} merged, waiting for a live check` : ""}
           </small>
         </a>
+        {s.blocked > 0 && <OldestBlocked oldest={s.oldestBlocked} />}
+        </div>
         {/* The API-money card opens the Spend page (BOS-2194); the subscription-tokens card still opens Funding. */}
         <a className="card stat" href={s.monthSubscriptionRuns > 0 ? "#/funding" : `#/spend/${company.id}`}>
           {/* Subscription use is tokens, not money (R67); money is only what API use cost. */}
