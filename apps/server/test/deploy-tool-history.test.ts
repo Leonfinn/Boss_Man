@@ -4,8 +4,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { eq } from "drizzle-orm";
-import { companies, deploys } from "../src/db/schema.js";
+import { and, eq } from "drizzle-orm";
+import { agents, companies, deploys, projects, tickets } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { currentHold, openHold } from "../src/services/owner-holds.js";
 
@@ -36,7 +36,12 @@ async function setup() {
     await c.connect(new StreamableHTTPClientTransport(new URL(`http://${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
     return c;
   };
-  return { ...built, db, close, mk, mcp };
+  // Every company is made with a CEO; mk's own agent is a worker.
+  const ceoOf = async (x: { company: { id: string } }) => {
+    const [a] = await db.select({ id: agents.id, name: agents.name }).from(agents).where(and(eq(agents.companyId, x.company.id), eq(agents.role, "ceo")));
+    return { company: x.company, agent: { id: a!.id }, name: a!.name };
+  };
+  return { ...built, db, close, mk, mcp, ceoOf };
 }
 
 const textOf = (r: unknown) => ((r as { content: Array<{ text: string }> }).content[0]?.text ?? "");
@@ -81,23 +86,51 @@ describe("deploy tool: release_hold (BOS-2554, DR-076 A)", () => {
     const other = await c.mk("Other");
     // Two companies made in the same millisecond would tie on createdAt: make the home one plainly older.
     await c.db.update(companies).set({ createdAt: new Date("2026-01-01T00:00:00Z") }).where(eq(companies.id, home.company.id));
-    const call = async (x: typeof home, args: Record<string, unknown>) => {
+    const call = async (x: { company: { id: string }; agent: { id: string } }, args: Record<string, unknown>) => {
       const client = await c.mcp(x);
       const r = (await client.callTool({ name: "deploy", arguments: { action: "release_hold", ...args } })) as { isError?: boolean };
       await client.close();
       return { error: !!r.isError, text: textOf(r) };
     };
+    const ceo = await c.ceoOf(home);
     const ok = { outcome: "retry_safe", ownerText: "fine" };
-    expect(await call(home, ok)).toMatchObject({ error: true, text: expect.stringContaining("Nothing is held") });
+    expect(await call(ceo, ok)).toMatchObject({ error: true, text: expect.stringContaining("Nothing is held") });
     await openHold(c.db, { subject: "server_deploy", commit: "b".repeat(40), result: "failed", reason: "Building green failed." });
     expect(await call(other, ok)).toMatchObject({ error: true, text: expect.stringContaining("Only Boss Man's own company") });
-    expect(await call(home, { ownerText: "fine" })).toMatchObject({ error: true, text: expect.stringContaining("Give outcome") });
-    expect(await call(home, { outcome: "retry_safe" })).toMatchObject({ error: true, text: expect.stringContaining("Give ownerText") });
+    expect(await call(ceo, { ownerText: "fine" })).toMatchObject({ error: true, text: expect.stringContaining("Give outcome") });
+    expect(await call(ceo, { outcome: "retry_safe" })).toMatchObject({ error: true, text: expect.stringContaining("Give ownerText") });
+    // A worker with no linked ticket is refused (Brains, DR-076 A).
+    expect(await call(home, ok)).toMatchObject({ error: true, text: expect.stringContaining("Only the CEO may release") });
     expect((await currentHold(c.db, "server_deploy"))?.releasedAt).toBeNull();
-    expect(await call(home, { outcome: "retry_safe", ownerText: "Disk was full; freed." })).toMatchObject({ error: false, text: expect.stringContaining("Released.") });
-    expect(await currentHold(c.db, "server_deploy")).toMatchObject({ releasedBy: "Home engineer", outcome: "retry_safe", ownerText: "Disk was full; freed." });
+    expect(await call(ceo, { outcome: "retry_safe", ownerText: "Disk was full; freed." })).toMatchObject({ error: false, text: expect.stringContaining("Released.") });
+    expect(await currentHold(c.db, "server_deploy")).toMatchObject({ releasedBy: ceo.name, outcome: "retry_safe", ownerText: "Disk was full; freed." });
     // Already released: a second call says so and changes nothing.
-    expect(await call(home, { outcome: "do_not_retry", ownerText: "x" })).toMatchObject({ error: true, text: expect.stringContaining("Nothing is held") });
+    expect(await call(ceo, { outcome: "do_not_retry", ownerText: "x" })).toMatchObject({ error: true, text: expect.stringContaining("Nothing is held") });
+  });
+
+  it("link_hold: CEO only, a ticket of the company; its assignee may then release", async () => {
+    const c = (ctx = await setup());
+    const home = await c.mk("Home");
+    const other = await c.mk("Other");
+    await c.db.update(companies).set({ createdAt: new Date("2026-01-01T00:00:00Z") }).where(eq(companies.id, home.company.id));
+    const ceo = await c.ceoOf(home);
+    const [p] = await c.db.insert(projects).values({ companyId: home.company.id, name: "Development" }).returning();
+    const [t] = await c.db.insert(tickets).values({ companyId: home.company.id, projectId: p!.id, title: "Diagnose", number: 7, assigneeAgentId: home.agent.id }).returning();
+    const [op] = await c.db.insert(projects).values({ companyId: other.company.id, name: "Development" }).returning();
+    const [foreign] = await c.db.insert(tickets).values({ companyId: other.company.id, projectId: op!.id, title: "Elsewhere", number: 7 }).returning();
+    await openHold(c.db, { subject: "server_deploy", commit: "b".repeat(40), result: "failed", reason: "x" });
+    const call = async (x: { company: { id: string }; agent: { id: string } }, args: Record<string, unknown>) => {
+      const client = await c.mcp(x);
+      const r = (await client.callTool({ name: "deploy", arguments: args })) as { isError?: boolean };
+      await client.close();
+      return { error: !!r.isError, text: textOf(r) };
+    };
+    expect(await call(home, { action: "link_hold", ticketId: t!.id })).toMatchObject({ error: true, text: expect.stringContaining("Only the CEO links") });
+    expect(await call(ceo, { action: "link_hold", ticketId: foreign!.id })).toMatchObject({ error: true, text: expect.stringContaining("No such ticket") });
+    expect(await call(ceo, { action: "link_hold", ticketId: t!.id })).toMatchObject({ error: false, text: expect.stringContaining("Linked.") });
+    expect((await currentHold(c.db, "server_deploy"))?.ticketId).toBe(t!.id);
+    expect(await call(home, { action: "release_hold", outcome: "retry_safe", ownerText: "Disk freed." })).toMatchObject({ error: false, text: expect.stringContaining("Released.") });
+    expect(await currentHold(c.db, "server_deploy")).toMatchObject({ releasedBy: "Home engineer", outcome: "retry_safe" });
   });
 
   it("asks which one when both the server and the runner update are held", async () => {
@@ -105,10 +138,10 @@ describe("deploy tool: release_hold (BOS-2554, DR-076 A)", () => {
     const home = await c.mk("Home");
     await openHold(c.db, { subject: "server_deploy", commit: "b".repeat(40), result: "failed", reason: "x" });
     await openHold(c.db, { subject: "runner_update", commit: "c".repeat(40), result: "failed", reason: "y" });
-    const client = await c.mcp(home);
+    const client = await c.mcp(await c.ceoOf(home));
     const both = (await client.callTool({ name: "deploy", arguments: { action: "release_hold", outcome: "retry_safe", ownerText: "ok" } })) as { isError?: boolean };
     expect(both.isError).toBe(true);
-    expect(textOf(both)).toContain("Name the one you diagnosed");
+    expect(textOf(both)).toContain("Name the one you mean");
     const one = (await client.callTool({ name: "deploy", arguments: { action: "release_hold", subject: "runner_update", outcome: "do_not_retry", ownerText: "Bad image." } })) as { isError?: boolean };
     await client.close();
     expect(one.isError).toBeFalsy();

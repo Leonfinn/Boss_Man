@@ -1,12 +1,12 @@
 // DR-076 A (BOS-2554): an owner ask holds what contradicts it. After a server or runner update fails, half-finishes or
 // is switched back, the next card for that update is not put on the owner's queue while the failure is diagnosed, so
 // the owner never gets "Deploy (recommended)" beside an agent's card asking for the deploy log. Boss Man opens the hold
-// itself in self-deploy's finished(); every offer path asks heldFor(). An agent releases it with one call (the deploy
-// tool's release_hold); if nobody does within the hold time it is released as "unknown": the card then says the cause
+// itself in self-deploy's finished(); every offer path asks heldFor(). The CEO, or the assignee of the ticket the CEO
+// linked to it (link_hold), releases it with one call (the deploy tool's release_hold); if nobody does within the hold time it is released as "unknown": the card then says the cause
 // isn't confirmed and recommends Not now, and the CEO is woken.
 import { and, desc, eq, isNull, lte, or } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { ownerHolds, settings } from "../db/schema.js";
+import { ownerHolds, settings, tickets } from "../db/schema.js";
 import { atWords } from "./closed-notice.js";
 
 export type HoldSubject = "server_deploy" | "runner_update";
@@ -73,23 +73,57 @@ export async function timeOutHolds(db: Db, now = new Date()): Promise<OwnerHold[
     .returning();
 }
 
-/** The one call that releases a hold (the deploy tool's release_hold). `subject` may be left out when only one is held. */
+// A hold the timeout released as "unknown" can still be released (or linked) by the agent who found the cause.
+const releasable = (h: OwnerHold | null): h is OwnerHold => !!h && (!h.releasedAt || h.outcome === "unknown");
+
+/** The one hold a release or link acts on: `subject`, or the only one held. */
+async function pickHold(db: Db, subject?: HoldSubject): Promise<{ ok: true; hold: OwnerHold } | { ok: false; text: string }> {
+  const subjects: HoldSubject[] = subject ? [subject] : ["server_deploy", "runner_update"];
+  const open = (await Promise.all(subjects.map((s) => currentHold(db, s)))).filter(releasable);
+  if (!open.length) {
+    const done = subject ? await currentHold(db, subject) : null;
+    return { ok: false, text: done ? `That hold was already released by ${done.releasedBy} (${done.outcome}).` : "Nothing is held: no failed update is waiting for a diagnosis." };
+  }
+  if (open.length > 1) return { ok: false, text: "Both the server and the runner update are held. Name the one you mean: subject server_deploy or runner_update." };
+  return { ok: true, hold: open[0]! };
+}
+
+/**
+ * CEO only (the deploy tool's link_hold): names the ticket diagnosing a hold, so that ticket's assignee may release it.
+ * The caller checks the ticket is in Boss Man's own company. Linking again moves it to the new ticket.
+ */
+export async function linkHold(db: Db, r: { subject?: HoldSubject; ticketId: string }): Promise<{ ok: true; hold: OwnerHold } | { ok: false; text: string }> {
+  const p = await pickHold(db, r.subject);
+  if (!p.ok) return p;
+  const [row] = await db.update(ownerHolds).set({ ticketId: r.ticketId }).where(and(eq(ownerHolds.id, p.hold.id), isNull(ownerHolds.endedAt))).returning();
+  return row ? { ok: true, hold: row } : { ok: false, text: "That hold ended a moment ago (a newer update finished). Nothing to link." };
+}
+
+/**
+ * The one call that releases a hold (the deploy tool's release_hold). `subject` may be left out when only one is held.
+ * Only the CEO, or the assignee of the ticket the CEO linked to the hold, may release it (Brains, DR-076 A): the
+ * release puts a "go ahead" in the owner's queue under that agent's name, so it must come from whoever owns the
+ * diagnosis, not any agent that happens to read the wake.
+ */
 export async function releaseHold(
   db: Db,
-  r: { subject?: HoldSubject; by: string; outcome: "retry_safe" | "do_not_retry"; ownerText: string; now?: Date },
+  r: { subject?: HoldSubject; by: string; agentId?: string | null; isCeo: boolean; outcome: "retry_safe" | "do_not_retry"; ownerText: string; now?: Date },
 ): Promise<{ ok: true; hold: OwnerHold; text: string } | { ok: false; text: string }> {
   const ownerText = r.ownerText.replace(/\s+/g, " ").trim().slice(0, 500);
   if (!ownerText) return { ok: false, text: "Give ownerText: in plain words for the owner, what was wrong and why the next step is safe. It goes on their card." };
-  const subjects: HoldSubject[] = r.subject ? [r.subject] : ["server_deploy", "runner_update"];
-  // A hold the timeout released as "unknown" can still be released by the agent who found the cause.
-  const releasable = (h: OwnerHold | null): h is OwnerHold => !!h && (!h.releasedAt || h.outcome === "unknown");
-  const open = (await Promise.all(subjects.map((s) => currentHold(db, s)))).filter(releasable);
-  if (!open.length) {
-    const done = r.subject ? await currentHold(db, r.subject) : null;
-    return { ok: false, text: done ? `That hold was already released by ${done.releasedBy} (${done.outcome}).` : "Nothing is held: no failed update is waiting for a diagnosis." };
+  const p = await pickHold(db, r.subject);
+  if (!p.ok) return p;
+  const h = p.hold;
+  if (!r.isCeo) {
+    const [t] = h.ticketId ? await db.select({ assignee: tickets.assigneeAgentId }).from(tickets).where(eq(tickets.id, h.ticketId)) : [];
+    if (!t || !r.agentId || t.assignee !== r.agentId)
+      return {
+        ok: false,
+        text: h.ticketId
+          ? "Only the CEO or the assignee of the ticket diagnosing this failure may release it. Tell them what you found."
+          : "Only the CEO may release this hold until it is linked to the ticket diagnosing the failure (the CEO's deploy link_hold). Tell the CEO what you found.",
+      };
   }
-  if (open.length > 1) return { ok: false, text: "Both the server and the runner update are held. Name the one you diagnosed: subject server_deploy or runner_update." };
-  const h = open[0]!;
   // Only a row still unreleased (or released by the timeout) is updated, so two releases at once can't both claim it.
   const [row] = await db
     .update(ownerHolds)

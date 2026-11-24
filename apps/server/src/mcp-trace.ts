@@ -133,7 +133,7 @@ async function changeTrace(name: string, input: Record<string, unknown>, ref: (i
     case "handoff":
       return "wrote the handoff";
     case "deploy":
-      return action === "request" ? `asked to deploy ${s(input.ref)}` : action === "report" ? "reported a deploy" : action === "release_hold" ? "released a held update" : null;
+      return action === "request" ? `asked to deploy ${s(input.ref)}` : action === "report" ? "reported a deploy" : action === "release_hold" ? "released a held update" : action === "link_hold" ? "linked a held update to a ticket" : null;
     case "submit_plan":
       return "submitted the plan";
     case "review":
