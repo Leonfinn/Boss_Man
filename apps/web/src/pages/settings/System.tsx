@@ -574,8 +574,39 @@ function RecentUpdates({ rows, liveRows, older, progress, wait, maint, queued }:
         </ul>
       )}
       <ShowOlder older={older} />
+      <PastWaits />
       <p style={{ fontSize: 13 }}><a href="#/decisions">All updates</a></p>
     </div>
+  );
+}
+
+/** BOS-2408: what each runner-update wait did, kept in the database so a restart doesn't erase it. */
+export type PastWait = { id: string; startedAt: string; kind: string; endedAt: string | null; endOk: boolean | null; endTitle: string | null; swapTries: { slug: string; n: number; at: string; outcome: string; error?: string }[]; events: { at: string; text: string }[] };
+export function pastWaitLine(w: PastWait): string {
+  const failed = w.swapTries.filter((t) => t.outcome === "failed").length;
+  const how = w.endedAt ? (w.endTitle ?? "ended") : "still going";
+  return `${how}${failed ? `, ${failed} swap ${failed === 1 ? "try" : "tries"} failed` : ""}${w.events.length ? `, ${w.events.length} noted ${w.events.length === 1 ? "moment" : "moments"}` : ""}`;
+}
+function PastWaits() {
+  const view = usePoll((signal) => api<{ holds: PastWait[] }>("/api/maintenance/history?limit=10", { signal }), 60_000, "maintenance-history");
+  const holds = Array.isArray(view.data?.holds) ? view.data.holds : [];
+  if (!holds.length) return null;
+  return (
+    <details data-testid="past-waits" style={{ fontSize: 13, margin: "6px 0" }}>
+      <summary>Past update waits ({holds.length})</summary>
+      <ul style={{ margin: 0, padding: 0 }}>
+        {holds.map((w) => (
+          <li key={w.id} style={{ listStyle: "none", marginTop: 6 }}>
+            <strong>{when(w.startedAt)}</strong> ({w.kind}): {pastWaitLine(w)}
+            {[...w.swapTries.map((t) => ({ at: t.at, text: `${t.slug} try ${t.n}: ${t.outcome}${t.error ? ` (${t.error})` : ""}` })), ...w.events]
+              .sort((a, b) => a.at.localeCompare(b.at))
+              .map((e, i) => (
+                <div key={i} className="muted">{atTime(e.at)} {e.text}</div>
+              ))}
+          </li>
+        ))}
+      </ul>
+    </details>
   );
 }
 

@@ -104,6 +104,26 @@ describe("deploy history", () => {
   });
 });
 
+describe("latest attempt on the target row (BOS-2464)", () => {
+  it("says the newest deploy failed, waits for you, or says nothing when there is none", async () => {
+    targetOver = { latestAttempt: { status: "failed", outcome: "boom", at: new Date(Date.now() - 2 * 3600_000).toISOString() } };
+    stub([]);
+    await open();
+    const line = screen.getByText(/^Latest: failed/);
+    expect(line.className).toBe("error");
+    cleanup();
+    targetOver = { latestAttempt: { status: "pending_approval", outcome: null, at: new Date().toISOString() } };
+    stub([]);
+    await open();
+    expect(screen.getByText("Latest: waiting for you").className).toBe("warning");
+    cleanup();
+    targetOver = {};
+    stub([]);
+    await open();
+    expect(screen.queryByText(/Latest:/)).toBeNull();
+  });
+});
+
 describe("deploy this version again (BOS-2329)", () => {
   it("offers the button on older successes only, confirms with ref, commit and date, and posts the redeploy", async () => {
     const sha = (c: string) => c.repeat(40);

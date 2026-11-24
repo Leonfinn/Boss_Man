@@ -360,6 +360,7 @@ reads:
   - /api/companies/:id/chapters
   - /api/companies/:id/retro-settings
   - /api/companies/:id/standing-rules
+  - /api/companies/:id/standing-rules/history
 
 ## #/settings/<company>/tools
 sections: 
@@ -393,6 +394,7 @@ reads:
   - /api/data-health
   - /api/kill-switch
   - /api/maintenance
+  - /api/maintenance/history
   - /api/runner-report
   - /api/self-deploy
   - /api/self-deploy/history

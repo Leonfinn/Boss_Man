@@ -65,7 +65,7 @@ export const OWNER_CONTROLS = {
     // Under each command in a step (the label is set in code, so the test can't read it).
     "Copy",
   ],
-  Notifications: ["Turn on browser notifications", "Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole", "Create phone login", "Set up ntfy for me", "Reset password", "Copy password", "I've saved it", "Waiting for the host", "Save", "Send a test message", "Switch off", "Switch on", "Change", "Remove", "Save changes", "Add", "Cancel", "Send one now"],
+  Notifications: ["Turn on browser notifications", "Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark this day read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole", "Create phone login", "Set up ntfy for me", "Reset password", "Copy password", "I've saved it", "Waiting for the host", "Save", "Send a test message", "Switch off", "Switch on", "Change", "Remove", "Save changes", "Add", "Cancel", "Send one now"],
   Chat: ["Ask the CEO", "Send", "Show more", "Show less", "Running now", "Load older messages", "Loading", "Download", "Preparing", "Previous", "Next", "Search older messages", "Searching", "Remember this", "Add to standing rules", "Undo", "Cancel", "Copy link", "Link copied", "Jump to newest"],
   // A project's page (Projects → a project). Its tabs along the top, then the Kanban tab's buttons.
   Board: [
@@ -215,7 +215,7 @@ export const OWNER_CONTROLS = {
   // Who approves and reviews work at each risk level, and whether it moved the goal.
   Reviews: ["Reset to defaults"],
   // Standing rules, the CEO chapters, the advice setting, nudges, the run time limit and the retros.
-  "Team and CEO": ["Pause company", "Resume company", "Cancel", "Edit", "Start a new chapter", "Clear", "Undo last change", "Discard draft", "Run a retro now"],
+  "Team and CEO": ["Pause company", "Resume company", "Cancel", "Edit", "Start a new chapter", "Clear", "Undo last change", "Put this version back", "Discard draft", "Run a retro now"],
   // The permission rules page, its advice mode, the second opinion and the fence.
   Permissions: ["Delete", "Edit", "Save", "Cancel", "Ask the CEO to draft it", "Add rule", "Make a rule", "Check", "Test", "Choose Off: run agents without the fence"],
   // The Scrum Master's watchdog: its limits, its record-only rehearsal and its safety cap.
@@ -304,6 +304,8 @@ export const OWNER_FIELDS = {
     "Watch this repo", "GitHub repo (owner/name)", "Check every (minutes, at least 15)", "Issues", "Discussions",
     "Skip posts by these GitHub logins (yours, Boss Man's account)",
     "Security alerts (this project owns the repo's alerts)",
+    // The order of the project list (BOS-2463).
+    "Sort by",
   ],
   Roadmap: ["Milestone", "Target date", "New milestone", "Company", "New objective", "Priority", "Where", "Show done work", "Key result", "Current", "Target", "Unit", "Objective"],
   Wiki: [

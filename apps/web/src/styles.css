@@ -1087,6 +1087,9 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 @media (prefers-reduced-motion: reduce) { .pulse-dot { animation: none; } }
 .dash-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
 .stat { display: flex; flex-direction: column; gap: 2px; padding: 16px 18px; color: var(--ink); text-decoration: none; }
+.stat-cell { display: flex; flex-direction: column; gap: 4px; }
+.stat-cell > .stat { flex: 1; }
+.stat-oldest { font-size: 13px; padding: 0 4px; }
 .stat:hover { border-color: var(--line-strong); }
 .stat strong { font-family: var(--display, inherit); font-size: 30px; line-height: 1.1; }
 .stat span { font-weight: 500; }
