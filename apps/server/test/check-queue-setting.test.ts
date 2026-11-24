@@ -7,7 +7,7 @@ import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { checkJobs, tickets, wakes } from "../src/db/schema.js";
-import { checkQueue } from "../src/services/check-queue.js";
+import { checkQueue, DEFAULT_SLOT_POLICY, isDefaultPolicy, MAX_CHECK_SLOTS, readPolicy, slotShape, type SlotPolicy } from "../src/services/check-queue.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -138,5 +138,78 @@ describe("the check queue switch (BOS-798)", () => {
     expect((await c.db.select().from(checkJobs).where(eq(checkJobs.id, running.id)))[0]!.state).toBe("passed");
     const told = (await c.db.select().from(wakes)).filter((w) => w.agentId === c.ceo.id && w.reason === "check_result");
     expect(told.some((w) => /passed/.test(w.note ?? ""))).toBe(true);
+  });
+});
+
+// The pure helpers behind the owner's per-machine split (BOS-1602): what a stored policy means, whether it is the
+// default, and how its slots divide between merges, checks and either kind. No database, clock or network.
+describe("machine slot policy helpers (BOS-1602)", () => {
+  const both = (mergeKept: number): SlotPolicy => ({ takes: "both", mergeKept });
+
+  it("readPolicy keeps a valid stored policy", () => {
+    expect(readPolicy({ takes: "both", mergeKept: 2 })).toEqual({ takes: "both", mergeKept: 2 });
+    expect(readPolicy({ takes: "merge", mergeKept: 0 })).toEqual({ takes: "merge", mergeKept: 0 });
+    expect(readPolicy({ takes: "checks", mergeKept: 0 })).toEqual({ takes: "checks", mergeKept: 0 });
+    // Kept slots mean nothing for a one-kind machine, so they read as 0 whatever was stored.
+    expect(readPolicy({ takes: "merge", mergeKept: 3 })).toEqual({ takes: "merge", mergeKept: 0 });
+    expect(readPolicy({ takes: "checks", mergeKept: 3 })).toEqual({ takes: "checks", mergeKept: 0 });
+  });
+
+  it("readPolicy reads a missing value as the default", () => {
+    expect(readPolicy(undefined)).toEqual(DEFAULT_SLOT_POLICY);
+    expect(readPolicy(null)).toEqual(DEFAULT_SLOT_POLICY);
+    expect(readPolicy({})).toEqual(DEFAULT_SLOT_POLICY);
+    expect(readPolicy({ takes: "both" })).toEqual(DEFAULT_SLOT_POLICY);
+  });
+
+  it("readPolicy reads junk as the default rather than throwing", () => {
+    expect(readPolicy("nonsense")).toEqual(DEFAULT_SLOT_POLICY);
+    expect(readPolicy(42)).toEqual(DEFAULT_SLOT_POLICY);
+    expect(readPolicy([])).toEqual(DEFAULT_SLOT_POLICY);
+    // A takes it doesn't know is "both"; the kept count is then read on its own.
+    expect(readPolicy({ takes: "sometimes", mergeKept: 0 })).toEqual(DEFAULT_SLOT_POLICY);
+    for (const junk of ["many", {}, [], 2.5, -3, 0]) expect(readPolicy({ takes: "both", mergeKept: junk })).toEqual(DEFAULT_SLOT_POLICY);
+  });
+
+  it("readPolicy clamps a kept count above the most slots a machine may have", () => {
+    expect(readPolicy({ takes: "both", mergeKept: MAX_CHECK_SLOTS + 5 })).toEqual({ takes: "both", mergeKept: MAX_CHECK_SLOTS });
+  });
+
+  it("isDefaultPolicy is true only for both kinds with nothing kept", () => {
+    expect(isDefaultPolicy(DEFAULT_SLOT_POLICY)).toBe(true);
+    expect(isDefaultPolicy(both(0))).toBe(true);
+    expect(isDefaultPolicy(both(-1))).toBe(true);
+    expect(isDefaultPolicy(both(1))).toBe(false);
+    expect(isDefaultPolicy({ takes: "merge", mergeKept: 0 })).toBe(false);
+    expect(isDefaultPolicy({ takes: "checks", mergeKept: 0 })).toBe(false);
+  });
+
+  it("slotShape divides the slots: one slot, and a normal limit with nothing kept", () => {
+    expect(slotShape(1, DEFAULT_SLOT_POLICY)).toEqual({ mergeOnly: 0, checkOnly: 0, either: 1 });
+    expect(slotShape(4, DEFAULT_SLOT_POLICY)).toEqual({ mergeOnly: 0, checkOnly: 0, either: 4 });
+  });
+
+  it("slotShape gives every slot to a one-kind machine", () => {
+    expect(slotShape(3, { takes: "merge", mergeKept: 0 })).toEqual({ mergeOnly: 3, checkOnly: 0, either: 0 });
+    expect(slotShape(3, { takes: "checks", mergeKept: 0 })).toEqual({ mergeOnly: 0, checkOnly: 3, either: 0 });
+    // Kept slots are ignored on a one-kind machine.
+    expect(slotShape(3, { takes: "checks", mergeKept: 2 })).toEqual({ mergeOnly: 0, checkOnly: 3, either: 0 });
+  });
+
+  it("slotShape keeps the merges then hands the rest to either kind, and always adds up to the limit", () => {
+    expect(slotShape(3, both(2))).toEqual({ mergeOnly: 2, checkOnly: 0, either: 1 });
+    expect(slotShape(1, both(1))).toEqual({ mergeOnly: 1, checkOnly: 0, either: 0 });
+    for (const limit of [1, 2, 5, 8])
+      for (const p of [DEFAULT_SLOT_POLICY, both(1), both(3), { takes: "merge", mergeKept: 0 }, { takes: "checks", mergeKept: 0 }] as SlotPolicy[]) {
+        const s = slotShape(limit, p);
+        expect(s.mergeOnly + s.checkOnly + s.either).toBe(limit);
+      }
+  });
+
+  it("slotShape clamps kept slots to the limit and floors a fractional count", () => {
+    // The owner asked for more kept slots than the machine now reports.
+    expect(slotShape(2, both(5))).toEqual({ mergeOnly: 2, checkOnly: 0, either: 0 });
+    expect(slotShape(3, both(1.9))).toEqual({ mergeOnly: 1, checkOnly: 0, either: 2 });
+    expect(slotShape(3, both(-2))).toEqual({ mergeOnly: 0, checkOnly: 0, either: 3 });
   });
 });

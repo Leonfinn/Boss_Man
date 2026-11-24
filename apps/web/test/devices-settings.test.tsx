@@ -6,7 +6,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 // from this browser when the owner presses Record.
 
 const collect = vi.fn();
-vi.mock("../src/devices", () => ({ collect: () => collect() }));
+const live = { width: 840, height: 900, pixelRatio: 2.6 };
+vi.mock("../src/devices", () => ({ collect: () => collect(), fingerprint: () => "fp", measure: () => live }));
 
 import { Devices } from "../src/pages/Settings";
 
@@ -33,6 +34,34 @@ describe("Devices settings", () => {
     render(<Devices />);
     expect(await screen.findByText(/100dvh 780/)).toBeTruthy();
     expect(screen.getByDisplayValue("Brave · 840px · touch")).toBeTruthy();
+  });
+
+  it("tags this browser, lists it first and says how long ago", async () => {
+    const other = { ...profile, id: "d0", label: "Other phone", fingerprint: "zz", reportedAt: new Date().toISOString() };
+    vi.stubGlobal("fetch", vi.fn(async () => json([other, { ...profile, reportedAt: new Date(Date.now() - 3 * 86_400_000).toISOString() }])));
+    render(<Devices />);
+    expect(await screen.findByText("This browser")).toBeTruthy();
+    expect(screen.getByText("Recorded 3 days ago")).toBeTruthy();
+    expect(screen.getByText("Recorded today")).toBeTruthy();
+    const names = screen.getAllByLabelText(/^Name for/).map((e) => e.getAttribute("aria-label"));
+    expect(names[0]).toBe(`Name for ${profile.label}`);
+    expect(screen.queryByText(/isn't recorded yet/)).toBeNull();
+    expect(screen.queryByText(/screen has changed/)).toBeNull();
+  });
+
+  it("says this browser isn't recorded when no fingerprint matches", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json([{ ...profile, fingerprint: "zz" }])));
+    render(<Devices />);
+    expect(await screen.findByText("This browser isn't recorded yet.")).toBeTruthy();
+    expect(screen.queryByText("This browser")).toBeNull();
+  });
+
+  it("warns on the matching card when the screen has changed", async () => {
+    live.width = 1000;
+    vi.stubGlobal("fetch", vi.fn(async () => json([profile])));
+    render(<Devices />);
+    expect(await screen.findByText(/This screen has changed since it was recorded/)).toBeTruthy();
+    live.width = 840;
   });
 
   it("records this device: posts the measurement and shows the new profile", async () => {

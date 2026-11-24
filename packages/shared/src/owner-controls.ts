@@ -66,7 +66,7 @@ export const OWNER_CONTROLS = {
     "Copy",
   ],
   Notifications: ["Turn on browser notifications", "Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark this day read", "Mark all read", "Download CSV", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole", "Create phone login", "Set up ntfy for me", "Reset password", "Copy password", "I've saved it", "Waiting for the host", "Save", "Send a test message", "Switch off", "Switch on", "Change", "Remove", "Save changes", "Add", "Cancel", "Send one now"],
-  Chat: ["Ask the CEO", "Send", "Show more", "Show less", "Running now", "Load older messages", "Loading", "Download", "Preparing", "Previous", "Next", "Search older messages", "Searching", "Remember this", "Add to standing rules", "Undo", "Cancel", "Copy link", "Link copied", "Jump to newest"],
+  Chat: ["Ask the CEO", "Send", "Show more", "Show less", "Running now", "Load older messages", "Loading", "Download", "Preparing", "Previous", "Next", "Search older messages", "Searching", "Remember this", "Add to standing rules", "Undo", "Cancel", "Copy link", "Link copied", "Jump to newest", "Clear"],
   // A project's page (Projects → a project). Its tabs along the top, then the Kanban tab's buttons.
   Board: [
     "Kanban", "Budget", "Config",
@@ -119,10 +119,13 @@ export const OWNER_CONTROLS = {
   // The Runs page's emergency stop: every run going now, in every company (BOS-837).
   // The Engagements list: the paged list's own buttons come from "Any screen"; its "Show" filter is a field (OWNER_FIELDS).
   Engagements: ["Download CSV"],
+  // The Search page (#/search, BOS-2378): its hits and "Show more" are links, so no buttons; its tick box is a field.
+  Search: [],
   Runs: ["End all running runs", "Ending", "Loading", "Show more", "Retry", "Download CSV", "Start now", "Cancel", "Starting", "Cancelling"],
   // The Merge queue page's two views (BOS-1174).
   // Below three recently finished checks, "Show N more" opens the rest (BOS-1239).
-  "Merge queue": ["Merges", "Quick checks", "Show …", "Move to front"],
+  // BOS-2473: Merge history's CSV of the rows shown.
+  "Merge queue": ["Merges", "Quick checks", "Show …", "Move to front", "Download CSV"],
   Roadmap: ["Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "No date …", "Add objective", "Milestones", "Change"],
   Plan: [
     "Refresh",
@@ -251,6 +254,8 @@ export const OWNER_FIELDS = {
   Engagements: ["Show", "Search engagements"],
   // The Runs page's search box (BOS-2317).
   Runs: ["Search by ticket", "Reason"],
+  // The Search page's tick box that leaves out done tickets (BOS-2477).
+  Search: ["Open tickets only"],
   // The Plan page's filters (BOS-2430).
   Plan: ["Project", "Assignee", "Kind", "Show finished"],
   // The Settings page's search box (BOS-2348).
@@ -273,7 +278,7 @@ export const OWNER_FIELDS = {
   ],
   // The "Remember this" box under the owner's own message (BOS-2184).
   // And the find box and date field above the conversation (BOS-2411).
-  Chat: ["Add this to the standing rules every agent reads", "Go to date", "Couldn't copy here. Copy the link by hand"],
+  Chat: ["Add this to the standing rules every agent reads", "Go to date", "Couldn't copy here. Copy the link by hand", "Unread only"],
   Notifications: [
     "Search notifications", "Company", "Quiet hours: pages and asks become flags, flags become notes", "From", "Until", "Time zone",
     "Per agent, per hour, before the rest become notes", "Send to my phone through my own ntfy server", "Send to my phone",
@@ -291,7 +296,7 @@ export const OWNER_FIELDS = {
     "Filter", "Undone only", "To", "Feature", "Milestone", "Make it wait on", "Acceptance criteria, one per line",
     "What you have to do, one step per line", "Why it matters (opens the card)", "If you skip it", "What should the agent change",
     "Lesson learned (optional) — the CEO decides whether to add it to the project brief, and you are told the outcome", "Doesn't need code changes",
-    "Priority 1", "Blocked until (optional)", "Why (one line)", "Written by", "Assigned to", "Risk", "Size", "Watcher",
+    "Priority 1", "Recurring", "Blocked until (optional)", "Why (one line)", "Written by", "Assigned to", "Risk", "Size", "Watcher",
     // Shown by "Copy link" when copying fails, so the address can be copied by hand (BOS-2233).
     "Page address",
     // Under a message's "Copy link" when copying fails here (BOS-2456).
