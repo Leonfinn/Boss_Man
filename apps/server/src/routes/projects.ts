@@ -128,6 +128,46 @@ export function projectRoutes(
     return db.select().from(projects).where(eq(projects.companyId, id)).orderBy(projects.name);
   });
 
+  // One summary per project for the Projects list in settings (BOS-2421): open work, points left, finished in 30 days, this month's spend
+  // (the same projectSpendMicros the budget page uses), and the last merge. One request for the whole company.
+  owner.get("/api/companies/:id/projects-summary", async (req) => {
+    const { id } = IdParam.parse(req.params);
+    const t = deps.now ? deps.now() : new Date();
+    const monthStart = monthStartUtc(t);
+    const since = new Date(t.getTime() - 30 * 86_400_000);
+    const open = sql`${tickets.systemState} <> 'done'`;
+    const rows = await db
+      .select({
+        projectId: projects.id,
+        monthlyCap: projects.monthlyCapMicros,
+        open: sql<string>`count(${tickets.id}) filter (where ${open})`,
+        inReview: sql<string>`count(${tickets.id}) filter (where ${tickets.systemState} = 'review')`,
+        points: sql<string>`coalesce(sum(${tickets.size}) filter (where ${open}), 0)`,
+        unsized: sql<string>`count(${tickets.id}) filter (where ${open} and ${tickets.size} is null)`,
+        finished: sql<string>`count(${tickets.id}) filter (where ${tickets.systemState} = 'done' and ${tickets.outcome} is distinct from 'cancelled' and ${tickets.stateChangedAt} >= ${since})`,
+        lastMergeAt: sql<Date | null>`max(${tickets.mergedAt})`,
+      })
+      .from(projects)
+      .leftJoin(tickets, eq(tickets.projectId, projects.id))
+      .where(eq(projects.companyId, id))
+      .groupBy(projects.id, projects.monthlyCapMicros);
+    const out = [];
+    for (const r of rows) {
+      out.push({
+        projectId: r.projectId,
+        open: Number(r.open),
+        inReview: Number(r.inReview),
+        pointsLeft: Number(r.points),
+        unsized: Number(r.unsized),
+        finishedLast30Days: Number(r.finished),
+        monthMicros: await projectSpendMicros(db, r.projectId, monthStart),
+        monthlyCapMicros: r.monthlyCap,
+        lastMergeAt: r.lastMergeAt ? new Date(r.lastMergeAt).toISOString() : null,
+      });
+    }
+    return { projects: out };
+  });
+
   owner.post("/api/companies/:id/projects", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
     const body = z.object({ name: z.string().trim().min(1).max(80), columns: z.array(Column).optional() }).parse(req.body);

@@ -155,6 +155,7 @@ sections:
   - Projects (…)
 reads: 
   - /api/companies/:id/projects
+  - /api/companies/:id/projects-summary
   - /api/companies/:id/review-policy
 
 ## #/roadmap
