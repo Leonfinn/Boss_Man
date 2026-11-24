@@ -356,7 +356,7 @@ export const OWNER_FIELDS = {
     "GitHub link to a repository, a folder or a SKILL.md", "Name", "What it does and when to use it",
     "Instructions, in Markdown", "A skill folder, its files, or a .zip", "Filter",
   ],
-  "Scrum Master": ["Filter", "Undone only"],
+  "Scrum Master": ["Filter", "Undone only", "With you only"],
   "Server and runner": [
     "Across all companies (1 to 32)", "In one company (1 to 16, no more than the number above)",
     "Background agents at once (0 to 16)",
