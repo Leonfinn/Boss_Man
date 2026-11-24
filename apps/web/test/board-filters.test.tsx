@@ -16,7 +16,7 @@ const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200
 const company: Company = { id: "c1", name: "App Co", mission: null, paused: false, agents: [{ id: "a1", name: "Developer" }] } as Company;
 let stuckIds: string[] = [];
 let holdUp = false;
-const card = (over: Record<string, unknown>) => ({ ...(stuckIds.includes(String(over.id)) ? { looksStuck: { idleMs: 3_600_000 } } : {}), ...(holdUp && (over.id === "t2" || over.id === "t3") ? { blockedBy: [{ ticketId: "t1", engagementId: null, decisionId: null }] } : {}), systemState: "ready", outcome: null, assigneeAgentId: null, assignedToOwner: false, dueDate: null, blockedBy: [], branch: null, risk: null, planFirst: false, plan: null, planApprovedAt: null, ...over });
+const card = (over: Record<string, unknown>) => ({ ...(stuckIds.includes(String(over.id)) ? { looksStuck: { idleMs: 3_600_000 } } : {}), systemState: "ready", outcome: null, assigneeAgentId: null, assignedToOwner: false, dueDate: null, blockedBy: [], branch: null, risk: null, planFirst: false, plan: null, planApprovedAt: null, ...(holdUp && (over.id === "t2" || over.id === "t3") ? { blockedBy: [{ ticketId: "t1", engagementId: null, decisionId: null }] } : {}), ...over });
 const feat = (id: string, title: string) => ({ id, companyId: "c1", areaId: null, parentId: null, title, description: null, status: "in_progress", effort: null, driverScores: {}, milestoneId: null, portalVisible: false, createdAt: "2026-10-19T09:00:00Z", updatedAt: "2026-10-19T09:00:00Z", releasedAt: null, demand: 0, insightCount: 0, customerCount: 0, value: 0, demandPart: 0, priority: 0, tickets: { total: 0, done: 0, items: [] } });
 
 function stub(extra: Record<string, unknown> = {}) {
