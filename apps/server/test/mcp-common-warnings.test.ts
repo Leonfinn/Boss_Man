@@ -2,7 +2,26 @@
 // and a live-looking criterion that isn't marked after merge (BOS-575). These are pure functions, so
 // no server or database is built here (BOS-663).
 import { describe, expect, it } from "vitest";
-import { criteriaWarning, thinTicketWarning } from "../src/mcp-common.js";
+import { criteriaWarning, stagingTexts, thinTicketWarning } from "../src/mcp-common.js";
+
+describe("stagingTexts", () => {
+  it("returns the criterion texts alone, string or object form, in order", () => {
+    expect(stagingTexts(["First", { text: "Second", after: "merge" }])).toEqual(["First", "Second"]);
+  });
+
+  it("returns only the extras when there are no criteria", () => {
+    expect(stagingTexts(undefined, "Title", "Body")).toEqual(["Title", "Body"]);
+    expect(stagingTexts([], "Title")).toEqual(["Title"]);
+  });
+
+  it("returns an empty list with undefined criteria and no extras", () => {
+    expect(stagingTexts(undefined)).toEqual([]);
+  });
+
+  it("puts the criteria first, then the extras as given, keeping null and undefined", () => {
+    expect(stagingTexts(["Crit"], "A", null, undefined, "B")).toEqual(["Crit", "A", null, undefined, "B"]);
+  });
+});
 
 describe("thinTicketWarning", () => {
   it("says nothing when the ticket has both a description and an assignee", () => {
