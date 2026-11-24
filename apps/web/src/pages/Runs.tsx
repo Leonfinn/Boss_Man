@@ -366,15 +366,63 @@ function EndAllRuns({ count, onDone }: { count: number; onDone: () => void }) {
 
 const PAGE = 50;
 const FILTER_KEY = "bm.runs.filter";
-type Filter = { companyId: string; agentId: string; result: "" | "finished" | "failed" | "interrupted"; q: string };
-const NO_FILTER: Filter = { companyId: "", agentId: "", result: "", q: "" };
+type Filter = { companyId: string; agentId: string; result: "" | "finished" | "failed" | "interrupted"; q: string; reason: string };
+const NO_FILTER: Filter = { companyId: "", agentId: "", result: "", q: "", reason: "" };
+
+type ReasonRow = { reason: string | null; runs: number; costMicros: number; share: number };
+
+/** The wake reasons the page has a plain label for, as the Reason select's options. */
+const REASON_OPTIONS = Object.keys(REASON_LABEL);
+
+/** "Why runs started, last 7 days": runs, share and cost per wake reason; each links to the finished list filtered by it (BOS-2437). */
+export function ReasonSummary({ rows, onPick }: { rows: ReasonRow[]; onPick: (reason: string) => void }) {
+  return (
+    <details>
+      <summary>Why runs started, last 7 days</summary>
+      {rows.length ? (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Reason</th>
+                <th scope="col" style={{ textAlign: "right" }}>Runs</th>
+                <th scope="col" style={{ textAlign: "right" }}>Share</th>
+                <th scope="col" style={{ textAlign: "right" }}>Cost</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.reason ?? "none"}>
+                  <td>
+                    {r.reason ? (
+                      <a href={`#/runs?reason=${encodeURIComponent(r.reason)}`} onClick={() => onPick(r.reason!)}>
+                        {reasonText(r.reason)}
+                      </a>
+                    ) : (
+                      <span className="muted">No reason recorded</span>
+                    )}
+                  </td>
+                  <td className="mono" style={{ textAlign: "right" }}>{r.runs}</td>
+                  <td className="mono" style={{ textAlign: "right" }}>{Math.round(r.share * 100)}%</td>
+                  <td className="mono" style={{ textAlign: "right" }}>{usd(r.costMicros)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p className="muted">No runs have finished in the last 7 days.</p>
+      )}
+    </details>
+  );
+}
 
 /** The owner's last filter, so a reload (or coming back later) keeps it. */
 function savedFilter(): Filter {
   let base = NO_FILTER;
   try {
     const f = JSON.parse(localStorage.getItem(FILTER_KEY) ?? "{}") as Partial<Filter>;
-    base = { companyId: f.companyId ?? "", agentId: f.agentId ?? "", result: f.result ?? "", q: typeof f.q === "string" ? f.q.slice(0, 100) : "" };
+    base = { companyId: f.companyId ?? "", agentId: f.agentId ?? "", result: f.result ?? "", q: typeof f.q === "string" ? f.q.slice(0, 100) : "", reason: typeof f.reason === "string" ? f.reason.slice(0, 100) : "" };
   } catch {
     /* no usable saved filter */
   }
@@ -382,8 +430,10 @@ function savedFilter(): Filter {
   const link = hashQuery();
   const result = link.get("result");
   const q = link.get("q");
-  if (result === null && q === null) return base;
+  const reason = link.get("reason");
+  if (result === null && q === null && reason === null) return base;
   const next: Filter = { ...base };
+  if (reason !== null) next.reason = reason.slice(0, 100);
   if (result !== null) next.result = result === "finished" || result === "failed" || result === "interrupted" ? result : "";
   if (q !== null) next.q = q.slice(0, 100);
   try {
@@ -436,6 +486,11 @@ export function Runs({ companies }: { companies: Company[] }) {
       // An agent belongs to one company, so changing company clears the agent.
       if (patch.companyId !== undefined) next.agentId = "";
       localStorage.setItem(FILTER_KEY, JSON.stringify(next));
+      // Keep the chosen reason in the page address so the view can be shared and survives a reload.
+      if (patch.reason !== undefined) {
+        const base = window.location.hash.split("?")[0] || "#/runs";
+        history.replaceState(null, "", next.reason ? `${base}?reason=${encodeURIComponent(next.reason)}` : base);
+      }
       return next;
     });
   };
@@ -453,10 +508,12 @@ export function Runs({ companies }: { companies: Company[] }) {
     if (company && filter.agentId) p.set("agentId", filter.agentId);
     if (filter.result) p.set("result", filter.result);
     if (filter.q) p.set("q", filter.q);
+    if (filter.reason) p.set("reason", filter.reason);
     return `/api/runs/recent?${p.toString()}${extra}`;
   };
   const active = usePoll((signal) => api<RunRow[]>("/api/runs", { signal }), 5_000, "active");
   const recent = usePoll((signal) => api<RunRow[]>(query(), { signal }), 15_000, `recent:${filterKey}`);
+  const reasons = usePoll((signal) => api<ReasonRow[]>(`/api/runs/reasons${company ? `?companyId=${company.id}` : ""}`, { signal }), 60_000, `reasons:${company?.id ?? ""}`);
   // Waiting to start (BOS-2320): one request per company shown, merged in launch order (the server sorts each company's own).
   const waitingIds = (company ? [company] : companies).map((c) => c.id);
   const waiting = usePoll(
@@ -485,7 +542,7 @@ export function Runs({ companies }: { companies: Company[] }) {
       setLoadingMore(false);
     }
   };
-  const filtered = !!(filter.companyId || filter.agentId || filter.result || filter.q);
+  const filtered = !!(filter.companyId || filter.agentId || filter.result || filter.q || filter.reason);
   return (
     <>
       <header className="page-head">
@@ -529,6 +586,7 @@ export function Runs({ companies }: { companies: Company[] }) {
         <h2 id="recent-h" style={{ fontSize: 18, fontWeight: 600 }}>
           Finished
         </h2>
+        {reasons.data ? <ReasonSummary rows={reasons.data} onPick={(reason) => change({ reason })} /> : null}
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {companies.length > 1 && <Chips label="Company" value={filter.companyId} options={companies} onPick={(id) => change({ companyId: id })} />}
           {company && company.agents.length > 0 && <Chips label="Agent" value={filter.agentId} options={company.agents} onPick={(id) => change({ agentId: id })} />}
@@ -542,6 +600,15 @@ export function Runs({ companies }: { companies: Company[] }) {
             ]}
             onPick={(id) => change({ result: id as Filter["result"] })}
           />
+          <label className="label" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            Reason
+            <select value={filter.reason} onChange={(e) => change({ reason: e.target.value })}>
+              <option value="">All</option>
+              {(filter.reason && !REASON_OPTIONS.includes(filter.reason) ? [...REASON_OPTIONS, filter.reason] : REASON_OPTIONS).map((r) => (
+                <option key={r} value={r}>{reasonText(r)}</option>
+              ))}
+            </select>
+          </label>
           <label className="label" style={{ display: "flex", alignItems: "center", gap: 8 }}>
             Search by ticket
             <input type="search" value={typed} maxLength={100} placeholder="BOS-2250 or words in the title" onChange={(e) => setTyped(e.target.value)} />

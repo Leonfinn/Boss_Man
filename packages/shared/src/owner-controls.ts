@@ -246,7 +246,7 @@ export const OWNER_FIELDS = {
   // The Engagements list's status filter (BOS-2260).
   Engagements: ["Show", "Search engagements"],
   // The Runs page's search box (BOS-2317).
-  Runs: ["Search by ticket"],
+  Runs: ["Search by ticket", "Reason"],
   // The Plan page's filters (BOS-2430).
   Plan: ["Project", "Assignee", "Kind", "Show finished"],
   // The Settings page's search box (BOS-2348).
