@@ -149,7 +149,9 @@ r2="$(state_of "$RUNNER")"; g2="$(state_of "$GUARD")"; l2="$(state_of launcher)"
 [ "$(guard_state)" = on ] && ok "the launcher still reports the guard on" || bad "guard state after move 2: $(guard_state)"
 n_open="$(grep -c OPEN "$T/probe2.log")"; n_closed="$(grep -c CLOSED "$T/probe2.log")"; n_err="$(grep -c ERROR "$T/probe2.log")"
 echo "during move 2: $n_closed closed, $n_open open, $n_err errors"
-[ "$n_open" = 0 ] && [ "$n_closed" -ge 3 ] && ok "during move 2 egress stayed closed ($n_closed attempts, none opened)" || bad "during move 2: $n_closed closed, $n_open open, $n_err errors"
+# A move that stops at the failed guard check is short (a few seconds) and a blocked probe takes its 3 s timeout, so only 1 to 3 attempts
+# fit (GitHub run 45487311598 got 2 on amd64, 1 on arm64). One closed and none open is what this window can show; "after" probes again below.
+[ "$n_open" = 0 ] && [ "$n_closed" -ge 1 ] && ok "during move 2 egress stayed closed ($n_closed attempts, none opened)" || bad "during move 2: $n_closed closed, $n_open open, $n_err errors"
 [ "$(probe)" = CLOSED ] && ok "after move 2: the runner still cannot open db:5432" || bad "after move 2: egress is not closed"
 # One public line for the GitHub run: annotations can be read without a login, raw job logs cannot (BOS-2528). Figures only, no secrets.
 same_runner=no; [ "$r0" = "$r1" ] && [ "$r1" = "$r2" ] && same_runner=yes
