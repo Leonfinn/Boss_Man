@@ -2,6 +2,7 @@ import { useRef, useState, type FormEvent } from "react";
 import { SCRATCH_RULE } from "@boss-man/shared";
 import { api, type Agent, type Company } from "../api";
 import { usePoll } from "../hooks";
+import { buildCsv, download } from "../csv";
 import { clearDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
 import { LoadError } from "../components/LoadError";
@@ -212,6 +213,35 @@ export function ruleMatchesFilter(r: { name: string; match: Match; outcome: Outc
   const agentNames = (r.match.agentIds ?? []).map((id) => agents.find((a) => a.id === id)?.name ?? "");
   return [r.name, r.match.commandPattern ?? "", r.match.titlePattern ?? "", ...agentNames].some((s) => s.toLowerCase().includes(q));
 }
+
+/** One CSV row per rule, in the order given. Usage columns are blank until the usage has loaded; a rule with no use in 30 days then shows 0 and no last-matched time. */
+export function rulesCsv(rules: Rule[], agents: Agent[], usage: Usage | undefined): string {
+  const head = ["name", "command_pattern", "title_pattern", "outcome", "applies_to", "kinds", "expires_at", "uses_7_days", "uses_30_days", "last_matched_at"];
+  return buildCsv(
+    head,
+    rules.map((r) => {
+      const ids = r.match.agentIds ?? [];
+      const who = ids.length ? ids.map((id) => agents.find((a) => a.id === id)?.name ?? id).join("; ") : "everyone";
+      const u = usage ? usage[r.name] : undefined;
+      const used = u && total(u.month) > 0;
+      return [
+        r.name,
+        r.match.commandPattern ?? "",
+        r.match.titlePattern ?? "",
+        r.outcome,
+        who,
+        (r.match.kinds ?? []).join("; "),
+        r.expiresAt ?? "",
+        usage ? (used ? total(u.week) : 0) : "",
+        usage ? (used ? total(u.month) : 0) : "",
+        used ? u.lastAt : "",
+      ];
+    }),
+  );
+}
+
+/** "permission-rules-<scope>-2026-11-24.csv": the scope is the company's name or "all". */
+export const rulesCsvName = (scope: string, now: Date = new Date()) => `permission-rules-${scope.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "all"}-${now.toISOString().slice(0, 10)}.csv`;
 
 /** "3 of 20 rules shown" while a filter is on; nothing otherwise. */
 function FilterCount({ shown, total, f }: { shown: number; total: number; f: RuleFilter }) {
@@ -439,6 +469,11 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
                   </option>
                 ))}
               </select>
+            </div>
+            <div className="field">
+              <button type="button" className="btn" disabled={shownRules.length === 0} onClick={() => download(rulesCsvName(company?.name ?? "all"), rulesCsv(shownRules, allAgents, usage))}>
+                Download CSV
+              </button>
             </div>
           </div>
         )}
