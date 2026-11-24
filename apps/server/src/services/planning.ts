@@ -10,6 +10,7 @@ import { record } from "./activity.js";
 import { ticketBlockerFinished } from "./ticket-links.js";
 import { hiddenWhileRechecked } from "./card-validity.js";
 import { heldReadyTickets } from "./agent-wip.js";
+import { readingsFor } from "./key-result-readings.js";
 
 export const OBJECTIVE_STATUSES = ["active", "done", "dropped"] as const;
 
@@ -93,6 +94,7 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
       const ids = objs.map((o) => o.id);
       const ms = ids.length ? await db.select().from(milestones).where(inArray(milestones.objectiveId, ids)).orderBy(sql`${milestones.targetDate} asc nulls last`, asc(milestones.title)) : [];
       const krs = ids.length ? await db.select().from(keyResults).where(inArray(keyResults.objectiveId, ids)) : [];
+      const readings = await readingsFor(db, krs.map((k) => k.id));
       const msIds = ms.map((m) => m.id);
       const counts = msIds.length
         ? await db
@@ -136,7 +138,7 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
               status: o.status,
               keyResults: krs
                 .filter((k) => k.objectiveId === o.id)
-                .map((k) => ({ id: k.id, title: k.title, current: k.current, target: k.target, unit: k.unit, progress: k.target ? Math.max(0, Math.min(1, (k.current ?? 0) / k.target)) : null })),
+                .map((k) => ({ id: k.id, title: k.title, current: k.current, target: k.target, unit: k.unit, progress: k.target ? Math.max(0, Math.min(1, (k.current ?? 0) / k.target)) : null, readings: readings.get(k.id) ?? [] })),
               milestones: ms
                 .filter((m) => m.objectiveId === o.id)
                 .map((m) => {

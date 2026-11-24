@@ -1233,6 +1233,13 @@
       "when": 1795480896145,
       "tag": "0194_server_size_readings",
       "breakpoints": true
+    },
+    {
+      "idx": 195,
+      "version": "7",
+      "when": 1795506988837,
+      "tag": "0195_key_result_readings",
+      "breakpoints": true
     }
   ]
 }

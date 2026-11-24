@@ -350,6 +350,20 @@ export const keyResults = pgTable("key_results", {
   checkSpec: jsonb("check_spec"),
 });
 
+/** Every value a key result has been given, with when and who (BOS-2458). byKind: owner, agent or check. */
+export const keyResultReadings = pgTable(
+  "key_result_readings",
+  {
+    id: id(),
+    keyResultId: uuid("key_result_id").notNull().references(() => keyResults.id, { onDelete: "cascade" }),
+    value: real("value").notNull(),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+    byKind: text("by_kind").notNull(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+  },
+  (t) => [index("key_result_readings_kr_at").on(t.keyResultId, t.at)],
+);
+
 export const roadmapHorizon = pgEnum("roadmap_horizon", ["now", "next", "later"]);
 
 export const milestones = pgTable("milestones", {
