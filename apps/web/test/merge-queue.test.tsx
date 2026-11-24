@@ -512,7 +512,7 @@ describe("merge queue attention layout (BOS-1239)", () => {
 describe("owner figures over the rows shown (BOS-2532, G2)", () => {
   afterEach(() => goTo(""));
 
-  it("Merges tab: the waiting numbers are pinned to the tab count (the fix is BOS-2508)", async () => {
+  it("Merges tab: the 3 waiting rows are numbered by their place in line (4, 5, 6) after the 3 running (BOS-2508)", async () => {
     const running = [1, 2, 3].map((n) => ({ ticketId: `r${n}`, ref: `APP-9${n}`, title: `Running ${n}`, phase: "checking", startedAt: new Date(Date.now() - 5 * 60_000).toISOString(), startedBy: "Boss Man", minutes: 5, what: "merge_check", slot: n, overLimit: false }));
     const waiting = [1, 2, 3].map((n) => ({ ...base, ticketId: `w${n}`, ref: `APP-2${n}`, title: `Waiting ${n}`, state: "waiting_for_slot", label: "waiting for a check slot" }));
     const view = { ...calm, running, waiting, waitingCount: waiting.length, lineCount: running.length + waiting.length };
@@ -522,11 +522,11 @@ describe("owner figures over the rows shown (BOS-2532, G2)", () => {
     const tab = screen.getByRole("tab", { name: /Merges/ });
     const count = tab.querySelector(".tab-count")!;
     expect({ value: count.textContent, label: count.getAttribute("aria-label") }).toEqual({ value: "6", label: "6 in the merge line" });
-    // The Merges tab's waiting list numbers its rows; the running ones carry no number. This reads 1, 2, 3 today;
-    // BOS-2508 will make it the row's place in line (4, 5, 6), and this pin will move with it then.
+    // BOS-2508 numbers each waiting row by its place in the whole line, so with 3 running the 3 waiting rows read 4, 5, 6
+    // (not 1, 2, 3 over a 6-row line). The running rows carry no number.
     const rows = [...document.querySelectorAll('#mq-panel-merges article')];
     const numbers = rows.map((a) => a.querySelector(".mq-pos")?.textContent ?? null).filter((v) => v !== null);
-    expect(numbers).toEqual(["1", "2", "3"]);
+    expect(numbers).toEqual(["4", "5", "6"]);
   });
 
   it("Quick checks tab: with 2 running, the waiting quick checks are numbered 3, 4, 5 and the badge matches the list", async () => {
