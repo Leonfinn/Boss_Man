@@ -8,6 +8,7 @@ import { ProjectReviews } from "../../components/ReviewPolicy";
 import { QuickAdd } from "../Board";
 import { StarButton } from "../Agents";
 import { Section, useAction } from "./shared";
+import { buildCsv, download } from "../../csv";
 
 type CheckPreset = { id: string; label: string; command: string | null; plain: string; needs: string[] };
 type Presets = { detected: CheckPreset[]; standard: CheckPreset[]; none: CheckPreset; tools: Record<string, boolean> | null; error: string | null };
@@ -386,6 +387,23 @@ export function sortProjects<P extends { id: string }>(list: P[], sort: ProjectS
   });
 }
 
+/**
+ * The active projects as a CSV (BOS-2502), one row each in the order given (the page passes its chosen sort).
+ * Money is plain dollars with two decimals so a spreadsheet sums it; the cap and last merge are blank when there is none.
+ * A project whose figures haven't loaded keeps its name with blank figures, rather than a misleading 0.
+ */
+export function projectsToCsv(list: Array<{ id: string; name: string }>, statsFor: (id: string) => ProjectSummary | undefined): string {
+  const dollars = (micros: number) => (micros / 1_000_000).toFixed(2);
+  return buildCsv(
+    ["project", "open", "in_review", "blocked", "points_left", "unsized", "done_last_30_days", "month_spend_usd", "monthly_cap_usd", "last_merge_at"],
+    list.map((p) => {
+      const s = statsFor(p.id);
+      if (!s) return [p.name, "", "", "", "", "", "", "", "", ""];
+      return [p.name, s.open, s.inReview, s.blocked ?? 0, s.pointsLeft, s.unsized, s.finishedLast30Days, dollars(s.monthMicros), s.monthlyCapMicros == null ? "" : dollars(s.monthlyCapMicros), s.lastMergeAt ?? ""];
+    }),
+  );
+}
+
 function ProjectCard({ p, go, agents, onStar, starBusy, onChanged, stats }: { p: Project; go: (to: string) => void; agents: Agent[]; onStar: () => void; starBusy?: boolean; onChanged: () => void; stats?: ProjectSummary }) {
   const [open, setOpen] = useState(false);
   const summary = `${p.repoUrl ? "Repo set" : "No repo"} · ${p.landing === "pull_request" ? "opens pull requests" : "merges into the default branch"}`;
@@ -462,16 +480,27 @@ export function ProjectsPage({ companies, companyId, go, onChanged }: { companie
             <p className="muted" style={{ fontSize: 14 }}>
               With a repo, each task gets its own branch and its own copy of the code to work in. Approved work is checked, then merged into the default branch or sent as a pull request. The token in <span className="mono">GIT_TOKEN</span> is used to clone, push and open pull requests. Don't put a token in the URL.
             </p>
-            {active.length > 1 && (
-              <div className="field" style={{ maxWidth: 240 }}>
-                <label htmlFor="projects-sort">Sort by</label>
-                <select id="projects-sort" value={sort} onChange={(e) => changeSort(e.target.value as ProjectSort)}>
-                  {PROJECT_SORTS.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.label}
-                    </option>
-                  ))}
-                </select>
+            {active.length > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "flex-end" }}>
+                {active.length > 1 && (
+                  <div className="field" style={{ maxWidth: 240, marginBottom: 0 }}>
+                    <label htmlFor="projects-sort">Sort by</label>
+                    <select id="projects-sort" value={sort} onChange={(e) => changeSort(e.target.value as ProjectSort)}>
+                      {PROJECT_SORTS.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => download(`projects-${company.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "company"}-${new Date().toISOString().slice(0, 10)}.csv`, projectsToCsv(sortProjects(active, sort, statsFor), statsFor))}
+                >
+                  Download CSV
+                </button>
               </div>
             )}
             {projects.data?.length
