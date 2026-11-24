@@ -251,6 +251,25 @@ describe("merge queue attention layout (BOS-1239)", () => {
     expect(container.textContent).not.toMatch(/held|Main is red|failing its check/i);
   });
 
+  it("2 running + 3 waiting (one Background lane) are numbered 3, 4, 5, and the header says the real order (BOS-2507)", async () => {
+    // The server's position also counts a waiting merge check (1), which this tab leaves out: the quick ones arrive as 2, 3, 4.
+    const rows = [
+      checkRow({ id: "r1", ticketId: "r1", ref: "APP-11", state: "running", position: null }),
+      checkRow({ id: "r2", ticketId: "r2", ref: "APP-12", state: "running", position: null }),
+      checkRow({ id: "m1", ticketId: "m1", ref: "APP-90", kind: "merge", position: 1 }),
+      checkRow({ id: "w1", ticketId: "w1", ref: "APP-21", position: 2 }),
+      checkRow({ id: "w2", ticketId: "w2", ref: "APP-22", position: 3 }),
+      checkRow({ id: "w3", ticketId: "w3", ref: "APP-23", position: 4, lane: "background lane: newer ordinary work goes first" }),
+    ];
+    serve(calm, { mode: "server", slots: 2, running: 2, rows });
+    goTo("#/merge-queue/c1/checks");
+    const { container } = render(<MergeQueue companies={[company]} companyId="c1" />);
+    await screen.findByText("APP-23");
+    const items = [...container.querySelectorAll("[data-checks-list] article")];
+    expect(items.map((a) => a.querySelector(".mq-pos")?.textContent ?? null)).toEqual([null, null, "3", "4", "5"]);
+    expect(container.textContent).toContain("running first, then in line order (Background lane after ordinary work)");
+  });
+
   it("main red: only the checks main holds are counted as held (BOS-1262)", async () => {
     const rows = [checkRow({ id: "a", position: 1, heldBy: "all 2 check slots are busy" }), checkRow({ id: "h1", ticketId: "t2", ref: "APP-2", position: null, heldBy: "main is red" }), checkRow({ id: "h2", ticketId: "t3", ref: "APP-3", position: null, heldBy: "main is red" })];
     serve(calm, { mode: "server", slots: 2, running: 0, rows });
