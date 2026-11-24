@@ -178,6 +178,7 @@ reads:
   - /api/runs
   - /api/runs/:id/permissions
   - /api/runs/:id/transcript
+  - /api/runs/reasons
 
 ## #/scrum-master
 sections: 
