@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNull, or } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
 import { checkSecretFormat, normaliseSecret, secretHint, type SecretKind } from "@boss-man/shared";
 import { decryptSecret, encryptSecret, type MasterKey } from "../crypto.js";
 import type { Db } from "../db/client.js";
@@ -35,6 +35,34 @@ const SERVER_ONLY_PURPOSES = new Set(["github_watch"]);
 /** Told which company grants changed (granted, revoked, re-valued or deleted with their secret), by env name. */
 export type GrantChangeListener = (change: { companyId: string; envName: string }) => void;
 
+const USE_DAYS = 30;
+
+export type UseSummary = {
+  total: number;
+  byCompany: { company: string; reads: number }[];
+  byPurpose: { run: number; deploy: number; merge: number; other: number };
+  /** Reads per UTC day, oldest first; the last cell is today. */
+  perDay: number[];
+};
+
+/** Counts the last 30 days of reads. Never sees a value. */
+export function summariseUse(rows: { at: Date; company: string | null; purpose: string }[], now = new Date()): UseSummary {
+  const byPurpose = { run: 0, deploy: 0, merge: 0, other: 0 };
+  const companies = new Map<string, number>();
+  const perDay = new Array<number>(USE_DAYS).fill(0);
+  const today = Math.floor(now.getTime() / 86_400_000);
+  for (const r of rows) {
+    const key = r.purpose === "run" || r.purpose === "claude_account" ? "run" : r.purpose === "deploy" ? "deploy" : r.purpose === "merge" ? "merge" : "other";
+    byPurpose[key]++;
+    const name = r.company ?? "A deleted company";
+    companies.set(name, (companies.get(name) ?? 0) + 1);
+    const idx = USE_DAYS - 1 - (today - Math.floor(r.at.getTime() / 86_400_000));
+    if (idx >= 0 && idx < USE_DAYS) perDay[idx]!++;
+  }
+  const byCompany = [...companies].map(([company, reads]) => ({ company, reads })).sort((a, b) => b.reads - a.reads || a.company.localeCompare(b.company));
+  return { total: rows.length, byCompany, byPurpose, perDay };
+}
+
 export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) {
   // BOS-1582: the network guard opens the address in a company's PENPOT_URL grant, so it must hear when that grant or its
   // value changes, from whichever route made the change (the Secrets page, the Penpot form, a grant revoke).
@@ -62,8 +90,19 @@ export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) 
   };
 
   return {
+    /** Each secret with when it was last read (null: never) and whether it has been read in the last 30 days. Counts and dates only. */
     async list() {
-      return db.select(publicFields).from(secrets).orderBy(secrets.name);
+      const rows = await db.select(publicFields).from(secrets).orderBy(secrets.name);
+      const last = await db
+        .select({ secretId: secretAccessLog.secretId, lastUsedAt: sql<Date | string>`max(${secretAccessLog.at})` })
+        .from(secretAccessLog)
+        .groupBy(secretAccessLog.secretId);
+      const byId = new Map(last.map((l) => [l.secretId, new Date(l.lastUsedAt)]));
+      const cutoff = Date.now() - USE_DAYS * 86_400_000;
+      return rows.map((r) => {
+        const lastUsedAt = byId.get(r.id) ?? null;
+        return { ...r, lastUsedAt, unusedIn30Days: !lastUsedAt || lastUsedAt.getTime() < cutoff };
+      });
     },
 
     async create(input: SecretInput) {
@@ -176,8 +215,18 @@ export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) 
       return rows.map((r) => ({ ...r, agentIds: limited.get(r.id) ?? [] }));
     },
 
-    /** Each time a run was given the secret, newest first. */
+    /** Each time a run was given the secret, newest first, with a summary of the last 30 days (counts only). */
     async accessLog(secretId: string, limit = 100) {
+      const since = new Date(Date.now() - USE_DAYS * 86_400_000);
+      const recent = await db
+        .select({ at: secretAccessLog.at, companyId: secretAccessLog.companyId, company: companies.name, purpose: secretAccessLog.purpose })
+        .from(secretAccessLog)
+        .leftJoin(companies, eq(companies.id, secretAccessLog.companyId))
+        .where(and(eq(secretAccessLog.secretId, secretId), gte(secretAccessLog.at, since)));
+      return { entries: await this.recentAccess(secretId, limit), summary: summariseUse(recent) };
+    },
+
+    async recentAccess(secretId: string, limit: number) {
       return db
         .select({ id: secretAccessLog.id, at: secretAccessLog.at, companyId: secretAccessLog.companyId, company: companies.name, runId: secretAccessLog.runId, purpose: secretAccessLog.purpose })
         .from(secretAccessLog)
