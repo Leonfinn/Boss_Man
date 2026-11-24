@@ -48,6 +48,8 @@ const WAKE_TABLE = {
   "after-merge check reported": "waiting",
   // The owner's note on a card nobody watches (a Boss Man card, or one whose ticket is done) goes to the CEO (BOS-2077). Never dropped.
   "owner hand-back": "waiting",
+  // BOS-2555: no result reached the owner after their answer to a card that asked them for information; the CEO posts it. Never dropped.
+  "a result for the owner": "waiting",
   // BOS-2288: a merged ticket's named watch trigger happened (a gate CI failure, a main CI failure). Never dropped.
   "watch trigger": "waiting",
   // Scheduled by Boss Man.

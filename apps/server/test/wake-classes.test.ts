@@ -385,6 +385,7 @@ describe("wake classes: callers of wake() and notify()", () => {
     "services/check-idle.ts": NEVER_DROPPED + " (idle check slot is a waiting reason; deps.notify is the owner's notification, not a wake)",
     "services/watchdog.ts": CHECKS_OUTCOME + " (a dropped wake is reported, not counted as sent)",
     "services/secret-scan.ts": NEVER_DROPPED + " (secret scan is scheduled; the match's ticket stays assigned, so a missed wake is picked up by the idle sweeps)",
+    "services/owner-result.ts": NEVER_DROPPED + " (a result for the owner is a waiting reason: the CEO posting an unanswered result is never dropped)",
   };
 
   it("lists every file that wakes an agent, so a new caller has to say how it handles a drop", () => {
