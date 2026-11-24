@@ -425,7 +425,18 @@ export type RunRow = {
 export type TranscriptItem = { seq: number; type: string; at: string; event: Record<string, unknown> & { update?: Record<string, unknown> } };
 export type Transcript = { run: RunRow & { endedAt: string | null; outcome: string | null; costMicros: number }; items: TranscriptItem[]; next: number; more: boolean };
 
-export type EngagementRow = { id: string; title: string; status: string; requester: string; provider: string; budgetCapUsd: number | null };
+export type EngagementSummary = {
+  openByState: Record<string, number>;
+  waitingOnRequester: number;
+  waitingOnProvider: number;
+  waitingOnOther: number;
+  spend30dPlanUseUsd: number;
+  spend30dPayAsYouGoUsd: number;
+  medianDaysToFinish: number | null;
+  finishedCount: number;
+};
+/** `summary` rides on the first row of the owner's first page only (BOS-2427). */
+export type EngagementRow = { id: string; title: string; status: string; requester: string; provider: string; budgetCapUsd: number | null; stateSince?: string; summary?: EngagementSummary | null };
 export type EngagementView = EngagementRow & {
   scope: string;
   deliverables: string | null;
