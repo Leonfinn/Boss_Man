@@ -145,6 +145,27 @@ export function runningMerges(this: ReviewSelf, ctx: ReviewCtx): Array<{ ticketI
 }
 
 /**
+ * BOS-2361: what the turn holder's merge is doing now, in words: waiting for GitHub CI since HH:MM (UTC), running its check,
+ * building the merge copy or pushing ("merging" covers both: one phase marks the start of a landing and its push), waiting
+ * for another ticket's turn, or "no merge running" when it has none on this server (it will start again, DR-026).
+ */
+export function holderPhase(ctx: Pick<ReviewCtx, "landings" | "phases" | "ciWaits" | "turnWaits">, ticketId: string): string {
+  const ci = ctx.ciWaits.get(ticketId);
+  if (ci) return `waiting for GitHub CI since ${new Date(ci.since).toISOString().slice(11, 16)} UTC`;
+  if (ctx.turnWaits.has(ticketId)) return "waiting for another ticket's landing turn";
+  if (ctx.landings.get(ticketId)?.state !== "running") return "no merge running";
+  const phase = ctx.phases.get(ticketId) ?? "checking";
+  const words: Record<string, string> = {
+    queued: "waiting for a check slot",
+    checking: "merge check",
+    merging: "building the merge copy or pushing",
+    waiting_to_retry: "trying again after the runner restarted",
+    retrying_git: "retrying a push or fetch to the git host",
+  };
+  return words[phase] ?? phase;
+}
+
+/**
  * BOS-2119: server_status landingTurns. Per project of the company with a landing turn held or a line for it: the holder,
  * since when, its cap and when the cap ends, and the line in order. Each ticket waiting for the turn carries the same words
  * the Merges tab and its ticket's merge line show (turnWaitWords). Read only; empty on a server whose merges aren't running here.
@@ -167,7 +188,7 @@ export async function landingTurnStatus(this: ReviewSelf, ctx: ReviewCtx, compan
     };
     out.push({
       projectId: s.projectId,
-      holder: s.holder ? { ...who(s.holder.ticketId), since: new Date(s.holder.since).toISOString(), capMin: Math.round(s.holder.capMs / 60_000), capEndsAt: new Date(s.holder.since + s.holder.capMs).toISOString() } : null,
+      holder: s.holder ? { ...who(s.holder.ticketId), phase: holderPhase(ctx, s.holder.ticketId), since: new Date(s.holder.since).toISOString(), capMin: Math.round(s.holder.capMs / 60_000), capEndsAt: new Date(s.holder.since + s.holder.capMs).toISOString() } : null,
       line: await Promise.all(s.line.map(async (id) => (await waiting(id)) ?? { ...who(id), label: null })),
       // Merges whose check passed and whose push waits for this holder (not in the line: they earned no turn).
       pushWaiting: (await Promise.all([...turnWaits].filter(([id, w]) => w.then === "push" && w.holderId === s.holder?.ticketId && !s.line.includes(id)).map(([id]) => waiting(id)))).filter((x) => x !== null),
