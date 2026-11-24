@@ -38,6 +38,8 @@ Anything the gate reports blocks the merge.
 
 Changing a screen? If your branch changes `apps/web/src/styles.css`, `App.tsx` or the JSX of a page or component, the move to review needs a `*-render.test.tsx` in `apps/web/test` that loads `styles.css` in Playwright/Chromium and measures geometry (template: `merge-queue-held-render.test.tsx`; jsdom doesn't count). It also needs "before" and "after" screenshots from `scripts/screenshot.mjs --api` (only those carry the mark the check looks for), attached to the ticket. A change that doesn't alter the layout passes `noVisualChange: "<why>"` instead. See `docs/28-browser-checks.md` (BOS-2511).
 
+The move to review also runs three list guards on your changed files (BOS-2522): a button or field label in a changed `apps/web/src` `.tsx` that `packages/shared/src/owner-controls.ts` doesn't hold, or a file with buttons missing from FILE_SCREEN; a new wake reason missing from WAKE_CLASS; a server file that newly reads an update hold and isn't in READERS. A miss refuses the move with the exact lines to add. It refuses only when the name is nowhere in the list, so the quick check still runs the full guards, and screen-inventory runs only there. If a refusal is wrong, move again with `listGuardWrong: "<why>"`.
+
 ## Writing tests: they must pass on GitHub's runners too
 
 A pass at the merge gate is not enough: GitHub CI runs every test again on main, on machines 2.5 to 5 times slower, with a newer git and a cold browser. Authors follow this rule and reviewers check every new or changed test against it:

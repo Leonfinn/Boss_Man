@@ -8,6 +8,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { HOLD_READER } from "../src/services/guard-scan.js";
 import { ruleProblems, WAIT_RULES, type WaitKind } from "../src/services/update-waits.js";
 
 const SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), "../src");
@@ -48,7 +49,7 @@ describe("update waits guard (BOS-2058)", () => {
   ];
   it("only the known files read an update hold to hold work back", () => {
     const found = walk(SRC)
-      .filter((f) => /\b(softHold|holdBlocksStarts|getHold|landingMergeIds)\(/.test(readFileSync(f, "utf8")))
+      .filter((f) => HOLD_READER.test(readFileSync(f, "utf8"))) // shared with the move-to-review check (BOS-2522)
       .map((f) => path.relative(SRC, f).split(path.sep).join("/"))
       .sort();
     const extra = found.filter((f) => !READERS.includes(f));
