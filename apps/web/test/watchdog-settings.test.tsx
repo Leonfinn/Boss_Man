@@ -115,10 +115,47 @@ describe("watchdog settings (BOS-58)", () => {
     });
     render(<Watchdog company={company} />);
     expect(await screen.findByText(/On\. Last check .* 2 open issues\./)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Test on the past 48 hours" }));
-    expect(await screen.findByText(/would have raised 1 flag and woken the Scrum Master 1 time/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Run the test" }));
+    expect(await screen.findByText(/Over the past 48 hours it would have raised 1 flag and woken the Scrum Master 1 time/)).toBeTruthy();
     expect(screen.getByRole("link", { name: "BOS-26" })).toBeTruthy();
-    expect(screen.getByText("nobody is assigned")).toBeTruthy();
+    expect(screen.getAllByText("nobody is assigned").length).toBe(2);
     expect(screen.getByText("History is approximate.")).toBeTruthy();
+  });
+
+  it("shows a failed test request under the button and stays usable", async () => {
+    const first = status({ settings: { ...DEFAULT_WATCHDOG, enabled: true }, scrumMaster: { id: "sm", name: "Scrum Master", paused: false } });
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => (url.includes("backtest") ? new Response(JSON.stringify({ error: "The test failed" }), { status: 500, headers: { "content-type": "application/json" } }) : json(first))));
+    render(<Watchdog company={company} />);
+    await screen.findByText(/On\./);
+    fireEvent.click(screen.getByRole("button", { name: "Run the test" }));
+    expect((await screen.findAllByRole("alert")).length).toBeGreaterThan(0);
+    expect((screen.getByRole("button", { name: "Run the test" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("tests over 7 days, counts per problem, and hides the ones that cleared by themselves", async () => {
+    const flag = (id: string, rule: string, verdict: string) => ({ ticketId: id, ref: `BOS-${id}`, title: `Ticket ${id}`, rule, firstAt: "2026-10-25T12:00:00Z", handOffs: 1, verdict });
+    const calls = stub(status({ settings: { ...DEFAULT_WATCHDOG, enabled: true }, scrumMaster: { id: "sm", name: "Scrum Master", paused: false } }), {
+      from: "2026-10-19T00:00:00Z",
+      to: "2026-10-26T00:00:00Z",
+      flags: [flag("1", "unassigned", "cleared within 30 min"), flag("2", "unassigned", "cleared later"), flag("3", "unassigned", "cleared within 30 min"), flag("4", "stale_in_progress", "still open")],
+      scrumMasterWakes: 2,
+      busiestHourWakes: 1,
+      wouldTripCap: false,
+      caveats: [],
+    });
+    render(<Watchdog company={company} />);
+    await screen.findByText(/On\./);
+    fireEvent.change(screen.getByLabelText("Test the rules against"), { target: { value: "7" } });
+    fireEvent.click(screen.getByRole("button", { name: "Run the test" }));
+    expect(await screen.findByText(/Over the past 7 days it would have raised 4 flags/)).toBeTruthy();
+    expect(calls.some((c) => c.url.endsWith("/watchdog/backtest?days=7"))).toBe(true);
+    const items = [...screen.getByRole("list", { name: "Flags by problem" }).querySelectorAll("li")].map((li) => li.textContent);
+    expect(items[0]).toMatch(/nobody is assigned.*: 3 flags, 2 cleared by themselves within 30 minutes/);
+    expect(items[1]).toMatch(/: 1 flag, 0 cleared/);
+    expect(screen.getAllByRole("link")).toHaveLength(4);
+    fireEvent.click(screen.getByLabelText("Hide ones that cleared by themselves"));
+    expect(screen.getAllByRole("link").map((a) => a.textContent)).toEqual(["BOS-2", "BOS-4"]);
+    // The counts above don't change.
+    expect(screen.getByRole("list", { name: "Flags by problem" }).querySelectorAll("li")[0]!.textContent).toMatch(/3 flags, 2 cleared/);
   });
 });

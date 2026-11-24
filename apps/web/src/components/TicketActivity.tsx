@@ -17,6 +17,23 @@ import { describe, useTranscript } from "../transcript";
 import { Loader } from "./Loader";
 import { LoadError } from "./LoadError";
 import { stopRun } from "../stop-run";
+import { copyText } from "../clipboard";
+import { ticketMessageLink } from "../chat-scroll";
+
+/** The `?m=` message of the page address (BOS-2456), re-read when the address changes. */
+function useLinkedMessage(): string | null {
+  const read = () => {
+    const at = window.location.hash.indexOf("?");
+    return new URLSearchParams(at < 0 ? "" : window.location.hash.slice(at + 1)).get("m");
+  };
+  const [m, setM] = useState(read);
+  useEffect(() => {
+    const on = () => setM(read());
+    window.addEventListener("hashchange", on);
+    return () => window.removeEventListener("hashchange", on);
+  }, []);
+  return m;
+}
 
 type Message = {
   id: string;
@@ -220,6 +237,89 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
     if (box.scrollHeight > box.clientHeight) box.scrollTop += shift;
     else window.scrollBy(0, shift);
   }, [kept]);
+
+  // A link to one message (BOS-2456): `?m=<id>` on the ticket address. Older pages load until it is found,
+  // then it is scrolled to and marked for a few seconds; if it is not in the conversation a note says so.
+  const wanted = useLinkedMessage();
+  const [pick, setPick] = useState<string | null>(null);
+  const [marked, setMarked] = useState<string | null>(null);
+  const [gone, setGone] = useState(false);
+  const [looking, setLooking] = useState(false);
+  const handled = useRef<string | null>(null);
+  const markTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(markTimer.current), []);
+  useEffect(() => {
+    setGone(false);
+    if (!wanted) {
+      handled.current = null;
+      return;
+    }
+    if (!convo.data) return;
+    const tag = `${ticketId}:${wanted}`;
+    if (handled.current === tag) return;
+    handled.current = tag;
+    if (messages.some((m) => m.id === wanted)) {
+      setPick(wanted);
+      return;
+    }
+    const id = ticketId;
+    void (async () => {
+      setLooking(true);
+      try {
+        let top = messages[0];
+        let more = hasOlder && !!top;
+        let found = false;
+        let loaded: Message[] = [];
+        while (more && !found && top) {
+          const res = await api<Conversation>(`/api/tickets/${id}/messages?before=${encodeURIComponent(top.id)}`);
+          if (shownTicket.current !== id || handled.current !== tag) return;
+          loaded = [...loaded, ...res.items];
+          found = res.items.some((m) => m.id === wanted);
+          more = (res.hasMore ?? false) && res.items.length > 0;
+          top = res.items[0] ?? top;
+        }
+        const newest = convo.data?.items ?? [];
+        if (loaded.length) {
+          setKept((prev) => new Map([...loaded.map((m) => [m.id, m] as const), ...prev, ...newest.map((m) => [m.id, m] as const)]));
+          setOlderMore(more);
+        }
+        if (found) setPick(wanted);
+        else setGone(true);
+      } catch {
+        if (shownTicket.current === id) setGone(true);
+      } finally {
+        setLooking(false);
+      }
+    })();
+  }, [wanted, ticketId, !!convo.data]);
+  useEffect(() => {
+    if (!pick) return;
+    const el = feedBox.current?.querySelector<HTMLElement>(`[data-key="m${CSS.escape(pick)}"]`);
+    if (!el) return;
+    el.scrollIntoView({ block: "center" });
+    setMarked(pick);
+    setPick(null);
+    clearTimeout(markTimer.current);
+    markTimer.current = setTimeout(() => setMarked(null), 5000);
+  }, [pick, messages.length]);
+  // "Copy link" under each message; if copying fails here the link is shown to copy by hand.
+  const [copied, setCopied] = useState<string | null>(null);
+  const [linkShown, setLinkShown] = useState<{ id: string; link: string } | null>(null);
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(copyTimer.current), []);
+  const copyMessageLink = async (id: string) => {
+    const link = ticketMessageLink(window.location, ticketId, id);
+    const ok = await copyText(link);
+    clearTimeout(copyTimer.current);
+    if (ok) {
+      setLinkShown(null);
+      setCopied(id);
+      copyTimer.current = setTimeout(() => setCopied(null), 2000);
+    } else {
+      setCopied(null);
+      setLinkShown({ id, link });
+    }
+  };
 
   // Find in this conversation (BOS-2422), over the helper chat uses (chat-find.ts). `at` is "the nth match in
   // message X", so older pages added above move nothing. A message's matches run through its summary, then its
@@ -465,6 +565,16 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
           )}
         </div>
       )}
+      {looking && (
+        <p className="muted" role="status" style={{ padding: "0 18px" }}>
+          Finding the linked message…
+        </p>
+      )}
+      {gone && (
+        <p className="muted" role="status" style={{ padding: "0 18px" }}>
+          That message isn't in this conversation.
+        </p>
+      )}
       <div className="activity-feed" role="log" aria-live="polite" ref={feedBox}>
         {hasOlder && messages.length > 0 && (
           <div style={{ textAlign: "center" }}>
@@ -501,7 +611,7 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
           ) : r ? (
             <RunBlock key={key} run={r} />
           ) : (
-            <div key={key} data-key={key} className={`chat-msg ${m!.author === "agent" ? "assistant" : m!.author}`}>
+            <div key={key} data-key={key} className={`chat-msg ${m!.author === "agent" ? "assistant" : m!.author}${marked === m!.id ? " found" : ""}`}>
               {(() => {
                 const { summary, details } = split(m!);
                 const mark = markIn(m!, { n: 0 });
@@ -522,6 +632,15 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
               <small>
                 {byline(m!)} · {when(m!.createdAt)}
               </small>
+              <button type="button" className="linkish msg-link-btn" onClick={() => void copyMessageLink(m!.id)}>
+                {copied === m!.id ? "Link copied" : "Copy link"}
+              </button>
+              {linkShown && linkShown.id === m!.id && (
+                <label className="msg-link-box">
+                  Couldn't copy here. Copy the link by hand:
+                  <input className="mono" readOnly autoFocus value={linkShown.link} onFocus={(e) => e.currentTarget.select()} />
+                </label>
+              )}
               {replyState(m!) && (
                 <p className="muted reply-state" style={{ fontSize: 12, margin: "2px 0 0" }}>
                   {replyState(m!)}

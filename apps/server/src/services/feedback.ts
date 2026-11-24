@@ -163,7 +163,7 @@ export function feedbackService(
       : [];
     const work = fs.length
       ? await db
-          .select({ featureId: tickets.featureId, id: tickets.id, title: tickets.title, state: tickets.systemState, outcome: tickets.outcome, assignee: agents.name })
+          .select({ featureId: tickets.featureId, id: tickets.id, title: tickets.title, state: tickets.systemState, outcome: tickets.outcome, assignee: agents.name, movedAt: tickets.stateChangedAt })
           .from(tickets)
           .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
           .where(and(inArray(tickets.featureId, fs.map((f) => f.id)), isNull(tickets.parentTicketId)))
@@ -190,13 +190,16 @@ export function feedbackService(
         const d = demand.get(f.id)!;
         const scores = f.driverScores as Record<string, number | null>;
         const p = priorityScore({ demand: d.demand, maxDemand, demandWeight: s.demandWeight, drivers: drivers.map((x) => ({ weight: x.weight, value: scores[x.id] ?? null })), effort: f.effort });
-        const items = work.filter((x) => x.featureId === f.id).map(({ id, title, state, outcome, assignee }) => ({ id, title, state, outcome, assignee }));
+        const own = work.filter((x) => x.featureId === f.id);
+        const items = own.map(({ id, title, state, outcome, assignee }) => ({ id, title, state, outcome, assignee }));
+        // When its latest task last changed state (sub-features' tasks not counted); null with no tasks (BOS-2454).
+        const lastMovedAt = own.reduce<Date | null>((m, x) => (x.movedAt && (!m || x.movedAt > m) ? x.movedAt : m), null)?.toISOString() ?? null;
         // Why the feature is on or off the portal, so the list can show the tick and a small reason (BOS-957).
         const criteria = Object.keys(scores).map((id) => drivers.find((x) => x.id === id)?.name ?? "");
         const portal = portalVerdict({ title: f.title, description: f.description, publicTitle: f.publicTitle, publicSummary: f.publicSummary, area: f.areaId ? (areaName.get(f.areaId) ?? null) : null, criteria, keepOffPortal: f.keepOffPortal, hasPublicSummary: !!f.publicSummary?.trim() });
         const portalShow = portalShows({ portalVisible: f.portalVisible, keepOffPortal: f.keepOffPortal, status: f.status, publicTitle: f.publicTitle, publicSummary: f.publicSummary });
         const fc = forecasts.get(f.id)!;
-        return { ...f, pointsDone: fc.pointsDone, pointsTotal: fc.pointsDone + fc.pointsLeft, portalShow, driverScores: scores, demand: d.demand, insightCount: d.insights, customerCount: d.customers, value: p.value, demandPart: p.demandPart, priority: p.priority, portal, tickets: { total: items.length, done: items.filter((x) => x.state === "done").length, items } };
+        return { ...f, pointsDone: fc.pointsDone, pointsTotal: fc.pointsDone + fc.pointsLeft, portalShow, driverScores: scores, demand: d.demand, insightCount: d.insights, customerCount: d.customers, value: p.value, demandPart: p.demandPart, priority: p.priority, lastMovedAt, portal, tickets: { total: items.length, done: items.filter((x) => x.state === "done").length, items } };
       }),
     };
   }

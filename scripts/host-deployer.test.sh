@@ -244,6 +244,11 @@ if [[ $1 == inspect && $2 == -f && $3 == '{{.HostConfig.RestartPolicy.Name}}' ]]
   esac
   exit 0
 fi
+if [[ $1 == inspect && $2 == -f && $3 == *StartPeriod* ]]; then
+  # BOS-2481: FAKE_STARTED_AGO=<seconds> says the container started that long ago, with a 60 s start period.
+  [[ -n ${FAKE_STARTED_AGO:-} ]] && echo "$(date -u -d "-${FAKE_STARTED_AGO} seconds" +%Y-%m-%dT%H:%M:%SZ)|60000000000"
+  exit 0
+fi
 if [[ $1 == ps && $2 == -aq ]]; then exit 0; fi
 exit 0
 FAKE
@@ -269,6 +274,14 @@ node -e 'const c=require(process.argv[1]).checks.container_status;if(!c.stopped.
 # A running container that is failing its health check counts as unhealthy (Rod's point 2).
 FAKE_STATUS="Up 3 minutes (unhealthy)" "$T/fd/hd.sh" >"$T/out" 2>&1 || fail "host-deployer (unhealthy running) exited non-zero"
 node -e 'const c=require(process.argv[1]).checks.container_status;if(c.unhealthy!==2)process.exit(1)' "$D/outbox/host.json" || fail "a running (unhealthy) container must count"
+# BOS-2481: the report names them, by service name only.
+node -e 'const c=require(process.argv[1]).checks.container_status;if(c.unhealthyNames!=="srv; cache")process.exit(1)' "$D/outbox/host.json" || fail "unhealthy containers must be named by service: $(cat "$D/outbox/host.json")"
+# BOS-2481: inside its health-check start period it is settling, not unhealthy (the restarting one still counts).
+FAKE_STATUS="Up 20 seconds (unhealthy)" FAKE_STARTED_AGO=20 "$T/fd/hd.sh" >"$T/out" 2>&1 || fail "host-deployer (start period) exited non-zero"
+node -e 'const c=require(process.argv[1]).checks.container_status;if(c.unhealthy!==1||c.unhealthyNames!=="cache")process.exit(1)' "$D/outbox/host.json" || fail "a container inside its start period must not count: $(cat "$D/outbox/host.json")"
+# Past the start period it counts again.
+FAKE_STATUS="Up 5 minutes (unhealthy)" FAKE_STARTED_AGO=300 "$T/fd/hd.sh" >"$T/out" 2>&1 || fail "host-deployer (after start period) exited non-zero"
+node -e 'const c=require(process.argv[1]).checks.container_status;if(c.unhealthy!==2)process.exit(1)' "$D/outbox/host.json" || fail "a container past its start period must count"
 # A one-shot that failed (non-zero exit) is a real failure, not "meant to stop".
 FAKE_EXIT=1 "$T/fd/hd.sh" >"$T/out" 2>&1 || fail "host-deployer (failed one-shot) exited non-zero"
 node -e 'const s=require(process.argv[1]).checks.container_status.stopped.map(x=>x.name+":"+x.exit);process.stdout.write(s.sort().join(","))' "$D/outbox/host.json" >"$T/names" || true

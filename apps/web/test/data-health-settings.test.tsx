@@ -38,6 +38,34 @@ describe("Server health", () => {
     expect(screen.getByRole("alert").textContent).toContain("running low");
   });
 
+  it("lists the daily history with the change, marks a jump over 10%, and counts days so far", async () => {
+    const MB = 1024 ** 2;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        json({
+          disk: null,
+          database: { bytes: 1000 * MB, dayAgoBytes: null, weekAgoBytes: null, growthPercent7d: null },
+          history: [
+            { day: "2026-11-21", bytes: 500 * MB },
+            { day: "2026-11-22", bytes: 620 * MB },
+            { day: "2026-11-23", bytes: 640 * MB },
+          ],
+          limits: { statementTimeouts: 0, poolFull: 0 },
+          slowQueries: [],
+          warnings: [],
+        }),
+      ),
+    );
+    render(<ServerHealth />);
+    const fold = await screen.findByTestId("health-db-history");
+    expect(fold.querySelectorAll("tr")).toHaveLength(3);
+    expect(fold.textContent).toContain("3 days recorded so far");
+    expect(fold.textContent).toContain("+120 MB (grew over 10%)");
+    expect(fold.textContent).toContain("+20 MB");
+    expect(screen.getAllByTestId("health-db-jump")).toHaveLength(1);
+  });
+
   it("says so when there is no history or no disk reading", async () => {
     vi.stubGlobal(
       "fetch",

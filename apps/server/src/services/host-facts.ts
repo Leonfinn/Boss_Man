@@ -162,6 +162,8 @@ export function flattenHostRecord(r: HostRecord): Record<string, string> {
           o[STOPPED_CONTAINERS_KEY] = v.map((c) => `${c.name} (${c.status}${c.exit ? `, exit ${c.exit}` : ""}${c.since ? `, ${c.since}` : ""})`).join("; ");
         continue;
       }
+      // BOS-2481: no unhealthy containers means no names, and an empty fact reads as "missing" on the panel.
+      if (check === "container_status" && k === "unhealthyNames" && !String(v).trim()) continue;
       o[`check.${check}.${k}`] = String(v);
     }
   for (const k of Object.keys(o)) if (!/^[A-Za-z0-9_.]{1,80}$/.test(k) || o[k]!.length > 500) delete o[k];

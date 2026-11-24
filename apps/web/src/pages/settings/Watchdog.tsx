@@ -19,6 +19,25 @@ type WatchdogStatus = {
 };
 type Backtest = { from: string; to: string; flags: Array<{ ticketId: string; ref: string; title: string; rule: WatchdogRule; firstAt: string; handOffs: number; verdict: string }>; scrumMasterWakes: number; busiestHourWakes: number; wouldTripCap: boolean; caveats: string[] };
 
+const BACKTEST_PERIODS = [
+  { days: 2, label: "Past 48 hours" },
+  { days: 7, label: "Past 7 days" },
+  { days: 14, label: "Past 14 days" },
+];
+const CLEARED = "cleared within 30 min";
+
+/** One row per problem type: how many flags and how many cleared by themselves, most flags first. */
+export function problemCounts(flags: Backtest["flags"]): Array<{ rule: WatchdogRule; flags: number; cleared: number }> {
+  const by = new Map<WatchdogRule, { rule: WatchdogRule; flags: number; cleared: number }>();
+  for (const f of flags) {
+    const row = by.get(f.rule) ?? { rule: f.rule, flags: 0, cleared: 0 };
+    row.flags += 1;
+    if (f.verdict === CLEARED) row.cleared += 1;
+    by.set(f.rule, row);
+  }
+  return [...by.values()].sort((a, b) => b.flags - a.flags);
+}
+
 /** The limits the owner edits, with their labels and units; `term` is the technical name, shown small after the plain label (BOS-1494). */
 const WATCHDOG_LIMITS: Array<{ key: keyof WatchdogSettings; label: string; unit: string; term?: string }> = [
   { key: "inProgressHours", label: "No movement in progress", unit: "hours" },
@@ -65,6 +84,9 @@ export function Watchdog({ company }: { company: Company }) {
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [sm, setSm] = useState("");
   const [bt, setBt] = useState<Backtest | null>(null);
+  const [days, setDays] = useState(2);
+  const [btDays, setBtDays] = useState(2);
+  const [hideCleared, setHideCleared] = useState(false);
   const [savedOk, setSavedOk] = useState(false);
   const [problems, setProblems] = useState<Record<string, string>>({});
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -126,6 +148,7 @@ export function Watchdog({ company }: { company: Company }) {
       return "Saved.";
     });
   };
+  const shown = bt ? (hideCleared ? bt.flags.filter((f) => f.verdict !== CLEARED) : bt.flags) : [];
   const dirty = sm !== (status.scrumMaster?.id ?? "") || WATCHDOG_LIMITS.some((l) => (draft[l.key] ?? "") !== String(status.settings[l.key]));
   const preset = matchPreset(limitsFromDraft(draft) as WatchdogLimits, WATCHDOG_PRESETS);
   const on = status.settings.enabled;
@@ -209,17 +232,29 @@ export function Watchdog({ company }: { company: Company }) {
         <button type="button" className="btn" disabled={act.busy || (!on && !sm)} onClick={() => void save({ enabled: !on })}>
           {on ? "Switch off" : status.trippedAt ? "Switch back on" : "Switch on"}
         </button>
+      </div>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <label htmlFor="wd-period">Test the rules against</label>
+        <select id="wd-period" value={days} onChange={(e) => setDays(Number(e.target.value))}>
+          {BACKTEST_PERIODS.map((p) => (
+            <option key={p.days} value={p.days}>
+              {p.label}
+            </option>
+          ))}
+        </select>
         <button
           type="button"
           className="btn"
           disabled={test.busy}
           onClick={() =>
             void test.run(async () => {
-              setBt(await api<Backtest>(`/api/companies/${company.id}/watchdog/backtest?days=2`));
+              const ran = days;
+              setBt(await api<Backtest>(`/api/companies/${company.id}/watchdog/backtest?days=${ran}`));
+              setBtDays(ran);
             })
           }
         >
-          Test on the past 48 hours
+          Run the test
         </button>
       </div>
       {act.view}
@@ -227,10 +262,25 @@ export function Watchdog({ company }: { company: Company }) {
       {bt && (
         <div style={{ fontSize: 14 }}>
           <p>
-            It would have raised {bt.flags.length} flag{bt.flags.length === 1 ? "" : "s"} and woken the Scrum Master {bt.scrumMasterWakes} time{bt.scrumMasterWakes === 1 ? "" : "s"} (at most {bt.busiestHourWakes} in one hour{bt.wouldTripCap ? ", which would have tripped the safety cap" : ""}).{" "}
-            {bt.flags.filter((f) => f.verdict === "cleared within 30 min").length} cleared by themselves within 30 minutes, so may not have needed it.
+            Over the {BACKTEST_PERIODS.find((p) => p.days === btDays)?.label.toLowerCase() ?? `past ${btDays} days`} it would have raised {bt.flags.length} flag{bt.flags.length === 1 ? "" : "s"} and woken the Scrum Master {bt.scrumMasterWakes} time{bt.scrumMasterWakes === 1 ? "" : "s"} (at most {bt.busiestHourWakes} in one hour{bt.wouldTripCap ? ", which would have tripped the safety cap" : ""}).{" "}
+            {bt.flags.filter((f) => f.verdict === CLEARED).length} cleared by themselves within 30 minutes, so may not have needed it.
           </p>
           {bt.flags.length > 0 && (
+            <>
+              <ul aria-label="Flags by problem" style={{ margin: "4px 0" }}>
+                {problemCounts(bt.flags).map((c) => (
+                  <li key={c.rule}>
+                    <strong>{WATCHDOG_RULE_LABEL[c.rule]}</strong>: {c.flags} flag{c.flags === 1 ? "" : "s"}, {c.cleared} cleared by themselves within 30 minutes
+                  </li>
+                ))}
+              </ul>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", margin: "6px 0" }}>
+                <input id="wd-hide-cleared" type="checkbox" checked={hideCleared} onChange={(e) => setHideCleared(e.target.checked)} />
+                <label htmlFor="wd-hide-cleared">Hide ones that cleared by themselves</label>
+              </div>
+            </>
+          )}
+          {shown.length > 0 && (
             <table>
               <thead>
                 <tr>
@@ -241,7 +291,7 @@ export function Watchdog({ company }: { company: Company }) {
                 </tr>
               </thead>
               <tbody>
-                {bt.flags.map((f) => (
+                {shown.map((f) => (
                   <tr key={`${f.ticketId}-${f.rule}-${f.firstAt}`}>
                     <td>
                       <a href={`#/tickets/${f.ticketId}`}>{f.ref}</a> {f.title}

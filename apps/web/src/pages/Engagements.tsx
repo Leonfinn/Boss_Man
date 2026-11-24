@@ -9,6 +9,7 @@ import { NotFoundBlock } from "../components/NotFoundBlock";
 import { Loader } from "../components/Loader";
 import { LoadError } from "../components/LoadError";
 import { ShowOlder } from "../components/ShowOlder";
+import { buildCsv, download } from "../csv";
 
 const STATUS: Record<string, { label: string; tone: string }> = {
   requested: { label: "Requested", tone: "blue" },
@@ -65,6 +66,29 @@ export function EngagementSummaryStrip({ s }: { s: EngagementSummary }) {
         <p>{s.medianDaysToFinish == null ? <span className="muted">No finished engagements yet</span> : <strong>{s.medianDaysToFinish.toFixed(1)} days</strong>}</p>
       </div>
     </section>
+  );
+}
+
+/** A finished engagement's state never changes again, so the start of that state is when it finished. */
+const FINISHED = new Set(["signed_off", "rejected"]);
+
+/**
+ * (BOS-2492) The rows shown as CSV. Only fields the list rows already carry: the owner's list spans every company, so
+ * requester and provider stand in for "other company" and "direction", and the rows have no opened date or spend
+ * (those live on the detail view), so the cap is the money column.
+ */
+export function engagementsToCsv(rows: EngagementRow[]): string {
+  return buildCsv(
+    ["Title", "Requester (asked)", "Provider (did the work)", "State", "In this state since", "Finished", "Cap (USD)"],
+    rows.map((e) => [
+      e.title,
+      e.requester,
+      e.provider,
+      STATUS[e.status]?.label ?? e.status,
+      e.stateSince ?? "",
+      FINISHED.has(e.status) ? (e.stateSince ?? "") : "",
+      e.budgetCapUsd != null ? e.budgetCapUsd.toFixed(2) : "",
+    ]),
   );
 }
 
@@ -130,6 +154,15 @@ export function Engagements() {
           Search engagements
           <input type="search" maxLength={200} placeholder="Title or company" value={typed} onChange={(e) => setTyped(e.target.value)} />
         </label>
+        <button
+          type="button"
+          className="btn small"
+          disabled={rows.length === 0}
+          title="Downloads the rows shown: this filter and search, and only the pages already loaded"
+          onClick={() => download(`engagements-${new Date().toISOString().slice(0, 10)}.csv`, engagementsToCsv(rows))}
+        >
+          Download CSV
+        </button>
       </div>
       {!list.data ? (
         list.error && !away(list.error) ? (
