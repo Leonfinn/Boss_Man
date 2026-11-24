@@ -1,5 +1,5 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { Fragment, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { isInfiniteModel } from "@boss-man/shared";
 import { api, usd, type Company, type RunRow, type Transcript, type TranscriptItem } from "../api";
 import { ticketSiblings, type Siblings } from "../run-siblings";
@@ -12,7 +12,9 @@ import { useImageAttach, withAttachments } from "../components/ImageAttach";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { describe, MAX_ITEMS, useTranscript } from "../transcript";
 import { runTimeSplit, spanWords } from "../run-time-split";
-import { usePoll } from "../hooks";
+import { hashQuery, usePoll } from "../hooks";
+import { countHits, findQuery, spotIndex, splitHits, stepSpot, type FindSpot } from "../chat-find";
+import { parseRunShow, RUN_SHOWS, runSpots, shownItems, type RunShow } from "../run-find";
 import { permissionAnsweredBy, permissionOutcome, permissionRule, type PermissionRow } from "../permissions-in-run";
 import { failureReason, outcomeTag, tokens, usage, when } from "./Runs";
 import { NotFoundBlock } from "../components/NotFoundBlock";
@@ -323,18 +325,66 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
   const follow = useRef(true);
   const userScrolled = useRef(0);
   // Only the rows in view are in the page, so a run of thousands of events stays light (R43).
-  const rows = useVirtualizer({ count: items.length, getScrollElement: () => scroller.current, estimateSize: () => 56, overscan: 12 });
+  // Show (kept in the page link) and Find: both work on the events the page holds; hidden events are not in the list.
+  const [show, setShow] = useState<RunShow>(() => parseRunShow(hashQuery()));
+  const changeShow = (v: RunShow) => {
+    setShow(v);
+    const base = window.location.hash.split("?")[0] || `#/runs/${runId}`;
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${base}${v === "all" ? "" : `?show=${v}`}`);
+  };
+  const shown = shownItems(items, show);
+  const [findText, setFindText] = useState("");
+  const query = findQuery(findText);
+  const [at, setAt] = useState<FindSpot | null>(null);
+  const spots = query ? runSpots(shown, query) : [];
+  const here = spotIndex(spots, at);
+  const curSpot = here >= 0 ? spots[here]! : null;
+  const curKey = curSpot ? `${curSpot.id}:${curSpot.n}` : "";
+  const rows = useVirtualizer({ count: shown.length, getScrollElement: () => scroller.current, estimateSize: () => 56, overscan: 12 });
+  // The first match is current until the owner steps; going to a match stops following the end.
+  useEffect(() => {
+    if (spots.length && here < 0) setAt(spots[0]!);
+  }, [spots.length, here, query]);
+  useEffect(() => {
+    if (!curSpot) return;
+    const i = shown.findIndex((it) => String(it.seq) === curSpot.id);
+    if (i < 0) return;
+    follow.current = false;
+    rows.scrollToIndex(i, { align: "center" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [curKey]);
+  const step = (dir: 1 | -1) => setAt(stepSpot(spots, curSpot, dir));
+  const onFindKey = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+      e.preventDefault();
+      step(e.shiftKey ? -1 : 1);
+    }
+  };
+  // Draws one text with its matches marked; `from` is how many matches came before it in the same event.
+  const marked = (text: string, itemSeq: number, from: number) => {
+    if (!query) return text;
+    let n = from;
+    return splitHits(text, query).map((sg, k) =>
+      sg.hit ? (
+        <mark key={k} className={`find-hit${curSpot?.id === String(itemSeq) && curSpot.n === n++ ? " current" : ""}`}>
+          {sg.text}
+        </mark>
+      ) : (
+        <Fragment key={k}>{sg.text}</Fragment>
+      ),
+    );
+  };
 
   useEffect(() => {
-    if (!follow.current || !items.length) return;
-    rows.scrollToIndex(items.length - 1, { align: "end" });
+    if (!follow.current || !shown.length) return;
+    rows.scrollToIndex(shown.length - 1, { align: "end" });
     // Rows are measured as they render, so settle on the true end a frame later.
     const frame = requestAnimationFrame(() => {
       const el = scroller.current;
       if (el && follow.current) el.scrollTop = el.scrollHeight;
     });
     return () => cancelAnimationFrame(frame);
-  }, [items.length, rows]);
+  }, [shown.length, rows]);
 
   if (error && !run && !away(error)) return error.status === 404 ? <NotFoundBlock title="Run not found" backHref="#/runs" backLabel="Back to Runs">This run doesn't exist any more, or the link is wrong.</NotFoundBlock> : <p className="error" role="alert">{error.message}</p>;
   const company = companies.find((c) => c.id === run?.companyId);
@@ -395,6 +445,37 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
           Showing the latest {MAX_ITEMS.toLocaleString()} events; {dropped.toLocaleString()} earlier ones aren't kept in this page.
         </p>
       )}
+      {items.length > 0 && (
+        <div className="chat-find" role="search" data-testid="run-find" style={{ padding: "8px 0" }}>
+          <input type="search" aria-label="Find in this run" placeholder={dropped > 0 ? "Find in the loaded events" : "Find in this run"} value={findText} onChange={(e) => setFindText(e.target.value)} onKeyDown={onFindKey} />
+          {query && (
+            <span className="muted" role="status">
+              {spots.length ? `${here + 1} of ${spots.length}` : "No matches"}
+            </span>
+          )}
+          {query && (
+            <>
+              <button type="button" className="btn" onClick={() => step(-1)} disabled={spots.length < 2} title="Previous match">
+                Previous
+              </button>
+              <button type="button" className="btn" onClick={() => step(1)} disabled={spots.length < 2} title="Next match">
+                Next
+              </button>
+            </>
+          )}
+          <label className="chat-date">
+            Show
+            <select value={show} onChange={(e) => changeShow(e.target.value as RunShow)}>
+              {RUN_SHOWS.map((s) => (
+                <option key={s.value} value={s.value}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {dropped > 0 && <p className="muted">Searches the {MAX_ITEMS.toLocaleString()} events loaded here only, not the earlier ones.</p>}
+        </div>
+      )}
       <div
         ref={scroller}
         className="transcript"
@@ -421,17 +502,21 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
               {run.endedAt ? "No events are kept for this run: runner events older than the retention period (60 days unless the owner changed it) are deleted." : "Nothing recorded yet."}
             </p>
           )
+        ) : shown.length === 0 ? (
+          <p className="muted" style={{ padding: 16 }}>
+            No {show === "messages" ? "messages" : show === "tools" ? "tool calls" : "problems"} in the events loaded here.
+          </p>
         ) : (
           <div style={{ height: rows.getTotalSize(), position: "relative" }}>
             {rows.getVirtualItems().map((v) => {
-              const item = items[v.index]!;
+              const item = shown[v.index]!;
               const d = describe(item);
               return (
                 <div key={item.seq} data-index={v.index} ref={rows.measureElement} className={`line ${d.tone}`} style={{ position: "absolute", top: 0, left: 0, right: 0, transform: `translateY(${v.start}px)` }}>
                   <span className="mono muted at">{new Date(item.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>
                   <div className="what">
-                    <strong>{d.label}</strong>
-                    {d.body && (d.tone === "tool" ? <span className="tag">{d.body.replace(/_/g, " ")}</span> : <p>{d.body}</p>)}
+                    <strong>{marked(d.label, item.seq, 0)}</strong>
+                    {d.body && (d.tone === "tool" ? <span className="tag">{marked(d.body.replace(/_/g, " "), item.seq, query ? countHits([d.label], query) : 0)}</span> : <p>{marked(d.body, item.seq, query ? countHits([d.label], query) : 0)}</p>)}
                   </div>
                 </div>
               );
