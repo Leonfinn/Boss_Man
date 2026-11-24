@@ -24,7 +24,6 @@
 // Options: --route R (hash route like "#board/p1", default "#board/p1") | --url U (full URL, skips the local server)
 //          --width N (CSS px, default 1280) --height N (default 900) --ratio N (device pixel ratio, default 1)
 //          --touch (touch + mobile) --full-page --wait SELECTOR (required) --timeout MS (default 20000)
-//          --click SELECTOR --then-wait SELECTOR (press a button after the page loads, then wait for what it shows)
 //          --out FILE (required) --dist DIR (default apps/web/dist) --api FILE
 // Exit 0 with the output path on the last line; non-zero with one error line otherwise.
 // Playwright is a global tool on the runner, not a project dependency; BOSSMAN_CHROMIUM overrides the browser.
@@ -60,8 +59,6 @@ function parseArgs(argv) {
     else if (a === "--ratio") o.ratio = num(a, val());
     else if (a === "--timeout") o.timeout = num(a, val());
     else if (a === "--wait") o.wait = val();
-    else if (a === "--click") o.click = val();
-    else if (a === "--then-wait") o.thenWait = val();
     else if (a === "--out") o.out = val();
     else if (a === "--dist") o.dist = resolve(val());
     else if (a === "--api") o.api = val();
@@ -71,7 +68,6 @@ function parseArgs(argv) {
   }
   if (!o.wait) fail("--wait SELECTOR is required (the element that shows the page has loaded)");
   if (!o.out) fail("--out FILE is required");
-  if (o.click && !o.thenWait) fail("--click needs --then-wait SELECTOR (the element that shows the click has finished)");
   return o;
 }
 
@@ -244,18 +240,6 @@ async function main() {
       mkdirSync(dirname(resolve(o.out)), { recursive: true });
       await page.screenshot({ path: `${o.out}.failed.png` }).catch(() => {});
       fail(`"${o.wait}" did not appear within ${o.timeout} ms at ${target}`);
-    }
-    // --click SELECTOR (a Playwright selector, e.g. "text=Run the test"), then wait for --then-wait: for a screen
-    // that only shows its result after a button press.
-    if (o.click) {
-      try {
-        await page.click(o.click, { timeout: o.timeout });
-        await page.waitForSelector(o.thenWait, { state: "visible", timeout: o.timeout });
-      } catch {
-        mkdirSync(dirname(resolve(o.out)), { recursive: true });
-        await page.screenshot({ path: `${o.out}.failed.png` }).catch(() => {});
-        fail(`clicking "${o.click}" and waiting for "${o.thenWait}" did not finish within ${o.timeout} ms`);
-      }
     }
     mkdirSync(dirname(resolve(o.out)), { recursive: true });
     // BOS-2511 (DR-075): a PNG made from seeded --api data carries a marker, which the move to review looks for.
