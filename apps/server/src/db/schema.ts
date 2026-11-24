@@ -888,6 +888,39 @@ export const providerQuotaWarnings = pgTable(
   (t) => [primaryKey({ columns: [t.fundingSourceId, t.period, t.threshold] })],
 );
 
+/**
+ * One row per funding source, usage window and reset: the highest use seen in that window and its limit.
+ * Kept past the 30-day pruning of raw readings, for the "Last 8 weeks" fold on Settings → Funding.
+ * `resets_at` is the reset that ends the window, rounded to the hour so a few seconds' jitter in
+ * the reported time is one window.
+ */
+export const fundingWindowSummaries = pgTable(
+  "funding_window_summaries",
+  {
+    fundingSourceId: uuid("funding_source_id").notNull().references(() => fundingSources.id, { onDelete: "cascade" }),
+    window: text("window").notNull(),
+    resetsAt: timestamp("resets_at", { withTimezone: true }).notNull(),
+    /** Highest share used, 0 to 1 and over. */
+    peakUtilization: real("peak_utilization").notNull(),
+    /** The provider's own limit when it states one (Synthetic); null for windows reported as a share only. */
+    limitValue: integer("limit_value"),
+  },
+  (t) => [primaryKey({ columns: [t.fundingSourceId, t.window, t.resetsAt] })],
+);
+
+/** A stretch when new work was held because this source's usage limit was nearly used up. endedAt null: still held. */
+export const fundingQuotaHolds = pgTable(
+  "funding_quota_holds",
+  {
+    id: id(),
+    fundingSourceId: uuid("funding_source_id").notNull().references(() => fundingSources.id, { onDelete: "cascade" }),
+    window: text("window").notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+  },
+  (t) => [index("funding_quota_holds_source_time").on(t.fundingSourceId, t.startedAt)],
+);
+
 /** "instance" covers every company (R53); its scope_id is the nil UUID. */
 export const budgetScope = pgEnum("budget_scope", ["company", "project", "agent", "instance"]);
 export const budgetWindow = pgEnum("budget_window", ["lifetime", "calendar_month", "billing_cycle", "rolling_days"]);
