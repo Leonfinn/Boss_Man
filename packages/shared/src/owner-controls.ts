@@ -219,7 +219,7 @@ export const OWNER_CONTROLS = {
   // The permission rules page, its advice mode, the second opinion and the fence.
   Permissions: ["Delete", "Edit", "Save", "Cancel", "Ask the CEO to draft it", "Add rule", "Make a rule", "Check", "Test", "Choose Off: run agents without the fence"],
   // The Scrum Master's watchdog: its limits, its record-only rehearsal and its safety cap.
-  Watchdog: ["Switch off", "Switch back on", "Switch on", "Test on the past 48 hours"],
+  Watchdog: ["Switch off", "Switch back on", "Switch on", "Run the test"],
   "Import and export": ["Check name", "Import as a new company", "Open …"],
   // The owner's password and other logins (BOS-2159).
   Account: ["Change password", "Sign out other devices"],
@@ -395,7 +395,7 @@ export const OWNER_FIELDS = {
     "Prefix", "Minutes the CEO has", "Nudges per hour", "Most minutes per run", "Who runs it", "What waits for you from the CEO",
   ],
   // The Scrum Master's watchdog.
-  Watchdog: ["Record only (rehearse)", "Scrum Master"],
+  Watchdog: ["Record only (rehearse)", "Scrum Master", "Test the rules against", "Hide ones that cleared by themselves"],
   // The permission rules page, the advice mode, the second opinion and the fence's mode (BOS-325).
   Permissions: [
     "Rules for", "Filter rules", "Show rules that", "What should this rule do", "New rule", "Rule name", "Command matches (regex)", "Tool title matches (regex)", "Then", "An agent of",

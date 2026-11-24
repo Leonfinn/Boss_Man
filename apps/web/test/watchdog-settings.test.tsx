@@ -122,6 +122,16 @@ describe("watchdog settings (BOS-58)", () => {
     expect(screen.getByText("History is approximate.")).toBeTruthy();
   });
 
+  it("shows a failed test request under the button and stays usable", async () => {
+    const first = status({ settings: { ...DEFAULT_WATCHDOG, enabled: true }, scrumMaster: { id: "sm", name: "Scrum Master", paused: false } });
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => (url.includes("backtest") ? new Response(JSON.stringify({ error: "The test failed" }), { status: 500, headers: { "content-type": "application/json" } }) : json(first))));
+    render(<Watchdog company={company} />);
+    await screen.findByText(/On\./);
+    fireEvent.click(screen.getByRole("button", { name: "Run the test" }));
+    expect((await screen.findAllByRole("alert")).length).toBeGreaterThan(0);
+    expect((screen.getByRole("button", { name: "Run the test" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it("tests over 7 days, counts per problem, and hides the ones that cleared by themselves", async () => {
     const flag = (id: string, rule: string, verdict: string) => ({ ticketId: id, ref: `BOS-${id}`, title: `Ticket ${id}`, rule, firstAt: "2026-10-25T12:00:00Z", handOffs: 1, verdict });
     const calls = stub(status({ settings: { ...DEFAULT_WATCHDOG, enabled: true }, scrumMaster: { id: "sm", name: "Scrum Master", paused: false } }), {
