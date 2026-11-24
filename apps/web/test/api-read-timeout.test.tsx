@@ -42,6 +42,15 @@ describe("apiOnce: a read that never answers", () => {
     expect((err as ApiError).status).toBe(0);
   });
 
+  it("lets a slow read inside the limit answer, with one request", async () => {
+    const f = vi.fn(() => new Promise<Response>((res) => setTimeout(() => res(json({ ok: 1 })), READ_TIMEOUT_MS - 1000)));
+    vi.stubGlobal("fetch", f);
+    const got = apiOnce<{ ok: number }>("/api/slow-ok");
+    await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS * 2);
+    await expect(got).resolves.toEqual({ ok: 1 });
+    expect(f).toHaveBeenCalledTimes(1);
+  });
+
   it("does not cut a write short", async () => {
     const f = hangingFetch();
     vi.stubGlobal("fetch", f);
