@@ -131,7 +131,43 @@ export function GoalCheck({ company, onChanged }: { company: Company; onChanged:
   );
 }
 
-type RetroStatus = { agentId: string | null; runner: { id: string; name: string; source: "chosen" | "default" | "ceo" } | null; last: { startedAt: string; doneCount: number; savedAt: string | null } | null; doneSince: number };
+type RetroStatus = { agentId: string | null; runner: { id: string; name: string; source: "chosen" | "default" | "ceo" } | null; last: { startedAt: string; doneCount: number; savedAt: string | null } | null; doneSince: number; history?: RetroHistoryRow[] };
+type RetroHistoryRow = {
+  id: string;
+  startedAt: string;
+  agentName: string | null;
+  doneCount: number;
+  findings: { failure: string; label: string; count: number }[];
+  changes: { applied: number; skipped: number; waiting: number; checked: number; met: number };
+};
+
+/** Past retros (BOS-2429): the last 8, newest first; a failure kind in 3 or more of them keeps coming up. */
+function PastRetros({ history }: { history: RetroHistoryRow[] }) {
+  if (!history.length) return null;
+  const seen = new Map<string, number>();
+  for (const h of history) for (const f of h.findings) seen.set(f.failure, (seen.get(f.failure) ?? 0) + 1);
+  return (
+    <details>
+      <summary>Past retros</summary>
+      <ul style={{ fontSize: 14 }}>
+        {history.map((h) => (
+          <li key={h.id}>
+            {when(h.startedAt)}, run by {h.agentName ?? "an agent who has left"}; {h.doneCount} tickets finished.{" "}
+            {h.findings.length
+              ? h.findings.map((f, i) => (
+                  <span key={f.failure}>
+                    {i ? "; " : "Findings: "}
+                    {f.label} ({f.count}){(seen.get(f.failure) ?? 0) >= 3 ? " (keeps coming up)" : ""}
+                  </span>
+                ))
+              : "No findings saved."}{" "}
+            Changes: {h.changes.applied} applied, {h.changes.skipped} skipped, {h.changes.waiting} waiting; of {h.changes.checked} checked, {h.changes.met} met their target.
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
 
 /** Workflow retros (docs/19): who runs the team's look-back, when it last ran, and a button to run one now. */
 export function WorkflowRetros({ company }: { company: Company }) {
@@ -174,6 +210,7 @@ export function WorkflowRetros({ company }: { company: Company }) {
       <p style={{ fontSize: 14 }}>
         {status.last ? `Last ran ${when(status.last.startedAt)}, over ${status.last.doneCount} finished tickets.` : "It has not run yet. The first one waits for 5 finished tickets."} {status.doneSince} finished since.
       </p>
+      <PastRetros history={status.history ?? []} />
       <div>
         <button
           type="button"
