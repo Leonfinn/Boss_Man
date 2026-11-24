@@ -28,7 +28,11 @@ describe("Workflow: week by week", () => {
         week("2026-11-24T00:00:00.000Z", { partial: true, done: 1 }),
       ],
     };
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } })));
+    // /retros/latest gets its own shape, or the "Latest retro" block throws after the test (BOS-2425).
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(
+      JSON.stringify(String(url).includes("/retros/latest") ? { retro: null, changes: [] } : body),
+      { status: 200, headers: { "content-type": "application/json" } },
+    )));
     render(<Workflow company={{ id: "c1", name: "Acme" } as Company} />);
     const h = await screen.findByRole("heading", { name: "Week by week" });
     const rows = within(h.closest("section")!).getAllByRole("row").slice(1);

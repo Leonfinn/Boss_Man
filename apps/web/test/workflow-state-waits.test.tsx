@@ -15,7 +15,12 @@ const row = (state: string, tickets: number, p50Ms: number | null, p90Ms: number
 const base = { days: 14, costBasis: "estimate", byRole: [], byAgent: [], handoffs: [], features: [], sizes: [], sizeNotes: [] };
 
 function show(stateWaits: object) {
-  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ...base, stateWaits }), { status: 200, headers: { "content-type": "application/json" } })));
+  // The page's "Latest retro" block fetches /retros/latest too; answer it with its own shape,
+  // or its data.changes.length throws after the test on a slow machine (GitHub, BOS-2425).
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    const body = String(url).includes("/retros/latest") ? { retro: null, changes: [] } : { ...base, stateWaits };
+    return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+  }));
   render(<Workflow company={{ id: "c1", name: "Acme" } as Company} />);
 }
 
