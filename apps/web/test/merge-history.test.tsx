@@ -43,7 +43,7 @@ describe("Merge history page (BOS-2379)", () => {
   });
 
   it("searches by ref or title with the other filters, asks the server for the chosen period, and builds the CSV of the rows shown (BOS-2473)", async () => {
-    const f = vi.fn(async () => new Response(JSON.stringify(data), { status: 200 }));
+    const f = vi.fn(async (_url: string) => new Response(JSON.stringify(data), { status: 200 }));
     vi.stubGlobal("fetch", f);
     render(<MergeHistory companies={[company]} companyId="c-mh" />);
     await screen.findByRole("link", { name: /Ticket 1$/ });
