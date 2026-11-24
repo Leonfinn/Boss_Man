@@ -5,6 +5,8 @@ dist/
 coverage/
 data/
 secrets/
+# Wrangler's local cache (BOS-2534): .wrangler/cache/pages.json holds the Cloudflare account ID, so a publish can't commit it.
+.wrangler/
 # Process core dumps (core.<pid>) can hold live secrets; never commit or checkpoint them.
 # Narrow on purpose (BOS-1059): a broad core.* would hide a real file such as core.ts.
 core
