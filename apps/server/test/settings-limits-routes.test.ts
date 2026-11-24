@@ -32,6 +32,8 @@ const MOVED = [
   // BOS-1070: the owner's "Wait for GitHub CI" switch.
   { method: "GET", url: "/api/settings/wait-for-ci" },
   { method: "PUT", url: "/api/settings/wait-for-ci" },
+  // BOS-2380: server health reads pg_stat_activity, so it is owner only.
+  { method: "GET", url: "/api/data-health" },
 ] as const;
 
 describe("the moved settings and limits routes are still owner only (BOS-1051)", () => {

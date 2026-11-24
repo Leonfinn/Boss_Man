@@ -451,7 +451,7 @@ export const OWNER_SECTIONS = {
   ],
   Watchdog: ["Watchdog"],
   Permissions: ["Permission rules", "Advice on permission cards", "Second opinion", "Second opinion from a model (optional)", "Agent fence", "Setting up a host", "Try a command"],
-  Updates: ["Updates", "Other actions", "Now running", "Recent updates", "Stop all work", "What the host said"],
+  Updates: ["Updates", "Other actions", "Now running", "Recent updates", "Stop all work", "Server health", "What the host said"],
   "Limits and checks": ["Agents at once", "Tickets in progress", "Checks", "Check workers"],
   Runner: ["Runner", "Add-ons", "Workspace disk"],
   Email: ["Outgoing email", "Main's CI"],
