@@ -462,6 +462,13 @@ function kindOf(d: Decision) {
   return KIND[kindKeyOf(d)] ?? { label: d.kind.replace(/_/g, " "), tone: "" };
 }
 
+/** (BOS-2434) A short name for a card in the summary: its kind and the ticket it is about, never the question text (which can hold raw step fences). */
+function oldestTitle(d: Decision): string {
+  const t = d.about?.[0] ?? d.blocks[0];
+  const kind = (KIND[kindKeyOf(d)]?.label ?? d.kind.replace(/_/g, " "));
+  return t ? `${kind}: ${t.ref ?? t.title}` : kind;
+}
+
 /** (BOS-2434) The "Waiting for you" summary: how many cards by kind (biggest group first), and the oldest card. */
 export function waitingSummary(cards: Decision[], now = Date.now()): { total: number; kinds: Array<{ key: string; label: string; count: number }>; oldest: { id: string; title: string; waited: string } | null } {
   const counts = new Map<string, number>();
@@ -469,7 +476,7 @@ export function waitingSummary(cards: Decision[], now = Date.now()): { total: nu
   const kinds = [...counts].map(([key, count]) => ({ key, label: KIND[key]?.label ?? key.replace(/_/g, " "), count })).sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
   let oldest: Decision | null = null;
   for (const d of cards) if (!oldest || new Date(d.createdAt).getTime() < new Date(oldest.createdAt).getTime()) oldest = d;
-  return { total: cards.length, kinds, oldest: oldest ? { id: oldest.id, title: oldest.question, waited: ageLabel(now - new Date(oldest.createdAt).getTime()).replace(/ ago$/, "") } : null };
+  return { total: cards.length, kinds, oldest: oldest ? { id: oldest.id, title: oldestTitle(oldest), waited: ageLabel(now - new Date(oldest.createdAt).getTime()).replace(/ ago$/, "") } : null };
 }
 
 /** (BOS-2434) The page address's `kind` and `order` choices ("#/decisions?kind=permission&order=oldest"). */

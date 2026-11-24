@@ -57,8 +57,7 @@ describe("waiting summary (BOS-2434)", () => {
     const box = screen.getByTestId("waiting-summary");
     expect(box.textContent).toContain("3 waiting for you");
     expect(within(box).getByText("2 permission")).toBeTruthy();
-    expect(box.textContent).toContain("Delete the temp folder?");
-    expect(box.textContent).toContain("waiting 3d");
+    expect(box.textContent).toContain("oldest: Permission, waiting 3d");
     expect(order()).toEqual(["decision-a", "decision-b", "decision-c"]);
   });
 
@@ -77,7 +76,7 @@ describe("waiting summary (BOS-2434)", () => {
     const scroll = vi.fn();
     Element.prototype.scrollIntoView = scroll;
     show();
-    fireEvent.click(within(screen.getByTestId("waiting-summary")).getByText("Delete the temp folder?"));
+    fireEvent.click(within(screen.getByTestId("waiting-summary")).getByText("Permission"));
     await vi.waitFor(() => expect(scroll).toHaveBeenCalled());
     expect(scroll.mock.instances[0]).toBe(document.getElementById("decision-b"));
     cleanup();
