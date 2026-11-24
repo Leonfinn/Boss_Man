@@ -1,7 +1,7 @@
 // One agent's record over the last 30 days (BOS-2389): what it finished, how often review passed first time,
 // send-backs, median time to merge and cost per finished ticket. Read only; no model calls. The Workflow report
 // has the same kind of figures per role (services/workflow.ts); this is per agent.
-import { and, eq, gte, inArray, ne, or, sql, desc } from "drizzle-orm";
+import { and, eq, gte, inArray, isNull, ne, or, sql, desc } from "drizzle-orm";
 import { ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { resultWhere } from "./runs.js";
@@ -38,7 +38,17 @@ export class AgentRecordError extends Error {}
 
 export function agentRecordService(db: Db, deps: { now?: () => Date } = {}) {
   const now = deps.now ?? (() => new Date());
-  return {
+  const svc = {
+    /** BOS-2504: every non-retired agent's record without the recent list, for the Agents page table. */
+    async team(companyId: string): Promise<Array<Omit<AgentRecord, "recent"> & { agentId: string; name: string }>> {
+      const list = await db.select({ id: agents.id, name: agents.name }).from(agents).where(and(eq(agents.companyId, companyId), isNull(agents.retiredAt))).orderBy(agents.name);
+      const out = [];
+      for (const a of list) {
+        const { recent: _recent, ...rest } = await svc.record(a.id);
+        out.push({ agentId: a.id, name: a.name, ...rest });
+      }
+      return out;
+    },
     async record(agentId: string): Promise<AgentRecord> {
       const [agent] = await db.select({ companyId: agents.companyId }).from(agents).where(eq(agents.id, agentId));
       if (!agent) throw new AgentRecordError("No such agent.");
@@ -89,4 +99,5 @@ export function agentRecordService(db: Db, deps: { now?: () => Date } = {}) {
       };
     },
   };
+  return svc;
 }

@@ -9,7 +9,7 @@ import { OWNER_MESSAGE_MAX, THINKING_LEVELS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agentAvatars, agentNotes, agents } from "../db/schema.js";
 import { AgentError, type agentsService } from "../services/agents.js";
-import { AgentRecordError, agentRecordService } from "../services/agent-record.js";
+import { AgentRecordError, agentRecordService, RECORD_DAYS } from "../services/agent-record.js";
 import { NOTE_LIMITS, NoteError, type notesService } from "../services/agent-notes.js";
 import { logoType } from "../services/image-type.js";
 import { permissionsForRun } from "../services/permission-store.js";
@@ -95,6 +95,9 @@ export function agentRunsRoutes(
       throw err;
     }),
   );
+
+  // Every agent's last 30 days side by side (BOS-2504), for the Agents page's "Team record" table.
+  owner.get("/api/companies/:id/agent-records", async (req) => ({ days: RECORD_DAYS, agents: await agentRecordService(db).team(IdParam.parse(req.params).id) }));
 
   // The CEO's lasting notes (BOS-85): the owner sees, adds, edits and deletes them, within the same caps, and sees colleagues' requests.
   const noteErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
