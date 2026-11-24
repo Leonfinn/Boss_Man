@@ -7,7 +7,7 @@ import { signedInOwner } from "./helpers/owner-session.js";
 import { appCache, sharedDatabase } from "./helpers/shared-server.js";
 import { activity, decisions, fundingSources, notifications, nudges, quotaSamples, runners, runTokens, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { hashToken } from "../src/auth.js";
-import type { Limits } from "../src/services/scheduler.js";
+import { isReplyLane, noCheckoutNote, type Limits } from "../src/services/scheduler.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
 
@@ -1440,5 +1440,54 @@ describe("scheduler", () => {
       const res = await ctx.req("POST", "/api/funding-sources", { name: "Plain", kind: "api_credit", provider: "anthropic", fallbackRank: 1 });
       expect(res.statusCode).toBe(400);
     });
+  });
+});
+
+// BOS-2365 (background lane): two small scheduler helpers that take plain values (no clock, no
+// database), so made-up values pin their exact behaviour.
+describe("isReplyLane (BOS-2365)", () => {
+  it("is true only for the two reply-lane reasons", () => {
+    expect(isReplyLane("ceo reply")).toBe(true);
+    expect(isReplyLane("update alert")).toBe(true);
+  });
+
+  it("is false for every other wake reason", () => {
+    expect(isReplyLane("ticket watch")).toBe(false);
+    expect(isReplyLane("wiki upkeep")).toBe(false);
+    expect(isReplyLane("chat")).toBe(false);
+  });
+
+  it("matches the whole reason, not a piece of it, and is case-sensitive", () => {
+    expect(isReplyLane("")).toBe(false);
+    expect(isReplyLane("reply")).toBe(false);
+    expect(isReplyLane("ceo reply please")).toBe(false);
+    expect(isReplyLane("CEO reply")).toBe(false);
+    expect(isReplyLane("ceo reply ")).toBe(false);
+    expect(isReplyLane("update")).toBe(false);
+  });
+});
+
+describe("noCheckoutNote (BOS-2365)", () => {
+  it("names the folder the run started in and says it is not a repo copy", () => {
+    const note = noCheckoutNote("/ws/agents/basil");
+    expect(note).toContain("it started in /ws/agents/basil, which is not a copy of the repo");
+  });
+
+  it("starts on its own lines and warns against editing, checking or making a worktree", () => {
+    const note = noCheckoutNote("/ws/agents/basil");
+    expect(note.startsWith("\n\n")).toBe(true);
+    expect(note).toContain("has no ticket checkout");
+    expect(note).toContain("Don't edit code, run checks or create a worktree here");
+    expect(note).toContain("work on a run woken on that ticket");
+  });
+
+  it("puts the folder in verbatim, even when it is empty or has awkward characters", () => {
+    expect(noCheckoutNote("")).toContain("it started in , which is not a copy of the repo");
+    expect(noCheckoutNote("/ws/my agent's folder")).toContain("it started in /ws/my agent's folder, which is not");
+    expect(noCheckoutNote("/ws/a \"quoted\" name")).toContain('it started in /ws/a "quoted" name, which is not');
+  });
+
+  it("gives the same text for the same folder every time", () => {
+    expect(noCheckoutNote("/ws/x")).toBe(noCheckoutNote("/ws/x"));
   });
 });
