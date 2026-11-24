@@ -554,11 +554,9 @@ function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: Ag
           record.data.finished === 0 ? (
             <>
               <p className="muted">Nothing finished in the last 30 days</p>
-              {record.data.runs > 0 && (
-                <p>
-                  <RecordRuns runs={record.data.runs} failedRuns={record.data.failedRuns} />
-                </p>
-              )}
+              <p>
+                <RecordRuns runs={record.data.runs ?? 0} failedRuns={record.data.failedRuns ?? 0} />
+              </p>
             </>
           ) : (
             <>
