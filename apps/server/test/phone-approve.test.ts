@@ -10,7 +10,7 @@ import { openPglite } from "../src/db/client.js";
 import { activity, approveTokens, decisions, notifications, phoneActionHits, ticketDependencies } from "../src/db/schema.js";
 import type { Leader } from "../src/leader.js";
 import { issueRunToken } from "../src/mcp.js";
-import { approveGate, cleanSummary, decisionRev, hashToken, IP_LIMIT, phoneApprovable, plainText } from "../src/services/phone-approve.js";
+import { approveGate, approveMessage, cleanSummary, decisionRev, hashToken, IP_LIMIT, phoneApprovable, plainText, PUSH_BODY_MAX } from "../src/services/phone-approve.js";
 import { DEFAULT_NOTIFY_SETTINGS, ntfyPublishUrl } from "../src/services/notifications.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
@@ -663,5 +663,45 @@ describe("QA (BOS-248): token lifetime edges and isolation between cards", () =>
     // B's own link still works, once.
     expect((await c.tap({ token: tb })).json().outcome).toBe("approved");
     expect((await c.tap({ token: tb })).json().outcome).toBe("already_answered");
+  });
+});
+
+describe("approveMessage: the text of a card's push (BOS-2392)", () => {
+  const card = (over: Record<string, unknown> = {}) =>
+    ({
+      question: "Use deSEC for DNS?",
+      options: ["Yes", "No"],
+      recommendedOption: "Yes",
+      context: { type: "question", approveSummary: "Use deSEC for DNS on the website" },
+      ...over,
+    }) as Parameters<typeof approveMessage>[0];
+  const approveLine = "Approve = Use deSEC for DNS on the website ('Yes')";
+
+  it("shows the stored question, then what Approve does", () => {
+    expect(approveMessage(card())).toBe(`Use deSEC for DNS?\n\n${approveLine}`);
+  });
+
+  it("cleans control and format characters and line breaks from all three parts", () => {
+    const out = approveMessage(
+      card({ question: "Use\u202e deSEC\nfor DNS?", recommendedOption: "Y\u200bes", context: { approveSummary: "Use\u200b deSEC\nnow" } }),
+    );
+    expect(out).toBe("Use deSEC for DNS?\n\nApprove = Use deSEC now ('Yes')");
+  });
+
+  it("keeps the whole Approve line and trims a long question to fit the push limit", () => {
+    const out = approveMessage(card({ question: "🙂".repeat(1000) }));
+    expect(new TextEncoder().encode(out).length).toBeLessThanOrEqual(PUSH_BODY_MAX);
+    expect(out.endsWith(approveLine)).toBe(true);
+    expect(out).toContain("...\n\nApprove = ");
+  });
+
+  it("keeps a question that fits exactly, and trims one byte over", () => {
+    const room = PUSH_BODY_MAX - new TextEncoder().encode(`\n\n${approveLine}`).length;
+    expect(approveMessage(card({ question: "a".repeat(room) }))).toBe(`${"a".repeat(room)}\n\n${approveLine}`);
+    expect(approveMessage(card({ question: "a".repeat(room + 1) }))).toBe(`${"a".repeat(room - 3)}...\n\n${approveLine}`);
+  });
+
+  it("leaves an empty summary empty rather than writing undefined", () => {
+    expect(approveMessage(card({ context: { type: "question" } }))).toBe("Use deSEC for DNS?\n\nApprove =  ('Yes')");
   });
 });
