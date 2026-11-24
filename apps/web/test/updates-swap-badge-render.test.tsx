@@ -69,7 +69,7 @@ const read = () => ({
 });
 
 describe.skipIf(!browser)("Updates swap badge measures against the update's image (BOS-2546)", () => {
-  for (const w of [{ name: "desktop-1280", width: 1280, height: 800 }, { name: "phone-380", width: 380, height: 800 }]) {
+  for (const w of [{ name: "brave-1667", width: 1667, height: 724 }, { name: "safari-1550", width: 1550, height: 1611 }, { name: "phone-390", width: 390, height: 844 }]) {
     for (const s of states) {
       it(`${w.name} ${s.name}: badge and list agree, no sideways scroll`, async () => {
         const page = await browser!.newPage({ viewport: { width: w.width, height: w.height } });
