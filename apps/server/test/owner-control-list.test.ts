@@ -105,6 +105,7 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   // "Download" in the Ticket header: the ticket as Markdown (BOS-2314).
   "components/TicketDownloadButton.tsx": "Ticket",
   "components/ReviewPolicy.tsx": "Reviews",
+  "components/OpenIssues.tsx": "Scrum Master",
   "components/ScrumMasterLog.tsx": "Scrum Master",
   // The health line's Retry (BOS-2249): shown on the board and on the Scrum Master page, so it takes its screens from where it is rendered.
   "components/WatchdogHealth.tsx": "Any screen",
