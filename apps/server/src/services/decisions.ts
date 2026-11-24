@@ -6,7 +6,7 @@ import { createPermissionLog, type PermissionLog } from "./permission-log.js";
 import { leaveClosedNotice, leaveWithdrawnNotice, parseReplacedBy, recheckBackBy as backByAt, recheckLine, switchedBackNotice, withdrawnNotice, type ClosedNotice, type ReplacedBy } from "./closed-notice.js";
 import type { NotifyInput } from "./notifications.js";
 import { applyFenceAnswer, applyFenceUnavailableAnswer, applyGuardAnswer, checkFenceAnswer } from "./fence-default.js";
-import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from "drizzle-orm";
 import {
   effectiveDueDate,
   evaluatePermission,
@@ -69,14 +69,15 @@ import { REVIEW_REASON } from "./review-kinds.js";
 import { signoffFacts, type SignoffFacts } from "./signoff-facts.js";
 import { planOverlapNote as overlapNoteOf, planOverlaps } from "./merge-line-conflicts.js";
 import { overrideLines, parseStoredOverride, resolveOverride } from "./lint-override.js";
-import { type CardLint, type LintFinding, THIS_HOST_POINTER, fillHostTokensIn, lintLines, unfilledTokens } from "./steps.js";
+import { type CardLint, type LintFinding, SCREEN_DIFFERENT_OPTION, THIS_HOST_POINTER, fillHostTokensIn, lintLines, outsideSiteKeys, unfilledTokens } from "./steps.js";
 import { HOST_TOKEN_HELP, NOT_GIVEN, type OwnerSetupFacts, checkOwnerSetup } from "./owner-setup-check.js";
 import { loadCompanyFacts } from "./company-facts.js";
 import type { Addon } from "./addons.js";
 import { type CardOpening, type OwnerOnlyKind, routeAgentCard, CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, isSystemCard, ceoAnswerRefusal, OWNER_ONLY_ANSWER_TYPES, fileList } from "./card-check.js";
 import { addTicketDependency, blockedHolds } from "./ticket-links.js";
 import { revokeApproveTokens } from "./approve-tokens.js";
-import { ATTACHMENT_LINK } from "./ticket-images.js";
+import { ATTACHMENT_LINK, seenImageDates } from "./ticket-images.js";
+import { screenMismatchSites } from "./outside-site-mismatch.js";
 import type { Ladder } from "./alert-ladder.js";
 import { recordGoalAnswer } from "./goal-check.js";
 import { applyPortalAnswer } from "./feature-portal.js";
@@ -581,23 +582,146 @@ export function ceoFirstMergeNote(title: string, cardId: string, what: string) {
  */
 export async function raiseOwnerTodo(
   db: Db,
-  t: { companyId: string; question: string; key: string; steps: string[]; check?: string; rollback?: string; ofDecisionId: string; raisedByAgentId?: string | null; target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; update?: DeployUpdate; doAfter?: OrderLink[]; /** Offer "Quiet the machine first" (a hand-applied server update, BOS-420). */ quietFirst?: boolean; /** An extra answer that closes the card for good (the CI-identity card's "Keep the emails"); "A step failed" never does. */ extraOption?: string },
+  t: { companyId: string; question: string; key: string; steps: string[]; check?: string; rollback?: string; ofDecisionId: string; raisedByAgentId?: string | null; target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; update?: DeployUpdate; doAfter?: OrderLink[]; /** Offer "Quiet the machine first" (a hand-applied server update, BOS-420). */ quietFirst?: boolean; /** An extra answer that closes the card for good (the CI-identity card's "Keep the emails"); "A step failed" never does. */ extraOption?: string; /** BOS-2336: host facts for the step check; absent = the provider app.ts wires (setOwnerTodoFacts). */ facts?: OwnerSetupFacts },
 ) {
+  // BOS-2336: Boss Man's own cards pass the same step checks as an agent's card and a ticket's setup (R19, R19b, R19c,
+  // the host fences). A refused step list never reaches the owner: the CEO gets a card with the findings instead.
+  const facts = await ownerTodoBaseFacts(t.facts);
+  // A step on someone else's website offers "My screen looks different": it is what R19b reads for the next card, and
+  // the owner's way to say a step doesn't match their screen.
+  const sendsToSite = t.steps.some((s) => outsideSiteKeys(s, facts.serverHost).length > 0);
+  const options = [...(t.quietFirst ? [QUIET_FIRST] : []), TODO_DONE, ...(t.extraOption ? [t.extraOption] : []), ...(sendsToSite ? [SCREEN_DIFFERENT_OPTION] : []), TODO_FAILED];
+  const steps = await vetOwnerTodoSteps(db, { companyId: t.companyId, key: t.key, question: t.question, steps: t.steps, options, facts });
+  if (!steps) return null;
   const [row] = await db
     .insert(decisions)
     .values({
       companyId: t.companyId,
       kind: "question",
       question: t.question,
-      options: [...(t.quietFirst ? [QUIET_FIRST] : []), TODO_DONE, ...(t.extraOption ? [t.extraOption] : []), TODO_FAILED],
+      options,
       recommendedOption: t.quietFirst ? QUIET_FIRST : TODO_DONE,
       tier: "owner",
       raisedByAgentId: t.raisedByAgentId ?? null,
       dedupeKey: t.key,
-      context: { type: "owner_todo", ofDecisionId: t.ofDecisionId, steps: t.steps, ownerMustDo: true, ...(t.check ? { check: t.check } : {}), ...(t.rollback ? { rollback: t.rollback } : {}), ...(t.target ? { target: t.target } : {}), ...(t.commit ? { commit: t.commit } : {}), ...(t.fromCommit ? { fromCommit: t.fromCommit } : {}), ...(t.deployId ? { deployId: t.deployId } : {}), ...(t.update ? { update: t.update } : {}), ...(t.doAfter?.length ? { doAfter: t.doAfter } : {}) } satisfies DecisionContext,
+      context: { type: "owner_todo", ofDecisionId: t.ofDecisionId, steps, ownerMustDo: true, ...(t.check ? { check: t.check } : {}), ...(t.rollback ? { rollback: t.rollback } : {}), ...(t.target ? { target: t.target } : {}), ...(t.commit ? { commit: t.commit } : {}), ...(t.fromCommit ? { fromCommit: t.fromCommit } : {}), ...(t.deployId ? { deployId: t.deployId } : {}), ...(t.update ? { update: t.update } : {}), ...(t.doAfter?.length ? { doAfter: t.doAfter } : {}) } satisfies DecisionContext,
     })
     .onConflictDoNothing()
     .returning({ id: decisions.id });
+  // The checked steps went out, so the CEO's card about them is done with.
+  if (row) {
+    await clearOwnerTodo(db, ownerTodoFixKey(t.key), "The fixed steps went to the owner.");
+    // A fix card the CEO already answered still holds its key; let go so the re-raise sweep stops looking at it.
+    await db.update(decisions).set({ dedupeKey: null }).where(eq(decisions.dedupeKey, ownerTodoFixKey(t.key)));
+  }
+  return row ?? null;
+}
+
+const HAND_APPLY_KEY = "owner-todo:self-deploy:";
+/** The hand-apply to-do of an approved infra update (BOS-122), raised when the owner approves and again by reraiseHeldHandApply. */
+export async function raiseHandApplyTodo(db: Db, d: { id: string; companyId: string; question: string; raisedByAgentId: string | null }, ctx: SelfDeployCtx, quietFirst: boolean) {
+  return raiseOwnerTodo(db, {
+    companyId: d.companyId,
+    question: `"${d.question.split("\n\n")[0]}" was approved. It's waiting for you to apply it by hand on the machine that runs Boss Man.`,
+    key: `${HAND_APPLY_KEY}${ctx.commit}`,
+    steps: ctx.handSteps?.length ? ctx.handSteps : ["Apply the approved change by hand on the server that runs Boss Man."],
+    check: ctx.check,
+    rollback: ctx.rollback,
+    ofDecisionId: d.id,
+    raisedByAgentId: d.raisedByAgentId,
+    target: ctx.target,
+    commit: ctx.commit,
+    fromCommit: ctx.fromCommit,
+    update: ctx.update,
+    doAfter: ctx.doAfter,
+    quietFirst,
+  });
+}
+
+/**
+ * BOS-2336: a hand-apply to-do is raised once, when the owner approves, so one held by the card check would be lost.
+ * Each pass looks for the CEO's hold cards of hand-apply to-dos and raises the owner's card again (it is checked again,
+ * and goes out once the steps or the host's facts pass). Returns how many went out.
+ */
+export async function reraiseHeldHandApply(db: Db) {
+  const held = await db.select({ key: decisions.dedupeKey }).from(decisions).where(sql`${decisions.dedupeKey} like ${ownerTodoFixKey(HAND_APPLY_KEY) + "%"}`);
+  let raised = 0;
+  for (const h of held) {
+    const commit = h.key!.slice(ownerTodoFixKey(HAND_APPLY_KEY).length);
+    const [d] = await db.select().from(decisions).where(and(eq(decisions.status, "answered"), eq(decisions.answer, APPROVE_HAND_APPLY), sql`${decisions.context}->>'type' = 'self_deploy' and ${decisions.context}->>'commit' = ${commit}`)).orderBy(desc(decisions.answeredAt)).limit(1);
+    if (!d) continue;
+    const ctx = d.context as SelfDeployCtx;
+    if (await raiseHandApplyTodo(db, d, ctx, ctx.target === "server")) raised++;
+  }
+  return raised;
+}
+
+// lost on restart, harmless because app.ts wires the provider again at every start
+let todoFactsProvider: (() => Promise<OwnerSetupFacts>) | null = null;
+/** BOS-2336: wired in app.ts to the host facts, so every to-do is checked against this server's real values. */
+export function setOwnerTodoFacts(fn: (() => Promise<OwnerSetupFacts>) | null) {
+  todoFactsProvider = fn;
+}
+async function ownerTodoBaseFacts(given: OwnerSetupFacts | undefined): Promise<OwnerSetupFacts> {
+  if (given) return given;
+  // A provider that fails leaves the facts empty, not the card unchecked: the check still runs, and a host token it
+  // can't fill goes to the CEO (R4) rather than to the owner.
+  return (await todoFactsProvider?.().catch(() => null)) ?? {};
+}
+
+/** The dedupe key for the CEO's card about an owner to-do whose steps failed the card check (BOS-2336). */
+export const ownerTodoFixKey = (key: string) => `owner-todo-fix:${key}`;
+
+/**
+ * BOS-2336: the card check (DR-052) on a Boss Man-written to-do: the same fill and lint as a ticket's setup at go-live,
+ * with the options the card will offer, the site-mismatch record and the images. Returns the steps as the owner will
+ * read them, or null after raising the CEO's card with the findings: the owner never sees unchecked steps. Fails
+ * closed: a check that throws holds the card too.
+ */
+export async function vetOwnerTodoSteps(db: Db, t: { companyId: string; key: string; question: string; steps: string[]; options: string[]; facts?: OwnerSetupFacts }): Promise<string[] | null> {
+  if (!t.steps.length) return t.steps;
+  let findings: LintFinding[];
+  let checked: string[] = t.steps;
+  try {
+    const base = await ownerTodoBaseFacts(t.facts);
+    const [company, images, mismatchedSites] = await Promise.all([
+      base.company ?? loadCompanyFacts(db, t.companyId, t.steps),
+      seenImageDates(db, t.companyId, t.steps),
+      screenMismatchSites(db, t.companyId, t.steps, base.serverHost),
+    ]);
+    const check = checkOwnerSetup(t.steps, { ...base, ...(company ? { company } : {}), options: t.options, todo: true, ...(images ? { images } : {}), ...(mismatchedSites ? { mismatchedSites } : {}) }, "raise");
+    findings = [...check.hard, ...check.soft];
+    checked = check.steps;
+  } catch (err) {
+    findings = [{ step: 0, rule: "warn", problem: `couldn't be checked (${err instanceof Error ? err.message : String(err)}), so it was held` }];
+  }
+  if (!findings.length) return checked;
+  await raiseOwnerTodoFix(db, { companyId: t.companyId, key: t.key, question: t.question, findings });
+  return null;
+}
+
+/** BOS-2336: the CEO's card when Boss Man's own owner card is held. A "Got it" notice; the real close is the owner's card going out. */
+async function raiseOwnerTodoFix(db: Db, t: { companyId: string; key: string; question: string; findings: LintFinding[] }) {
+  const at = new Date().toISOString();
+  // A "Got it" card keeps its dedupe key, which would swallow a later hold of the same card. After a day the answered
+  // card lets go of the key, so the CEO is told again if the steps still fail; within the day a sweep doesn't re-ask.
+  await db.update(decisions).set({ dedupeKey: null }).where(and(eq(decisions.dedupeKey, ownerTodoFixKey(t.key)), ne(decisions.status, "open"), lt(decisions.answeredAt, new Date(Date.now() - 24 * 3_600_000))));
+  const [row] = await db
+    .insert(decisions)
+    .values({
+      companyId: t.companyId,
+      kind: "question",
+      question: `A card Boss Man wrote for the owner was held back because its steps failed the owner-card check ("${t.question.slice(0, 160)}", card key ${t.key}):\n${lintLines(t.findings)}\nThe owner has not seen it and has nothing to do. These steps are written in Boss Man's own code, so make a ticket to fix the text (if a site's docs misled the owner, the fix is one screenshot of their screen to write the first step from). Boss Man raises the owner's card again on its next pass and closes this one itself once the steps pass.`,
+      options: ["Got it"],
+      recommendedOption: "Got it",
+      tier: "ceo",
+      dedupeKey: ownerTodoFixKey(t.key),
+      // Kept on the CEO's rung, never climbing to the owner (BOS-1953): the owner can do nothing with it.
+      context: { type: "question", triedFirst: "Boss Man checked the steps of its own owner card against the owner-card rules before raising it, and they failed.", ladder: { rung: "ceo", since: at, minutes: CEO_QUESTION_HANDOVER_MINUTES, about: [] as string[], hops: [{ to: "ceo", at, why: "only the CEO can have Boss Man's own card text fixed" }], topRung: "ceo" } } as DecisionContext,
+    })
+    .onConflictDoNothing()
+    .returning({ id: decisions.id });
+  if (row) await record(db, { companyId: t.companyId, kind: "decision_raised", summary: `An owner card was held: its steps failed the card check: ${t.findings.map((f) => `step ${f.step}: ${f.problem}`).join("; ").slice(0, 400)}`, at: new Date() });
   return row ?? null;
 }
 
@@ -3490,22 +3614,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (ctx.infra && answer === APPROVE_HAND_APPLY) {
           // The change touches deployment files, so Boss Man can't deploy it. Approval doesn't clear it:
           // it leaves an owner to-do with the steps, the check and the rollback (BOS-122).
-          await raiseOwnerTodo(db, {
-            companyId: d.companyId,
-            question: `"${d.question.split("\n\n")[0]}" was approved. It's waiting for you to apply it by hand on the machine that runs Boss Man.`,
-            key: `owner-todo:self-deploy:${ctx.commit}`,
-            steps: ctx.handSteps?.length ? ctx.handSteps : ["Apply the approved change by hand on the server that runs Boss Man."],
-            check: ctx.check,
-            rollback: ctx.rollback,
-            ofDecisionId: id,
-            raisedByAgentId: d.raisedByAgentId,
-            target: ctx.target,
-            commit: ctx.commit,
-            fromCommit: ctx.fromCommit,
-            update: ctx.update,
-            doAfter: ctx.doAfter,
-            quietFirst: ctx.target === "server" && !!deployWait,
-          });
+          // A hold by the card check is retried by reraiseHeldHandApply on each deployer pass.
+          await raiseHandApplyTodo(db, d, ctx, ctx.target === "server" && !!deployWait);
         } else if (answer === DEPLOY || answer === UPDATE_RUNNERS || answer === DEPLOY_AND_RUNNERS) {
           try {
             // A server update waits for a quiet machine (BOS-420); it is sent at once when the machine is quiet already.
