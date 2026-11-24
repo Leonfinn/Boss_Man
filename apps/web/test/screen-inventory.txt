@@ -360,6 +360,7 @@ reads:
   - /api/companies/:id/penpot
   - /api/companies/:id/projects
   - /api/deploys
+  - /api/deploys/summary
 
 ## #/settings/<company>/transfer
 sections: 
