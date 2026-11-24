@@ -17,17 +17,16 @@ afterAll(async () => {
 });
 
 const out = process.env.BOSSMAN_SCRATCH;
-const worker = { id: "w1", name: "Spare machine", enabled: true, connected: false, slots: 2, reportedSlots: 2, limit: 2, checkThreads: null, checkMemoryMb: null, imageCommit: null, toolchain: null, lastSeenAt: null, companies: [], reason: null };
+const LONG = "Basement rack, second shelf from the top, the big grey tower, next to the router";
+const worker = (id: string, name: string, connected: boolean) => ({ id, name, enabled: true, connected, slots: 2, reportedSlots: 2, limit: 2, checkThreads: null, checkMemoryMb: null, imageCommit: null, toolchain: null, lastSeenAt: null, companies: [], reason: null });
 const stat = (machine: string, extra: object = {}) => ({ machine, total: 12, passed: 10, failed: 1, stuck: 1, medianSeconds: 840, longestSeconds: 3000, recent: [], ...extra });
 const api = {
   ...API,
-  "/api/settings/check-queue": { mode: "server", slots: 2, maxSlots: 4, defaultSlots: 2, runnersTooOld: [], workers: [worker] },
-  "/api/settings/check-workers/stats": [stat("runner"), stat("w1", { total: 0, passed: 0, failed: 0, stuck: 0, medianSeconds: null, longestSeconds: null })],
+  // 4 machines: the company runner, one with no checks, one with a long name and a comma, one starting with "=".
+  "/api/settings/check-queue": { mode: "server", slots: 2, maxSlots: 4, defaultSlots: 2, runnersTooOld: [], workers: [worker("w1", "Spare machine", false), worker("w2", LONG + ", rack 2", true), worker("w3", "=Lab box", true)] },
+  "/api/settings/check-workers/stats": [stat("runner"), stat("w1", { total: 0, passed: 0, failed: 0, stuck: 0, medianSeconds: null, longestSeconds: null }), stat("w2", { total: 3, passed: 3, failed: 0, stuck: 0 }), stat("w3", { total: 5, passed: 4, failed: 1, stuck: 0, medianSeconds: 60, longestSeconds: 90 })],
   "/api/settings/check-workers/line": {
-    days: [
-      { date: "2026-11-22", quick: 0, full: 0, merge: 0 },
-      { date: "2026-11-23", quick: 4, full: 1, merge: 2 },
-    ],
+    days: ["17", "18", "19", "20", "21", "22"].map((d) => ({ date: `2026-11-${d}`, quick: 0, full: 0, merge: 0 })).concat([{ date: "2026-11-23", quick: 4, full: 1, merge: 2 }]),
     kinds: [
       { kind: "quick", total: 4, cancelled: 1, medianWaitSeconds: 1200, longestWaitSeconds: 7200, medianRunSeconds: 300 },
       { kind: "full", total: 1, cancelled: 0, medianWaitSeconds: null, longestWaitSeconds: null, medianRunSeconds: null },
@@ -44,7 +43,7 @@ const api = {
 };
 
 const PROFILES = [
-  { name: "phone-380", width: 380, height: 800, touch: true, ratio: 2 },
+  { name: "phone-390", width: 390, height: 800, touch: true, ratio: 2 },
   { name: "brave-1667", width: 1667, height: 724, touch: true, ratio: 1 },
   { name: "safari-1550", width: 1550, height: 1000, touch: false, ratio: 1 },
 ];
@@ -69,6 +68,13 @@ describe.skipIf(!can)("Settings → Check workers: Download CSV (BOS-2519, real 
         for (let i = 0; i < 2; i++) {
           const box = await buttons.nth(i).boundingBox();
           expect(box!.x).toBeGreaterThanOrEqual(0);
+          // The button does not sit over a fold heading or any other button.
+          for (const other of [...(await root.locator("summary").all()), ...(await buttons.all())]) {
+            const o = await other.boundingBox();
+            if (!o || (o.x === box!.x && o.y === box!.y)) continue;
+            const apart = box!.x + box!.width <= o.x || o.x + o.width <= box!.x || box!.y + box!.height <= o.y || o.y + o.height <= box!.y;
+            expect(apart, `button at ${JSON.stringify(box)} overlaps ${JSON.stringify(o)}`).toBe(true);
+          }
           expect(box!.x + box!.width).toBeLessThanOrEqual(p.width);
           if (p.touch && p.width < 641) expect(box!.height).toBeGreaterThanOrEqual(44);
         }
@@ -88,6 +94,11 @@ describe.skipIf(!can)("Settings → Check workers: Download CSV (BOS-2519, real 
         expect(line.name).toMatch(/^check-line-7-days-\d{4}-\d{2}-\d{2}\.csv$/);
         expect(line.body.split("\r\n")).toEqual([
           "date,quick,full,merge,total",
+          "2026-11-17,0,0,0,0",
+          "2026-11-18,0,0,0,0",
+          "2026-11-19,0,0,0,0",
+          "2026-11-20,0,0,0,0",
+          "2026-11-21,0,0,0,0",
           "2026-11-22,0,0,0,0",
           "2026-11-23,4,1,2,7",
           "",
@@ -102,6 +113,8 @@ describe.skipIf(!can)("Settings → Check workers: Download CSV (BOS-2519, real 
           "machine,connected,checks,passed,failed,stuck,median_seconds,longest_seconds",
           "Company runner,yes,12,10,1,1,840,3000",
           "Spare machine,no,0,0,0,0,,",
+          `"${LONG}, rack 2",yes,3,3,0,0,840,3000`,
+          "'=Lab box,yes,5,4,1,0,60,90",
           "",
         ]);
       } finally {

@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CheckLine, CheckWorkers, lineToCsv, machinesToCsvRows, type CheckLineView, type MachineStatsView } from "../src/pages/settings/CheckWorkers";
+import { buildCsv } from "../src/csv";
+import { CheckLine, CheckWorkers, MACHINES_CSV_HEAD, lineToCsv, machinesToCsvRows, type CheckLineView, type MachineStatsView } from "../src/pages/settings/CheckWorkers";
 import { stubFetchByUrl } from "./stub-fetch";
 
 // BOS-2519: "Download CSV" for the machines' 7 days and for the check line's 7 days.
@@ -66,6 +67,28 @@ describe("lineToCsv", () => {
       "full,0,0,,,",
       "",
     ]);
+  });
+});
+
+describe("seven days and three kinds; names with a comma or a leading =", () => {
+  it("gives 7 day rows with totals, then the 3 kind rows in seconds", () => {
+    const days = [0, 1, 2, 3, 4, 5, 6].map((i) => ({ date: `2026-11-${17 + i}`, quick: i, full: 1, merge: 2 }));
+    const kinds: CheckLineView["kinds"] = [
+      { kind: "quick", total: 21, cancelled: 2, medianWaitSeconds: 10, longestWaitSeconds: 99, medianRunSeconds: 300 },
+      { kind: "full", total: 7, cancelled: 0, medianWaitSeconds: 20, longestWaitSeconds: 40, medianRunSeconds: 1800 },
+      { kind: "merge", total: 14, cancelled: 1, medianWaitSeconds: null, longestWaitSeconds: null, medianRunSeconds: 2400 },
+    ];
+    const rows = lineToCsv({ ...line, days, kinds }).split("\r\n");
+    expect(rows).toHaveLength(1 + 7 + 1 + 1 + 3 + 1);
+    expect(rows.slice(1, 8).map((r) => r.split(",")[4])).toEqual(["3", "4", "5", "6", "7", "8", "9"]);
+    expect(rows.slice(10, 13)).toEqual(["quick,21,2,10,99,300", "full,7,0,20,40,1800", "merge,14,1,,,2400"]);
+  });
+
+  it("quotes a name holding a comma and guards one starting with =", () => {
+    const csv = buildCsv(MACHINES_CSV_HEAD, machinesToCsvRows([{ name: "Rack, shelf 2", connected: true, stats: undefined }, { name: "=SUM(A1)", connected: true, stats: undefined }]));
+    const lines = csv.split("\r\n");
+    expect(lines[1]!.startsWith('"Rack, shelf 2",yes')).toBe(true);
+    expect(lines[2]!.startsWith("'=SUM(A1),yes")).toBe(true);
   });
 });
 
