@@ -340,6 +340,8 @@ p { margin: 0; }
 .lane-title .mono { font-size: 12px; color: var(--muted); white-space: nowrap; flex: none; }.lane-title .count-badge { color: var(--side); }
 .lane-empty { margin: 0; font-size: 13px; color: var(--muted); }
 .lane-hint { font-size: 12px; color: var(--muted); }
+.lane-head .lane-oldest { white-space: nowrap; }
+.lane-title h2 { min-width: 0; overflow-wrap: normal; }
 /* BOS-1909: lanes that move by themselves (Being checked, Merged watching) read as parked: a dashed edge, flat cards. */
 .lane.parked { background: transparent; border: 1px dashed var(--line-strong); }
 .lane.parked h2 { color: var(--muted); }
@@ -376,9 +378,12 @@ p { margin: 0; }
 .ticket h3 { font-size: 14px; font-weight: 500; line-height: 1.35; overflow-wrap: anywhere; }
 .ticket .top { display: flex; justify-content: space-between; align-items: center; gap: 6px; flex-wrap: wrap; }
 .ticket .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
-.ticket .row .who { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+/* BOS-2509: the picture keeps its own room (28px + gap + a few letters); the end group shrinks and cuts its text instead of drawing over the picture. */
+.ticket .row .who { display: inline-flex; align-items: center; gap: 6px; min-width: 56px; flex: 0 1 auto; }
 .ticket .row .who-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.ticket .row .end { display: inline-flex; align-items: center; gap: 4px; flex: none; }
+.ticket .row .end { display: inline-flex; align-items: center; gap: 4px; flex: 0 1 auto; min-width: 0; }
+.ticket .row .end .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.ticket .row .end .icon-btn, .ticket .row .end .state-age { flex: none; }
 .ticket .row .icon-btn { margin-left: 0; }
 .ticket .row .icon-btn svg { transition: transform 0.15s; }
 @media (prefers-reduced-motion: reduce) { .ticket .row .icon-btn svg { transition: none; } }

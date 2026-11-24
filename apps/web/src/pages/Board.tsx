@@ -855,10 +855,10 @@ function TicketCard({ waiters, t, mine, merging, who, name, prefix, tiers, numbe
           <span className="who-name">{first}</span>
         </span>
         <span className="end">
-          <span className="mono">{t.dueDate ? `Due ${t.dueDate}` : t.working?.length ? workingFor(t.workingSince) : age(t.lastActivityAt)}</span>
           {(() => {
             const sa = stateAge(t);
-            return sa ? <span className={`mono state-age${sa.old ? " old" : ""}`} title={sa.old ? `${sa.label}: more than 3 days in this state` : `Time in this state: ${sa.label}`} style={sa.old ? { color: "var(--amber-ink)" } : undefined}>{sa.label}</span> : null;
+            // The time in state already says how long; the last-activity age beside it would show the age twice.
+            return <>{(!sa || t.dueDate || t.working?.length) && <span className="mono">{t.dueDate ? `Due ${t.dueDate}` : t.working?.length ? workingFor(t.workingSince) : age(t.lastActivityAt)}</span>}{sa ? <span className={`mono state-age${sa.old ? " old" : ""}`} title={sa.old ? `${sa.label}: more than 3 days in this state` : `Time in this state: ${sa.label}`} style={sa.old ? { color: "var(--amber-ink)" } : undefined}>{sa.text}</span> : null}</>;
           })()}
           {(titleCut || noteCut || waitsCut || open) && (
             <button type="button" className="icon-btn expand" aria-expanded={open} aria-controls={bodyId} aria-label={`${open ? "Show less of" : "Show all of"} ${ticketRefText}`} onClick={() => setOpen(!open)}>
@@ -1464,11 +1464,11 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                       <span className="mono" style={full ? { color: "var(--amber-ink)" } : undefined}>
                         {col.wipLimit != null ? `${counted} / ${col.wipLimit}` : done && !words.length && shown.length === tickets.length && board.data?.doneTotal != null ? board.data.doneTotal : shown.length}
                       </span>
-                      {oldestAge(shown) && <span className="mono" title="The longest any card here has sat in its state">{oldestAge(shown)}</span>}
                       <button type="button" className="icon-btn" aria-label={`Rename the ${label(col)} column`} title="Rename this column. Agents always see the fixed state." onClick={() => setRenaming(col.id)}>
                         <svg width="15" height="15" {...iconProps}>{PENCIL}</svg>
                       </button>
                     </div>
+                    {oldestAge(shown) && <span className="lane-hint mono lane-oldest" title="The longest any card here has sat in its state">{oldestAge(shown)}</span>}
                     {col.name !== DEFAULT_LABEL[col.systemState] && (
                       <span className="lane-hint">
                         Agents see: <span className="mono">{col.systemState}</span>
