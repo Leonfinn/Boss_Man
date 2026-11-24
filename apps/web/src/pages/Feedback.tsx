@@ -683,7 +683,7 @@ export function Feedback({ companies, companyId, noteId, go }: { companies: Comp
               </div>
               {typeof summary.data?.waiting === "number" && (
                 <p className="muted" data-testid="feedback-summary">
-                  {summary.data.waiting} waiting to be triaged
+                  {summary.data.waiting === 0 ? "Nothing waiting" : `${summary.data.waiting} waiting to be triaged`}
                   {summary.data.oldest && (
                     <>
                       {" · oldest waiting "}
