@@ -200,6 +200,8 @@ export const OWNER_CONTROLS = {
     "Add a check worker", "Add", "Done", "Change", "Turn on", "Remove", "Cancel",
     // BOS-1550: copy the ready-filled compose file shown after adding.
     "Copy compose file",
+    // Check workers (BOS-2519): the machines' 7 days and the check line's 7 days, each saved as a CSV.
+    "Download CSV",
   ],
   // Tool servers and deploy targets (a funding source is added on Funding, not here).
   "Tools and deploys": [
