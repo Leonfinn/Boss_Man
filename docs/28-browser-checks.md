@@ -35,6 +35,15 @@ Pick a `--wait` selector that only the finished screen has (a section id, not `h
 
 Why hand-run Chromium failed on the runner (BOS-1053): (1) the run's temp path is long and Chromium's socket path limit is 107 characters ("Socket path too long", the crash on its temp folder); the script points `TMPDIR` at a short link. (2) `/dev/shm` on the runner is 64 MB and can be nearly full, so pointing Chromium at it, or letting it use it for renderer memory, gives a blank page; the script passes `--disable-dev-shm-usage` and never writes there except the link.
 
+## Required before review: a screen change (BOS-2511)
+
+A branch that changes `apps/web/src/styles.css`, or the JSX of a file under `apps/web/src/pages/` or `apps/web/src/components/` (a tag, `className=` or `style=` in a changed line), can't move to review until it has both of these:
+
+1. **A render test in the diff:** an `apps/web/test/<name>-render.test.tsx` (or `.ts`) whose added lines measure geometry (`getBoundingClientRect`, `boundingBox`, `scrollWidth`/`clientWidth`, `offsetWidth`/`offsetHeight`). Copy `apps/web/test/merge-queue-held-render.test.tsx` (BOS-1078): the real component and the real `styles.css` in a headless browser, at the widths the `devices` tool gives plus a 390 px phone, with the new state (an age, a long name, many items). Assert that boxes don't overlap, that a line stays one line tall and that nothing runs off its container. A test that only checks that classes exist doesn't count.
+2. **Before and after screenshots attached to the ticket** (`attach_image`), one captioned "before" (on `origin/main`) and one "after" (on your branch), taken with `scripts/screenshot.mjs` and seeded `--api` data at the same widths. HTML mock-ups don't count.
+
+If the change truly doesn't alter the layout (a handler, a label's wording), move to review with `noVisualChange: "<why>"`. The reason is kept in the state note, and the reviewer must agree with it. The reviewer opens the screenshots and says in the verdict what they checked and at which widths. "Didn't open the screenshots" means request changes. If the runner can't give the branch's diff, the move goes ahead and its reply says the check was skipped. The check lives in `apps/server/src/services/render-check-gate.ts`.
+
 ## Claims about a video or image
 
 Any claim about a video in owner-facing text (a README line, a ticket reply, a release note) quotes the output of `node scripts/media-facts.mjs FILE`: duration, size, resolution, frame rate, and `audio: yes` or `audio: no (silent)` with the track list. Never copy such a claim from another reply: the README once said "with sound" about a video that had no audio track (BOS-1569). The script reads MP4/WebM files in plain Node and uses `ffprobe` when it is installed, so it works on the runner. For an image, quote the pixel size from a measured source (the screenshot script's output, or `file`), not from memory.
