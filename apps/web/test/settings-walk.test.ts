@@ -9,6 +9,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DEFAULT_WATCHDOG } from "@boss-man/shared";
+import { urlStub } from "./stub-fetch";
 
 const DIST = path.join(path.resolve(fileURLToPath(new URL("..", import.meta.url))), "dist");
 const built = existsSync(path.join(DIST, "index.html"));
@@ -17,40 +18,75 @@ const company = { id: "c1", name: "Boss Man Co", mission: null, paused: false, t
 
 const fundingSource = { id: "f1", name: "Claude Max", kind: "subscription", provider: "anthropic", monthlyGrantMicros: null, cycleAnchor: null };
 
-function answer(p: string): unknown {
-  if (p === "/api/setup") return { needsSetup: false };
-  if (p === "/api/me") return { username: "owner" };
-  if (p === "/api/setup-progress") return { dismissed: true };
-  if (p === "/api/companies") return [company];
-  if (p === "/api/notifications") return { items: [], unread: 0 };
-  if (p === "/api/notifications/unseen") return { count: 0 };
-  if (p === "/api/funding-sources") return [fundingSource];
-  if (p === "/api/funding-sources/f1/status") return { source: fundingSource, credit: null, quota: [{ window: "five_hour", utilization: 0.42, resetsAt: null, status: null }], windowsSeen: ["five_hour"], forecasts: {}, daily: [], totalSpentMicros: 0, coverage: "all" };
-  if (p === "/api/budgets") return [{ policy: { id: "b1", scopeKind: "instance", scopeId: "x", windowKind: "calendar_month", limitMicros: 5_000_000, onLimit: "pause" }, status: { usedMicros: 1_000_000, limitMicros: 5_000_000, fractionUsed: 0.2, state: "ok" } }];
-  if (["/api/runs", "/api/decisions", "/api/decisions/advised", "/api/decisions/with-team", "/api/decisions/closed-notices", "/api/devices"].includes(p)) return [];
-  if (p === "/api/health") return { role: "leader", version: "1.2.0", commit: "aaaaaaaaaaaa", colour: null, startedAt: now() };
-  if (p === "/api/bluegreen") return { enabled: false };
-  if (p === "/api/kill-switch") return { paused: false };
-  if (p === "/api/maintenance") return { on: false, last: null };
-  if (p === "/api/runner-report") return { live: [], update: null };
-  if (p === "/api/self-deploy") return { enabled: true, status: null, available: null };
-  if (p === "/api/run-limits") return { instance: 8, company: 4, background: 2, defaults: { instance: 8, company: 4, background: 2 } };
-  if (p === "/api/settings/check-queue") return { mode: "legacy", slots: 1, maxSlots: 4, defaultSlots: 1, runnersTooOld: [] };
-  if (p === "/api/private-details") return { total: 0, counts: {} };
+const lvl = { planApprover: "ceo", reviewer: "ceo", ownerSignoff: false };
+const opinionWindow = { answered: 0, allowed: 0, denied: 0, fellBack: 0, pending: 0, reasons: [], bothVerdicts: 0, agreed: 0, agreement: null, perDay: [] };
+const unset = { set: false, hint: null, secretName: null };
+// Every request the walked pages make, by path (BOS-2451). There is no "anything else" answer: a page that gains a
+// request fails here with "no stub for GET /api/…" instead of reading a wrong shape and erroring only on GitHub.
+const api = urlStub({
+  "/api/setup": { needsSetup: false },
+  "/api/me": { username: "owner" },
+  "/api/setup-progress": { dismissed: true },
+  "/api/companies": [company],
+  "/api/notifications": { items: [], unread: 0 },
+  "/api/notifications/unseen": { count: 0 },
+  "/api/funding-sources": [fundingSource],
+  "/api/funding-sources/f1/status": { source: fundingSource, credit: null, quota: [{ window: "five_hour", utilization: 0.42, resetsAt: null, status: null }], windowsSeen: ["five_hour"], forecasts: {}, daily: [], totalSpentMicros: 0, coverage: "all" },
+  "/api/budgets": [{ policy: { id: "b1", scopeKind: "instance", scopeId: "x", windowKind: "calendar_month", limitMicros: 5_000_000, onLimit: "pause" }, status: { usedMicros: 1_000_000, limitMicros: 5_000_000, fractionUsed: 0.2, state: "ok" } }],
+  "/api/runs": [],
+  "/api/decisions": [],
+  "/api/decisions/advised": [],
+  "/api/decisions/with-team": [],
+  "/api/decisions/closed-notices": [],
+  "/api/devices": [],
+  "/api/health": () => ({ role: "leader", version: "1.2.0", commit: "aaaaaaaaaaaa", colour: null, startedAt: now() }),
+  "/api/bluegreen": { enabled: false },
+  "/api/kill-switch": { paused: false },
+  "/api/maintenance": { on: false, last: null },
+  "/api/runner-report": { live: [], update: null },
+  "/api/self-deploy": { enabled: true, status: null, available: null },
+  "/api/run-limits": { instance: 8, company: 4, background: 2, defaults: { instance: 8, company: 4, background: 2 } },
+  "/api/settings/check-queue": { mode: "legacy", slots: 1, maxSlots: 4, defaultSlots: 1, runnersTooOld: [] },
+  "/api/private-details": { total: 0, counts: {} },
   // The Network guard section only shows once a runner has reported (the panel hides itself with no report), so the walk gives it one.
-  if (p === "/api/netguard-allow") return { report: { mode: "on", entries: [], lineCanGo: false, automatic: [], env: { lines: [], reportedAt: now(), envFound: true }, warnings: [] } };
-  if (p === "/api/host-facts") return { hostName: "host", reportedAt: now(), ownerFacts: [], facts: {} };
-  if (p === "/api/companies/c1/projects") return [{ id: "p1", companyId: "c1", name: "Boss Man", starred: false }];
-  if (p === "/api/policy-rules") return { company: [], global: [], defaults: [], shadowedIds: [] };
-  if (p === "/api/companies/c1/watchdog") return { settings: DEFAULT_WATCHDOG, scrumMaster: null, lastSweepAt: null, trippedAt: null, trippedReason: null, openFlags: 0 };
-  if (p.startsWith("/api/projects/")) return { monthMicros: 0, totalMicros: 0, ticketCostCapMicros: null, monthlyCapMicros: null, monthStart: now(), topTickets: [] };
-  if (p === "/api/companies/c1/review-policy") {
-    const lvl = { planApprover: "ceo", reviewer: "ceo", ownerSignoff: false };
-    return { trivial: lvl, low: lvl, medium: lvl, high: { ...lvl, ownerSignoff: true }, critical: { ...lvl, ownerSignoff: true } };
-  }
-  // Anything else: an empty list, which survives both `.find(...)` and `.field` reads where `{}` would not.
-  return [];
-}
+  "/api/netguard-allow": () => ({ report: { mode: "on", entries: [], lineCanGo: false, automatic: [], env: { lines: [], reportedAt: now(), envFound: true }, warnings: [] } }),
+  "/api/host-facts": () => ({ hostName: "host", reportedAt: now(), ownerFacts: [], facts: {} }),
+  "/api/companies/c1/projects": [{ id: "p1", companyId: "c1", name: "Boss Man", starred: false }],
+  "/api/policy-rules": { company: [], global: [], defaults: [], shadowedIds: [] },
+  "/api/companies/c1/watchdog": { settings: DEFAULT_WATCHDOG, scrumMaster: null, lastSweepAt: null, trippedAt: null, trippedReason: null, openFlags: 0 },
+  "/api/projects/*": () => ({ monthMicros: 0, totalMicros: 0, ticketCostCapMicros: null, monthlyCapMicros: null, monthStart: now(), topTickets: [] }),
+  "/api/companies/c1/review-policy": { trivial: lvl, low: lvl, medium: lvl, high: { ...lvl, ownerSignoff: true }, critical: { ...lvl, ownerSignoff: true } },
+  // The app shell's own polls, on every page.
+  "/api/feedback/unprocessed": {},
+  "/api/companies/c1/merge-queue": { waitingCount: 0, lineCount: 0, stuckCount: 0 },
+  "/api/decisions/tally": { open: 0, waiting: 0 },
+  // Team.
+  "/api/companies/c1/standing-rules": { text: "", by: null, at: null, max: 4000 },
+  "/api/companies/c1/chapters": [],
+  "/api/companies/c1/agent-approvals": { approvals: "hires" },
+  "/api/companies/c1/retro-settings": { agentId: null, runner: null, last: null, doneSince: 0, history: [] },
+  // Permissions.
+  "/api/policy-rules/usage": { rules: {} },
+  "/api/policy-rules/most-asked": { cards: [] },
+  "/api/companies/c1/second-opinion": { enabled: false, baseUrl: "", model: "", secretId: null },
+  "/api/companies/c1/second-opinion/stats": { last24h: opinionWindow, last7d: opinionWindow, last30d: opinionWindow },
+  "/api/companies/c1/runner": { registered: false },
+  // Funding, Tools, Updates, Limits, Email, This host, Server.
+  "/api/secrets": [],
+  "/api/companies/c1/mcp-servers": [],
+  "/api/companies/c1/deploy-targets": [],
+  "/api/companies/c1/penpot": { configured: false, url: null, urlHint: null, guardAddress: null, guardTrustsPrivate: false, token: unset, email: unset, password: unset, agentIds: [], exportAgentIds: [] },
+  "/api/self-deploy/wait": { on: false },
+  "/api/self-deploy/history": [],
+  "/api/wip-limits": { agent: null, company: null, defaultAgent: 2 },
+  "/api/settings/check-workers/stats": [],
+  "/api/settings/wait-for-ci": { on: false },
+  "/api/settings/merge-carry": { on: false, turnMinutes: 30 },
+  "/api/settings/main-ci": { on: false, projects: [] },
+  "/api/settings/email": { settings: null, configured: false },
+  "/api/daily-backup": { lastAt: null, failed: null, stale: false },
+  "/api/data-health": { disk: null, database: { bytes: null, dayAgoBytes: null, weekAgoBytes: null, growthPercent7d: null }, limits: { statementTimeouts: 0, poolFull: 0 }, slowQueries: [], warnings: [] },
+});
 
 let server: Server | undefined;
 let base = "";
@@ -59,8 +95,9 @@ beforeAll(async () => {
   server = createServer((req, res) => {
     const p = new URL(req.url ?? "/", "http://x").pathname;
     if (p.startsWith("/api/")) {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(answer(p)));
+      const a = api.answer(req.url ?? "/", { method: req.method });
+      res.writeHead(a.found ? 200 : 404, { "content-type": "application/json" });
+      res.end(JSON.stringify(a.found ? a.body : { error: `no stub for ${req.method} ${p}` }));
       return;
     }
     const file = path.join(DIST, p === "/" ? "index.html" : p);
@@ -213,6 +250,7 @@ describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page"
           // No page sideways-scrolls (a phone with a wide table would).
           const over = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
           if (over > 1) wide.push(`${vp.name}/${id} +${over}px`);
+          expect(api.takeMisses(), `${vp.name}/${id}: requests with no stub`).toEqual([]);
         }
         expect(wide, "pages that scroll sideways").toEqual([]);
         expect(JSON.stringify(errors), `${vp.name} page errors`).toBe("[]");

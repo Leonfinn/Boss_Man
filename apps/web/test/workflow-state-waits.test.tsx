@@ -4,6 +4,7 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
 import { Workflow } from "../src/pages/Workflow";
+import { stubFetchByUrl } from "./stub-fetch";
 
 afterEach(() => {
   cleanup();
@@ -17,10 +18,7 @@ const base = { days: 14, costBasis: "estimate", byRole: [], byAgent: [], handoff
 function show(stateWaits: object) {
   // The page's "Latest retro" block fetches /retros/latest too; answer it with its own shape,
   // or its data.changes.length throws after the test on a slow machine (GitHub, BOS-2425).
-  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
-    const body = String(url).includes("/retros/latest") ? { retro: null, changes: [] } : { ...base, stateWaits };
-    return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
-  }));
+  stubFetchByUrl({ "/api/companies/c1/retros/latest": { retro: null, changes: [] }, "/api/companies/c1/workflow": { ...base, stateWaits } });
   render(<Workflow company={{ id: "c1", name: "Acme" } as Company} />);
 }
 

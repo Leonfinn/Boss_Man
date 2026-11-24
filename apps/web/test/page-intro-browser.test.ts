@@ -10,6 +10,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { urlStub } from "./stub-fetch";
 
 const DIST = path.join(path.resolve(fileURLToPath(new URL("..", import.meta.url))), "dist");
 const built = existsSync(path.join(DIST, "index.html"));
@@ -24,40 +25,64 @@ const feature = {
   demandPart: 1.5, priority: 6.8, tickets: { total: 0, done: 0, items: [] }, portal: { onPortal: true, reason: null },
 };
 
-function answer(p: string): unknown {
-  if (p === "/api/setup") return { needsSetup: false };
-  if (p === "/api/me") return { username: "owner" };
-  if (p === "/api/setup-progress") return { dismissed: true };
-  if (p === "/api/companies") return [company];
-  if (p === "/api/notifications") return { items: [], unread: 0 };
-  if (["/api/runs", "/api/decisions", "/api/decisions/advised", "/api/decisions/with-team", "/api/decisions/closed-notices", "/api/devices", "/api/funding-sources", "/api/phone-pushes"].includes(p)) return [];
-  if (p === "/api/agent-templates") return { templates: [] };
-  if (p === "/api/health") return { role: "leader", version: "1.2.0", commit: "aaaaaaaaaaaa", colour: null, startedAt: now() };
-  if (p === "/api/bluegreen" || p === "/api/self-deploy") return { enabled: false };
-  if (p === "/api/kill-switch") return { paused: false };
-  if (p === "/api/maintenance") return { on: false, last: null };
-  if (p === "/api/runner-report") return { live: [], update: null };
-  if (p === "/api/companies/c1/agents") return [agent];
-  if (p === "/api/companies/c1/projects") return [];
+const lvl = { planApprover: "ceo", reviewer: "ceo", ownerSignoff: false };
+// Every request the four places make, by path (BOS-2451). There is no "anything else" answer: a page that gains a
+// request (BOS-2420's /api/notifications/week) fails here with "no stub for GET /api/…", not only on GitHub.
+const api = urlStub({
+  "/api/setup": { needsSetup: false },
+  "/api/me": { username: "owner" },
+  "/api/setup-progress": { dismissed: true },
+  "/api/companies": [company],
+  "/api/notifications": { items: [], unread: 0 },
+  "/api/runs": [],
+  "/api/decisions": [],
+  "/api/decisions/advised": [],
+  "/api/decisions/with-team": [],
+  "/api/decisions/closed-notices": [],
+  "/api/devices": [],
+  "/api/funding-sources": [],
+  "/api/phone-pushes": [],
+  "/api/agent-templates": { templates: [] },
+  "/api/health": () => ({ role: "leader", version: "1.2.0", commit: "aaaaaaaaaaaa", colour: null, startedAt: now() }),
+  "/api/bluegreen": { enabled: false },
+  "/api/kill-switch": { paused: false },
+  "/api/maintenance": { on: false, last: null },
+  "/api/runner-report": { live: [], update: null },
+  "/api/companies/c1/agents": [agent],
+  "/api/companies/c1/projects": [],
   // Settings → Team and CEO lists the chapters (an array) beside the approvals setting.
-  if (p === "/api/companies/c1/chapters") return [];
-  if (p === "/api/companies/c1/models") return { runner: {}, api: [] };
-  if (p === "/api/companies/c1/review-policy") return { levels: {} };
-  if (p === "/api/notifications/settings") return { quiet: false, start: "22:00", end: "07:00", phoneAddress: null };
-  if (p === "/api/notifications/week") return { timeZone: "UTC", days: [], totals: { notices: 0, pushed: 0, quiet: 0, cap: 0, failed: 0 }, topAgents: [], lastFailure: null };
-  if (p === "/api/companies/c1/features") return { settings: { demandWeight: 1, ceoTriage: false }, drivers: [], maxDemand: 0, features: [feature] };
-  if (p === "/api/companies/c1/feedback-settings") return { demandWeight: 1, ceoTriage: false, portalEnabled: true, portalToken: null, portalTitle: null, portalIntro: null, hasLogo: false, drivers: [], areas: [] };
-  // Settings → Server and runner shows every panel on one page; each one needs a shape it can read.
-  if (p === "/api/companies/c1/runner") return { registered: false };
-  if (p === "/api/self-deploy") return { enabled: false, pending: false, status: null, available: null };
-  if (p === "/api/run-limits") return { instance: 3, company: 2, background: 1, defaults: { instance: 3, company: 2, background: 1 } };
-  if (p === "/api/wip-limits") return { agent: null, company: null, defaultAgent: 2 };
-  if (p === "/api/settings/check-queue") return { mode: "legacy", slots: 1, maxSlots: 3, defaultSlots: 1, runnersTooOld: [] };
-  if (p === "/api/host-facts") return { hostName: null, reportedAt: null, ownerFacts: [], facts: {} };
-  if (p === "/api/netguard-allow") return { report: { mode: null, entries: [], lineCanGo: false, automatic: [], env: null, warnings: [] } };
-  if (p.startsWith("/api/decisions/tally")) return { open: 0, waiting: 0 };
-  return {};
-}
+  "/api/companies/c1/chapters": [],
+  "/api/companies/c1/models": { runner: {}, api: [] },
+  "/api/companies/c1/review-policy": { trivial: lvl, low: lvl, medium: lvl, high: lvl, critical: lvl },
+  "/api/notifications/settings": { quiet: false, start: "22:00", end: "07:00", phoneAddress: null },
+  "/api/notifications/week": { timeZone: "UTC", days: [], totals: { notices: 0, pushed: 0, quiet: 0, cap: 0, failed: 0 }, topAgents: [], lastFailure: null },
+  "/api/companies/c1/features": { settings: { demandWeight: 1, ceoTriage: false }, drivers: [], maxDemand: 0, features: [feature] },
+  "/api/companies/c1/feedback-settings": { demandWeight: 1, ceoTriage: false, portalEnabled: true, portalToken: null, portalTitle: null, portalIntro: null, hasLogo: false, drivers: [], areas: [] },
+  // Settings → Server and runner: each panel needs a shape it can read.
+  "/api/companies/c1/runner": { registered: false },
+  "/api/self-deploy": { enabled: false, pending: false, status: null, available: null },
+  "/api/run-limits": { instance: 3, company: 2, background: 1, defaults: { instance: 3, company: 2, background: 1 } },
+  "/api/wip-limits": { agent: null, company: null, defaultAgent: 2 },
+  "/api/settings/check-queue": { mode: "legacy", slots: 1, maxSlots: 3, defaultSlots: 1, runnersTooOld: [] },
+  "/api/host-facts": { hostName: null, reportedAt: null, ownerFacts: [], facts: {} },
+  "/api/netguard-allow": { report: { mode: null, entries: [], lineCanGo: false, automatic: [], env: null, warnings: [] } },
+  "/api/decisions/tally": { open: 0, waiting: 0 },
+  "/api/self-deploy/wait": { on: false },
+  "/api/self-deploy/history": [],
+  "/api/data-health": { disk: null, database: { bytes: null, dayAgoBytes: null, weekAgoBytes: null, growthPercent7d: null }, limits: { statementTimeouts: 0, poolFull: 0 }, slowQueries: [], warnings: [] },
+  // The app shell's own polls, on every page.
+  "/api/feedback/unprocessed": {},
+  "/api/companies/c1/merge-queue": { waitingCount: 0, lineCount: 0, stuckCount: 0 },
+  // Team.
+  "/api/companies/c1/standing-rules": { text: "", by: null, at: null, max: 4000 },
+  "/api/companies/c1/agent-approvals": { approvals: "hires" },
+  "/api/companies/c1/retro-settings": { agentId: null, runner: null, last: null, doneSince: 0, history: [] },
+  // Notifications.
+  "/api/notification-settings": { quietHours: null, agentHourlyCap: 10, ntfy: null, publicUrl: null },
+  "/api/notifications/pushes": { items: [] },
+  "/api/alert-destinations": { destinations: [] },
+  "/api/companies/c1/weekly-summary": { enabled: false, to: null, lastSentAt: null, configured: false },
+});
 
 let server: Server | undefined;
 let base = "";
@@ -67,8 +92,9 @@ beforeAll(async () => {
   server = createServer((req, res) => {
     const p = new URL(req.url ?? "/", "http://x").pathname;
     if (p.startsWith("/api/")) {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(answer(p)));
+      const a = api.answer(req.url ?? "/", { method: req.method });
+      res.writeHead(a.found ? 200 : 404, { "content-type": "application/json" });
+      res.end(JSON.stringify(a.found ? a.body : { error: `no stub for ${req.method} ${p}` }));
       return;
     }
     const file = path.join(DIST, p === "/" ? "index.html" : p);
@@ -173,6 +199,7 @@ describe.skipIf(!built)("BOS-1278 page intros in a real browser", () => {
             await saveShot(`bos-1278-failed-${place.name}-${s.name}.png`, page);
             throw new Error(`${e.message}\nPage text: ${(await page.evaluate(() => document.body.innerText)).slice(0, 400)}`);
           });
+          expect(api.takeMisses(), `${place.name}: requests with no stub`).toEqual([]);
           const body = await page.evaluate(() => document.body.innerText);
           expect(body, `${place.name}: the lead is on the page`).toContain(place.lead);
           expect(body, `${place.name}: the fold is closed at first`).not.toContain(place.held);
