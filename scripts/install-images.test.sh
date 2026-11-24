@@ -60,6 +60,38 @@ echo "$cfg" | jq -e '(.services.proxy.ports | length) == 2 and (.services["serve
 if grep -v '^[[:space:]]*#' docker-compose.images.yml | grep -Eq '\b(openssl|sudo|chown|stat -c)\b'; then bad "compose file uses host tools"; else ok "no host openssl, chown, stat or sudo"; fi
 [ -f docs/35-install-from-images.md ] && ok "the install guide exists" || bad "docs/35-install-from-images.md is missing"
 
+# BOS-2388: the real install half below only runs with a Docker daemon and INSTALL_RELEASE_JSON, so a workflow that builds its
+# test release.json by hand can drift from what the install needs and only GitHub notices. Check the contract here, with no daemon:
+#  1. every image scripts/render-image-env.sh requires is in the list the .github/workflows/ci.yml install step puts in release.json;
+#  2. a release.json built from that list renders through scripts/render-image-env.sh, in the environment test-shell.sh gives the
+#     real half (no GITHUB_REPOSITORY), and docker-compose.images.yml accepts the result (a required variable left unset fails here).
+# The images the workflow lists are read from its "for pair in name:boss-man-name:tag ..." loop; the ones the script requires from
+# its "for image in ...; do" loop. Decision (BOS-2388): publish.yml and release.yml are not checked this way. Their image list is
+# the owner's PUBLISH_IMAGES variable (default in scripts/publish-images.sh is smaller than the install needs, on purpose), which a
+# static check cannot read; render-image-env.sh already refuses such a release by name and says to add the image to PUBLISH_IMAGES.
+# Either one not found is a failure, not a pass: the check must not go quiet when a file is reshaped.
+need="$(sed -n 's/^for image in \(.*\); do$/\1/p' scripts/render-image-env.sh | tr ' ' '\n' | grep -E '^[a-z]+$' | sort -u)"
+have="$(grep -E 'for pair in .*boss-man-' .github/workflows/ci.yml | tr ' ' '\n' | grep -oE '^[a-z]+:boss-man-[a-z]+:' | cut -d: -f1 | sort -u)"
+if [ -z "$need" ] || [ -z "$have" ]; then
+  bad "could not read the image lists (scripts/render-image-env.sh 'for image in ...; do' gave '${need//$'\n'/ }', .github/workflows/ci.yml 'for pair in ...' gave '${have//$'\n'/ }')"
+else
+  missing="$(comm -23 <(echo "$need") <(echo "$have") | sed 's/^/boss-man-/' | tr '\n' ' ')"
+  [ -z "$missing" ] && ok "the CI install step's release.json lists every image render-image-env.sh requires" \
+    || bad "the CI install step (.github/workflows/ci.yml) builds release.json without: ${missing% } (scripts/render-image-env.sh requires them)"
+  imgs=""
+  for n in $have; do imgs="$imgs${imgs:+,}{\"name\":\"boss-man-$n\",\"digest\":\"$D\"}"; done
+  echo "{\"schema\":1,\"version\":\"ci\",\"registries\":[\"registry.invalid/ci\"],\"images\":[$imgs]}" > "$T/ci-release.json"
+  if env -u GITHUB_REPOSITORY -u GITHUB_REPOSITORY_OWNER scripts/render-image-env.sh "$T/ci-release.json" > "$T/ci-images.env" 2> "$T/ci-render.err"; then
+    if env -u GITHUB_REPOSITORY -u GITHUB_REPOSITORY_OWNER docker compose --env-file "$T/ci-images.env" --profile '*' -f docker-compose.images.yml config -q 2> "$T/ci-compose.err"; then
+      ok "a release.json built like the CI install step renders and docker-compose.images.yml accepts it"
+    else
+      bad "docker-compose.images.yml refuses the images.env rendered from the CI install step's release.json: $(tr '\n' ' ' < "$T/ci-compose.err")"
+    fi
+  else
+    bad "scripts/render-image-env.sh refuses a release.json built like the CI install step: $(tr '\n' ' ' < "$T/ci-render.err")"
+  fi
+fi
+
 # ---- The real install ----
 if [ -z "${INSTALL_RELEASE_JSON:-}" ]; then
   echo "skip: real install (set INSTALL_RELEASE_JSON to run it)"
