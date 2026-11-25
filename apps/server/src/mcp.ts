@@ -40,6 +40,7 @@ import { clearsWhenToConditions, type ClearWhen } from "./services/alert-clearin
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { PAGE_DEFAULT } from "./services/list-page.js";
 import { DeployError, liveTagOf, type deploysService } from "./services/deploys.js";
+import { linkHold, releaseHold } from "./services/owner-holds.js";
 import { RunError, runOriginQuery, type runsService } from "./services/runs.js";
 import { holdView } from "./services/review-holds.js";
 import { cardIdInput, resolveCardId, resolveReplacedBy } from "./services/card-id.js";
@@ -772,16 +773,18 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     "deploy",
     {
       description:
-        "Ship work to one of your company's deploy targets. action: targets (list them, each with its deploy tag if it has one and its last successful deploy: commit, time and tag result, so you can say what is live), request (target, ref, optional notes and ticketId; Boss Man records the commit the ref names and the approval names it; production targets wait for the owner, and you're woken in a run that holds the target's secrets once approved), report (deployId and outcome, from that run, when the deploy is done), history (target by name or id, optional limit, default 10, at most 50: that target's recent deploys newest first, failed and refused ones too, one line each with deploy id, requested time, ref and commit, who asked, ticket and status; use it to answer why a deploy didn't go out, or what was live before). Deploy scripts must not push git tags themselves (agents have no git login): when a target has a deploy tag, Boss Man moves it to the deployed commit after you report success. A target called staging (listed only when the host's staging lane is on) is different: request it with a ref that names a merged commit (main or a sha on main) and no approval is needed; the host deploys it, runs its smoke checks and you're woken with the result, and you do not report it. server_status shows staging's commit, runner image and each check. Staging has an empty database and no real integrations, so check there only what needs the code alone; anything needing real accounts, production data, the edge or timing is checked live.",
+        "Ship work to one of your company's deploy targets. action: targets (list them, each with its deploy tag if it has one and its last successful deploy: commit, time and tag result, so you can say what is live), request (target, ref, optional notes and ticketId; Boss Man records the commit the ref names and the approval names it; production targets wait for the owner, and you're woken in a run that holds the target's secrets once approved), report (deployId and outcome, from that run, when the deploy is done), history (target by name or id, optional limit, default 10, at most 50: that target's recent deploys newest first, failed and refused ones too, one line each with deploy id, requested time, ref and commit, who asked, ticket and status; use it to answer why a deploy didn't go out, or what was live before). Deploy scripts must not push git tags themselves (agents have no git login): when a target has a deploy tag, Boss Man moves it to the deployed commit after you report success. A target called staging (listed only when the host's staging lane is on) is different: request it with a ref that names a merged commit (main or a sha on main) and no approval is needed; the host deploys it, runs its smoke checks and you're woken with the result, and you do not report it. server_status shows staging's commit, runner image and each check. Staging has an empty database and no real integrations, so check there only what needs the code alone; anything needing real accounts, production data, the edge or timing is checked live. release_hold (Boss Man's own company only; the CEO, or the assignee of the ticket the CEO linked with link_hold; outcome retry_safe or do_not_retry, ownerText, optional subject server_deploy or runner_update when both are held): after a Boss Man server or runner update fails, half-finishes or is switched back, the next card for it is held off the owner's queue while the failure is diagnosed (the CEO is woken about it). link_hold (CEO only; ticketId, optional subject) names the ticket diagnosing it, so its assignee may release it. Call release_hold once you know what to do: retry_safe offers the same version again, do_not_retry only a newer one. ownerText (plain words: what was wrong and why the next step is safe) goes on the owner's card, which then recommends going ahead. Unreleased within 2 hours, the card goes to the owner saying the cause is unknown, with Not now recommended; you can still release it after that.",
       inputSchema: {
-        action: z.enum(["targets", "request", "report", "history"]),
+        action: z.enum(["targets", "request", "report", "history", "release_hold", "link_hold"]),
         target: z.string().optional(),
         limit: z.number().int().min(1).max(50).optional(),
         ref: z.string().min(1).max(200).optional(),
         notes: z.string().max(2000).optional(),
         ticketId: z.string().uuid().optional(),
         deployId: z.string().uuid().optional(),
-        outcome: z.enum(["succeeded", "failed"]).optional(),
+        outcome: z.enum(["succeeded", "failed", "retry_safe", "do_not_retry"]).optional(),
+        subject: z.enum(["server_deploy", "runner_update"]).optional(),
+        ownerText: z.string().max(500).optional(),
       },
     },
     async (input) => {
@@ -822,12 +825,31 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
               .join("\n"),
           );
         }
+        if (input.action === "release_hold" || input.action === "link_hold") {
+          // BOS-2554 (DR-076 A): the self-deploy cards belong to Boss Man's home company (the oldest), as in self-deploy.ts.
+          // The CEO links the hold to the diagnosing ticket; the CEO or that ticket's assignee releases it (owner-holds.ts).
+          const [home] = await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1);
+          if (home?.id !== scope.companyId) return fail("Only Boss Man's own company holds its update cards.");
+          const [me] = scope.agentId ? await db.select({ name: agents.name, role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+          const isCeo = me?.role === "ceo";
+          if (input.action === "link_hold") {
+            if (!isCeo) return fail("Only the CEO links a held update to the ticket diagnosing it.");
+            if (!input.ticketId) return fail("Give ticketId: the ticket diagnosing the failure.");
+            const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, input.ticketId), eq(tickets.companyId, scope.companyId)));
+            if (!t) return fail("No such ticket in your company.");
+            const r = await linkHold(db, { subject: input.subject, ticketId: t.id });
+            return r.ok ? text("Linked. That ticket's assignee can now release the hold (deploy release_hold); so can you.") : fail(r.text);
+          }
+          if (input.outcome !== "retry_safe" && input.outcome !== "do_not_retry") return fail("Give outcome retry_safe (the same version can go out again) or do_not_retry (only a newer one).");
+          const r = await releaseHold(db, { subject: input.subject, by: me?.name ?? "an agent", agentId: scope.agentId, isCeo, outcome: input.outcome, ownerText: input.ownerText ?? "" });
+          return r.ok ? text(r.text) : fail(r.text);
+        }
         if (input.action === "request") {
           if (!input.target || !input.ref) return fail("Give the target and the ref to deploy.");
           const r = await deploys.request({ companyId: scope.companyId, agentId: scope.agentId, runId: scope.runId }, { target: input.target, ref: input.ref, notes: input.notes, ticketId: input.ticketId });
           return text(`Deploy ${r.deploy.id}: ${r.note}`);
         }
-        if (!input.deployId || !input.outcome) return fail("Give the deployId and the outcome.");
+        if (!input.deployId || (input.outcome !== "succeeded" && input.outcome !== "failed")) return fail("Give the deployId and the outcome (succeeded or failed).");
         const d = await deploys.report({ companyId: scope.companyId, runId: scope.runId }, { deployId: input.deployId, outcome: input.outcome, notes: input.notes });
         const tag = d.tagResult === "pending" ? ` Boss Man is moving the tag ${d.tagName} to ${d.commit?.slice(0, 7)}; the result goes on the ticket.` : "";
         return text(`Deploy ${d.id} recorded as ${d.status}. The target's secrets are no longer available.${tag}`);

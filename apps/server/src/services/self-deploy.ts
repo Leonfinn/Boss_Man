@@ -14,6 +14,7 @@ import { record } from "./activity.js";
 import { priorityGroup } from "./priority-group.js";
 import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, DEPLOY_AND_RUNNERS, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, fixesLiveHeading, markDecisionNotificationRead, raiseOwnerTodo, readyHeading, reraiseHeldHandApply, vetOwnerTodoSteps, type DecisionContext, type DeployUpdate, type DeployUrgent, type LiveFix } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
+import { currentHold, endHold, heldFor, holdCardLead, holdMinutes, holdStamp, openHold, timeOutHolds, type HoldSubject } from "./owner-holds.js";
 import { leaveClosedNotice, liveNotice, newerNotice, replacedNotice, NOTICE_MS, type ClosedNotice } from "./closed-notice.js";
 import { sh, step, type HostFacts, type SelfDeployFacts } from "./steps.js";
 import { getHold, runnerCardHold } from "./maintenance.js";
@@ -155,6 +156,10 @@ const isSha = (s: string) => /^[0-9a-f]{7,64}$/.test(s);
 const LEVEL = { deployed: "note", nothing_new: "note", rejected: "flag", failed: "page", partial: "page", rolled_back: "page", running: "note" } as const;
 /** The pass reads the host's files every time, but if they haven't changed for this long it runs anyway (BOS-414). */
 const FORCED_SYNC_MS = 60_000;
+
+const holdSubject = (target: "server" | "runner"): HoldSubject => (target === "server" ? "server_deploy" : "runner_update");
+/** BOS-2554 (DR-076 A): what the CEO is told about a hold Boss Man just opened, and how to release it. */
+const RELEASE_HOW = `If someone else diagnoses it, link the hold to their ticket (deploy tool, action link_hold, ticketId) so its assignee can release it; only you or that assignee can. When the cause is known, call the deploy tool with action release_hold, outcome retry_safe (the same version can go out again) or do_not_retry (only a newer one), and ownerText: what was wrong and why the next step is safe, in plain words for the owner; it goes on their card.`;
 
 export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; /** The live-commit record and the Release Manager's wake (BOS-284). */ releaseLog?: ReleaseLog; /** What each host recorded about itself (BOS-427): its name goes on every command's block. */ hosts?: () => Promise<HostFacts[]>; /** BOS-990: the deployer script fingerprints from the host's report; null = no report. */ deployerScript?: () => Promise<{ scriptSha: string; repoSha: string } | null>; /** The settings record's facts as key → value (BOS-419): used for what the update file doesn't say. */ facts?: () => Promise<Record<string, string>>; /** True when nothing is running that a few seconds' outage would cut short (BOS-487); absent = always quiet. */ hostQuiet?: () => Promise<boolean>; /** Both colours' health, the same probe as GET /api/bluegreen (DR-020 E): the trial ends as soon as the standby is stopped (BOS-953). */ colours?: () => Promise<BlueGreen | null>; /** Wakes an agent (the CEO) when Boss Man can't tell whether a runner update is needed (BOS-1648). */ wake?: CeoWake; log?: (msg: string) => void }) {
   const dir = deps.dir;
@@ -457,6 +462,27 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       .where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'self_deploy'`, sql`${decisions.context}->>'target' = ${target}`));
   }
 
+  /**
+   * BOS-2554 (DR-076 A): withdraws each open card raised under an owner hold that has since moved on (released, timed
+   * out or ended), so the card raised next, with the right wording and recommendation, is the only one.
+   */
+  async function replaceStaleHoldCards(target: "server" | "runner") {
+    const now = holdStamp(await currentHold(db, holdSubject(target)));
+    for (const d of await openFor(target)) {
+      const was = (d.context as SelfDeployContext).holdStamp;
+      if (was && was !== now) await withdrawOpen(d.id);
+    }
+  }
+
+  /** BOS-2554 (DR-076 A): releases each hold past its time as "unknown" and wakes the CEO about it. */
+  async function timeOutOwnerHolds() {
+    for (const h of await timeOutHolds(db)) {
+      const what = h.subject === "server_deploy" ? "server update" : "runner update";
+      deps.log?.(`self-deploy: the ${what} hold for ${short(h.commit)} timed out; offering it as cause unknown`);
+      await tellCeo(`Nobody released the hold on the ${what} that ended "${h.result}" (to ${short(h.commit)}: ${h.reason}), so its card now goes to the owner saying the cause is unknown, with Not now recommended. Find out why. ${RELEASE_HOW}`).catch((err: Error) => deps.log?.(`self-deploy: telling the CEO failed: ${err.message}`));
+    }
+  }
+
   /** The plain audit reason on a runner-update card a newer one replaced (BOS-1010, the owner's rule of 9 Nov). */
   const replacedWhy = (commit: string) => `Replaced by a newer runner update for ${short(commit)}`;
 
@@ -497,6 +523,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         return null;
       }
     }
+    // BOS-2554: a card raised under a hold that has moved on is replaced first, the owner's own press included (its
+    // wording and recommendation are out of date).
+    await replaceStaleHoldCards("runner");
     const row = await raise("runner", commit, fromCommit, a, opts.again ?? false, opts.requested ?? false);
     if (!row) return null;
     // Rule 1 (the owner's rule of 9 Nov): the new card replaces every earlier open runner card, in the same step.
@@ -585,6 +614,10 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   }
 
   async function runnerBlocker(a: Available | null): Promise<string | null> {
+    // BOS-2554 (DR-076 A): a failed runner update holds every runner offer, automatic or queued, until it is diagnosed.
+    // The owner's own press still raises its card (askAnyway), headed Held, and is answered with this reason.
+    const held = await heldFor(db, "runner_update", a?.deployed);
+    if (held) return held.releasedAt ? `the runner update built from ${short(held.commit)} failed and won't be retried, so the runners update with the next server version.` : "the last runner update failed and is being looked into, so the runners can't be updated until we know a retry is safe.";
     const fix = await runnerUpdateFix();
     if (fix) return fix.replace(/^Waiting/, "waiting").replace(/\.$/, ", so the runners can't be updated yet.");
     const s = await status();
@@ -777,7 +810,13 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
           .slice(0, 10)
           .map((r) => ({ decisionId: r.id, label: r.question.split("\n")[0]!.replace(/\s+/g, " ").trim().slice(0, 80) }))
       : [];
-    const ctx: SelfDeployContext = { type: "self_deploy", target, commit, fromCommit, ...(infra ? { infra: true, handSteps, ...(check ? { check } : {}), ...(rollback ? { rollback } : {}) } : {}), ...(a?.runnerChanged && target === "server" ? { runnerChanged: true } : {}), ...(runnerTickets.length ? { tickets: runnerTickets } : {}), ...(requested ? { requested: true } : {}), ...(changes.length ? { changes } : {}), ...(update ? { update } : {}), ...(doAfter.length ? { doAfter } : {}), ...(urgent ? { urgent } : {}) };
+    // BOS-2554 (DR-076 A): a card raised after a failed update says so first. Still held (only the owner's own button
+    // press gets here) or timed out: Not now is recommended. Released by an agent: their words, and going ahead is.
+    const hold = await currentHold(db, holdSubject(target));
+    const held = hold ? holdCardLead(hold, commit) : null;
+    const holdLead = held ? `${held.lead}\n\n` : "";
+    const stamp = holdStamp(hold);
+    const ctx: SelfDeployContext = { type: "self_deploy", target, commit, fromCommit, ...(stamp ? { holdStamp: stamp } : {}), ...(infra ? { infra: true, handSteps, ...(check ? { check } : {}), ...(rollback ? { rollback } : {}) } : {}), ...(a?.runnerChanged && target === "server" ? { runnerChanged: true } : {}), ...(runnerTickets.length ? { tickets: runnerTickets } : {}), ...(requested ? { requested: true } : {}), ...(changes.length ? { changes } : {}), ...(update ? { update } : {}), ...(doAfter.length ? { doAfter } : {}), ...(urgent ? { urgent } : {}) };
     const areas = `${n} file${n === 1 ? "" : "s"} changed${migrations ? `, ${migrations} database migration${migrations === 1 ? "" : "s"}` : ""}${a?.runnerChanged ? ", runner code changed (separate approval after this)" : ""}`;
     // The heading is the card's first paragraph, so the card, its phone push and the CEO's view all lead with it.
     const lead = urgent ? `${urgent.heading}.\n\n` : "";
@@ -789,6 +828,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const carries = carried.length ? ` It includes ${carried.join("; ")}${notNamed > 0 ? `; and ${notNamed} more` : ""}.` : "";
     const question =
       lead +
+      holdLead +
       (target === "runner"
         ? `Update the runners to ${short(commit)}?\n\n${alreadyRun}This rebuilds the runner containers from the version Boss Man runs (${short(commit)}); the server itself doesn't change. The new image is built and checked first. Then nothing new starts in any company; runs in progress finish (you are asked after about 30 minutes if some are still going), and each company's runner is swapped as soon as it is idle. Without the launcher the runners restart at once and cut runs off.${runnerTickets.length ? `\n\nIt also carries ${runnerTickets.map((t) => `"${t.title}"`).join("; ")}. Their only setup step is the runner update above, so they have no card of their own.` : ""}`
         : infra
@@ -804,8 +844,11 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         kind: "approval",
         question: question + (target === "server" && !infra ? await stagingLine(commit, !!urgent) : ""),
         options,
-        recommendedOption: options[0]!,
-        dedupeKey: `self-deploy:${target}:${commit}${again ? `:${randomBytes(3).toString("hex")}` : ""}`,
+        recommendedOption: held?.notNow ? NOT_NOW : options[0]!,
+        // BOS-2554: after a hold the commit is often the one whose (answered) card still holds the plain key, so that
+        // key would silently drop the offer. Each hold and outcome gets a key of its own: the card appears once, and an
+        // owner's "Not now" on it still sticks.
+        dedupeKey: `self-deploy:${target}:${commit}${again ? `:${randomBytes(3).toString("hex")}` : stamp ? `:hold-${stamp}` : ""}`,
         context: ctx,
       })
       .onConflictDoNothing()
@@ -928,6 +971,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     if (!held) return;
     if (await runnerFirst()) return;
     if ((await status())?.result === "running" || (await pending())) return;
+    // BOS-2554 (DR-076 A): an approval waiting here while a server update failure is undiagnosed waits for the release
+    // (or the timeout); the owner did approve it. (Rare: a server deploy only waits here behind a runner update.)
+    if (await heldFor(db, "server_deploy", held.commit)) return;
     await writeChecked().catch((err: Error) => deps.log?.(`self-deploy: could not write the checked list: ${err.message}`));
     await writeRequest(held.id, "server", held.commit);
     await putSetting(HELD_SERVER, null);
@@ -1192,11 +1238,40 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     // BOS-753: a newer checked commit than the card's went out, so the card's list is only part of what changed.
     const newer = ctx?.type === "self_deploy" && s.target === "server" && !!s.to_commit && s.to_commit !== ctx.commit;
     const changedHead = newer ? `What changed, up to the approved ${short(ctx.commit)} (the newer merges up to ${short(s.to_commit)} went out too):` : "What changed:";
-    await deps.notify({ companyId: null, level: runnerRefused ? "note" : LEVEL[s.result], title, body: changes.length ? `${s.message}\n\n${changedHead}\n${changes.map((c) => `- ${c}`).join("\n")}` : s.message, link: "#/settings" });
+    // BOS-2554 (DR-076 A): a server or runner update that broke (failed, half-done or switched back) holds the next card
+    // for it while the failure is diagnosed. A refusal or "nothing new" broke nothing, so it holds nothing; a later
+    // success ends the hold.
+    const subject = s.target === "server" || s.target === "runner" ? holdSubject(s.target) : null;
+    const broke = !!subject && (s.result === "failed" || s.result === "partial" || s.result === "rolled_back");
+    const heldWhat = s.target === "server" ? "update" : "runner update";
+    const minutes = broke ? await holdMinutes(db) : 0;
+    const instead = `A new card follows once we know a retry is safe, or in ${minutes} minutes at the latest.`;
+    // The owner's feed line about the failure says what happens next, so the hold is never a silent gap.
+    const heldLine = broke ? `\n\nThe next ${heldWhat} card is held while we find out why. ${instead} If a card asks you for the update's log, answer that one.` : "";
+    await deps.notify({ companyId: null, level: runnerRefused ? "note" : LEVEL[s.result], title, body: (changes.length ? `${s.message}\n\n${changedHead}\n${changes.map((c) => `- ${c}`).join("\n")}` : s.message) + heldLine, link: "#/settings" });
     // BOS-1805: the owner's "Deploy" that left the live commit where it was (refused, failed, switched back, nothing new)
     // is told to the CEO as well, with the host's own reason, so somebody acts on it. The owner has the line above.
+    let holdNote = "";
+    if (broke) {
+      await openHold(db, { subject, commit: s.to_commit, result: s.result, reason: s.message });
+      // A card raised before the failure (during a trial that then switched back) would still recommend going ahead.
+      // DR-058: a card the owner has seen is withdrawn with why and what happens instead, left where it was.
+      const now = new Date();
+      for (const o of await openFor(s.target)) {
+        const notice = replacedNotice({ commit: s.to_commit, text: `Withdrawn by Boss Man: the last ${heldWhat} (to ${short(s.to_commit)}) failed, so this card is held while we find out why. What happens instead: ${instead[0]!.toLowerCase()}${instead.slice(1)} You don't need to do anything for this card.`, now });
+        await withdrawOpen(o.id, notice);
+        await leaveClosedNotice(db, o.id, notice, { notify: deps.notify });
+      }
+      // The runner offer was spent when the build was sent. Keep one queued, so the card comes back by itself once the
+      // hold is released (releaseRunnerDue → raiseRunner, which waits while runnerBlocker reports the hold).
+      if (s.target === "runner" && s.to_commit && !(await getSetting<RunnerDue>(RUNNER_DUE)))
+        await putSetting(RUNNER_DUE, { commit: s.to_commit, fromCommit: s.from_commit || s.to_commit, after: now.toISOString(), offer: true, needs: s.to_commit } satisfies RunnerDue);
+      holdNote = ` Boss Man is holding the next ${heldWhat} card while this is diagnosed, so the owner is not offered it again. ${RELEASE_HOW} If nobody does within ${minutes} minutes, the card goes to the owner saying the cause is unknown, with Not now recommended, and you are woken again.`;
+    } else if (subject && s.result === "deployed") await endHold(db, subject);
     if (s.target === "server" && d && ctx?.type === "self_deploy" && (s.result !== "deployed" || (!!s.from_commit && s.to_commit === s.from_commit)))
-      await tellCeo(`The owner approved the server update on card ${d.id.slice(0, 8)} (to ${short(ctx.commit)}), but the live server did not change: the host reported "${s.result}": ${s.message} Find out why, tell the owner on the ticket that needed it, and say when to approve it again.`).catch((err: Error) => deps.log?.(`self-deploy: telling the CEO failed: ${err.message}`));
+      await tellCeo(`The owner approved the server update on card ${d.id.slice(0, 8)} (to ${short(ctx.commit)}), but the live server did not change: the host reported "${s.result}": ${s.message} Find out why, tell the owner on the ticket that needed it, and say when to approve it again.${holdNote}`).catch((err: Error) => deps.log?.(`self-deploy: telling the CEO failed: ${err.message}`));
+    else if (broke)
+      await tellCeo(`A ${s.target} update (to ${short(s.to_commit)}) ended "${s.result}": ${s.message} Find out why and tell the owner.${holdNote}`).catch((err: Error) => deps.log?.(`self-deploy: telling the CEO failed: ${err.message}`));
     // BOS-364 withdrew only cards for the commit it never reached; BOS-368 withdraws every open runner card, whichever way round the host names the commits.
     if (s.target === "server") {
       await putSetting(LAST_SERVER, { result: s.result, from: s.from_commit, to: s.to_commit, ended: s.ended } satisfies LastServer);
@@ -1548,6 +1623,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const s = await status();
       const a = await available();
       if (s && s.result !== "running") await finished(s, a);
+      // BOS-2554 (DR-076 A): a hold nobody released in time goes to the owner as "cause unknown" (Not now recommended),
+      // and the CEO is woken, so a hold never lasts for ever.
+      await timeOutOwnerHolds().catch((err: Error) => deps.log?.(`self-deploy: timing out held updates failed: ${err.message}`));
       // A to-do clears as soon as what runs is the approved commit, even if the rest below returns early.
       if (a) await this.clearDoneOwnerTodos(a, s).catch((err) => deps.log?.(`self-deploy: clearing done to-dos failed: ${(err as Error).message}`));
       await syncDeployerScript().catch((err) => deps.log?.(`self-deploy: deployer script check failed: ${(err as Error).message}`));
@@ -1574,6 +1652,14 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         // BOS-739 (8 Nov 13:47): the owner may be part-way through this card's hand steps; the notice says it is live and they can stop.
         const liveAt = s?.result === "deployed" && s.to_commit === a.deployed && Number.isFinite(Date.parse(s.ended)) ? new Date(s.ended) : new Date(a.checkedAt);
         for (const d of await openFor("server")) await withdrawOpen(d.id, (steps) => liveNotice({ commit: a.deployed, liveAt, steps, now: new Date() }));
+        return woken;
+      }
+      // BOS-2554 (DR-076 A): while a failed update is held no card is raised by itself (the owner's Deploy latest press
+      // still gets one, headed Held, with Not now recommended). Once released, the card raised below has a key of its own
+      // (the hold's stamp), and raise() replaces any older server card with the usual "a newer card covers it" notice.
+      const held = await heldFor(db, "server_deploy", a.tip);
+      if (held) {
+        deps.log?.(`self-deploy: server update for ${short(a.tip)} held; the last update failed and ${held.releasedAt ? "that version is not to be retried" : "is not diagnosed yet"}`);
         return woken;
       }
       await raise("server", a.tip, a.deployed, a);
@@ -1754,6 +1840,11 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         runnerQueue: await runnerQueueState(a, trial),
         heldDeploy: await getSetting<HeldServer>(HELD_SERVER),
         queueCancelled: await getSetting<{ at: string; why: string }>(QUEUE_CANCELLED),
+        // BOS-2554 (DR-076 A): a failed update's hold, with the words its card would open with (null when none).
+        failureHolds: await Promise.all((["server_deploy", "runner_update"] as const).map(async (subject) => {
+          const h = await currentHold(db, subject);
+          return h ? { subject, commit: h.commit, since: h.createdAt.toISOString(), releaseBy: h.releaseBy.toISOString(), outcome: h.outcome, words: holdCardLead(h, subject === "server_deploy" ? (a?.tip ?? h.commit) : (a?.deployed ?? h.commit)).lead } : null;
+        })).then((l) => l.filter((x) => !!x)),
       };
     },
 

@@ -6,11 +6,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { DEPLOY_UNCHANGED_REASON, selfDeployService } from "../src/services/self-deploy.js";
+import { currentHold, linkHold, releaseHold } from "../src/services/owner-holds.js";
 import { setOwnerTodoFacts } from "../src/services/decisions.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { openPglite } from "../src/db/client.js";
 import { commandProblem, lintOwnerSteps, parseStep, sh, step } from "../src/services/steps.js";
-import { agents, companies, activity, decisions, notifications, projects, settings, tickets, wakes } from "../src/db/schema.js";
+import { agents, companies, activity, decisions, notifications, ownerHolds, projects, settings, tickets, wakes } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -1744,6 +1745,233 @@ describe("an approved server update that leaves the live commit unchanged (BOS-1
     await c.status({ id: d!.id, result: "deployed", message: "Deployed aaaaaaaa to bbbbbbbb." });
     await c.selfDeploy.sync();
     expect((await c.db.select().from(wakes)).filter((w) => w.reason === DEPLOY_UNCHANGED_REASON)).toHaveLength(0);
+  });
+});
+
+// BOS-2554 (24 Nov 22:25): the update to f30c4e2f failed at "Building green"; Boss Man at once offered a new card with
+// Deploy recommended while an agent's card asked the owner for the deploy log "before you press Deploy again".
+describe("after a failed update the next card is held while it is diagnosed (BOS-2554, DR-076 A)", () => {
+  const ceoWakes = async (c: Awaited<ReturnType<typeof setup>>) => {
+    const [co] = await c.db.select().from(companies).limit(1);
+    const [ceo] = await c.db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, co!.id), eq(agents.role, "ceo")));
+    return (await c.db.select().from(wakes)).filter((w) => w.agentId === ceo!.id && w.reason === DEPLOY_UNCHANGED_REASON);
+  };
+  const release = (c: Awaited<ReturnType<typeof setup>>, outcome: "retry_safe" | "do_not_retry", ownerText: string, subject?: "server_deploy" | "runner_update") => releaseHold(c.db, { by: "Dougal", isCeo: true, outcome, ownerText, ...(subject ? { subject } : {}) });
+  const failOnce = async (c: Awaited<ReturnType<typeof setup>>) => {
+    await c.available();
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Deploy" })).statusCode).toBe(200);
+    await rm(path.join(c.dir, "inbox", "request.json"));
+    await c.status({ id: d!.id, result: "failed", message: "Building green failed." });
+    // The host rewrites its offer after the run: main is still ahead of what runs.
+    await c.available();
+    await c.selfDeploy.sync();
+    return d!;
+  };
+  const serverCards = async (c: Awaited<ReturnType<typeof setup>>) => (await c.open()).filter((d) => (d.context as { target?: string }).target === "server");
+
+  it("failed update + open diagnosis: no card by itself, the CEO is told how to release it, and the owner's own press says Held with Not now recommended", async () => {
+    const c = (ctx = await setup());
+    await failOnce(c);
+    expect(await serverCards(c)).toHaveLength(0);
+    // The pass runs every 30 s: still nothing on later passes.
+    await c.available();
+    await c.selfDeploy.sync();
+    expect(await serverCards(c)).toHaveLength(0);
+    const told = await ceoWakes(c);
+    expect(told).toHaveLength(1);
+    expect(told[0]!.note).toContain("action release_hold, outcome retry_safe");
+    expect(told[0]!.note).toContain("within 120 minutes");
+    // Deploy latest (the owner's own press) still gets a card, but it never recommends Deploy.
+    const r = (await c.selfDeploy.deployLatest()) as { decisionId: string };
+    const [held] = await c.db.select().from(decisions).where(eq(decisions.id, r.decisionId));
+    expect(held!.recommendedOption).toBe("Not now");
+    expect(held!.question).toMatch(/^Held: the last server update \(to bbbbbbbb\) failed at .* and is being looked into\./);
+    expect(held!.question).toContain("If a card asks you for the update's log, answer that one first.");
+    const hold = (await currentHold(c.db, "server_deploy"))!;
+    expect(held!.context).toMatchObject({ holdStamp: `${hold.id}:held` });
+    // The Settings overview carries the hold, with the same words.
+    expect((await c.selfDeploy.overview()).failureHolds).toEqual([expect.objectContaining({ subject: "server_deploy", commit: B, outcome: null, words: expect.stringMatching(/^Held: /) })]);
+  });
+
+  it("diagnosis says retry is safe: the owner gets one card with Deploy recommended and the agent's words on it", async () => {
+    const c = (ctx = await setup());
+    await failOnce(c);
+    await c.selfDeploy.deployLatest(); // a held card from an owner's press, which must be replaced, not left beside it
+    const r = await release(c, "retry_safe", "The build ran out of disk space; space is freed, so a retry is safe.");
+    expect(r.ok).toBe(true);
+    await c.available();
+    await c.selfDeploy.sync();
+    const cards = await serverCards(c);
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.recommendedOption).toBe("Deploy");
+    expect(cards[0]!.question).toMatch(/^The last server update \(to bbbbbbbb\) failed at .*\. Dougal looked into it: The build ran out of disk space; space is freed, so a retry is safe\./);
+    // Releasing twice says so, and changes nothing.
+    expect((await release(c, "retry_safe", "again")).ok).toBe(false);
+  });
+
+  it("only the CEO, or the assignee of the ticket the CEO linked, may release (Brains, DR-076 A)", async () => {
+    const c = (ctx = await setup());
+    await failOnce(c);
+    const [co] = await c.db.select().from(companies).limit(1);
+    const [dougal] = await c.db.insert(agents).values({ companyId: co!.id, name: "Dougal", role: "worker", agentKind: "claude" }).returning();
+    const [rex] = await c.db.insert(agents).values({ companyId: co!.id, name: "Rex", role: "worker", agentKind: "claude" }).returning();
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Development" }).returning();
+    const [t] = await c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: "Update failed at Building green", number: 2550, assigneeAgentId: dougal!.id }).returning();
+    const as = (a: { id: string; name: string }) => releaseHold(c.db, { by: a.name, agentId: a.id, isCeo: false, outcome: "retry_safe", ownerText: "Disk freed." });
+    // Unlinked: nobody but the CEO, and the refusal says how to get it linked.
+    const unlinked = await as(dougal!);
+    expect(unlinked).toMatchObject({ ok: false, text: expect.stringContaining("link_hold") });
+    expect((await currentHold(c.db, "server_deploy"))!.releasedAt).toBeNull();
+    // The CEO links it to Dougal's ticket: Dougal may release, Rex still may not.
+    expect((await linkHold(c.db, { ticketId: t!.id })).ok).toBe(true);
+    expect(await as(rex!)).toMatchObject({ ok: false, text: expect.stringContaining("assignee of the ticket diagnosing") });
+    const r = await as(dougal!);
+    expect(r.ok).toBe(true);
+    expect((await currentHold(c.db, "server_deploy"))).toMatchObject({ releasedBy: "Dougal", outcome: "retry_safe", ticketId: t!.id });
+  });
+
+  it("link_hold with nothing held says so", async () => {
+    const c = (ctx = await setup());
+    const [co] = await c.db.select().from(companies).limit(1);
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Development" }).returning();
+    const [t] = await c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: "x", number: 1 }).returning();
+    expect(await linkHold(c.db, { ticketId: t!.id })).toEqual({ ok: false, text: expect.stringContaining("Nothing is held") });
+  });
+
+  it("diagnosis says do not retry: the failed version is never offered by itself, a newer one is, with Deploy recommended", async () => {
+    const c = (ctx = await setup());
+    await failOnce(c);
+    await release(c, "do_not_retry", "This version has a broken migration; the fix is merging now.");
+    await c.available();
+    await c.selfDeploy.sync();
+    expect(await serverCards(c)).toHaveLength(0);
+    // The owner's own press for that very version: Not now recommended, with the reason.
+    const r = (await c.selfDeploy.deployLatest()) as { decisionId: string };
+    const [same] = await c.db.select().from(decisions).where(eq(decisions.id, r.decisionId));
+    expect(same!.recommendedOption).toBe("Not now");
+    expect(same!.question).toContain("it should not be tried again. Dougal: This version has a broken migration");
+    // The fix merges: main moves on, and the newer version is offered with Deploy recommended.
+    await c.available({ tip: C, commits: [{ sha: C, subject: "Fix the migration" }, { sha: B, subject: "Add rate limiting" }] });
+    await c.selfDeploy.sync();
+    const cards = await serverCards(c);
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({ recommendedOption: "Deploy", context: { commit: C } });
+    expect(cards[0]!.question).toContain("that version won't be offered again. Dougal: This version has a broken migration");
+  });
+
+  it("no diagnosis: after the hold time the card goes to the owner saying the cause is unknown, Not now recommended, and the CEO is woken", async () => {
+    const c = (ctx = await setup());
+    await failOnce(c);
+    await c.db.update(ownerHolds).set({ releaseBy: new Date(Date.now() - 60_000) });
+    await c.available();
+    await c.selfDeploy.sync();
+    const cards = await serverCards(c);
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.recommendedOption).toBe("Not now");
+    expect(cards[0]!.question).toMatch(/^The last server update \(to bbbbbbbb\) failed at .*\. Nobody has confirmed the cause yet, so trying again may fail the same way\. Not now is recommended/);
+    expect(await currentHold(c.db, "server_deploy")).toMatchObject({ releasedBy: "timeout", outcome: "unknown" });
+    // A note joins a wake still waiting (the failure's own wake here), so count the notes, not the rows.
+    const timeoutNotes = async () => (await ceoWakes(c)).map((w) => w.note ?? "").join("\n").split("Nobody released the hold on the server update").length - 1;
+    expect(await timeoutNotes()).toBe(1);
+    // Later passes don't tell the CEO again.
+    await c.available();
+    await c.selfDeploy.sync();
+    expect(await timeoutNotes()).toBe(1);
+    // A release after that replaces the "cause unknown" card with the plain one.
+    expect((await release(c, "retry_safe", "A one-off network blip.")).ok).toBe(true);
+    await c.available();
+    await c.selfDeploy.sync();
+    const after = await serverCards(c);
+    expect(after).toHaveLength(1);
+    expect(after[0]!.recommendedOption).toBe("Deploy");
+    expect(after[0]!.question).toContain("Dougal looked into it: A one-off network blip.");
+  });
+
+  it("the hold time is a setting", async () => {
+    const c = (ctx = await setup());
+    await c.db.insert(settings).values({ key: "owner_hold_minutes", value: 30 });
+    await failOnce(c);
+    const h = (await currentHold(c.db, "server_deploy"))!;
+    expect(h.releaseBy.getTime() - h.createdAt.getTime()).toBe(30 * 60_000);
+  });
+
+  it("a later successful deploy ends the hold, and a refusal never starts one", async () => {
+    const c = (ctx = await setup());
+    await failOnce(c);
+    await c.status({ id: randomUUID(), result: "deployed", message: "Deployed by hand.", ended: "2026-10-20T13:03:00Z" });
+    await c.selfDeploy.sync();
+    expect(await currentHold(c.db, "server_deploy")).toBeNull();
+    await c.status({ id: randomUUID(), result: "rejected", message: "Refused: another deploy ran 3 minutes ago.", ended: "2026-10-20T13:05:00Z" });
+    await c.available({ deployed: B, tip: C, commits: [{ sha: C, subject: "More" }] });
+    await c.selfDeploy.sync();
+    expect(await currentHold(c.db, "server_deploy")).toBeNull();
+    const cards = await serverCards(c);
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.recommendedOption).toBe("Deploy");
+    expect(cards[0]!.context).not.toHaveProperty("holdStamp");
+  });
+
+  it("a failed runner build holds the runner card the same way, and its release brings it back", async () => {
+    const c = (ctx = await setup());
+    await c.available({ runnerChanged: true });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Deploy" });
+    await rm(path.join(c.dir, "inbox", "request.json"));
+    await c.status({ id: d!.id, result: "deployed", message: "Deployed aaaaaaaa to bbbbbbbb." });
+    await c.available({ deployed: B, tip: B });
+    await c.selfDeploy.sync();
+    const [runner] = await c.open();
+    expect(runner!.context).toMatchObject({ target: "runner" });
+    expect((await c.req("POST", `/api/decisions/${runner!.id}/answer`, { answer: "Update runners" })).statusCode).toBe(200);
+    await rm(path.join(c.dir, "inbox", "request.json"));
+    await c.status({ id: runner!.id, target: "runner", result: "failed", message: "The runner image build failed.", from_commit: B, to_commit: B, ended: "2026-10-20T12:10:00Z" });
+    await c.selfDeploy.sync();
+    await c.available({ deployed: B, tip: B });
+    await c.selfDeploy.sync();
+    expect(await c.open()).toHaveLength(0);
+    expect(await currentHold(c.db, "runner_update")).toMatchObject({ commit: B, result: "failed", releasedAt: null });
+    expect((await ceoWakes(c)).at(-1)!.note).toContain("A runner update (to bbbbbbbb) ended \"failed\"");
+    expect((await release(c, "retry_safe", "The registry was down for a minute; it is back.")).ok).toBe(true);
+    await c.available({ deployed: B, tip: B });
+    await c.selfDeploy.sync();
+    // Released: the kept offer comes back by itself, recommending the update, with the agent's words.
+    const cards = await c.open();
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({ recommendedOption: "Update runners", context: { target: "runner", commit: B } });
+    expect(cards[0]!.question).toContain("Dougal looked into it: The registry was down for a minute; it is back.");
+  });
+
+  it("the owner's Build and update runners press while a runner hold is open is queued, and starts once it is released", async () => {
+    const c = (ctx = await setup());
+    await c.available({ deployed: B, tip: B });
+    await c.status({ id: randomUUID(), target: "runner", result: "failed", message: "The runner image build failed.", from_commit: B, to_commit: B, ended: "2026-10-20T12:10:00Z" });
+    await c.selfDeploy.sync();
+    expect(await c.selfDeploy.updateRunners()).toMatchObject({ queued: true, message: expect.stringContaining("The last runner update failed and is being looked into") });
+    await c.selfDeploy.sync();
+    expect(await readdir(path.join(c.dir, "inbox"))).not.toContain("request.json");
+    await release(c, "retry_safe", "Fixed.");
+    await c.available({ deployed: B, tip: B });
+    await c.selfDeploy.sync();
+    expect(JSON.parse(await readFile(path.join(c.dir, "inbox", "request.json"), "utf8"))).toMatchObject({ target: "runner", commit: B });
+  });
+
+  it("a switch-back withdraws a Deploy card raised during the trial", async () => {
+    const c = (ctx = await setup());
+    await c.available({ deployed: B, tip: C, commits: [{ sha: C, subject: "More" }] });
+    await c.selfDeploy.sync();
+    const [trial] = await serverCards(c);
+    expect(trial).toBeDefined();
+    await c.status({ id: randomUUID(), result: "rolled_back", message: "Switched back.", from_commit: B, to_commit: A, ended: "2026-10-20T13:03:00Z" });
+    await c.selfDeploy.sync();
+    expect(await serverCards(c)).toHaveLength(0);
+    expect(await currentHold(c.db, "server_deploy")).toMatchObject({ result: "rolled_back" });
+    // DR-058: the withdrawn card says why and what happens instead, and the owner's feed line says the next card is held.
+    const [gone] = await c.db.select().from(decisions).where(eq(decisions.id, trial!.id));
+    expect(JSON.stringify((gone!.context as { closedNotice?: unknown }).closedNotice)).toContain("Withdrawn by Boss Man: the last update (to aaaaaaaa) failed, so this card is held while we find out why. What happens instead: a new card follows once we know a retry is safe, or in 120 minutes at the latest.");
+    expect((await c.db.select().from(notifications)).map((n) => n.body).join("\n")).toContain("The next update card is held while we find out why.");
   });
 });
 
