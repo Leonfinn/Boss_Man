@@ -66,6 +66,10 @@ export type LastUpdate = { at: string; startedAt: string | null; ok: boolean; ti
 export const MAINTENANCE_LAST_KEY = "maintenance:last";
 /** The status_reason a held wake carries; it stays queued (like a paused company's) and launches once the hold lifts. */
 export const HOLD_REASON = "update pending";
+/** BOS-2610: the status_reason a wake held by the owner's wrap-up carries, so the label names the real hold. */
+export const WRAPUP_HOLD_REASON = "wrap-up pending";
+/** The label a held wake gets under this hold: a wrap-up (alone) says so, anything else is an update. */
+export const holdReasonFor = (hold: { kind?: HoldKind }): string => (hold.kind === "wrapup" ? WRAPUP_HOLD_REASON : HOLD_REASON);
 
 export type Hold = {
   reason: string;
@@ -114,6 +118,8 @@ export type Hold = {
    * Absent on a hold saved before this: read as "none" from `since`.
    */
   forUpdate?: "server" | "runner" | "none";
+  /** BOS-2610: when a standalone wrap-up was tied to the runner update's build (update-runner.sh asked for its "building" hold while the wrap-up was on). */
+  tiedSince?: string;
   /** The still-running-list timeout for the owner's wrap-up ask (BOS-929/988): only a flag, never an automatic stop. */
   wrapNotRespondingAfter?: number;
   /** runId -> when the owner's wrap-up message went to it (BOS-988), so a drain pass never tells a run twice. */
@@ -868,9 +874,18 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         await rm(cancelTrigger, { force: true });
         // Both files in one pass (a build that failed fast): the cancel wins, so no hold starts that nothing would end.
         if (asked === "building") asked = null;
-        if ((await getHold(db))?.kind === "building" && asked !== "update" && asked !== "settings") await end("Runner update build stopped", "note", "The new runner image was not built, so nothing is swapped. New runs have started again.");
+        const cur = await getHold(db);
+        if (cur?.kind === "building" && asked !== "update" && asked !== "settings") await end("Runner update build stopped", "note", "The new runner image was not built, so nothing is swapped. New runs have started again.");
+        // BOS-2610: a wrap-up tied to this build ends with it: the update failed, so nothing is waiting any more.
+        else if (cur?.kind === "wrapup" && cur.forUpdate === "runner" && asked !== "update" && asked !== "settings") await end("Wrap-up lifted: the runner update failed", "note", `The runner update failed at ${now().toISOString().slice(11, 16)} UTC. Work has restarted.`);
       }
       let h = await getHold(db);
+      // BOS-2610: update-runner.sh asks for its "building" hold while a standalone wrap-up is on: the wrap-up now belongs to
+      // that update. It lifts when the build fails (the cancel file above), when the real drain takes it over, or after the build's own cap.
+      if (asked === "building" && h?.kind === "wrapup" && h.forUpdate !== "runner" && h.forUpdate !== "server") {
+        await save({ ...h, forUpdate: "runner", tiedSince: now().toISOString() });
+        h = await getHold(db);
+      }
       // A real update or setting change takes over a wrap-up hold here too, not only from the button (BOS-929): its
       // trigger file must end the wrap-up and swap, or new work stays held until the owner cancels by hand.
       // BOS-1955: it takes over a building hold the same way, but keeps that hold's start.
@@ -900,6 +915,8 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         const t = now();
         if (h.forUpdate === "server" && !(await deps.serverUpdateWaiting?.().catch(() => true))) {
           await end("Wrap-up lifted", "note", "The server update it was asked for is no longer waiting for the machine, so new runs start again. Agents that were still going finish on their own; any that ended cleanly are woken on their tickets.");
+        } else if (h.forUpdate === "runner" && h.tiedSince && t.getTime() - Date.parse(h.tiedSince) > BUILD_HOLD_MAX_MINUTES * 60_000) {
+          await end("Wrap-up lifted: the runner update did not start", "note", `The runner update it was tied to did not start within ${BUILD_HOLD_MAX_MINUTES} minutes, so work has restarted.`);
         } else if (h.forUpdate !== "server" && t.getTime() - Date.parse(h.wrapSince ?? h.since) > STANDALONE_WRAPUP_MS) {
           await end("Wrap-up lifted after 60 minutes", "note", "No update was waiting for it, so new runs start again after 60 minutes. Agents that were still going finish on their own; any that ended cleanly are woken on their tickets.");
         }

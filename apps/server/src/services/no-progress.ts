@@ -18,7 +18,7 @@ import { agents, companies, decisions, failureSignatures, runners, runs, setting
 import type { AlertInput } from "./alert-ladder.js";
 import { HELD_AGENT, HELD_ALL_COMPANIES, HELD_COMPANY } from "./fair-share.js";
 import { accountOutage } from "./loop-guards.js";
-import { HOLD_REASON } from "./maintenance.js";
+import { HOLD_REASON, WRAPUP_HOLD_REASON } from "./maintenance.js";
 
 /** How long work may wait with no clean run, and the window for trigger B. */
 export const NO_PROGRESS_AFTER_MS = 60 * 60_000;
@@ -29,7 +29,7 @@ export const SAME_ERROR_AGENTS = 2;
 export const NO_PROGRESS_QUIET_MS = 4 * 3_600_000;
 
 /** Wakes held on purpose, which are not work waiting on Boss Man. */
-const DELIBERATE_HOLDS = ["company paused", "agent paused", "quiet hours", "working hours", HOLD_REASON];
+const DELIBERATE_HOLDS = ["company paused", "agent paused", "quiet hours", "working hours", HOLD_REASON, WRAPUP_HOLD_REASON];
 
 /**
  * A run that counts as progress: it ended, and not on an error, a loss, a cut-off or a stop. The CEO's

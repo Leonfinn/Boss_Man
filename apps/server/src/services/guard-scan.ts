@@ -139,7 +139,7 @@ export function wakeReasonsIn(text: string): string[] {
   return [...[...text.matchAll(/export const \w*REASON = "([^"]+)"/g)].map((m) => m[1]!), ...[...text.matchAll(/\breason: "([a-z_][a-z_ -]*)"/g)].map((m) => m[1]!)];
 }
 /** Strings that follow `reason:` but are refusal codes or the hold's label, never a wake (the test drops them too). */
-export const NOT_WAKE_CODES = ["update pending", "no_wrapup", "too_early", "no_update", "agents_running", "no_checks"];
+export const NOT_WAKE_CODES = ["update pending", "wrap-up pending", "no_wrapup", "too_early", "no_update", "agents_running", "no_checks"];
 
 // ---- Update waits (update-waits-guard.test.ts): a file that reads an update hold to hold work back. ----
 
