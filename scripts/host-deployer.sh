@@ -1571,12 +1571,15 @@ recover_interrupted() {
 S_ID="" S_COMMIT="" S_STARTED="" S_KV=()
 write_staging_status() { # result message
   ((DRY)) && { log "[dry-run] staging status: $1: $2"; return 0; }
-  local ended=""
+  local ended="" out=staging-status.json
   case $1 in running | held) ;; *) ended="$(now)" ;; esac
-  json id="$S_ID" target=staging result="$1" message="$2" to_commit="$S_COMMIT" started="$S_STARTED" ended="$ended" at="${ended:-$S_STARTED}" ${S_KV[@]+"${S_KV[@]}"} >"$OUTBOX/staging-status.json.tmp"
-  chmod 644 "$OUTBOX/staging-status.json.tmp"
-  mv "$OUTBOX/staging-status.json.tmp" "$OUTBOX/staging-status.json"
-  [[ -z $ended ]] || cat "$OUTBOX/staging-status.json" >>"$OUTBOX/staging-history.jsonl"
+  # BOS-2592: a refused request (rate limit, replay, not on main, ...) goes to staging-refused.json, never over staging-status.json,
+  # so the last real deploy (and the log_tail of a failure) stays readable until a real deploy replaces it (production: BOS-1469).
+  [[ $1 == rejected ]] && out=staging-refused.json
+  json id="$S_ID" target=staging result="$1" message="$2" to_commit="$S_COMMIT" started="$S_STARTED" ended="$ended" at="${ended:-$S_STARTED}" ${S_KV[@]+"${S_KV[@]}"} >"$OUTBOX/$out.tmp"
+  chmod 644 "$OUTBOX/$out.tmp"
+  mv "$OUTBOX/$out.tmp" "$OUTBOX/$out"
+  [[ -z $ended ]] || cat "$OUTBOX/$out" >>"$OUTBOX/staging-history.jsonl"
 }
 # The last 30 lines this staging run added to the deployer log (from byte offset $1), short lines, secrets blanked, at most
 # 2500 characters, so a failed run's reason is readable from the staging record without opening the host.

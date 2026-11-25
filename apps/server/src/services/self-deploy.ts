@@ -1473,7 +1473,17 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
 
   // ---- The staging lane (BOS-1472, docs/22-staging.md): its own files, beside production's, never sharing a slot ----
   const stagingLane = async () => (dir ? ((await readJson(path.join(dir, "outbox", "staging-lane.json"), StagingLane))?.configured === "true") : false);
-  const stagingStatus = () => (dir ? readJson(path.join(dir, "outbox", "staging-status.json"), StagingStatus) : Promise.resolve(null));
+  /** The last real staging run (staging-status.json). A rate-limit refusal never replaces it (BOS-2592), so a failure's log_tail stays readable. */
+  const stagingReal = () => (dir ? readJson(path.join(dir, "outbox", "staging-status.json"), StagingStatus) : Promise.resolve(null));
+  /** The newest staging rate-limit refusal, kept apart from the real result; null when none. */
+  const stagingRefusal = () => (dir ? readJson(path.join(dir, "outbox", "staging-refused.json"), StagingStatus) : Promise.resolve(null));
+  /** What staging did last: the real run, or a refusal that came after it (so a request's answer, and the card line, still see its refusal). */
+  const stagingStatus = async () => {
+    const [real, refused] = [await stagingReal(), await stagingRefusal()];
+    if (!refused) return real;
+    if (!real || real.result === "running" || real.result === "held") return real ?? refused;
+    return Date.parse(refused.ended || refused.started) >= Date.parse(real.ended || real.started) ? refused : real;
+  };
   /** One staging request for the host: same flat format as production's, target "staging", written beside its name and renamed. */
   const stagingOrigin = async () => (dir ? ((await readJson(path.join(dir, "outbox", "staging-lane.json"), StagingLane))?.origin || null) : null);
   /**
@@ -1549,12 +1559,14 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   const stagingPending = async () => !!dir && (await stat(path.join(dir, "inbox", "staging-request.json")).then(() => true, () => false));
   /** What agents (server_status) and Settings see of staging: the lane, and the last result with each smoke check. */
   async function stagingBlock() {
-    const [configured, pend, st] = await Promise.all([stagingLane(), stagingPending(), stagingStatus()]);
-    if (!st) return { configured, pending: pend, last: null };
+    const [configured, pend, st, refused] = await Promise.all([stagingLane(), stagingPending(), stagingReal(), stagingRefusal()]);
+    // BOS-2592: `last` is always the last real run; a refusal newer than it is shown beside it, never instead of it.
+    const refusedLast = refused && (!st || Date.parse(refused.ended || refused.started) >= Date.parse(st.ended || st.started)) ? { id: refused.id, message: refused.message, commit: refused.to_commit, at: refused.at } : null;
+    if (!st) return { configured, pending: pend, last: null, refused: refusedLast };
     const checks = Object.keys(st)
       .filter((k) => k.startsWith("check_"))
       .map((k) => ({ name: k.slice(6), result: st[k] as string, why: (st[`why_${k.slice(6)}`] as string | undefined) ?? "" }));
-    return { configured, pending: pend, last: { id: st.id, result: st.result, message: st.message, commit: st.to_commit, runnerImage: st.runner_image ?? null, smoke: st.smoke ?? null, failedChecks: st.failed_checks ?? null, logTail: st.log_tail ?? null, checks, at: st.at } };
+    return { configured, pending: pend, last: { id: st.id, result: st.result, message: st.message, commit: st.to_commit, runnerImage: st.runner_image ?? null, smoke: st.smoke ?? null, failedChecks: st.failed_checks ?? null, logTail: st.log_tail ?? null, checks, at: st.at }, refused: refusedLast };
   }
 
   return {
