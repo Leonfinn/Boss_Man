@@ -2,7 +2,7 @@
 // other tickets' pushes wait for it, but never longer than the cap. The clock is injected: no test waits on the wall clock.
 import { describe, expect, it } from "vitest";
 import { LandingTurns, REBUILDS_FOR_TURN } from "../src/services/landing-turn.js";
-import { holderPhase } from "../src/services/merge-status.js";
+import { holderPhase, mergeState } from "../src/services/merge-status.js";
 
 const P = "project-1";
 const HOUR = 60 * 60_000;
@@ -177,6 +177,21 @@ describe("landing turn events (BOS-2361)", () => {
     advance(HOUR);
     expect(t.snapshot()).toEqual([]);
     expect(seen).toEqual([{ action: "expired", projectId: P, ticketId: "a", capMs: HOUR }]);
+  });
+});
+
+describe("mergeState waiting on GitHub CI (BOS-2605)", () => {
+  // The db is absent on purpose: the slot lookup fails closed (no slot held), so the CI wait is what the line says.
+  const l = async () => ({ state: "running", startedAt: "2026-11-25T15:25:25.000Z", phase: "merging" });
+  const ctx = (p: { ci?: number; turn?: boolean }) => ({ db: {}, ciWaits: new Map(p.ci ? [["a", { since: p.ci, waiting: ["check"] }]] : []), turnWaits: new Map(p.turn ? [["a", {}]] : []) }) as never;
+
+  it("says waiting for GitHub CI, not merging, the same words as server_status's phase", async () => {
+    const since = Date.parse("2026-11-25T15:25:39Z");
+    expect(await mergeState.call({ landing: l } as never, ctx({ ci: since }), "a")).toBe("merge waiting for GitHub CI since 15:25 UTC");
+    expect(holderPhase({ ...(ctx({ ci: since }) as object), landings: new Map(), phases: new Map() } as never, "a")).toBe("waiting for GitHub CI since 15:25 UTC");
+  });
+  it("without a CI wait it still says merging", async () => {
+    expect(await mergeState.call({ landing: l } as never, ctx({}), "a")).toBe("merge merging (since 15:25 UTC)");
   });
 });
 

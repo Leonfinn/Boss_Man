@@ -371,8 +371,13 @@ export function carriedNoteText(note: string | null | undefined): string {
  * BOS-1871: the words for a landing that waits only for GitHub CI on its merge copy, e.g. "waiting for GitHub CI (check), 12 min
  * so far". Written where that wait is decided (the landing's own CI marker), so the screen can't fall through to "next in line".
  */
-export function ciWaitLabel(ci: { minutes: number; waiting: string[] }): string {
-  return `waiting for GitHub CI on its merge copy${ci.waiting.length ? ` (${ci.waiting.join(", ")})` : ""}, ${waitedText(Math.max(0, ci.minutes))} so far`;
+export function ciWaitLabel(ci: { minutes: number; waiting: string[]; workflowOnly?: boolean }): string {
+  return `waiting for GitHub CI on its merge copy${ci.waiting.length ? ` (${ci.waiting.join(", ")})` : ""}, ${waitedText(Math.max(0, ci.minutes))} so far${ci.workflowOnly ? " (workflow change: GitHub runs every job, usually longer)" : ""}`;
+}
+
+/** BOS-2605 (F4): every changed file is under .github/workflows/, which switches on every optional CI job. False for no files. */
+export function workflowOnlyChange(files: string[]): boolean {
+  return files.length > 0 && files.every((f) => f.startsWith(".github/workflows/"));
 }
 
 /**
@@ -769,7 +774,8 @@ export function mergeQueueService(
         const ci = ciWait.get(r.id);
         if (ci) {
           const since = new Date(ci.since);
-          const words = ciWaitLabel({ minutes: mins(t.getTime() - since.getTime()), waiting: ci.waiting });
+          const [files] = await db.select({ f: tickets.diffFiles }).from(tickets).where(eq(tickets.id, r.id));
+          const words = ciWaitLabel({ minutes: mins(t.getTime() - since.getTime()), waiting: ci.waiting, workflowOnly: workflowOnlyChange(files?.f ?? []) });
           sinceOf.set(r.id, since.toISOString());
           waiting.push({
             ticketId: r.id,

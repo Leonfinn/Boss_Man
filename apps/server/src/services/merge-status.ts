@@ -17,7 +17,7 @@ import type { ReviewCtx } from "./review-ctx.js";
 import type { ReviewSelf } from "./review.js";
 import { LANDING_END_MS, landingsThatCount } from "./update-waits.js";
 import { landingTurns } from "./landing-turn.js";
-import { turnWaitWords, type TurnWait } from "./merge-queue.js";
+import { runningCheckJobs, turnWaitWords, type TurnWait } from "./merge-queue.js";
 
 /** BOS-2479: when the landing's push call began (merge-rounds.ts whilePushing); undefined when it isn't pushing. */
 function pushStartMs(ctx: Pick<ReviewCtx, "landings" | "pushing">, id: string): number | undefined {
@@ -74,6 +74,22 @@ export async function landing(this: ReviewSelf, ctx: ReviewCtx, ticketId: string
   return { ...status, stale: await landingStale(ticketId), phase: phases.get(ticketId) ?? "checking" };
 }
 
+/** BOS-2605: the one wording of the GitHub CI wait: the Merges tab's tag line, mergeState, server_status's holder and seats. */
+export function ciPhaseWords(sinceMs: number): string {
+  return `waiting for GitHub CI since ${new Date(sinceMs).toISOString().slice(11, 16)} UTC`;
+}
+
+/** BOS-2605: does the ticket's merge check hold a check slot now? Without the server queue (or on an error) it doesn't. */
+async function holdsCheckSlot(ctx: Pick<ReviewCtx, "db">, ticketId: string): Promise<boolean> {
+  try {
+    const [t] = await ctx.db.select({ companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ticketId));
+    if (!t) return false;
+    return (await runningCheckJobs(ctx.db, t.companyId)).some((j) => j.kind === "merge" && j.ticketId === ticketId);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * One plain line on where a ticket's merge stands, for every list of sign-off and merge cards (DR-014), built on the
  * server so agents copy it: queued / checking / merging / waiting to retry / looks stuck / finished (with why).
@@ -86,6 +102,10 @@ export async function mergeState(this: ReviewSelf, ctx: ReviewCtx, ticketId: str
   if (l.state === "finished") return `merge finished: ${l.text}`;
   if (l.stale) return `merge looks stuck since ${at(l.startedAt)}; nothing is running now`;
   // BOS-2119 (R43): waiting for another ticket's landing turn: the Merges tab's words, not a bare "merging".
+  // BOS-2605 (F1): holderPhase's order, CI wait first. A landing whose check still holds a slot is "checking": GitHub runs
+  // beside it, and the wait only counts once the check is over (the Merges tab's rule).
+  const ci = ctx.ciWaits.get(ticketId);
+  if (ci && !(await holdsCheckSlot(ctx, ticketId))) return `merge ${ciPhaseWords(ci.since)}`;
   const turn = ctx.turnWaits.get(ticketId);
   if (turn) return `merge ${await turnWaitWords(ctx.db, turn)} (since ${at(new Date(turn.since).toISOString())})`;
   const word = { queued: "queued for a check slot", checking: "checking", merging: "merging", waiting_to_retry: "waiting to try again after the runner restarted", retrying_git: "retrying after a push/fetch failure to the git host" }[l.phase ?? "checking"];
@@ -158,7 +178,7 @@ export function runningMerges(this: ReviewSelf, ctx: ReviewCtx): Array<{ ticketI
  */
 export function holderPhase(ctx: Pick<ReviewCtx, "landings" | "phases" | "ciWaits" | "turnWaits">, ticketId: string): string {
   const ci = ctx.ciWaits.get(ticketId);
-  if (ci) return `waiting for GitHub CI since ${new Date(ci.since).toISOString().slice(11, 16)} UTC`;
+  if (ci) return ciPhaseWords(ci.since);
   if (ctx.turnWaits.has(ticketId)) return "waiting for another ticket's landing turn";
   if (ctx.landings.get(ticketId)?.state !== "running") return "no merge running";
   const phase = ctx.phases.get(ticketId) ?? "checking";
@@ -170,6 +190,15 @@ export function holderPhase(ctx: Pick<ReviewCtx, "landings" | "phases" | "ciWait
     retrying_git: "retrying a push or fetch to the git host",
   };
   return words[phase] ?? phase;
+}
+
+/**
+ * BOS-2605 (F3): a merge train seat's phase for server_status mergeTrain: holderPhase's words (the same function), when the
+ * GitHub wait began and the GitHub jobs still running. The train runs no landing turn, so landingTurns is empty then.
+ */
+export function seatPhase(this: ReviewSelf, ctx: ReviewCtx, ticketId: string): { phase: string; ciSince: string | null; ciRunning: string[] } {
+  const ci = ctx.ciWaits.get(ticketId);
+  return { phase: holderPhase(ctx, ticketId), ciSince: ci ? new Date(ci.since).toISOString() : null, ciRunning: ci?.waiting ?? [] };
 }
 
 /**

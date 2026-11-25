@@ -102,6 +102,9 @@ describe("rowState", () => {
   it("every kind of hold reads Held", () => {
     for (const state of ["held", "waiting_host", "waiting_for_other_ticket", "waiting_for_decision"]) expect(rowState(row({ state }))).toEqual({ word: "Held", tone: "grey" });
   });
+  it("a merge that waits only for GitHub CI reads On GitHub, blue, not Waiting (BOS-2605)", () => {
+    expect(rowState(row({ state: "waiting_for_ci" }))).toEqual({ word: "On GitHub", tone: "blue" });
+  });
   it("anything else reads Waiting", () => {
     expect(rowState(row({ actor: "ceo" }))).toEqual({ word: "Waiting", tone: "grey" });
   });

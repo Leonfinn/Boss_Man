@@ -259,6 +259,16 @@ describe("merge stall alarm (BOS-1515)", () => {
     expect(p!.seated).toHaveLength(1);
     expect(p!.waiting).toHaveLength(1);
   });
+
+  it("server_status mergeTrain gives each seat its phase, GitHub wait start and running jobs (BOS-2605)", async () => {
+    const tr = new MergeTrain({ seats: () => 2 });
+    const id = ctx.ids.get("L")!;
+    tr.join(id, { priority: 1, place: 1 });
+    tr.seated(id);
+    const info = (t: string) => ({ phase: t === id ? "waiting for GitHub CI since 15:25 UTC" : "x", ciSince: "2026-11-25T15:25:39.000Z", ciRunning: ["check"] });
+    const [p] = await mergeTrainStatus(ctx.db, ctx.company.id, (pid) => (pid === ctx.project.id ? tr.facts() : null), info);
+    expect(p!.seatDetails).toEqual([{ ticket: ctx.refs.get("L"), phase: "waiting for GitHub CI since 15:25 UTC", ciSince: "2026-11-25T15:25:39.000Z", ciRunning: ["check"] }]);
+  });
 });
 
 /**
