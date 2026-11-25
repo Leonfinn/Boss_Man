@@ -309,14 +309,15 @@ export async function sweepMissingSignoffs(db: Db, tellCeo?: (companyId: string,
  * 10-minute grace, so the moment between a move to review and its reviews opening raises nothing. The card closes when
  * the ticket leaves review. Returns the card's id, or null when none was needed.
  */
-export async function restoreNoReviewerCard(db: Db, t: Ticket, now: Date = new Date()): Promise<string | null> {
+export async function restoreNoReviewerCard(db: Db, t: Ticket, now: Date = new Date(), headOf?: (ticketId: string) => Promise<string | null>): Promise<string | null> {
   if (t.systemState !== "review" || t.checkHoldAt) return null;
   if (await openSignoffCard(db, t.id)) return null;
+  // Any open card the ticket waits on holds it, whatever its tier (a CEO-tier review-loop card too).
   const [other] = await db
     .select({ id: decisions.id })
     .from(ticketDependencies)
     .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
-    .where(and(eq(ticketDependencies.blockedTicketId, t.id), eq(decisions.status, "open"), eq(decisions.tier, "owner")))
+    .where(and(eq(ticketDependencies.blockedTicketId, t.id), eq(decisions.status, "open")))
     .limit(1);
   if (other) return null;
   const [noOne] = await db.select({ id: reviewRequests.id }).from(reviewRequests).where(and(eq(reviewRequests.ticketId, t.id), eq(reviewRequests.status, "pending"), isNull(reviewRequests.reviewerAgentId))).limit(1);
@@ -325,9 +326,12 @@ export async function restoreNoReviewerCard(db: Db, t: Ticket, now: Date = new D
     const [open] = await db.select({ id: reviewRequests.id }).from(reviewRequests).where(and(eq(reviewRequests.ticketId, t.id), inArray(reviewRequests.status, ["pending", "approved"]))).limit(1);
     if (open || (await derivedSignoff(db, t)).state === "waiting") return null;
   }
+  // The runner is asked for the head only now, for a ticket that really gets a card, so the card follows the head rules.
+  const head = headOf ? await headOf(t.id).catch(() => null) : null;
   const id = await raiseSignoffCard(db, t, {
     reviewer: "the owner",
     reviewerAgentId: null,
+    head,
     question: `Merge "${t.title}"? No agent can review it, so it is yours to approve. It is rated ${riskOf(t.risk)} risk. Choose "${APPROVE_MERGE}" to land it, or "Send it back".`,
     clearWhen: [{ kind: "noReviewerGone", ticketId: t.id }],
   });
@@ -336,7 +340,7 @@ export async function restoreNoReviewerCard(db: Db, t: Ticket, now: Date = new D
 }
 
 /** BOS-2582 sweep: every ticket in review that no agent can review gets its card, once. Paused companies are left alone. */
-export async function sweepNoReviewerCards(db: Db, tellCeo?: (companyId: string, note: string) => Promise<unknown>): Promise<number> {
+export async function sweepNoReviewerCards(db: Db, tellCeo?: (companyId: string, note: string) => Promise<unknown>, headOf?: (ticketId: string) => Promise<string | null>): Promise<number> {
   const rows = await db
     .select({ t: tickets })
     .from(tickets)
@@ -344,7 +348,7 @@ export async function sweepNoReviewerCards(db: Db, tellCeo?: (companyId: string,
     .where(and(eq(tickets.systemState, "review"), eq(companies.paused, false)));
   let raised = 0;
   for (const { t } of rows) {
-    const id = await restoreNoReviewerCard(db, t);
+    const id = await restoreNoReviewerCard(db, t, new Date(), headOf);
     if (!id) continue;
     raised++;
     await tellCeo?.(t.companyId, `"${t.title}" (${t.id}) is in review and no agent can review it, so it waited on the owner with no card. Boss Man raised one (card ${id}); it is in the owner's Decisions. Nothing to do unless it stays unanswered.`).catch(() => undefined);
