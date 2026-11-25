@@ -24,6 +24,7 @@ import { MERGE_LINE_KIND } from "./merge-line.js";
 import { HELD_AGENT } from "./fair-share.js";
 import { isBackgroundLaneTitle } from "./check-gate.js";
 import { heldTicketIds } from "./review-holds.js";
+import { tellOnce, type Told } from "./tell-once.js";
 
 export const PRIORITY_WATCH_REASON = "priority watch";
 /** The sweep runs on every pass; it does its work this often. */
@@ -162,9 +163,11 @@ export function priorityWatchService(
   db: Db,
   deps: {
     /** Wakes the company's CEO on the ticket, on a wake that is never dropped. */
-    tellCeo: (input: { companyId: string; ticketId: string; note: string }) => Promise<unknown>;
+    tellCeo: (input: { companyId: string; ticketId: string; note: string }) => Promise<Told>;
     notify: (input: { companyId: string; level: "note" | "flag" | "page"; title: string; body: string; link: string }) => Promise<{ id: string; level: string } | null>;
     now?: () => Date;
+    /** Where a tell that did not get through is logged (BOS-2632); it is tried again on the next pass. */
+    log?: (message: string) => void;
   },
 ) {
   const now = deps.now ?? (() => new Date());
@@ -318,20 +321,26 @@ export function priorityWatchService(
         const isStopped = stopped(verdict);
         if (fresh.length) {
           const note = `Priority watch: ${ref} "${ticket.title}" is urgent and its next step is in doubt. ${fresh.map((a) => `Cause: ${a.text}.`).join(" ")} Get it moving now, or say what is blocking it.`;
-          await deps.tellCeo({ companyId: ticket.companyId, ticketId: ticket.id, note }).catch(() => undefined);
-          e.told = [...e.told, ...fresh.map((a) => a.key)].slice(-20);
-          out.told++;
+          // BOS-2632: the causes are marked told only once the wake got through; a failed one is logged and tried again next pass.
+          if (await tellOnce(`priority watch CEO ${ticket.id}`, () => deps.tellCeo({ companyId: ticket.companyId, ticketId: ticket.id, note }), deps.log)) {
+            e.told = [...e.told, ...fresh.map((a) => a.key)].slice(-20);
+            out.told++;
+          }
         }
         if (isStopped) {
           if (!e.stoppedAt) e.stoppedAt = t.toISOString();
           else if (!e.ownerTold && t.getTime() - new Date(e.stoppedAt).getTime() >= OWNER_AFTER_MS) {
             const worst = verdict.alarms.find((a) => a.cause === "nothing" || a.cause === "seat_free")!;
-            const sent = await deps
-              .notify({ companyId: ticket.companyId, level: "flag", title: `${ref} is urgent and still stopped`, body: `${ref} "${ticket.title}": ${worst.text}. The CEO was told ${ageWords(t.getTime() - new Date(e.stoppedAt).getTime())} ago and it has not moved.`, link: `#/tickets/${ticket.id}` })
-              .catch(() => null);
-            e.ownerTold = true;
-            e.ownerNotificationId = sent?.id ?? null;
-            out.ownerTold++;
+            const sent = await tellOnce(
+              `priority watch owner ${ticket.id}`,
+              () => deps.notify({ companyId: ticket.companyId, level: "flag", title: `${ref} is urgent and still stopped`, body: `${ref} "${ticket.title}": ${worst.text}. The CEO was told ${ageWords(t.getTime() - new Date(e.stoppedAt!).getTime())} ago and it has not moved.`, link: `#/tickets/${ticket.id}` }),
+              deps.log,
+            );
+            if (sent) {
+              e.ownerTold = true;
+              e.ownerNotificationId = sent;
+              out.ownerTold++;
+            }
           }
         } else if (e.stoppedAt) {
           // Moving again (a step is under way): this stop is over, the card goes, the next stop starts afresh.

@@ -10,6 +10,7 @@ import type { Db } from "../db/client.js";
 import { agents, projects, settings, ticketMessages, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
 import { wakeWatchers } from "./watch-triggers.js";
+import { tellOnce } from "./tell-once.js";
 import { isBackgroundLaneTitle } from "./check-gate.js";
 import { errorLines, readFailureLog, MAX_LINE, MAX_LINES, type GitHostConfig, type WorkflowJob, type WorkflowRun, type gitHostService } from "./git-hosts.js";
 
@@ -506,7 +507,11 @@ export function mainCiService(
         // Saved at once: if a later ticket in this pass fails, the next pass must not open this one again.
         await writeState(p.id, state);
         await record(db, { companyId: p.companyId, ticketId: t.id, kind: "main_ci_failure", summary: `Opened for a failing step on ${p.defaultBranch}`, at: now() });
-        if (who.agentId && deps.notify) await deps.notify(who.agentId, { ticketId: t.id, reason: "main CI failed", note: `Main's CI failed at ${f.job} → ${f.step}. ${NEVER_WEAKEN}`, priority: 2 }).catch(() => undefined);
+        // BOS-2632: a failed wake is logged, not retried: the urgent ticket just opened and assigned is itself the backstop
+        // (its assignment and the missed-work sweep wake the agent on it).
+        const notify = deps.notify;
+        const agentId = who.agentId;
+        if (agentId && notify) await tellOnce(`main CI ticket ${t.id}`, () => notify(agentId, { ticketId: t.id, reason: "main CI failed", note: `Main's CI failed at ${f.job} → ${f.step}. ${NEVER_WEAKEN}`, priority: 2 }), deps.log);
         await wakeWatchers(db, deps.notify, "github_main_failed", `${f.job} → ${f.step} on ${p.defaultBranch}, ticket ${t.id}`, { exceptTicketId: t.id }).catch(() => undefined);
       }
       judged[run.id] = run.attempt;
