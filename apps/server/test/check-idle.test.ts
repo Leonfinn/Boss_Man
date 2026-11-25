@@ -98,18 +98,46 @@ describe("idle check slot alarm", () => {
     minutes: 0,
     ...over,
   });
-  function rig(slots: IdleSlot[]) {
+  function rig(slots: IdleSlot[], fail = { ceo: 0, owner: 0 }) {
     const clock = { at: T(0) };
     const ceo: string[] = [];
     const owner: Array<{ level: string; body: string }> = [];
+    const logs: string[] = [];
     const svc = checkIdleService({
       slots: () => slots,
-      tellCeo: async ({ note }) => void ceo.push(note),
-      notify: async (i) => void owner.push({ level: i.level, body: i.body }),
+      tellCeo: async ({ note }) => {
+        if (fail.ceo-- > 0) throw new Error("wake insert failed");
+        ceo.push(note);
+        return { id: `w${ceo.length}` };
+      },
+      notify: async (i) => {
+        if (fail.owner-- > 0) return null;
+        owner.push({ level: i.level, body: i.body });
+        return { id: `n${owner.length}` };
+      },
       now: () => clock.at,
+      log: (m) => logs.push(m),
     });
-    return { svc, clock, ceo, owner };
+    return { svc, clock, ceo, owner, logs };
   }
+
+  it("BOS-2632: a CEO wake or owner page that fails is logged and sent on the next pass, then never again", async () => {
+    const r = rig([slot()], { ceo: 1, owner: 1 });
+    r.clock.at = new Date(T(0).getTime() + IDLE_CEO_AFTER_MS);
+    expect(await r.svc.run()).toEqual({ ceo: 0, owner: 0 });
+    expect(r.logs).toHaveLength(1);
+    expect(r.logs[0]).toContain("wake insert failed");
+    expect(await r.svc.run()).toEqual({ ceo: 1, owner: 0 });
+    await r.svc.run();
+    expect(r.ceo).toHaveLength(1);
+    r.clock.at = new Date(T(0).getTime() + IDLE_OWNER_AFTER_MS);
+    expect(await r.svc.run()).toEqual({ ceo: 0, owner: 0 });
+    expect(r.logs).toHaveLength(2);
+    expect(await r.svc.run()).toEqual({ ceo: 0, owner: 1 });
+    await r.svc.run();
+    expect(r.owner).toHaveLength(1);
+    expect(r.ceo).toHaveLength(1);
+  });
 
   it("says nothing before 5 minutes, wakes the CEO once at 5, pages the owner once at 30", async () => {
     const r = rig([slot()]);
@@ -156,8 +184,8 @@ describe("idle check slot alarm", () => {
       const svc = checkIdleService({
         slots: () => slots,
         mergeActive: async () => active.on,
-        tellCeo: async ({ note }) => void ceo.push(note),
-        notify: async (i) => void owner.push(i.body),
+        tellCeo: async ({ note }) => ({ id: String(ceo.push(note)) }),
+        notify: async (i) => ({ id: String(owner.push(i.body)) }),
         now: () => clock.at,
       });
       return { svc, clock, ceo, owner };
@@ -209,7 +237,7 @@ describe("idle check slot alarm", () => {
         tellCeo: async () => {
           throw new Error("should not wake");
         },
-        notify: async () => undefined,
+        notify: async () => null,
         now: () => after(45),
       });
       expect(await svc.run()).toEqual({ ceo: 0, owner: 0 });

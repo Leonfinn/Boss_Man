@@ -13,6 +13,7 @@ import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or } from "drizzle-orm
 import type { Db } from "../db/client.js";
 import { agents, ownerReplies, runs, ticketMessages, tickets, wakes } from "../db/schema.js";
 import { record } from "./activity.js";
+import { tellOnce, type Told } from "./tell-once.js";
 import { SCRUM_MASTER_DUTY } from "./watchdog.js";
 
 /** How long before the re-wake and the stand-in; tests move a clock through them. */
@@ -34,7 +35,9 @@ export function ownerRepliesService(
   db: Db,
   opts: {
     /** The same wake the ticket chat uses, so the owner class and priority are the scheduler's call. */
-    notify: (agentId: string, input: { ticketId: string; reason: string; note: string; priority?: number }) => Promise<unknown>;
+    notify: (agentId: string, input: { ticketId: string; reason: string; note: string; priority?: number }) => Promise<Told>;
+    /** Where a re-wake that did not get through is logged (BOS-2632). */
+    log?: (message: string) => void;
     /** Raises the CEO/SM ask on the ladder; its note carries who has the ticket and when they are expected. */
     alert: (input: { companyId: string; question: string; ticketId: string; about: string[]; from?: "scrum_master" | "ceo" | "owner"; /** A note on why the ask started where it did, kept on the ladder. */ why?: string; dedupeKey: string; context?: Record<string, unknown> }) => Promise<{ id: string } | null>;
     limits?: Partial<OwnerReplyLimits>;
@@ -162,9 +165,16 @@ export function ownerRepliesService(
     if (!claimed.length) return 0;
     const name = await agentName(run.agentId);
     const [t] = await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, run.ticketId));
-    await opts
-      .notify(run.agentId, { ticketId: run.ticketId, reason: "message", priority: 4, note: "The owner wrote to you on this ticket and your run ended without an answer. Read the conversation and answer with ticket_reply before doing anything else." })
-      .catch(() => undefined);
+    const woke = await tellOnce(
+      `owner reply re-wake run ${run.id}`,
+      () => opts.notify(run.agentId!, { ticketId: run.ticketId!, reason: "message", priority: 4, note: "The owner wrote to you on this ticket and your run ended without an answer. Read the conversation and answer with ticket_reply before doing anything else." }),
+      opts.log,
+    );
+    if (!woke) {
+      // BOS-2632: the re-wake didn't get through, so the claim is handed back and the five-minute sweep wakes the agent instead.
+      await db.update(ownerReplies).set({ reminders: 0 }).where(and(inArray(ownerReplies.id, claimed.map((r) => r.id)), eq(ownerReplies.reminders, 1)));
+      return 0;
+    }
     await record(db, { companyId: open[0]!.companyId, agentId: null, ticketId: run.ticketId, kind: "message", summary: `The run on "${t?.title ?? "a ticket"}" ended without answering the owner, so ${name ?? "the agent"} was woken to answer.` });
     return claimed.length;
   }

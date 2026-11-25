@@ -18,6 +18,7 @@ import { checkJobs, companies, notifications, projects, settings, tickets } from
 import { clashWords } from "./merge-line.js";
 import { TRAIN_RESTACK_BACKOFF_MAX_MS, trainFacts, trainProjects, type TrainFacts } from "./merge-train.js";
 import { OWNER_AFTER_MS } from "./priority-watch.js";
+import { tellOnce, type Told } from "./tell-once.js";
 
 export const MERGE_STALL_REASON = "merge line stalled";
 export const EMPTY_SEAT_MS = 3 * 60_000;
@@ -123,9 +124,11 @@ export function mergeStallService(
   db: Db,
   deps: {
     /** Wakes the company's CEO on the ticket, on a wake that is never dropped. */
-    tellCeo: (input: { companyId: string; ticketId: string; note: string }) => Promise<unknown>;
+    tellCeo: (input: { companyId: string; ticketId: string; note: string }) => Promise<Told>;
     notify: (input: { companyId: string; level: "note" | "flag" | "page"; title: string; body: string; link: string; kind?: "merge_stuck" }) => Promise<{ id: string; level: string } | null>;
     now?: () => Date;
+    /** Where a tell that did not get through is logged (BOS-2632); it is tried again on the next pass. */
+    log?: (message: string) => void;
     /** The trains to watch; the live ones by default (tests pass their own, on a fake clock). */
     trains?: () => Array<{ projectId: string; facts: TrainFacts }>;
     /** Whether new checks are paused on purpose now (the soft hold for a server update). */
@@ -216,13 +219,15 @@ export function mergeStallService(
           let e = episodes.get(key) ?? null;
           if (!e) {
             const note = `${await describe(s.cause, s.facts, s.since, n, at)} Get the line moving (send back or move the ticket in the way), or say why it is right to wait.`;
-            await deps.tellCeo({ companyId, ticketId: on, note }).catch(() => undefined);
+            // BOS-2632: no episode is saved until the CEO's wake got through, so a failed one is logged and tried again next pass.
+            if (!(await tellOnce(`merge stall CEO ${key}`, () => deps.tellCeo({ companyId, ticketId: on, note }), deps.log))) continue;
             e = { since: s.since, toldAt: t.toISOString(), ownerTold: false, ownerNotificationId: null };
             out.told++;
           } else if (!e.ownerTold && at - new Date(e.toldAt).getTime() >= OWNER_AFTER_MS) {
             const body = `${await describe(s.cause, s.facts, s.since, n, at)} The CEO was told ${ageWords(at - new Date(e.toldAt).getTime())} ago and it has not moved.`;
-            const sent = await deps.notify({ companyId, level: "flag", title: s.cause === "empty_seat" ? "The merge line has an empty seat it isn't using" : s.cause === "thrash" ? "The merge line is stuck in a loop" : "Nothing has merged for a long time", body, link: `#/merge-queue/${companyId}`, kind: "merge_stuck" }).catch(() => null);
-            e = { ...e, ownerTold: true, ownerNotificationId: sent?.id ?? null };
+            const sent = await tellOnce(`merge stall owner ${key}`, () => deps.notify({ companyId, level: "flag", title: s.cause === "empty_seat" ? "The merge line has an empty seat it isn't using" : s.cause === "thrash" ? "The merge line is stuck in a loop" : "Nothing has merged for a long time", body, link: `#/merge-queue/${companyId}`, kind: "merge_stuck" }), deps.log);
+            if (!sent) continue;
+            e = { ...e, ownerTold: true, ownerNotificationId: sent };
             out.ownerTold++;
           } else continue;
           await db.insert(settings).values({ key, value: e }).onConflictDoUpdate({ target: settings.key, set: { value: e } });

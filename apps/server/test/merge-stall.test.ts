@@ -120,6 +120,9 @@ beforeEach(async () => {
   await ctx.db.delete(settings).where(sql`${settings.key} like 'merge_stall:%'`);
   ctx.told.length = 0;
   ctx.sent.length = 0;
+  ctx.logs.length = 0;
+  ctx.fail.ceo = 0;
+  ctx.fail.owner = 0;
 });
 
 async function setup() {
@@ -141,10 +144,18 @@ async function setup() {
   }
   const told: Array<{ ticketId: string; note: string; at: number }> = [];
   const sent: Array<{ id: string; title: string; body: string; at: number }> = [];
+  // BOS-2632: how many of the next CEO wakes / owner notifications fail (a throw, then a null), and what was logged.
+  const fail = { ceo: 0, owner: 0 };
+  const logs: string[] = [];
   const service = (clock: { t: number }, trains: () => Array<{ projectId: string; facts: ReturnType<MergeTrain["facts"]> }>, paused?: () => boolean) =>
     mergeStallService(db, {
-      tellCeo: async ({ ticketId, note }) => void told.push({ ticketId, note, at: clock.t }),
+      tellCeo: async ({ ticketId, note }) => {
+        if (fail.ceo > 0 && fail.ceo--) throw new Error("wake insert failed");
+        return { id: String(told.push({ ticketId, note, at: clock.t })) };
+      },
+      log: (m) => logs.push(m),
       notify: async (input) => {
+        if (fail.owner > 0 && fail.owner--) return null;
         const row = await built.notes.notify(input);
         if (row) sent.push({ id: row.id, title: input.title, body: input.body, at: clock.t });
         return row;
@@ -153,7 +164,7 @@ async function setup() {
       trains,
       ...(paused ? { paused: async () => paused() } : {}),
     });
-  return { ...built, db, close, company, project, ids, refs, told, sent, service };
+  return { ...built, db, close, company, project, ids, refs, told, sent, service, fail, logs };
 }
 
 describe("merge stall alarm (BOS-1515)", () => {
@@ -232,6 +243,36 @@ describe("merge stall alarm (BOS-1515)", () => {
     expect(await svc.run()).toMatchObject({ told: 1 });
     expect(ctx.told[0]!.note).toContain("nothing has landed for 45 minutes");
     expect(ctx.told[0]!.note).toContain("No merge check is running.");
+  });
+
+  it("BOS-2632: a CEO wake or owner notification that fails is logged, saves no episode, and is sent on the next pass, once", async () => {
+    const clock = { t: at("12:00:00") };
+    const tr = new MergeTrain({ seats: () => 1, now: () => clock.t });
+    tr.join(ctx.ids.get("S")!, { priority: 1, place: 1 });
+    tr.seated(ctx.ids.get("S")!);
+    tr.join(ctx.ids.get("B")!, { priority: 1, place: 2 });
+    const svc = ctx.service(clock, () => [{ projectId: ctx.project.id, facts: tr.facts() }]);
+    ctx.fail.ceo = 1;
+    clock.t += NO_LANDING_MS;
+    expect(await svc.run()).toMatchObject({ told: 0 });
+    expect(ctx.logs.join("\n")).toContain("wake insert failed");
+    expect(await ctx.db.select().from(settings).where(sql`${settings.key} like 'merge_stall:%'`)).toEqual([]);
+    clock.t += MIN;
+    expect(await svc.run()).toMatchObject({ told: 1 });
+    clock.t += MIN;
+    expect(await svc.run()).toMatchObject({ told: 0 });
+    expect(ctx.told).toHaveLength(1);
+    // The owner's notification: one not saved, then sent on the next pass, then never again.
+    ctx.fail.owner = 1;
+    clock.t += OWNER_AFTER_MS;
+    expect(await svc.run()).toMatchObject({ ownerTold: 0 });
+    expect(ctx.logs).toHaveLength(2);
+    clock.t += MIN;
+    expect(await svc.run()).toMatchObject({ ownerTold: 1 });
+    clock.t += MIN;
+    expect(await svc.run()).toMatchObject({ ownerTold: 0, told: 0 });
+    expect(ctx.sent).toHaveLength(1);
+    expect(ctx.told).toHaveLength(1);
   });
 
   it("a stall whose train is gone (a restart) is cleared, never left standing", async () => {

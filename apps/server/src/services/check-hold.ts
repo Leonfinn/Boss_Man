@@ -12,6 +12,7 @@ import { record } from "./activity.js";
 import { checkQueue, type CheckJob } from "./check-queue.js";
 import { moveTicket } from "./ticket-moves.js";
 import { systemMoveTicket } from "./ticket-transition.js";
+import { tellOnce } from "./tell-once.js";
 
 export type CheckHoldDeps = {
   /** Opens the review round for a ticket that was held (requests the reviews its tier needs and wakes the reviewers). */
@@ -19,6 +20,8 @@ export type CheckHoldDeps = {
   /** Wakes the ticket's agent with the failing step. */
   wake: (agentId: string, input: { ticketId: string; reason: string; note: string; priority?: number }) => Promise<unknown>;
   now?: () => Date;
+  /** Where a wake that did not get through is logged (BOS-2632). */
+  log?: (message: string) => void;
   /** The head commit of a ticket's branch (null when it can't be read). Without it the standing sweep (BOS-2114) does nothing and a pass is released as before. */
   branchHead?: (ticketId: string) => Promise<string | null>;
   /**
@@ -48,14 +51,20 @@ export function checkHoldService(db: Db, deps: CheckHoldDeps) {
     if (moved.assigneeAgentId) {
       const kept = job?.state === "failed" ? await queue.logChars(job.id).catch(() => null) : null;
       const tail = (job?.logTail ? `\n\nEnd of the log:\n${job.logTail.slice(-1500)}` : "") + (kept && job ? `\n\n${fullLogPointer(job.id, ticketId, kept)}` : "");
-      await Promise.resolve(
-        deps.wake(moved.assigneeAgentId, {
-          ticketId,
-          reason: "check_result",
-          priority: 2,
-          note: `You handed this ticket in, and Boss Man ran its quick check. ${why}\n\nIt is back in In progress and no reviewer was woken. Fix it, commit, and move it to review again.${tail}`,
-        }),
-      ).catch(() => undefined);
+      // BOS-2632: a failed wake is logged, not retried here: the ticket is already In progress with the failing step in its
+      // state note, so the missed-work sweep wakes its agent if nothing else does.
+      const agentId = moved.assigneeAgentId;
+      await tellOnce(
+        `check hold bounce ${ticketId}`,
+        async () =>
+          deps.wake(agentId, {
+            ticketId,
+            reason: "check_result",
+            priority: 2,
+            note: `You handed this ticket in, and Boss Man ran its quick check. ${why}\n\nIt is back in In progress and no reviewer was woken. Fix it, commit, and move it to review again.${tail}`,
+          }),
+        deps.log,
+      );
     }
     return true;
   }

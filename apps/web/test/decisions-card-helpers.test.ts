@@ -3,7 +3,7 @@
 // once the CEO has advised, and the card id in a #/decisions/<id> link.
 import { describe, expect, it } from "vitest";
 import type { Decision } from "../src/api";
-import { cardTicketId, effectiveRecommendation, linkedCardOf, sendFailed } from "../src/pages/Decisions";
+import { cardTicketId, effectiveRecommendation, kindKeyOf, linkedCardOf, sendFailed, waitedMinutes } from "../src/pages/Decisions";
 
 const ticket = (id: string) => ({ ticketId: id, ref: `APP-${id}`, title: `Ticket ${id}` });
 
@@ -91,6 +91,75 @@ describe("effectiveRecommendation", () => {
 
   it("falls back to the rule when the card has no matching option for the CEO's advice", () => {
     expect(effectiveRecommendation(card({ options: ["Approve", "Reject"], recommendedOption: "Approve", context: { advice: { state: "advised", recommendation: "deny" } } }))).toEqual({ option: "Approve", rule: null });
+  });
+});
+
+describe("kindKeyOf", () => {
+  const key = (kind: string, options: string[] = [], type?: string) =>
+    kindKeyOf({ kind, options, ...(type ? { context: { type } } : {}) });
+
+  it("keeps a deploy, a self-deploy and a rule proposal as themselves", () => {
+    expect(key("approval", ["Approve", "Reject"], "deploy")).toBe("deploy");
+    expect(key("approval", ["Approve", "Reject"], "self_deploy")).toBe("self_deploy");
+    expect(key("rule_proposal", ["Add it", "Skip"], "rule_proposal")).toBe("rule_proposal");
+  });
+
+  it("reads a card that offers Approve plan as a plan", () => {
+    expect(key("approval", ["Approve plan", "Keep planning"])).toBe("plan");
+  });
+
+  it("reads a risk review as a signoff and a review stall as itself", () => {
+    expect(key("question", [], "risk_review")).toBe("signoff");
+    expect(key("question", [], "review_stall")).toBe("review_stall");
+  });
+
+  it("otherwise falls back to the card's own kind", () => {
+    expect(key("permission", ["Allow once", "Deny"])).toBe("permission");
+    expect(key("question", [], "something_else")).toBe("question");
+    expect(key("hire")).toBe("hire");
+  });
+
+  it("puts a deploy context ahead of an Approve plan option", () => {
+    expect(key("approval", ["Approve plan", "Keep planning"], "deploy")).toBe("deploy");
+  });
+});
+
+describe("waitedMinutes", () => {
+  type Item = Parameters<typeof waitedMinutes>[0];
+  const answered = (over: Partial<Item> = {}): Item => ({
+    id: "a1",
+    question: "Run the backup?",
+    status: "answered",
+    answer: "Yes",
+    by: "owner",
+    byName: null,
+    at: "2026-11-10T11:00:00.000Z",
+    askedAt: "2026-11-10T09:30:00.000Z",
+    ticket: null,
+    ...over,
+  });
+
+  it("counts whole minutes between asked and answered", () => {
+    expect(waitedMinutes(answered())).toBe(90);
+  });
+
+  it("rounds a part minute to the nearest whole minute", () => {
+    expect(waitedMinutes(answered({ at: "2026-11-10T09:31:29.000Z" }))).toBe(1);
+    expect(waitedMinutes(answered({ at: "2026-11-10T09:31:31.000Z" }))).toBe(2);
+  });
+
+  it("never goes below zero when the answer came before the question", () => {
+    expect(waitedMinutes(answered({ at: "2026-11-10T09:00:00.000Z" }))).toBe(0);
+  });
+
+  it("has no wait for a withdrawn card or one with no asked time", () => {
+    expect(waitedMinutes(answered({ status: "withdrawn" }))).toBeNull();
+    expect(waitedMinutes(answered({ askedAt: undefined }))).toBeNull();
+  });
+
+  it("has no wait when a date cannot be read", () => {
+    expect(waitedMinutes(answered({ askedAt: "not a date" }))).toBeNull();
+    expect(waitedMinutes(answered({ at: "not a date" }))).toBeNull();
   });
 });
 
