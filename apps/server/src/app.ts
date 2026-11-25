@@ -919,6 +919,8 @@ export async function buildApp(opts: AppOptions) {
     planning: roadmapPlanning,
     wake: (input) => scheduler.wake(input),
     now: opts.now,
+    // BOS-2633: tellOnce logs a tell that did not get through (BOS-2160: into the error buffer, which raises an owner card if it keeps failing).
+    log: (message) => app.log.error(message),
   });
   const sweeps = sweepService(db, {
     // BOS-2160: a background step that throws is logged (the error buffer reads app.log.error) and, if it keeps failing, raises one owner card.

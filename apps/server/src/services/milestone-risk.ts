@@ -5,11 +5,16 @@
 // under its badge (which names the tickets). Nothing is woken while the status stays the same, and a switched-off milestone
 // never wakes anyone. What the CEO was last woken about is kept in settings (milestone_risk:<milestoneId>), so a restart
 // neither repeats a wake nor loses one.
+//
+// BOS-2633: the wake goes through tellOnce (services/tell-once.ts), the one rule every sweep uses since BOS-2632: it counts
+// only when it resolved with a real wake row, and a throw, a "no CEO" null or a dropped wake is logged and answered null, so
+// the milestone stays "not woken yet" and the next pass tries again.
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { ceoPlanWake, dateIn, needsCeoPlan } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, milestones, settings } from "../db/schema.js";
 import type { planningService } from "./planning.js";
+import { tellOnce, type Told } from "./tell-once.js";
 
 export const MILESTONE_RISK_REASON = "milestone at risk";
 export const MILESTONE_RISK_KEY = (milestoneId: string) => `milestone_risk:${milestoneId}`;
@@ -28,8 +33,9 @@ export function reasonForWake(reason: string | null): string {
 
 type Kept = { status: string | null; managed: boolean };
 
-export function milestoneRiskService(db: Db, deps: { planning: ReturnType<typeof planningService>; wake: (input: { agentId: string; reason: string; note: string; priority?: number }) => Promise<unknown>; now?: () => Date }) {
+export function milestoneRiskService(db: Db, deps: { planning: ReturnType<typeof planningService>; wake: (input: { agentId: string; reason: string; note: string; priority?: number }) => Promise<unknown>; now?: () => Date; log?: (message: string) => void }) {
   const now = deps.now ?? (() => new Date());
+  const log = deps.log ?? (() => undefined);
 
   return {
     /** One pass (the sweep calls it every minute). Errors in one company don't stop the others. */
@@ -59,30 +65,48 @@ export function milestoneRiskService(db: Db, deps: { planning: ReturnType<typeof
         const prev = seen.get(m.id) ?? null;
         const status = m.status;
         const shouldWake = ceoPlanWake({ managed: true, wasManaged: prev?.managed ?? false, status, lastWoken: (prev?.status ?? null) as never });
-        if (shouldWake) {
-          const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, m.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
-          if (ceo) {
-            const what = m.targetDate ? `Its date is ${m.targetDate}.` : "It has no date.";
-            await deps
-              .wake({
+        // What the next pass compares against: the status the milestone was last WOKEN about. It is cleared as soon as the
+        // status leaves At risk/Late, so a return to that state is a new wake; otherwise the last woken status stays.
+        // BOS-2633: the send goes through tellOnce, so the wake counts only when it resolved with a real wake row. A throw, a
+        // null ("no CEO to wake", "not saved") or a dropped wake is logged by tellOnce and answers null, and the milestone is
+        // not marked woken, so the next pass tries again (BOS-2627 did this locally; this is now the sweeps' one shared rule).
+        const delivered = () =>
+          tellOnce(
+            `milestone at risk ${m.title} (${m.id})`,
+            async (): Promise<Told> => {
+              const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, m.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+              if (!ceo) return null;
+              const what = m.targetDate ? `Its date is ${m.targetDate}.` : "It has no date.";
+              return (await deps.wake({
                 agentId: ceo.id,
                 reason: MILESTONE_RISK_REASON,
                 priority: 3,
-                note: `The milestone "${m.title}" under the objective "${m.objective}" at ${m.company} is now ${status === "late" ? "Late" : "At risk"}: ${reasonForWake(m.reason)}. ${what} The owner asked you to manage this one: plan a remedy for it in plain words, and say it to them when they next ask how it is going.`,
-              })
-              .catch(() => undefined);
-            woken++;
-          }
-        }
-        // Record what the next pass compares against: the status the milestone was last woken about. It is cleared as soon
-        // as the status leaves At risk/Late, so a return to that state is a new wake; otherwise the last woken status stays.
-        const next: Kept = { status: needsCeoPlan(status) ? (shouldWake ? status : (prev?.status ?? null)) : null, managed: true };
+                note: `The milestone "${m.title}" under the objective "${m.objective}" at ${m.company} is now ${status === "late" ? "Late" : "At risk"}: ${reasonForWake(m.reason)}. ${what} The owner asked you to manage this one: work out a short remedy for it and record it with the roadmap tool, action set_plan (milestoneId, plan), so it shows under the milestone's reason on the owner's Roadmap.`,
+              })) as Told;
+            },
+            log,
+          );
+        // BOS-2627: this pass writes a row BEFORE anything is sent, so a pass cut short (a deploy swap, a restart, a throw)
+        // is tried again next pass rather than the milestone going quiet for good. That row says status: null ("woken about
+        // nothing yet") when a wake is due, unless the status has now left At risk/Late, which is cleared as before. Only a
+        // wake that really started replaces it with the status it was about; a dropped or failed wake leaves it, so the next
+        // pass tries again.
+        const next: Kept = { status: shouldWake || !needsCeoPlan(status) ? null : (prev?.status ?? null), managed: true };
         if (!prev || prev.status !== next.status || prev.managed !== next.managed) {
           await db
             .insert(settings)
             .values({ key: MILESTONE_RISK_KEY(m.id), value: next })
             .onConflictDoUpdate({ target: settings.key, set: { value: next } })
-            .catch(() => undefined);
+            .catch((err) => log(`milestone at risk: recording the wake for ${m.id} failed: ${(err as Error).message}`));
+        }
+        if (shouldWake && (await delivered())) {
+          woken++;
+          const after: Kept = { status, managed: true };
+          await db
+            .insert(settings)
+            .values({ key: MILESTONE_RISK_KEY(m.id), value: after })
+            .onConflictDoUpdate({ target: settings.key, set: { value: after } })
+            .catch((err) => log(`milestone at risk: recording the wake for ${m.id} failed: ${(err as Error).message}`));
         }
       }
       await forget(managed);

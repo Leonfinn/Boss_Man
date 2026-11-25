@@ -44,7 +44,8 @@ const sweep = (c: Awaited<ReturnType<typeof setup>>, now: string) =>
     planning: c.planning,
     wake: async (input) => {
       c.woken.push(input);
-      return { outcome: "queued" };
+      // The scheduler's wake row, with its id: since BOS-2633 a tell counts only when it resolved with a real row.
+      return { id: `wake-${c.woken.length}`, outcome: "queued" };
     },
     now: () => new Date(`${now}T09:00:00Z`),
   });
@@ -170,7 +171,7 @@ describe("milestone at risk: who wakes the CEO, and when (BOS-2581)", () => {
     let asked: string[] = [];
     const counted = milestoneRiskService(c.db, {
       planning: { managedMilestones: async (today: string) => ((asked.push(today), [])) } as unknown as typeof c.planning,
-      wake: async () => ({ outcome: "queued" }),
+      wake: async () => ({ id: "w0", outcome: "queued" }),
       now: () => new Date("2026-10-16T09:00:00Z"),
     });
     expect(await counted.run()).toEqual({ woken: 0 });
@@ -190,6 +191,59 @@ describe("milestone at risk: who wakes the CEO, and when (BOS-2581)", () => {
     await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
     expect(await sweep(c, "2026-10-16").run()).toEqual({ woken: 1 });
     expect(c.woken.map((w) => w.agentId)).toEqual([c.ceo.id]);
+  });
+});
+
+describe("milestone at risk: the wake goes through tellOnce (BOS-2633)", () => {
+  /** A sweep that records what the pass logged, with the wake's outcome (or a throw) under the test's control. */
+  const through = (c: Awaited<ReturnType<typeof setup>>, now: string, wake: () => Promise<unknown>) => {
+    const logs: string[] = [];
+    const service = milestoneRiskService(c.db, { planning: c.planning, wake: async (input) => ((c.woken.push(input), wake())), now: () => new Date(`${now}T09:00:00Z`), log: (m) => logs.push(m) });
+    return { logs, service };
+  };
+
+  it("a wake that sent nothing (no CEO) counts as not told, is logged once, and the next pass tries again", async () => {
+    const c = await setup();
+    const { m } = await lateNow(c);
+    await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
+    // wake() saying null is what a sweep gets when nothing was saved: tellOnce answers null, so the milestone is not woken.
+    const first = through(c, "2026-10-16", async () => null);
+    expect(await first.service.run()).toEqual({ woken: 0 });
+    expect(c.woken).toHaveLength(1);
+    expect(first.logs.some((l) => l.includes('"milestone at risk Launch') && l.includes("nothing was sent"))).toBe(true);
+    // The row stays "not woken yet", so the next pass tries again and, this time, it goes through.
+    const [kept] = await c.db.select().from(settings).where(eq(settings.key, `milestone_risk:${m.id}`));
+    expect(kept!.value).toMatchObject({ status: null });
+    expect(await through(c, "2026-10-17", async () => ({ id: "w1", outcome: "queued" })).service.run()).toEqual({ woken: 1 });
+    expect(c.woken).toHaveLength(2);
+  });
+
+  it("a wake that throws is logged by tellOnce, the pass carries on, and the next pass wakes the CEO", async () => {
+    const c = await setup();
+    const { m } = await lateNow(c);
+    await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
+    const first = through(c, "2026-10-16", async () => {
+      throw new Error("scheduler unavailable");
+    });
+    // tellOnce swallows the error on purpose: the sweep step must not go down for one failed tell.
+    expect(await first.service.run()).toEqual({ woken: 0 });
+    expect(first.logs.some((l) => l.includes("scheduler unavailable"))).toBe(true);
+    const [kept] = await c.db.select().from(settings).where(eq(settings.key, `milestone_risk:${m.id}`));
+    expect(kept!.value).toMatchObject({ status: null });
+    expect(await through(c, "2026-10-17", async () => ({ id: "w2", outcome: "queued" })).service.run()).toEqual({ woken: 1 });
+    expect(c.woken).toHaveLength(2);
+  });
+
+  it("a dropped wake is retried, and only a wake that really started goes quiet", async () => {
+    const c = await setup();
+    const { m } = await lateNow(c);
+    await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
+    const first = through(c, "2026-10-16", async () => ({ id: "w3", outcome: "dropped" }));
+    expect(await first.service.run()).toEqual({ woken: 0 });
+    expect(first.logs.some((l) => l.includes("dropped"))).toBe(true);
+    expect(await through(c, "2026-10-17", async () => ({ id: "w4", outcome: "queued" })).service.run()).toEqual({ woken: 1 });
+    expect(await through(c, "2026-10-18", async () => ({ id: "w5", outcome: "queued" })).service.run()).toEqual({ woken: 0 });
+    expect(c.woken).toHaveLength(2);
   });
 });
 

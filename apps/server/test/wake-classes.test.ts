@@ -384,7 +384,7 @@ describe("wake classes: callers of wake() and notify()", () => {
     "services/owner-replies.ts": CHECKS_OUTCOME + " (a dropped or failed re-wake hands its claim back through tellOnce, so the 5-minute sweep retries; the 10-minute ask does not need it to land)",
     "services/ticket-chat.ts": NEVER_DROPPED,
     "services/merge-stall.ts": NEVER_DROPPED + " (merge line stalled is a waiting reason; deps.notify is the owner's notification, not a wake)",
-    "services/milestone-risk.ts": NEVER_DROPPED + " (milestone at risk is a waiting reason: the owner asked the CEO to manage that milestone, so it is never dropped)",
+    "services/milestone-risk.ts": CHECKS_OUTCOME + " (milestone at risk is a waiting reason, sent through tellOnce: a dropped, failed or no-CEO wake is logged and tried again next pass)",
     "services/priority-watch.ts": NEVER_DROPPED + " (priority watch is a waiting reason; deps.notify is the owner's notification, not a wake)",
     "services/check-idle.ts": NEVER_DROPPED + " (idle check slot is a waiting reason; deps.notify is the owner's notification, not a wake)",
     "services/watchdog.ts": CHECKS_OUTCOME + " (a dropped wake is reported, not counted as sent)",
