@@ -623,6 +623,12 @@ export const decisions = pgTable("decisions", {
    * report; the CEO is woken at this deadline if the report never came.
    */
   infoAskNaggedAt: timestamp("info_ask_nagged_at", { withTimezone: true }),
+  /**
+   * BOS-2594: once the first result has reached the owner, later non-interim replies from the raiser or the CEO on the card's
+   * ticket are mirrored into their chat until this time (24 h after the first result). Null when the loop never opened, or
+   * when the raiser closed it (ticket_reply closesOwnerLoop).
+   */
+  infoAskFollowUntil: timestamp("info_ask_follow_until", { withTimezone: true }),
 },
   // The open queue is read on the dashboard, brief and ladder, and the notifications sweep scans status (BOS-407).
   // Every hot read also names the company, so the two go together (BOS-546); status alone still serves the sweeps that cross companies.
