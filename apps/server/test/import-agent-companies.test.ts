@@ -1,8 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { strToU8, zipSync } from "fflate";
+import { strFromU8, strToU8, zipSync } from "fflate";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
+import { fromAgentCompanies, isAgentCompanies } from "../src/services/import-agent-companies.js";
 
 // No real DNS: the package's git address (github.com) must resolve public so the network guard doesn't flag it (BOS-953).
 // The import's guard lookup races a 3 s timeout and fails closed, so a real lookup that stalls under load would refuse the
@@ -230,5 +231,109 @@ describe("agent pictures in an Agent Companies export", () => {
     expect(pic.headers["content-type"]).toBe("image/png");
     expect(Buffer.from(pic.rawPayload).equals(png)).toBe(true);
     expect((await req("GET", `/api/agents/${team.find((a) => a.name === "Boss")!.id}/avatar`)).statusCode).toBe(404);
+  });
+});
+
+// BOS-2413 (background lane): the two pure helpers behind the Agent Companies preview, without a database or HTTP.
+describe("isAgentCompanies", () => {
+  const pack = (paths: string[]) => new Map(paths.map((p) => [p, strToU8("x")]));
+
+  it("is true only for an export: COMPANY.md and no Boss Man manifest", () => {
+    expect(isAgentCompanies(pack(["COMPANY.md"]))).toBe(true);
+    expect(isAgentCompanies(pack(["COMPANY.md", "agents/boss/AGENTS.md"]))).toBe(true);
+  });
+
+  it("is false once a manifest.json is there, and for files with no COMPANY.md", () => {
+    expect(isAgentCompanies(pack(["COMPANY.md", "manifest.json"]))).toBe(false);
+    expect(isAgentCompanies(pack(["manifest.json", "company.json"]))).toBe(false);
+    expect(isAgentCompanies(pack([]))).toBe(false);
+  });
+});
+
+describe("fromAgentCompanies", () => {
+  const Files = (entries: Record<string, string | Uint8Array>) => new Map(Object.entries(entries).map(([p, t]) => [p, typeof t === "string" ? strToU8(t) : t]));
+  const json = (files: Map<string, Uint8Array>, p: string) => JSON.parse(strFromU8(files.get(p)!));
+  const EXPORT: Record<string, string> = {
+    "COMPANY.md": '---\nname: "Acme"\nschema: "agentcompanies/v1"\n---\nSell good widgets.\n',
+    ".paperclip.yaml": [
+      'schema: "paperclip/v1"',
+      "agents:",
+      "  boss:",
+      '    role: "ceo"',
+      "    adapter:",
+      '      type: "claude_local"',
+      "      config:",
+      '        model: "claude-x"',
+      "  keeper:",
+      '    role: "knowledge-maintainer"',
+      "    adapter:",
+      '      type: "gemini_local"',
+      "    inputs:",
+      "      env:",
+      "        GIT_TOKEN:",
+      '          kind: "secret"',
+      "        lower_name:",
+      '          kind: "secret"',
+      "projects:",
+      "  site:",
+      "    workspaces:",
+      "      repo:",
+      "        isPrimary: true",
+      '        repoUrl: "https://github.com/acme/site.git"',
+      '        defaultRef: "trunk"',
+    ].join("\n"),
+    "agents/boss/AGENTS.md": '---\nname: "Boss"\n---\nRun the company.\n',
+    "agents/keeper/AGENTS.md": '---\nname: "Keeper"\nskills:\n  - "company/ACME/seo"\n  - "nobody/gone/nope"\n---\nKeep the notes.\n',
+    "skills/company/ACME/seo/SKILL.md": "---\nname: seo\ndescription: Audit.\n---\nSteps.\n",
+    "projects/site/PROJECT.md": '---\nname: "Site"\n---\nThe public website.\n',
+  };
+
+  it("turns an export into a package: company, agents, skills, secrets and the project", () => {
+    const { files, notes } = fromAgentCompanies(Files(EXPORT));
+
+    expect(json(files, "manifest.json")).toEqual({ format: "bossman-company/1", from: "agentcompanies/v1" });
+    expect(json(files, "company.json")).toMatchObject({ name: "Acme", mission: "Sell good widgets." });
+
+    expect(json(files, "agents/boss/agent.json")).toMatchObject({ name: "Boss", role: "ceo", agentKind: "claude", model: "claude-x" });
+    // A role Boss Man has no template for keeps no template but gets the wiki duty; an adapter it doesn't know falls back to Claude.
+    expect(json(files, "agents/keeper/agent.json")).toMatchObject({ name: "Keeper", role: "worker", template: null, duty: "wiki", agentKind: "claude" });
+    expect(notes).toEqual(expect.arrayContaining([expect.stringContaining('keeper ran on "gemini_local", which Boss Man doesn\'t have; it\'s set to Claude.')]));
+
+    expect(json(files, "skills.json")).toEqual([{ name: "seo", source: "upload", requiresAddons: null, agents: ["keeper"] }]);
+    expect(json(files, "secrets.json")).toEqual([{ name: "GIT_TOKEN", kind: "generic", envName: "GIT_TOKEN", agents: ["keeper"] }]);
+    expect(notes).toEqual(expect.arrayContaining([expect.stringContaining("lower_name (add it as LOWER_NAME)"), expect.stringContaining("Keeper had skills that aren't in the export: nope.")]));
+
+    expect(json(files, "projects/site/project.json")).toMatchObject({ name: "Site", repoUrl: "https://github.com/acme/site.git", defaultBranch: "trunk" });
+    expect(strFromU8(files.get("wiki/imported/site.md")!)).toContain("The public website.");
+  });
+
+  it("moves an over-long company description to a wiki page and says so", () => {
+    const long = "M".repeat(2_500);
+    const { files, notes } = fromAgentCompanies(Files({ ...EXPORT, "COMPANY.md": `---\nname: "Acme"\n---\n${long}\n` }));
+    const company = json(files, "company.json");
+    expect(company.mission).toContain("cut here");
+    expect(notes).toEqual(expect.arrayContaining([expect.stringContaining("imported/company-description")]));
+    expect(strFromU8(files.get("wiki/imported/company-description.md")!)).toContain(long);
+  });
+
+  it("leaves out a project repo address Boss Man won't take, or one that holds a credential, and says why", () => {
+    const withRepo = (repoUrl: string) => Files({ ...EXPORT, ".paperclip.yaml": EXPORT[".paperclip.yaml"]!.replace("https://github.com/acme/site.git", repoUrl) });
+
+    const publicHttp = fromAgentCompanies(withRepo("http://example.com/acme/site.git"));
+    expect(json(publicHttp.files, "projects/site/project.json").repoUrl).toBeNull();
+    expect(publicHttp.files.get("projects/site/project.json")).toBeDefined();
+    expect(publicHttp.notes).toEqual(expect.arrayContaining([expect.stringContaining("Boss Man doesn't accept it")]));
+
+    const cred = fromAgentCompanies(withRepo("https://user:secret@github.com/acme/site.git"));
+    expect(json(cred.files, "projects/site/project.json").repoUrl).toBeNull();
+    expect(cred.notes).toEqual(expect.arrayContaining([expect.stringContaining("it holds a credential")]));
+  });
+
+  it("reads a broken .paperclip.yaml as empty and notes what was left out", () => {
+    const { files, notes } = fromAgentCompanies(Files({ ...EXPORT, ".paperclip.yaml": "agents: [oops" }));
+    expect(notes).toEqual(expect.arrayContaining([expect.stringContaining(".paperclip.yaml couldn't be read")]));
+    // The rest of the export still comes through: agents from their AGENTS.md, the company from COMPANY.md.
+    expect(json(files, "agents/boss/agent.json")).toMatchObject({ name: "Boss", role: "worker", agentKind: "claude" });
+    expect(json(files, "company.json")).toMatchObject({ name: "Acme" });
   });
 });
