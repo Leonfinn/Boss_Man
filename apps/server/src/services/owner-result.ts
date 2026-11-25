@@ -5,7 +5,8 @@
 //
 // Who tells them: the agent that raised the card, not a guess by Boss Man. The contract is enforced here, at the one place
 // every answer goes through:
-//   1. the card's own words make it an information request (`infoAskOf`), accepted only on a plain question card;
+//   1. the card's own words make it an information request (`infoAskOf`), accepted only on a plain question card; or
+//      (BOS-2593) the owner's answer carries their own words, a note or a picture on any agent's question card (`ownContentOf`);
 //   2. answering it puts a line and a flag in the owner's chat and feed at once ("your answer is with X; a result follows"),
 //      and wakes the raiser with a note that says how to report back (BOS-2291: only the raiser, not every assignee);
 //   3. the raiser's status-only reply on the card's ticket is accepted (`ticket_reply` with notAnAsk on that ticket), and the
@@ -19,6 +20,7 @@ import { ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, ownerChatMessages, tickets } from "../db/schema.js";
 import type { NotifyInput } from "./notifications.js";
+import { ATTACHMENT_LINK } from "./ticket-images.js";
 
 /** How long the raiser has to report back before the CEO is asked to (BOS-2555, the ticket's "e.g. 30 minutes"). */
 export const INFO_ASK_MINUTES = 30;
@@ -54,6 +56,35 @@ export function infoAskOf(d: Pick<Decision, "kind" | "question" | "context">): s
   const hit = ASK_INFO.map((r) => r.exec(ask)).find(Boolean);
   if (!hit) return null;
   return hit[0].replace(/\s+/g, " ").trim().slice(0, 120);
+}
+
+const ATTACHED = new RegExp(ATTACHMENT_LINK.source, "g");
+
+/**
+ * BOS-2593 (DR-076 B): the second trigger. An owner answer that carries their own content (a picture or file, a note, or
+ * words beyond the button label) owes them a reply in their chat, whatever the card's wording, steps cards included: on
+ * 25 Nov "I think step 4 failed" and a screenshot on a release steps card went unanswered for over an hour.
+ *
+ * Only an agent's own question card (`type: "question"`, which is what plan, steps and to-do cards are): its raiser is woken
+ * with the answer and the report-back note on every such card. Left out on purpose: a permission card (the note goes
+ * straight into the asking run, which acts on it), a system card (Boss Man's own; its words go to the CEO through
+ * raiseOwnerHandBack, and a deadline no raiser can clear would always escalate), and the other agent card types (a rule
+ * proposal answered with a button wakes no raiser, so the report-back note would never arrive).
+ */
+export function ownContentOf(
+  d: Pick<Decision, "kind" | "context" | "raisedByAgentId" | "options">,
+  answer: string,
+  extra: { custom?: boolean; note?: string | null },
+): string | null {
+  if (d.kind !== "question" || !d.raisedByAgentId) return null;
+  if (((d.context ?? {}) as { type?: string }).type !== "question") return null;
+  const note = extra.note?.trim() ?? "";
+  if (ATTACHMENT_LINK.test(answer) || ATTACHMENT_LINK.test(note)) return "the owner attached a picture or file";
+  if (note) return "the owner added a note of their own";
+  const words = answer.replace(ATTACHED, " ").trim();
+  const options = (d.options as string[] | null) ?? [];
+  if (extra.custom && words && !options.includes(words)) return "the owner answered in their own words";
+  return null;
 }
 
 const short = (s: string, n: number) => s.replace(/\s+/g, " ").trim().slice(0, n);
@@ -97,7 +128,7 @@ export function resultWaitingFlag(raiser: string, ceo: string, question: string,
 /** What the CEO reads when it is woken to post the result. */
 export function ceoResultNote(input: { ownerVoice: string; raiser: string; question: string; answer: string; ticketId: string | null; ref: string | null; received: boolean }): string {
   return [
-    `${input.ownerVoice} answered "${short(input.question, 200)}"${input.ref ? ` (${input.ref})` : ""} with the information the card asked for. ${INFO_ASK_MINUTES} minutes later nothing has reached them: ${input.raiser} didn't post a result, and the owner hasn't heard what their answer showed.`,
+    `${input.ownerVoice} answered "${short(input.question, 200)}"${input.ref ? ` (${input.ref})` : ""} with information of their own (what the card asked for, or their own words, note or picture). ${INFO_ASK_MINUTES} minutes later nothing has reached them: ${input.raiser} didn't post a result, and the owner hasn't heard what their answer showed.`,
     `Their answer: ${short(input.answer, 300)}${input.received && input.ticketId ? " (what they sent is on the ticket's conversation; read it there, pictures and files included)" : ""}`,
     input.ticketId
       ? `Post the result for the owner now: read what they sent on ticket #/tickets/${input.ticketId}, work out what it showed, and tell them in plain words in the owner chat: what happened, and the next step (what to press, or nothing to do). You may also reply on the ticket with notAnAsk. If it needs real work, open a ticket and say so in the same line.`
