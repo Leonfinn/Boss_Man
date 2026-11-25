@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { guardImageOf, runnerImageOf, type LauncherConfig } from "../src/spec.js";
-import { parseReleaseCurrent, releaseReader } from "../src/release-current.js";
+import { acceptRef, parseReleaseCurrent, releaseReader } from "../src/release-current.js";
 
 const D1 = "a".repeat(64);
 const D2 = "b".repeat(64);
@@ -49,5 +49,42 @@ describe("release-current (BOS-1227)", () => {
     bad();
     bad();
     expect(logs).toHaveLength(1);
+  });
+});
+
+describe("acceptRef (BOS-2535)", () => {
+  const repo = "registry.example.com/acme/boss-man-runner";
+  const pinned = (digest: string) => `${repo}@sha256:${digest}`;
+
+  it("returns a digest-pinned ref in the same repository as the base", () => {
+    expect(acceptRef(pinned(D2), base.runner)).toBe(pinned(D2));
+  });
+
+  it("returns a digest-pinned ref when the base is a tag rather than a digest", () => {
+    expect(acceptRef(pinned(D2), `${repo}:latest`)).toBe(pinned(D2));
+  });
+
+  it("refuses a tag-only ref", () => {
+    expect(acceptRef(`${repo}:latest`, base.runner)).toBeUndefined();
+    expect(acceptRef(repo, base.runner)).toBeUndefined();
+  });
+
+  it("refuses a short or upper-case digest", () => {
+    expect(acceptRef(pinned(D2.slice(1)), base.runner)).toBeUndefined();
+    expect(acceptRef(`${repo}@sha256:${D2.toUpperCase()}`, base.runner)).toBeUndefined();
+  });
+
+  it("refuses a different repository", () => {
+    expect(acceptRef(`evil.example.net/x/boss-man-runner@sha256:${D2}`, base.runner)).toBeUndefined();
+    expect(acceptRef(`registry.example.com/acme/other@sha256:${D2}`, base.runner)).toBeUndefined();
+  });
+
+  it("refuses anything that is not a string", () => {
+    for (const value of [42, null, undefined, {}, ["x"]]) expect(acceptRef(value, base.runner)).toBeUndefined();
+  });
+
+  it("refuses everything when the base is undefined", () => {
+    expect(acceptRef(pinned(D2), undefined)).toBeUndefined();
+    expect(acceptRef(`${repo}:latest`, undefined)).toBeUndefined();
   });
 });
