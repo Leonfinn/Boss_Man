@@ -581,6 +581,7 @@ describe("screenExtras, the pure rule behind the preview and the import (BOS-246
           rule(),
           rule({ name: "Ann's deletes", condition: { kinds: ["delete"], agents: ["Ann"] }, outcome: "owner", position: 1 }),
           rule({ name: "No pushes", condition: { kinds: ["execute"], commandPattern: "^git\\s+push\\b" }, outcome: "deny", position: 2 }),
+          rule({ name: "Deploys to the CEO", condition: { kinds: ["execute"], titlePattern: "^deploy\\b" }, outcome: "ceo", position: 3 }),
         ],
       }),
     );
@@ -589,8 +590,12 @@ describe("screenExtras, the pure rule behind the preview and the import (BOS-246
       { name: "Restarts are fine", match: { commandPattern: "^docker\\s+restart\\b" }, outcome: "owner", agentNames: null },
       { name: "Ann's deletes", match: { kinds: ["delete"] }, outcome: "owner", agentNames: ["Ann"] },
       { name: "No pushes", match: { kinds: ["execute"], commandPattern: "^git\\s+push\\b" }, outcome: "deny", agentNames: null },
+      { name: "Deploys to the CEO", match: { kinds: ["execute"], titlePattern: "^deploy\\b" }, outcome: "owner", agentNames: null },
     ]);
-    expect(extras.lines).toEqual(['Rule "Restarts are fine" was Allow in the export; it asks you now. If you trust it, change it back in Settings → Permissions.']);
+    expect(extras.lines).toEqual([
+      'Rule "Restarts are fine" was Allow in the export; it asks you now. If you trust it, change it back in Settings → Permissions.',
+      'Rule "Deploys to the CEO" was Ask the CEO in the export; it asks you now. If you trust it, change it back in Settings → Permissions.',
+    ]);
   });
 
   it("carries a safe target but warns that its live tag and secrets must be set again", () => {
