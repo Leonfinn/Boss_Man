@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
+import { connectionToCsv } from "../src/pages/settings/Runner";
 import { API, launch, startVite, stubApi } from "./real-page";
 
 // BOS-2545: Settings → Runner, "Connection, last 7 days" has a "Download CSV" under the gaps table. This mounts the
@@ -40,6 +41,44 @@ const PROFILES = [
   { name: "brave-1667", width: 1667, height: 724, touch: true, ratio: 1 },
   { name: "safari-1550", width: 1550, height: 1000, touch: false, ratio: 1 },
 ];
+
+type ConnectionHistory = Parameters<typeof connectionToCsv>[0];
+const history = (over: Partial<ConnectionHistory> = {}): ConnectionHistory => ({
+  since: "2026-11-17T10:00:00.000Z",
+  percentConnected: 98,
+  drops: 2,
+  longestGapMs: 300_000,
+  gaps: [
+    { from: "2026-11-23T08:00:00.000Z", to: "2026-11-23T08:05:00.000Z", ms: 300_000, how: "dropped" },
+    { from: "2026-11-24T09:00:00.000Z", to: null, ms: 45_000, how: null },
+  ],
+  shortGaps: 1,
+  ...over,
+});
+
+describe("connectionToCsv (direct)", () => {
+  it("leaves a still-open gap's back blank, calls a gap with no reason a connection drop, and puts the summary after a blank line", () => {
+    expect(connectionToCsv(history()).split("\r\n")).toEqual([
+      "gone,back,length_seconds,length,why",
+      "2026-11-23T08:00:00.000Z,2026-11-23T08:05:00.000Z,300,5 min,Connection dropped",
+      "2026-11-24T09:00:00.000Z,,45,45 s,Connection dropped",
+      "",
+      "percent_connected,since,times_dropped,longest_gap_seconds,longest_gap,shorter_gaps_not_listed",
+      "98,2026-11-17T10:00:00.000Z,2,300,5 min,1",
+      "",
+    ]);
+  });
+
+  it("says the longest gap is none when nothing dropped and there are no gaps", () => {
+    expect(connectionToCsv(history({ percentConnected: null, since: null, drops: 0, longestGapMs: 0, gaps: [], shortGaps: 0 })).split("\r\n")).toEqual([
+      "gone,back,length_seconds,length,why",
+      "",
+      "percent_connected,since,times_dropped,longest_gap_seconds,longest_gap,shorter_gaps_not_listed",
+      ",,0,0,none,0",
+      "",
+    ]);
+  });
+});
 
 describe.skipIf(!can)("Settings → Runner: connection Download CSV (BOS-2545, real page)", () => {
   for (const p of PROFILES) {
