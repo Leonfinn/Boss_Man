@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 // The writer scripts/screenshot.mjs uses, so writer and reader can't drift apart.
 import { addPngText, SCREENSHOT_MARKER_KEY as WRITER_KEY, SCREENSHOT_MARKER_SEEDED as WRITER_VALUE } from "../../../scripts/png-marker.mjs";
-import { hasBeforeAfterShots, hasSeededMarker, isBrowserRenderTest, layoutFiles, noVisualChangeProblem, renderCheckRefusal, renderTestCandidates, SCREENSHOT_MARKER_KEY, SCREENSHOT_MARKER_SEEDED, type ShotFacts } from "../src/services/render-check-gate.js";
+import { changedLinesByFile, hasBeforeAfterShots, hasSeededMarker, isBrowserRenderTest, layoutFiles, noVisualChangeProblem, renderCheckRefusal, renderTestCandidates, SCREENSHOT_MARKER_KEY, SCREENSHOT_MARKER_SEEDED, type ShotFacts } from "../src/services/render-check-gate.js";
 
 const section = (path: string, lines: string[]) => [`diff --git a/${path} b/${path}`, "index 1..2 100644", `--- a/${path}`, `+++ b/${path}`, "@@ -1,3 +1,3 @@", ...lines].join("\n");
 const diffOf = (...parts: Array<{ path: string; lines: string[] }>) => ({
@@ -130,5 +130,67 @@ describe("the refusal", () => {
     expect(noVisualChangeProblem("n/a")).toMatch(/at least 10/);
     expect(noVisualChangeProblem("only the handler\nchanged here")).toMatch(/one line/);
     expect(noVisualChangeProblem("only the click handler changed")).toBeNull();
+  });
+});
+
+describe("changed lines by file (BOS-2535)", () => {
+  it("keeps each file's + and - lines without the marker, and skips the ---/+++ headers", () => {
+    const diff = [
+      "diff --git a/a.ts b/a.ts",
+      "index 1..2 100644",
+      "--- a/a.ts",
+      "+++ b/a.ts",
+      "@@ -1,2 +1,2 @@",
+      "-old a",
+      " context a",
+      "+new a",
+      "diff --git a/b.ts b/b.ts",
+      "index 3..4 100644",
+      "--- a/b.ts",
+      "+++ b/b.ts",
+      "@@ -1,1 +1,1 @@",
+      "-old b",
+      "+new b",
+    ].join("\n");
+    const got = changedLinesByFile(diff);
+    expect([...got.keys()]).toEqual(["a.ts", "b.ts"]);
+    expect(got.get("a.ts")).toEqual(["old a", "new a"]);
+    expect(got.get("b.ts")).toEqual(["old b", "new b"]);
+  });
+
+  it("gives a rename's old and new path the same lines", () => {
+    const diff = [
+      "diff --git a/old/Name.ts b/new/Name.ts",
+      "similarity index 90%",
+      "rename from old/Name.ts",
+      "rename to new/Name.ts",
+      "--- a/old/Name.ts",
+      "+++ b/new/Name.ts",
+      "@@ -1,1 +1,1 @@",
+      "-  old",
+      "+  new",
+    ].join("\n");
+    const got = changedLinesByFile(diff);
+    expect(got.get("new/Name.ts")).toEqual(["  old", "  new"]);
+    expect(got.get("old/Name.ts")).toEqual(["  old", "  new"]);
+    expect(got.get("old/Name.ts")).toBe(got.get("new/Name.ts"));
+  });
+
+  it("keeps a file with no changed lines as an empty list", () => {
+    const diff = [
+      "diff --git a/same.ts b/same.ts",
+      "index 1..2 100644",
+      "--- a/same.ts",
+      "+++ b/same.ts",
+      "@@ -1,1 +1,1 @@",
+      " unchanged",
+    ].join("\n");
+    const got = changedLinesByFile(diff);
+    expect(got.has("same.ts")).toBe(true);
+    expect(got.get("same.ts")).toEqual([]);
+  });
+
+  it("gives an empty map for empty text", () => {
+    expect(changedLinesByFile("").size).toBe(0);
   });
 });
