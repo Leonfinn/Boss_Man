@@ -10,7 +10,7 @@ import { RiskHelp, useRiskTiers, type RiskTiers } from "../components/RiskHelp";
 import { State } from "../components/State";
 import { Loader } from "../components/Loader";
 import { statusLineText, type StatusLine } from "./MergeQueue";
-import { usePoll } from "../hooks";
+import { hashQuery, usePoll } from "../hooks";
 import { useWheelToPage } from "../wheel-to-page";
 import { DRAFT_CHANGED, clearDraft, readDraftJson, saveFormDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
@@ -25,7 +25,9 @@ import { RunLabelLink } from "./Runs";
 import { ago } from "./Dashboard";
 import { ageShort } from "../age";
 import { yourReviewFirst } from "../board-lane-order";
+import { waitingOnThis, waitingWords } from "../board-waiting";
 import { WorkStands } from "../components/WorkStands";
+import { RecurringTag } from "../components/RecurringTag";
 import { HeldBehindFixLine, heldSummary, type MergeLine } from "../components/MergesStuckBanner";
 
 const DONE_SHOWN = 8;
@@ -65,6 +67,24 @@ const iconProps = { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", 
 /** "25m", "3h", "2d": how long since the ticket last moved (there is no per-column timestamp, so this is its last activity). */
 function age(iso: string | undefined, now = Date.now()) {
   return iso ? ageShort(now - new Date(iso).getTime()) : "";
+}
+const STATE_AGE_WORDS: Record<string, string> = { in_progress: "in progress", review: "in Review", blocked: "blocked" };
+/** BOS-2400: how long a ticket has sat in its state ("2 d", "5 h"). Only in progress, review and blocked show one. */
+export function stateAge(t: { systemState: string; stateChangedAt?: string }, now = Date.now()): { text: string; label: string; days: number; old: boolean } | null {
+  const word = STATE_AGE_WORDS[t.systemState];
+  if (!word || !t.stateChangedAt) return null;
+  const ms = Math.max(0, now - new Date(t.stateChangedAt).getTime());
+  if (Number.isNaN(ms)) return null;
+  const hours = Math.floor(ms / 3_600_000);
+  const days = Math.floor(ms / 86_400_000);
+  const text = hours < 24 ? `${hours} h` : `${days} d`;
+  return { text, label: `${word} ${text}`, days: ms / 86_400_000, old: ms > 3 * 86_400_000 };
+}
+/** The lane header's "oldest 4 d": the longest-sitting card shown in the lane. */
+export function oldestAge(ts: Array<{ systemState: string; stateChangedAt?: string }>, now = Date.now()): string | null {
+  const ages = ts.map((t) => stateAge(t, now)).filter((a): a is NonNullable<typeof a> => !!a);
+  if (!ages.length) return null;
+  return `oldest ${ages.reduce((a, b) => (b.days > a.days ? b : a)).text}`;
 }
 /** The card footer's time: how long the run has been going ("23m"), or "now" in its first minute. */
 export function workingFor(since: string | null | undefined, now = Date.now()) {
@@ -479,7 +499,7 @@ function AddForm({ companyId, projectId, initial, agents, features, goals, tiers
 
 const FILTERS_KEY = "board-filters";
 type BoardView = "all" | "features" | "tasks";
-type SavedFilters = { feature: string; working: boolean; view: BoardView; assignee: string; stuckOnly: boolean };
+type SavedFilters = { feature: string; working: boolean; view: BoardView; assignee: string; stuckOnly: boolean; hideRecurring: boolean; holding: boolean };
 /** The view, Assigned to, feature and "working now" filters, kept for the browser session like the feature states below. */
 function readFilters(): SavedFilters {
   try {
@@ -490,9 +510,11 @@ function readFilters(): SavedFilters {
       view: saved?.view === "features" || saved?.view === "tasks" ? saved.view : "all",
       assignee: typeof saved?.assignee === "string" && saved.assignee ? saved.assignee : "anyone",
       stuckOnly: saved?.stuckOnly === true,
+      hideRecurring: saved?.hideRecurring === true,
+      holding: saved?.holding === true,
     };
   } catch {
-    return { feature: "any", working: false, view: "all", assignee: "anyone", stuckOnly: false };
+    return { feature: "any", working: false, view: "all", assignee: "anyone", stuckOnly: false, hideRecurring: false, holding: false };
   }
 }
 
@@ -562,11 +584,25 @@ function DoneTitle({ id, title }: { id: string; title: string }) {
 
 type BoardTicket = BoardData["columns"][number]["tickets"][number];
 
+type BuildResult = NonNullable<BoardTicket["build"]>;
+
+/** BOS-2435: the words on a Review card's build tag (words, not colour alone). */
+export function buildWords(b: BuildResult): string {
+  return b.state === "passed" ? "Build passed" : b.state === "failed" ? "Build failed" : b.state === "running" ? "Build running" : b.state === "none" ? "No build yet" : "Build result unavailable";
+}
+
+export function buildTitle(b: BuildResult): string {
+  return b.state === "failed" && b.failing.length ? `Failing: ${b.failing.join(", ")}` : buildWords(b);
+}
+
 /** The Board's "Download CSV": one row per ticket shown, in the order the lanes show them. */
-export function boardToCsv(rows: Array<{ t: BoardTicket; column: string; assignee: string; ref: string }>): string {
+export function boardToCsv(rows: Array<{ t: BoardTicket; column: string; assignee: string; ref: string; waiting?: number }>): string {
   return buildCsv(
-    ["Reference", "Title", "Column", "Assignee", "Risk", "Size", "Feature", "Priority 1", "Last activity"],
-    rows.map(({ t, column, assignee, ref }) => [ref, t.title, column, assignee, t.risk ?? "", t.size ?? "", t.featureTitle ?? "", t.urgentByOwner ? "yes" : "no", t.lastActivityAt ?? ""]),
+    ["Reference", "Title", "Column", "Assignee", "Risk", "Size", "Feature", "Priority 1", "Last activity", "Days in state", "Build", "Waiting on this"],
+    rows.map(({ t, column, assignee, ref, waiting }) => {
+      const a = stateAge(t);
+      return [ref, t.title, column, assignee, t.risk ?? "", t.size ?? "", t.featureTitle ?? "", t.urgentByOwner ? "yes" : "no", t.lastActivityAt ?? "", a ? (Math.floor(a.days * 10) / 10).toString() : "", t.build ? (t.build.state === "failed" && t.build.failing.length ? `failed: ${t.build.failing.join(", ")}` : t.build.state) : "", String(waiting ?? 0)];
+    }),
   );
 }
 
@@ -625,7 +661,7 @@ export function BulkBar({ count, agents, busy, result, onRun, onClear }: { count
   );
 }
 
-function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRunNow, runState, mergeLine, quiet, select }: { select?: { checked: boolean; onClick: (id: string, shift: boolean) => void }; quiet?: boolean; runState?: { busy: boolean; error?: string }; mergeLine?: StatusLine; t: BoardTicket; mine: boolean; merging: boolean; who: Company["agents"][number] | undefined; name: string; prefix: string | null | undefined; tiers: RiskTiers; numberOf: (id: string) => number | null | undefined; onRunNow: (id: string) => void }) {
+function TicketCard({ waiters, t, mine, merging, who, name, prefix, tiers, numberOf, onRunNow, runState, mergeLine, quiet, select }: { waiters?: BoardTicket[]; select?: { checked: boolean; onClick: (id: string, shift: boolean) => void }; quiet?: boolean; runState?: { busy: boolean; error?: string }; mergeLine?: StatusLine; t: BoardTicket; mine: boolean; merging: boolean; who: Company["agents"][number] | undefined; name: string; prefix: string | null | undefined; tiers: RiskTiers; numberOf: (id: string) => number | null | undefined; onRunNow: (id: string) => void }) {
   const [open, setOpen] = useState(false);
   const bodyId = useId();
   const titleRef = useRef<HTMLAnchorElement>(null);
@@ -661,8 +697,13 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
             Size {t.size}
           </span>
         )}
-        {t.planFirst && !t.planApprovedAt && <span className="tag blue">{t.plan ? "Plan waiting" : "Planning"}</span>}
+        {t.planFirst && !t.planApprovedAt && <span className="tag blue">{t.hasPlan ? "Plan waiting" : "Planning"}</span>}
         {t.blockedBy.length > 0 && <span className="tag amber">Blocked by {t.blockedBy.length === 1 ? (t.blockedBy[0]!.decisionId ? "a decision" : t.blockedBy[0]!.engagementId ? "an engagement" : "a task") : t.blockedBy.length}</span>}
+        {waiters && waiters.length > 0 && (
+          <span className="tag amber" tabIndex={0} title={waiters.map((w) => (w.number ? ticketRef(prefix, w.number) : w.title)).join(", ")}>
+            {waitingWords(waiters.length)}
+          </span>
+        )}
         {t.nextUp && t.systemState === "ready" && (
           <span className="tag" title="The agent is busy on another ticket. This one starts by itself when they finish, and counts toward no limit until then.">
             Next up
@@ -670,6 +711,11 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
         )}
         {t.looksStuck && <span className="tag amber" title="The watchdog has handed this to the Scrum Master.">Looks stuck</span>}
         {t.reviewStage === "checking" && <span className="tag">Being checked</span>}
+        {t.systemState === "review" && t.build && (
+          <span className={`tag${t.build.state === "failed" ? " amber" : t.build.state === "passed" ? " green" : ""}`} title={buildTitle(t.build)}>
+            {buildWords(t.build)}
+          </span>
+        )}
         {isLiveCheckWait(t) && <span className="tag green">Merged</span>}
         {isLiveCheckWait(t) && watchNoDateDays(t) !== null && <span className="tag amber">No date · {watchNoDateDays(t)} days</span>}
         {t.wipExempt === "busy" && !isLiveCheckWait(t) && <span className="tag">Agent busy</span>}
@@ -685,6 +731,7 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
             {t.urgentByOwner ? "Priority 1" : "Urgent"}
           </span>
         )}
+        {t.recurring && <RecurringTag />}
         {t.number && <span className="mono muted ref">{ticketRef(prefix, t.number)}</span>}
       </div>
       <h3>
@@ -811,7 +858,11 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
           <span className="who-name">{first}</span>
         </span>
         <span className="end">
-          <span className="mono">{t.dueDate ? `Due ${t.dueDate}` : t.working?.length ? workingFor(t.workingSince) : age(t.lastActivityAt)}</span>
+          {(() => {
+            const sa = stateAge(t);
+            // The time in state already says how long; the last-activity age beside it would show the age twice.
+            return <>{(!sa || t.dueDate || t.working?.length) && <span className="mono">{t.dueDate ? `Due ${t.dueDate}` : t.working?.length ? workingFor(t.workingSince) : age(t.lastActivityAt)}</span>}{sa ? <span className={`mono state-age${sa.old ? " old" : ""}`} title={sa.old ? `${sa.label}: more than 3 days in this state` : `Time in this state: ${sa.label}`} style={sa.old ? { color: "var(--amber-ink)" } : undefined}>{sa.text}</span> : null}</>;
+          })()}
           {(titleCut || noteCut || waitsCut || open) && (
             <button type="button" className="icon-btn expand" aria-expanded={open} aria-controls={bodyId} aria-label={`${open ? "Show less of" : "Show all of"} ${ticketRefText}`} onClick={() => setOpen(!open)}>
               <svg width="16" height="16" {...iconProps} style={{ transform: open ? "rotate(180deg)" : undefined }}><path d="M6 9l6 6 6-6" /></svg>
@@ -836,14 +887,17 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   const [query, setQuery] = useState("");
   const [allDone, setAllDone] = useState(false);
   // BOS-2166: the server sends the newest done tickets only; every done ticket is asked for while "Show all done" is on or the search has words.
-  const wantAllDone = allDone || query.trim() !== "";
-  const board = usePoll((signal) => (current ? api<BoardData>(`/api/projects/${current.id}/board${wantAllDone ? "?done=all" : ""}`, { signal }) : Promise.resolve(null)), 10_000, current?.id ?? "none");
+  const searching = query.trim() !== "";
+  const wantAllDone = allDone || searching;
+  // BOS-2497: cards come without descriptions; the search box matches them too, so they are asked for (text=1) only while it has words.
+  const boardQuery = [wantAllDone ? "done=all" : "", searching ? "text=1" : ""].filter(Boolean).join("&");
+  const board = usePoll((signal) => (current ? api<BoardData>(`/api/projects/${current.id}/board${boardQuery ? `?${boardQuery}` : ""}`, { signal }) : Promise.resolve(null)), 10_000, current?.id ?? "none");
   const reloadBoard = board.reload;
   const firstAsk = useRef(true);
   useEffect(() => {
     if (firstAsk.current) { firstAsk.current = false; return; }
     reloadBoard();
-  }, [wantAllDone, reloadBoard]);
+  }, [boardQuery, reloadBoard]);
   // BOS-1546: the merge queue's own status line for each approved ticket (place in line, check running since, the ticket it waits for). Asked only when the board has such a ticket.
   const inMergeLine = (board.data?.columns ?? []).some((c) => c.tickets.some((t) => t.reviewStage === "merging" || t.reviewStage === "held"));
   const mergeLines = usePoll(
@@ -857,10 +911,23 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   const [adding, setAdding] = useState<(Adding & { n: number }) | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
-  const [filters, setFilters] = useState(readFilters);
+  // BOS-2475: "?holding=1" in the page link wins over the saved session value, so a shared link opens with it on.
+  const [filters, setFilters] = useState(() => {
+    const saved = readFilters();
+    const linked = hashQuery().get("holding");
+    return linked === "1" ? { ...saved, holding: true } : linked === "0" ? { ...saved, holding: false } : saved;
+  });
   const setFilter = (change: Partial<SavedFilters>) =>
     setFilters((cur) => {
       const next = { ...cur, ...change };
+      if ("holding" in change) {
+        // Keep the choice in the page link without adding history entries or re-routing.
+        const q = hashQuery();
+        if (next.holding) q.set("holding", "1");
+        else q.delete("holding");
+        const base = window.location.hash.split("?")[0] || "#/board";
+        window.history.replaceState(window.history.state, "", `${window.location.pathname}${window.location.search}${base}${q.toString() ? `?${q}` : ""}`);
+      }
       try {
         sessionStorage.setItem(FILTERS_KEY, JSON.stringify(next));
       } catch {
@@ -898,9 +965,9 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
     if (phone) setFilterOpen(false);
   }, [phone]);
   const filterCompany = companies.find((c) => c.id === current?.companyId);
-  const filterCount = (view !== "all" ? 1 : 0) + (assignee !== "anyone" ? 1 : 0) + (featureFilter !== "any" ? 1 : 0) + (filters.working ? 1 : 0);
+  const filterCount = (view !== "all" ? 1 : 0) + (assignee !== "anyone" ? 1 : 0) + (featureFilter !== "any" ? 1 : 0) + (filters.working ? 1 : 0) + (filters.hideRecurring ? 1 : 0) + (filters.holding ? 1 : 0);
   const clearFilters = () => {
-    setFilter({ view: "all", assignee: "anyone", feature: "any", working: false, stuckOnly: false });
+    setFilter({ view: "all", assignee: "anyone", feature: "any", working: false, stuckOnly: false, hideRecurring: false, holding: false });
   };
   const assigneeName = assignee === "owner" ? "You" : (filterCompany?.agents.find((a) => a.id === assignee)?.name ?? "Unknown");
   const featureName = featureFilter === "none" ? "none" : (featureList.find((f) => f.id === featureFilter)?.title ?? "");
@@ -909,7 +976,11 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
     ...(assignee !== "anyone" ? [{ key: "assignee", label: `Assigned: ${assigneeName}`, remove: `assigned to ${assigneeName}`, clear: () => setAssignee("anyone") }] : []),
     ...(featureFilter !== "any" ? [{ key: "feature", label: `Feature: ${featureName}`, remove: `feature ${featureName}`, clear: () => setFilter({ feature: "any" }) }] : []),
     ...(filters.working ? [{ key: "working", label: "Working now", remove: "working now", clear: () => setFilter({ working: false }) }] : []),
+    ...(filters.hideRecurring ? [{ key: "recurring", label: "Recurring hidden", remove: "recurring hidden", clear: () => setFilter({ hideRecurring: false }) }] : []),
+    ...(filters.holding ? [{ key: "holding", label: "Holding others up", remove: "holding others up", clear: () => setFilter({ holding: false }) }] : []),
   ];
+  // BOS-2475: for each open card, the open cards waiting on it.
+  const waitersOf = waitingOnThis((board.data?.columns ?? []).flatMap((c) => c.tickets));
   const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
   // Every word must appear in the ticket's reference, title, feature or description.
   const passes = (t: BoardData["columns"][number]["tickets"][number]) =>
@@ -917,6 +988,8 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
     (featureFilter === "any" || (featureFilter === "none" ? !t.featureId : t.featureId === featureFilter)) &&
     (!filters.working || !!t.working?.length) &&
     (!filters.stuckOnly || !!t.looksStuck) &&
+    (!filters.hideRecurring || !t.recurring) &&
+    (!filters.holding || (waitersOf.get(t.id)?.length ?? 0) > 0) &&
     (!words.length || words.every((w) => [t.number ? ticketRef(filterCompany?.ticketPrefix, t.number) : "", t.title, t.featureTitle ?? "", t.body ?? ""].join("\n").toLowerCase().includes(w)));
   // The review column is three lanes (BOS-667): still with its reviewers, approved by all of them and
   // only merging, and every ticket, from any column, whose next step is the owner's. Approved work used
@@ -958,7 +1031,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
         if (seen.has(t.id)) return [];
         seen.add(t.id);
         const a = t.assigneeAgentId ? companies.flatMap((c) => c.agents).find((x) => x.id === t.assigneeAgentId) : undefined;
-        return [{ t, column: l.col.name, assignee: a ? a.name : t.assignedToOwner ? "You" : "", ref: (t.number ? ticketRef(filterCompany?.ticketPrefix, t.number) : "") ?? "" }];
+        return [{ t, waiting: waitersOf.get(t.id)?.length ?? 0, column: l.col.name, assignee: a ? a.name : t.assignedToOwner ? "You" : "", ref: (t.number ? ticketRef(filterCompany?.ticketPrefix, t.number) : "") ?? "" }];
       }),
     );
     const slug = (current?.name ?? "project").replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase() || "project";
@@ -1260,6 +1333,10 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
               onFeature={(v) => setFilter({ feature: v })}
               working={filters.working}
               onWorking={(v) => setFilter({ working: v })}
+              showRecurring={!filters.hideRecurring}
+              onShowRecurring={(v) => setFilter({ hideRecurring: !v })}
+              holding={filters.holding}
+              onHolding={(v) => setFilter({ holding: v })}
               agents={company?.agents ?? []}
               features={featureList}
               workingCount={board.data?.workingAgents}
@@ -1401,6 +1478,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                         <svg width="15" height="15" {...iconProps}>{PENCIL}</svg>
                       </button>
                     </div>
+                    {oldestAge(shown) && <span className="lane-hint mono lane-oldest" title="The longest any card here has sat in its state">{oldestAge(shown)}</span>}
                     {col.name !== DEFAULT_LABEL[col.systemState] && (
                       <span className="lane-hint">
                         Agents see: <span className="mono">{col.systemState}</span>
@@ -1450,6 +1528,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                     <TicketCard
                       key={t.id}
                       quiet={parked}
+                      waiters={waitersOf.get(t.id)}
                       select={selecting ? { checked: selected.has(t.id), onClick: pick } : undefined}
                       t={t}
                       mine={!!mine}

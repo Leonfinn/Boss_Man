@@ -4,7 +4,7 @@ import { and, eq } from "drizzle-orm";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { loopGuards } from "../src/services/loop-guards.js";
+import { DIFFERENT_APPROACH, loopGuards } from "../src/services/loop-guards.js";
 import { budgetPolicies, costEvents, decisions, runners, runs, tickets, wakes } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -86,10 +86,12 @@ describe("circular failures (R50)", () => {
     await fail("TypeError: cannot read properties of undefined (reading 'limit') at /tmp/ws-a1b2c3d/x.ts:10:3");
     await fail("Model overloaded (529)");
     await fail("TypeError: cannot read properties of undefined (reading 'limit') at /tmp/ws-9z8y7x6/x.ts:12:9");
-    expect(await c.db.select().from(decisions).where(eq(decisions.kind, "question"))).toHaveLength(0);
+    // Each unknown error also raises its own "did not restart it" card at once (BOS-2357); only the circular-failure card is counted here.
+    const circular = async () => (await c.db.select().from(decisions).where(eq(decisions.kind, "question"))).filter((d) => d.question.startsWith("An agent run has hit the same failure"));
+    expect(await circular()).toHaveLength(0);
     await fail("TypeError: cannot read properties of undefined (reading 'limit') at /tmp/ws-q1w2e3r/x.ts:14:1");
     await fail("TypeError: cannot read properties of undefined (reading 'limit') at /tmp/ws-zzzzzzz/x.ts:15:1");
-    const alerts = await c.db.select().from(decisions).where(eq(decisions.kind, "question"));
+    const alerts = await circular();
     expect(alerts).toHaveLength(1);
     expect(alerts[0]!.question).toMatch(/^An agent run has hit the same failure 3 times in 2 hours on "Add rate limiting"/);
   });
@@ -249,6 +251,26 @@ describe("stuck review card: move the checks to after the merge (BOS-422)", () =
       await ctx.app.close();
       await ctx.close();
       ctx = undefined;
+    }
+  });
+});
+
+describe("DIFFERENT_APPROACH", () => {
+  it("names the count, with 'rd' only for 3 and 'th' otherwise", () => {
+    expect(DIFFERENT_APPROACH(3)).toContain("the 3rd time");
+    for (const n of [2, 4, 5, 10, 13, 100]) {
+      const text = DIFFERENT_APPROACH(n);
+      expect(text).toContain(`the ${n}th time`);
+      expect(text).not.toContain("rd time");
+    }
+  });
+
+  it("starts a new paragraph and tells the agent to find the root cause and take a different approach", () => {
+    for (const n of [3, 7]) {
+      const text = DIFFERENT_APPROACH(n);
+      expect(text.startsWith("\n\nThis is the ")).toBe(true);
+      expect(text).toContain("take a different approach");
+      expect(text).toContain("raise a decision");
     }
   });
 });

@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company, Notice } from "../src/api";
 import { Notifications } from "../src/pages/Notifications";
 import { NotificationSettings } from "../src/pages/settings/Notifications";
+import { stubFetchByUrl } from "./stub-fetch";
 
 afterEach(() => {
   cleanup();
@@ -42,6 +43,45 @@ describe("notifications", () => {
     expect(url).toContain("limit=50");
     expect(decodeURIComponent(url)).toContain(`before=${first[49]!.createdAt}`);
     expect(screen.queryByRole("button", { name: "Show older" })).toBeNull();
+  });
+
+  it("groups by day and 'Mark this day read' sends only that day's unread ids (BOS-2441)", async () => {
+    const today = new Date();
+    const old = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 5, 12);
+    const items = [
+      { ...notice("a"), id: "t1", title: "T1" },
+      { ...notice("b"), id: "t2", title: "T2", readAt: today.toISOString() },
+      { ...notice("c"), id: "o1", title: "O1", createdAt: old.toISOString() },
+    ];
+    const f = vi.fn(() => Promise.resolve(new Response("{}", { status: 200, headers: { "content-type": "application/json" } })));
+    vi.stubGlobal("fetch", f);
+    render(<Notifications feed={{ items, unread: 2 }} onChanged={() => {}} />);
+    expect(screen.getByRole("heading", { name: "Today" })).toBeTruthy();
+    expect(screen.getAllByText("1 new").length).toBe(2);
+    fireEvent.click(screen.getAllByRole("button", { name: "Mark this day read" })[0]!);
+    await waitFor(() => expect(f).toHaveBeenCalled());
+    const call = (f.mock.calls as unknown as [string, RequestInit][]).find((c) => c[0] === "/api/notifications/read")!;
+    expect(JSON.parse(call[1].body as string)).toEqual({ ids: ["t1"] });
+  });
+
+  // BOS-2532 (G2): the summary said "Latest 50 shown" over a list of 50 while 50 more were still to come, so the
+  // number read as the whole list. It now counts the rows on screen and says there are more below.
+  it("BOS-2532: the summary counts the rows shown and says more are below until they are loaded", async () => {
+    const mk = (i: number): Notice => ({ ...notice(`b${i}`), id: `n${i}`, title: `Notice ${i}`, createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, 100 - i)).toISOString() });
+    const first = Array.from({ length: 50 }, (_, i) => mk(i));
+    // The server answers the filtered list (Level: Notes) with the same page, then the "Show older" page. The route
+    // matches before "/api/notifications" exactly in the helper, so a forgotten request is still refused.
+    stubFetchByUrl({
+      "/api/notifications?level=note": { items: first, unread: 0 },
+      "/api/notifications?level=note&limit=50&before=*": { items: [mk(50), mk(51)], unread: 0 },
+    });
+    render(<Notifications feed={{ items: first, unread: 0 }} onChanged={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Notes" }));
+    expect(await screen.findByText("50 shown, more below")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Show older" }));
+    expect(await screen.findByText("Notice 51")).toBeTruthy();
+    expect(await screen.findByText("52 shown")).toBeTruthy();
+    expect(screen.queryByText(/more below/)).toBeNull();
   });
 
   it("keeps the rows and shows the error when an older load fails", async () => {

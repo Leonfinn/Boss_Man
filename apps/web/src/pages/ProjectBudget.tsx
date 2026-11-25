@@ -1,16 +1,42 @@
 import { useState, type FormEvent } from "react";
 import { api, usd, type Project } from "../api";
+import { buildCsv, download } from "../csv";
 import { useAction } from "./settings/shared";
 import { usePoll } from "../hooks";
 import { away } from "../server-watch";
 import { Loader } from "../components/Loader";
 import { LoadError } from "../components/LoadError";
+import { ProjectMonthlyTrend, type ProjectMonth } from "../components/ProjectMonthlyTrend";
+import { budgetForecast } from "../budget-forecast";
+
+function BudgetForecastLine({ monthMicros, monthStart, capMicros }: { monthMicros: number; monthStart: string; capMicros: number | null }) {
+  const f = budgetForecast(monthMicros, monthStart, capMicros, new Date());
+  if (f.kind === "too-early") return <p className="muted" style={{ fontSize: 13, margin: "8px 0 0" }}>Too early in the month for a forecast.</p>;
+  return (
+    <p style={{ fontSize: 14, margin: "8px 0 0" }}>
+      At this pace: about <strong>{usd(f.projectedMicros)}</strong> by the end of the month.
+      {f.capMicros !== null && <> <span className="muted">(limit {usd(f.capMicros)})</span> {f.status === "over" ? <strong>Already over the limit.</strong> : f.status === "under" ? "Stays under the limit." : `Reaches the limit around ${f.reachDate!.toLocaleDateString(undefined, { day: "numeric", month: "short" })}.`}</>}
+    </p>
+  );
+}
 
 type Tokens = { input: number; output: number; cacheRead?: number; cacheWrite?: number };
-type Spend = { costCheck?: { outOfBand: number; checked: number; skipped: { model: string; reason: string; runs: number }[] }; tokens?: { month: Tokens; total: Tokens }; monthMicros: number; totalMicros: number; ticketCostCapMicros: number | null; monthlyCapMicros: number | null; monthStart: string; plan?: { provider: string; monthRuns: number; totalRuns: number; monthMicros: number; totalMicros: number }[]; topTickets: { id: string; title: string; micros: number; planMicros: number }[] };
+type Spend = { months?: ProjectMonth[]; costCheck?: { outOfBand: number; checked: number; skipped: { model: string; reason: string; runs: number }[] }; tokens?: { month: Tokens; total: Tokens }; monthMicros: number; totalMicros: number; ticketCostCapMicros: number | null; monthlyCapMicros: number | null; monthStart: string; plan?: { provider: string; monthRuns: number; totalRuns: number; monthMicros: number; totalMicros: number }[]; topTickets: { id: string; title: string; micros: number; planMicros: number }[] };
 const PROVIDER_NAMES: Record<string, string> = { anthropic: "Claude", openai: "Codex", synthetic: "Synthetic" };
 
 const n = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 });
+
+type TopTicket = { id: string; title: string; micros: number; planMicros: number };
+
+/** The "Costliest tasks" list as CSV (BOS-2543), one row per task in the page's order, dollars like the page. */
+export function costliestTasksCsv(rows: TopTicket[]): string {
+  return buildCsv(
+    ["rank", "task", "ticket_id", "pay_as_you_go_usd", "subscriptions_at_list_usd", "both_together_usd"],
+    rows.map((t, i) => [i + 1, t.title, t.id, (t.micros / 1e6).toFixed(2), (t.planMicros / 1e6).toFixed(2), ((t.micros + t.planMicros) / 1e6).toFixed(2)]),
+  );
+}
+
+export const costliestTasksCsvName = (project: string, now: Date = new Date()) => `${project.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase() || "project"}-costliest-tasks-${new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit" }).format(now)}.csv`;
 
 /** Add a monthly spending limit for one project (the only screen that calls POST /api/budget-policies, BOS-1564). It then shows under Settings → Funding → Spending limits. */
 export function ProjectLimitForm({ project }: { project: Project }) {
@@ -46,7 +72,7 @@ export function ProjectLimitForm({ project }: { project: Project }) {
 
 /** What a project has cost on API and credit runs (subscription runs aren't in the dollar figures), the month being the UTC calendar month. */
 export function ProjectBudget({ project }: { project: Project }) {
-  const spend = usePoll((signal) => api<Spend>(`/api/projects/${project.id}/spend`, { signal }), 30_000, `spend-${project.id}`);
+  const spend = usePoll((signal) => api<Spend>(`/api/projects/${project.id}/spend?tz=${encodeURIComponent(Intl.DateTimeFormat().resolvedOptions().timeZone)}`, { signal }), 30_000, `spend-${project.id}`);
   const s = spend.data;
   const plan = s?.plan ?? [];
   if (spend.error && !away(spend.error)) return <LoadError what="the budget" message={spend.error.message} onRetry={spend.reload} />;
@@ -60,6 +86,7 @@ export function ProjectBudget({ project }: { project: Project }) {
             <div><dt className="muted">This month</dt><dd style={{ fontSize: 24, margin: 0 }}>{usd(s.monthMicros)}</dd></div>
             <div><dt className="muted">All time</dt><dd style={{ fontSize: 24, margin: 0 }}>{usd(s.totalMicros)}</dd></div>
           </dl>
+          <BudgetForecastLine monthMicros={s.monthMicros} monthStart={s.monthStart} capMicros={s.monthlyCapMicros} />
           <p className="muted" style={{ fontSize: 13, margin: "4px 0 0" }}>Estimates at list prices, from the accounts you pay per use (such as OpenRouter or Ollama credit). <a href={`#/spend/${project.companyId}`}>See spend by day, agent and feature</a>.</p>
         </section>
         <section aria-label="On your subscriptions" style={{ flex: "1 1 280px" }}>
@@ -92,6 +119,7 @@ export function ProjectBudget({ project }: { project: Project }) {
       ) : (
         <p className="muted">No monthly cap. Set one on the Config tab.</p>
       )}
+      <ProjectMonthlyTrend months={s.months ?? []} capMicros={s.monthlyCapMicros} />
       {s.costCheck && s.costCheck.outOfBand > 0 && (
         <p role="alert" style={{ fontSize: 14, margin: "8px 0" }}>
           Check these figures: {s.costCheck.outOfBand} run{s.costCheck.outOfBand === 1 ? "" : "s"} on this project's tasks recorded a cost that does not match {s.costCheck.outOfBand === 1 ? "its" : "their"} tokens at list price, so the dollar figures here may be wrong. The CEO has been told; you do not need to do anything.
@@ -113,7 +141,14 @@ export function ProjectBudget({ project }: { project: Project }) {
           </dl>
         </>
       )}
-      <h2 style={{ fontSize: 16, marginTop: 24 }}>Costliest tasks</h2>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "baseline" }}>
+        <h2 style={{ fontSize: 16, marginTop: 24 }}>Costliest tasks</h2>
+        {s.topTickets.length > 0 && (
+          <button type="button" className="btn" onClick={() => download(costliestTasksCsvName(project.name), costliestTasksCsv(s.topTickets))}>
+            Download CSV
+          </button>
+        )}
+      </div>
       <p className="muted" style={{ fontSize: 13, margin: 0 }}>Pay-as-you-go spend, and on subscriptions what the runs would have cost at list prices (about). Ranked by the two together.</p>
       {s.topTickets.length ? (
         <ol>

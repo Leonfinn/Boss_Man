@@ -57,7 +57,21 @@ async function crossRun(sameAgent: boolean) {
   const homeA = path.join(fence.agentsRoot, agentA);
   // B aims at wherever A's files really are (what A's adapter saw), not where this test expects them.
   type Holder = { tmp: string; mcpConfig: string; mcpConfigExists: boolean };
-  const readHolder = () => JSON.parse(readFileSync(path.join(cwdA, "holder.json"), "utf8")) as Holder;
+  const holderJson = path.join(cwdA, "holder.json");
+  // A missing or half-written file is not an answer (the peer renames one into place), so it is waited for rather
+  // than parsed: the run B asks for its environment is told so and asks again (BOS-2551).
+  // holderReady is a plain file read with a try/catch, not an expect(): a throw from the SECOND arg of waitFor's
+  // check (a matcher) escapes, and the poll other tests use (a filesHolding walk) reads every file under a folder
+  // the peer is still writing, so on GitHub's slow CPU it met a file that appeared before its bytes and threw.
+  const readHolder = () => JSON.parse(readFileSync(holderJson, "utf8")) as Holder;
+  const holderReady = () => {
+    try {
+      readHolder();
+      return true;
+    } catch {
+      return false;
+    }
+  };
 
   const events: RunnerEvent[] = [];
   const manager = new SessionManager({
@@ -67,6 +81,9 @@ async function crossRun(sameAgent: boolean) {
     fence,
     resolveEnv: async (runId): Promise<Record<string, string>> => {
       if (runId === runA) return { PEER_ROLE: "holder", PEER_SECRET: secret };
+      // Read the moment B starts, which on a slow, busy CPU can be while A's peer is still writing the file: the write
+      // isn't atomic there, so an empty or cut file is not an error, it is "ask again" (BOS-2551).
+      await waitFor(holderReady, "the holder's holder.json");
       const h = readHolder();
       return { PEER_ROLE: "prober", PEER_TMP: h.tmp, PEER_MCP: h.mcpConfig, PEER_MCP_EXISTS: existsSync(h.mcpConfig) ? "1" : "0", PEER_HOME: homeA, PEER_TOKEN: token, PEER_SECRET: secret };
     },
@@ -78,22 +95,28 @@ async function crossRun(sameAgent: boolean) {
 
   try {
     start(runA, agentA, cwdA, token);
-    await waitFor(() => existsSync(path.join(cwdA, "holder.json")) || !!ended(runA), "the holder's session/new");
+    await waitFor(() => holderReady() || !!ended(runA), "the holder's session/new");
     if (ended(runA)) throw new Error(`the holder ended early: ${ended(runA)!.error}`);
     const holder = readHolder();
+    // The fields themselves, not the object a `toEqual` would show a diff of: that diff takes the test's own event
+    // recorder apart for every key and calls every function it meets, so it costs far more on a slow CPU, and what it
+    // throws is not the assertion. toMatchObject has the diff ready and reports whatever really differs (BOS-2551).
+    const holderSeen = { tmp: holder.tmp, mcpConfig: holder.mcpConfig, mcpConfigExists: holder.mcpConfigExists };
     // While A's session opens, its token is in one file, in A's own temp folder: not /tmp, /dev/shm or A's home.
-    const atStart = { holder, homeHits: filesHolding(homeA, token), homeSecretHits: filesHolding(homeA, secret) };
+    const atStart = { holder: holderSeen, homeHits: filesHolding(homeA, token), homeSecretHits: filesHolding(homeA, secret) };
 
     start(runB, agentB, cwdB, `bm_run_other-${randomUUID()}`);
+    // The prober's write is renamed into place (fake-peer), so the file it leaves is always whole. (The prober ends
+    // only after leaving that file, so this read races only a previous test's leftover, never a live write.)
     await waitFor(() => !!ended(runB), "the prober");
     expect(ended(runB)).toMatchObject({ error: null });
     const probe = JSON.parse(readFileSync(path.join(cwdB, "probe.json"), "utf8")) as Probe;
-    const planted = existsSync(path.join(holder.tmp, "planted.txt"));
+    const planted = existsSync(path.join(holderSeen.tmp, "planted.txt"));
 
     writeFileSync(path.join(cwdA, "release"), "");
     await waitFor(() => !!ended(runA), "the holder to end");
     expect(ended(runA)).toMatchObject({ error: null });
-    return { ...atStart, probe, planted, runTmpA, mcpA, homeA, events, tmpAGone: !existsSync(holder.tmp) };
+    return { ...atStart, probe, planted, runTmpA, mcpA, homeA, events, tmpAGone: !existsSync(holderSeen.tmp) };
   } finally {
     manager.shutdown();
   }
@@ -103,13 +126,14 @@ describe.skipIf(!live)("two fenced runs at once (BOS-555)", () => {
   for (const sameAgent of [false, true]) {
     it(`of ${sameAgent ? "the same agent" : "different agents"}: neither reaches the other's temp folder, token file or command-line secrets`, async () => {
       const r = await crossRun(sameAgent);
-      expect(r.events.filter((e) => e.type === "run.started")).toEqual([expect.objectContaining({ fenced: true }), expect.objectContaining({ fenced: true })]);
+      expect(r.events.filter((e) => e.type === "run.started")).toMatchObject([{ fenced: true }, { fenced: true }]);
       // A's token file was there while B looked, and B can't list, read or write A's temp folder or that file.
       expect(r.probe.peerMcpExisted).toBe(true);
       expect(r.probe).toMatchObject({ listedPeerTmp: false, readPeerSecret: false, readPeerMcp: false, wrotePeerTmp: false });
       expect(r.planted).toBe(false);
       // The folder is A's own, outside every agent's home, so A's home holds neither the token nor the secret.
-      expect(r.holder).toEqual({ tmp: r.runTmpA, mcpConfig: r.mcpA, mcpConfigExists: true });
+      // toMatchObject's diff is the expected part; toEqual over the whole object walked the event recorder (BOS-2551).
+      expect(r.holder).toMatchObject({ tmp: r.runTmpA, mcpConfig: r.mcpA, mcpConfigExists: true });
       expect(r.probe.tmp).not.toBe(r.runTmpA);
       expect(r.homeHits).toEqual([]);
       expect(r.homeSecretHits).toEqual([]);

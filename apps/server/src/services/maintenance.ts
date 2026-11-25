@@ -12,7 +12,8 @@ import { CANCEL_RUNNER_UPDATE, CANCEL_UPDATE, DEADLINE_WAIT_MINUTES, STOP_AND_UP
 import type { NotifyInput } from "./notifications.js";
 import { expectRestart } from "./runner-restarts.js";
 import { untrusted } from "@boss-man/shared";
-import { chatRunsByCompany, runnerBusy, runnerChecks, runsByCompany, updateWaitCountsRun, type RunnerCheck } from "./runner-busy.js";
+import { chatRunsByCompany, runnerBusy, runnerChecks, runsByCompany, updateWaitCountsRun, workerChecks, type RunnerCheck } from "./runner-busy.js";
+import { updateHoldHistory } from "./update-hold-history.js";
 import { drainEndsAt, STANDALONE_WRAPUP_MS, SWAP_WHEN_DONE_CAP_MINUTES, WAIT_RULES } from "./update-waits.js";
 
 export const MAINTENANCE_KEY = "maintenance";
@@ -165,8 +166,8 @@ export function drainForecast(input: { runs: number; checks: RunnerCheck[]; dead
 
 /**
  * BOS-1951: the swap itself takes seconds, so a hold that still stands this long after it began, with no run, check or
- * merge going and no runner recently recreated or retrying, is waiting on something Boss Man can't name. Both the
- * banner (late, with the stop/cancel options) and the scheduler (chat keeps answering) read this one rule.
+ * merge going and no runner recently recreated or retrying, is waiting on something Boss Man can't name. The banner
+ * reads it (late, with the stop/cancel options). The chat no longer depends on it (BOS-2404: chat passes every hold).
  */
 export const UNKNOWN_WAIT_MS = 2 * 60_000;
 export function unknownWait(hold: Hold, at: Date, reconnectMs = SWAP_WINDOW_MS): boolean {
@@ -174,6 +175,43 @@ export function unknownWait(hold: Hold, at: Date, reconnectMs = SWAP_WINDOW_MS):
   if (at.getTime() - new Date(hold.since).getTime() < UNKNOWN_WAIT_MS) return false;
   if (Object.values(hold.tries ?? {}).length) return false; // a failed swap on its retry schedule is a swap, not a mystery
   return !Object.values(hold.swapped ?? {}).some((s) => at.getTime() - new Date(s).getTime() < reconnectMs); // a runner still dialling in
+}
+
+/**
+ * BOS-2533: the one rule for "this company's runner is mid-swap": it is being recreated (inside the reconnect window
+ * after its recreate) or is on its retry schedule, AND it is not connected yet. A runner that is back, a failed swap,
+ * a wrap-up hold and a building hold are never mid-swap. swapFor, swappingFor and swapInProgressUntil all use it.
+ */
+export function midSwap(hold: Hold | null, slug: string | undefined, nowMs: number, connected: boolean, reconnectMs = SWAP_WINDOW_MS): boolean {
+  if (!hold || !slug || connected || hold.kind === "wrapup" || hold.kind === "building") return false;
+  if (hold.failed?.[slug]) return false;
+  if (hold.tries?.[slug]) return true;
+  const at = hold.swapped?.[slug];
+  return !!at && nowMs - new Date(at).getTime() < reconnectMs;
+}
+
+/**
+ * BOS-2404: the one time the owner's chat waits during an update: a runner was recreated and has not dialled back in.
+ * Returns when that wait ends at the latest (the recreate plus the reconnect window), or null when no runner is mid-swap.
+ * `isBack(slug)` says a runner is already connected again; without it every recent recreate counts. Pure, so the
+ * banner, the chat screen and their tests share it.
+ */
+export function swapInProgressUntil(hold: Hold | null, at: Date, reconnectMs = SWAP_WINDOW_MS, isBack: (slug: string) => boolean = () => false): Date | null {
+  if (!hold) return null;
+  const ends = Object.entries(hold.swapped ?? {})
+    .map(([slug, s]) => ({ slug, end: new Date(s).getTime() + reconnectMs }))
+    .filter(({ slug, end }) => end > at.getTime() && midSwap(hold, slug, at.getTime(), isBack(slug), reconnectMs))
+    .map(({ end }) => end);
+  return ends.length ? new Date(Math.max(...ends)) : null;
+}
+
+/**
+ * BOS-2404: swapInProgressUntil on the saved hold, for the chat screen's words only (chat.ts state()). It holds nothing
+ * back: the chat's one wait is launch() finding the runner offline. Kept here so the hold stays read only by the files
+ * the update-waits guard lists (BOS-2058).
+ */
+export async function swapUntilForScreen(db: Db, at: Date): Promise<Date | null> {
+  return swapInProgressUntil(await getHold(db), at);
 }
 
 /** BOS-1954: the longest a drain pass waits for a scheduling pass to end before it tries again on the next pass. */
@@ -238,6 +276,8 @@ export type MaintenanceDeps = {
   landingMerges?: () => Promise<Map<string, number>>;
   /** BOS-1951: the same merges as ticket ids, so the banner can name them. */
   landingMergeIds?: () => Promise<string[]>;
+  /** BOS-2479: when the last counted push stops holding the swap at the latest (null when none), for the banner's go-ahead time. */
+  landingEndsAt?: () => Promise<string | null>;
   /** BOS-2058: a server update is waiting for a quiet machine right now (a wrap-up pressed then belongs to it, and lifts with it). */
   serverUpdateWaiting?: () => Promise<boolean>;
   /** Resolves when no scheduling pass is mid-flight, so a count of runs taken after it cannot be outdated by a launch. */
@@ -290,7 +330,12 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
   /** BOS-1955: update-runner.sh drops this when its build fails; it ends a building hold and never a real drain. */
   const cancelTrigger = deps.dir && path.join(deps.dir, "inbox", "drain-cancel.json");
 
-  const save = (h: Hold) => db.insert(settings).values({ key: MAINTENANCE_KEY, value: h }).onConflictDoUpdate({ target: settings.key, set: { value: h } });
+  /** BOS-2408: each hold's own record, kept after its settings row is deleted. */
+  const history = updateHoldHistory(db, now, deps.log);
+  const save = async (h: Hold) => {
+    await db.insert(settings).values({ key: MAINTENANCE_KEY, value: h }).onConflictDoUpdate({ target: settings.key, set: { value: h } });
+    await history.upsert(h);
+  };
 
   /**
    * Live runs per company. `workOnly` leaves out the owner's chat and the CEO's reply lane (BOS-349):
@@ -435,6 +480,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     if (h && h.kind !== "wrapup" && h.wrapSince) body = `${body} The wrap-up you asked for ended with it: work has restarted.`;
     const last: LastUpdate = { at: now().toISOString(), startedAt: h?.since ?? null, ok: level !== "page", title, body, ...(h?.swapped ? { swapped: h.swapped } : {}) };
     await db.insert(settings).values({ key: MAINTENANCE_LAST_KEY, value: last }).onConflictDoUpdate({ target: settings.key, set: { value: last } });
+    if (h) await history.close(h.since, { ok: last.ok, title, body, swapped: h.swapped, failed: h.failed });
     await db.delete(settings).where(eq(settings.key, MAINTENANCE_KEY));
     await withdrawQuestion();
     await deps.notify({ companyId: null, level, title, body, link: "#/settings/updates" });
@@ -516,7 +562,29 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     return tell(text, h, h.kind === "wrapup" ? "wrapTold" : "startTold");
   }
 
+  /**
+   * BOS-2404: swapInProgressUntil, leaving out the runners already dialled back in and any the launcher no longer lists.
+   * If the launcher can't say, every recent recreate counts. Server-wide, like the banner; each company's chat screen
+   * names its own runner's swap (chat.ts state()).
+   */
+  async function swappingUntil(h: Hold): Promise<Date | null> {
+    if (!Object.keys(h.swapped ?? {}).length) return null;
+    let notSwapping: ((slug: string) => boolean) | undefined;
+    try {
+      const fleet = await deps.fleet();
+      const away = new Set<string>();
+      for (const r of fleet) if (!r.companyId || !(await deps.connected(r.companyId))) away.add(r.slug);
+      notSwapping = (slug) => !away.has(slug);
+    } catch {
+      // The launcher didn't answer: no runner is known to be back.
+    }
+    return swapInProgressUntil(h, now(), reconnectMs, notSwapping);
+  }
+
   const self = {
+    /** BOS-2408: the past holds, newest first. */
+    history: (limit?: number) => history.list(limit),
+
     /** Turns the hold on. Idempotent: a second call returns the hold that is already on. // leader-only */
     async start(opts: { reason?: string; minutes?: number; kind?: HoldKind } = {}): Promise<Hold> {
       const kind = opts.kind ?? "update";
@@ -562,6 +630,8 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         // start message goes out below, so an agent that missed the wrap-up is told again by the update.
         if ((kind === "update" || kind === "settings") && have.kind === "wrapup") {
           const up: Hold = { ...have, kind, reason: kind === "settings" ? SETTINGS_REASON : "runner update", since: now().toISOString() };
+          // The wrap-up's own record ends here (its start time is the key); the update opens a new one below.
+          await history.close(have.since, { ok: true, title: "Taken over by a runner update (the wrap-up carries on as part of it)", body: "" });
           await save(up);
           await tellOnce(kind === "settings" ? WRAP_UP_SETTINGS : WRAP_UP, up);
           return up;
@@ -619,12 +689,10 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       const busyNow = await runnerBusy(db, true, now());
       const active = busyNow.runs;
       const runsTotal = busyNow.runsTotal;
-      // BOS-349: while work runs are still going, the chat page stays open and says so; otherwise the swap can land any moment.
       // BOS-1600: the checks on a runner that a swap waits on (not those on a check worker), so the banner can name them.
       // A "stop the checks and update now" answer (force) means nothing is waited for any more.
       const checksList = h.kind === "wrapup" || h.kind === "building" || h.force || h.ignoreChecks ? [] : await runnerChecks(db, now());
-      // BOS-1877: the chat stays open while anything the swap waits on is still going (runs, or checks), not only runs.
-      // BOS-1951: merges being pushed to main hold the swap too (BOS-1645), so the banner names them and the chat stays open.
+      // BOS-1951: merges being pushed to main hold the swap too (BOS-1645), so the banner names them.
       // Not for a wrap-up hold: it swaps nothing. The same count the drain waits on, so text and swap never disagree.
       const mergeIds = h.kind === "wrapup" || h.kind === "building" || !deps.landingMergeIds ? [] : await deps.landingMergeIds().catch(() => [] as string[]);
       const mergesList = mergeIds.length
@@ -637,9 +705,18 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       const mergesN = Math.max(mergeIds.length, mergesList.length);
       // Nothing named is going and the swap still has not happened: late and unnamed (see unknownWait).
       const unknown = h.kind !== "building" && runsTotal === 0 && checksList.length === 0 && mergesN === 0 && unknownWait(h, now(), reconnectMs);
-      // BOS-1955: a building hold is never "swapping": nothing is built yet, so chat stays open for the whole build.
+      // BOS-1955: a building hold is never "swapping": nothing is built yet.
       const forecast = h.kind === "building" ? { phase: "waiting" as const, expectedFinishAt: null, overdue: false } : drainForecast({ runs: runsTotal, checks: checksList, deadline: h.deadline, now: now(), merges: mergesN, unknownWait: unknown });
-      const base = { on: true as const, kind: h.kind ?? "update", reason: h.reason, since: h.since, deadline: h.deadline, ...forecast, runs: runsTotal, companies: active.size, chatOpen: h.kind === "building" || runsTotal > 0 || (h.kind !== "wrapup" && (checksList.length > 0 || mergesN > 0 || unknown)), blocking: holdBlocksStarts(h, now()), checks: checksList.length, checksList, merges: mergesN, mergesList, unknownWait: unknown, last };
+      // BOS-2404: the chat is open through every hold; it waits only while a runner is being recreated and not back yet.
+      const swapUntil = await swappingUntil(h);
+      // BOS-2479: the checks on a check worker, which the drain lets run and never waits for (BOS-2108), named so the owner
+      // doesn't read them as what the update waits on (24 Nov 10:24). And the latest time it goes ahead: the drain's own end,
+      // or the end of the last push being waited for, if later. Not for a wrap-up or a build: neither swaps on a timer.
+      const swaps = h.kind !== "wrapup" && h.kind !== "building";
+      const workerChecksList = swaps ? (await workerChecks(db)).map(({ ticket, kind, scope }) => ({ ticket, kind, scope })) : [];
+      const landingEnd = swaps && mergesN > 0 && deps.landingEndsAt ? await deps.landingEndsAt().catch(() => null) : null;
+      const goAheadAt = swaps ? new Date(Math.max(drainGoAheadAt(h).getTime(), landingEnd ? Date.parse(landingEnd) : 0)).toISOString() : null;
+      const base = { on: true as const, kind: h.kind ?? "update", reason: h.reason, since: h.since, deadline: h.deadline, ...forecast, runs: runsTotal, companies: active.size, chatOpen: !swapUntil, chatBackBy: swapUntil?.toISOString() ?? null, blocking: holdBlocksStarts(h, now()), checks: checksList.length, checksList, merges: mergesN, mergesList, workerChecksList, goAheadAt, unknownWait: unknown, last };
       // The wrap-up panel's list (BOS-929): each work run still going, with its ticket and a run waiting on an open
       // permission card named as waiting for an answer (Brains's part B), so it is never called "not responding".
       // A wrap-up asked for while an update waits (BOS-988) keeps the update's kind but carries the ask, so it shows
@@ -803,7 +880,11 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         // Re-read, so the hold carries who its start message already reached (BOS-988): the pass below tells the rest.
         h = await getHold(db);
       }
-      if (!h) return;
+      if (!h) {
+        // BOS-2408: no live hold, so a record still open is one that lost its end (a restart): close it, don't leave it open.
+        await history.closeOrphans();
+        return;
+      }
       // BOS-1955: the early hold ends by itself when the build never reached a drain (the script was killed, a host reboot).
       if (h.kind === "building") {
         if (now() >= new Date(h.deadline)) await end("Runner update build hold ended", "note", `The new image was not ready within ${h.minutes} minutes, so new runs have started again. Press Build and update runners again when you like.`);
@@ -977,10 +1058,12 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
           if (r.companyId) await expectRestart(db, r.companyId, h.kind === "settings" ? "setting change" : "update", now());
           await deps.recreate(r.slug); // leader-only
           swapped[r.slug] = now().toISOString();
+          await history.swapTry(h.since, { slug: r.slug, n: (tries[r.slug]?.n ?? 0) + 1, outcome: "recreated" });
           delete tries[r.slug];
         } catch (err) {
           const why = (err as Error).message;
           const n = (tries[r.slug]?.n ?? 0) + 1;
+          await history.swapTry(h.since, { slug: r.slug, n, outcome: "failed", error: why });
           deps.log?.(`drain: could not recreate ${r.slug} (try ${n} of ${swapTries}): ${why}`);
           // A network guard failure is not the new image's fault: the previous image starts behind the same guard,
           // so trying again or going back can't help. It is reported at once.
@@ -999,6 +1082,10 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       const waiting = fleet.filter((r) => !r.current && !failed[r.slug] && !swapped[r.slug] && !tries[r.slug]);
       // BOS-1982: nothing counted (no run, check or merge) and runners still wait: the swap is held up by something Boss Man
       // can't name (a scheduling pass that never ends). The wake above needs counted work, so wake each such company's CEO once.
+      // BOS-2408: the record keeps that the wait was on nothing Boss Man could name (once per hold), with how long it had waited.
+      if (waiting.length && total === 0 && (await landing()).size === 0 && unknownWait(h, t, reconnectMs)) {
+        await history.event(h.since, `Waiting on nothing Boss Man can name (no run, check or merge going); ${waiting.map((r) => r.slug).join(", ")} not swapped yet`);
+      }
       if (waiting.length && !h.ceoWokenAt && deps.wakeCeo && total === 0 && (await landing()).size === 0) {
         const lastProgress = Math.max(new Date(h.since).getTime(), ...Object.values(swapped).map((s) => new Date(s).getTime()));
         const idleCompanies = [...new Set(waiting.map((r) => r.companyId).filter((id): id is string => !!id && !(active.get(id) ?? 0)))];

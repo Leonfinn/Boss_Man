@@ -1,7 +1,9 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { Fragment, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { isInfiniteModel } from "@boss-man/shared";
-import { api, type Company, type Transcript, type TranscriptItem } from "../api";
+import { api, usd, type Company, type RunRow, type Transcript, type TranscriptItem } from "../api";
+import { ticketSiblings, type Siblings } from "../run-siblings";
+import { LoadError } from "../components/LoadError";
 import { download } from "../csv";
 import { away } from "../server-watch";
 import { stopRun } from "../stop-run";
@@ -9,9 +11,12 @@ import { useDraft } from "../drafts";
 import { useImageAttach, withAttachments } from "../components/ImageAttach";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { describe, MAX_ITEMS, useTranscript } from "../transcript";
-import { usePoll } from "../hooks";
+import { runTimeSplit, spanWords } from "../run-time-split";
+import { hashQuery, usePoll } from "../hooks";
+import { countHits, findQuery, spotIndex, splitHits, stepSpot, type FindSpot } from "../chat-find";
+import { parseRunShow, RUN_SHOWS, runSpots, shownItems, type RunShow } from "../run-find";
 import { permissionAnsweredBy, permissionOutcome, permissionRule, type PermissionRow } from "../permissions-in-run";
-import { failureReason, outcomeTag, usage, when } from "./Runs";
+import { failureReason, outcomeTag, tokens, usage, when } from "./Runs";
 import { NotFoundBlock } from "../components/NotFoundBlock";
 import { Loader } from "../components/Loader";
 import { CopyLinkButton } from "../components/CopyLinkButton";
@@ -148,6 +153,23 @@ function PermissionsInRun({ runId, live }: { runId: string; live: boolean }) {
 
 const CUT = 2_000;
 /** One run as Markdown (BOS-2322): what the Run page shows, in order; long text is cut with "(cut)". */
+/**
+ * The run's model, token counts and cost as one line (BOS-2367). A count the agent didn't report reads
+ * "not reported", never 0; a plan (subscription) run costs allowance, so it says "plan use" not money.
+ */
+export function runFigures(run: Pick<Transcript["run"], "model" | "inputTokens" | "outputTokens" | "cachedReadTokens" | "cachedWriteTokens" | "fundingKind" | "costMicros">): string {
+  const part = (n: number | null | undefined, what: string) => (n == null ? `${what} not reported` : `${tokens(n)} ${what}`);
+  const cost = run.fundingKind === "subscription" ? "plan use" : usd(run.costMicros ?? 0);
+  return [
+    run.model ?? "default model",
+    part(run.inputTokens, "in"),
+    part(run.outputTokens, "out"),
+    part(run.cachedReadTokens, "cache read"),
+    part(run.cachedWriteTokens, "cache write"),
+    cost,
+  ].join(" · ");
+}
+
 export function runMarkdown(run: Transcript["run"], ticketRef: string | null, items: TranscriptItem[]): string {
   const utc = (iso: string) => `${iso.slice(0, 16).replace("T", " ")} UTC`;
   const cut = (s: string) => (s.length > CUT ? `${s.slice(0, CUT)} (cut)` : s);
@@ -168,8 +190,110 @@ export function runMarkdown(run: Transcript["run"], ticketRef: string | null, it
   return `${head.join("\n")}\n${lines.join("\n")}`;
 }
 
+/** "Where the time went": the run's time by tool, its longest calls and permission waits. A plain fold, no button. */
+export function TimeSplitFold({ run, items, onGoTo }: { run: Transcript["run"]; items: TranscriptItem[]; onGoTo: (index: number) => void }) {
+  const live = !run.endedAt;
+  const split = runTimeSplit(items, run.endedAt ? Date.parse(run.endedAt) : null, Date.now());
+  return (
+    <details data-testid="run-time-split" style={{ margin: "8px 0" }}>
+      <summary>Where the time went{split && live ? " (so far)" : ""}</summary>
+      {!split ? (
+        <p className="muted">Not available for this run.</p>
+      ) : (
+        <>
+          <p className="muted" style={{ fontSize: 13 }}>
+            {live ? "So far, " : ""}
+            {spanWords(split.totalMs)} in all.
+          </p>
+          <table>
+            <tbody>
+              {split.rows.map((r) => (
+                <tr key={r.key}>
+                  <td>{r.label}</td>
+                  <td className="mono">{spanWords(r.ms)}</td>
+                  <td className="mono muted">{Math.round(r.share * 100)}%</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {split.longest.length > 0 && (
+            <>
+              <h3 style={{ fontSize: 14 }}>Longest tool calls</h3>
+              <ol>
+                {split.longest.map((c, i) => (
+                  <li key={i}>
+                    {c.tool}: {c.what || "(no detail)"} · <span className="mono">{spanWords(c.ms)}</span>
+                    {c.noResult && <span className="tag"> no result</span>}{" "}
+                    <a
+                      href={window.location.hash || "#"}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        onGoTo(c.index);
+                      }}
+                    >
+                      Go to step
+                    </a>
+                  </li>
+                ))}
+              </ol>
+            </>
+          )}
+        </>
+      )}
+    </details>
+  );
+}
+
+/** "Other runs on this ticket": every run of the same ticket, oldest first, this one marked. */
+export function SiblingRunsFold({ runId, sibs, error, onRetry }: { runId: string; sibs: Siblings | null; error: Error | null; onRetry: () => void }) {
+  return (
+    <details data-testid="run-siblings" style={{ margin: "8px 0" }}>
+      <summary>Other runs on this ticket{sibs ? ` (${sibs.rows.length})` : ""}</summary>
+      {error && !sibs ? (
+        <LoadError what="the ticket's other runs" message={error.message} onRetry={onRetry} />
+      ) : !sibs ? (
+        <Loader label="Loading the ticket's runs" />
+      ) : (
+        <table>
+          <thead>
+            <tr>
+              <th>Started</th>
+              <th>Agent</th>
+              <th>Result</th>
+              <th>Length</th>
+              <th>Cost</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {sibs.rows.map((r) => (
+              <tr key={r.id} aria-current={r.id === runId ? "true" : undefined}>
+                <td>
+                  <a href={`#/runs/${r.id}`}>{when(r.startedAt)}</a>
+                </td>
+                <td>{r.agent ?? "An agent"}</td>
+                <td>{outcomeTag(r.endedAt ? (r.outcome ?? "end_turn") : null)}</td>
+                <td className="mono">{r.endedAt ? spanWords(Date.parse(r.endedAt) - Date.parse(r.startedAt)) : "running"}</td>
+                <td className="mono">{r.fundingKind === "subscription" ? "plan use" : usd(r.costMicros ?? 0)}</td>
+                <td>{r.id === runId && <strong>This run</strong>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </details>
+  );
+}
+
 export function Run({ runId, companies }: { runId: string; companies: Company[] }) {
   const { run, items, dropped, error } = useTranscript(runId);
+  const sibQuery = run?.ticketId ? (run.runTicketRef ?? run.ticket ?? "") : "";
+  const sibRes = usePoll(
+    async (signal) => (run?.ticketId && sibQuery ? ticketSiblings(await api<RunRow[]>(`/api/runs/recent?q=${encodeURIComponent(sibQuery)}&limit=200`, { signal }), run) : null),
+    60_000,
+    `siblings:${runId}:${run?.ticketId ?? ""}`,
+  );
+  const sibs = run?.ticketId ? sibRes.data : null;
   const [preparing, setPreparing] = useState(false);
   const [dlError, setDlError] = useState<string | null>(null);
   const downloadRun = async () => {
@@ -201,18 +325,66 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
   const follow = useRef(true);
   const userScrolled = useRef(0);
   // Only the rows in view are in the page, so a run of thousands of events stays light (R43).
-  const rows = useVirtualizer({ count: items.length, getScrollElement: () => scroller.current, estimateSize: () => 56, overscan: 12 });
+  // Show (kept in the page link) and Find: both work on the events the page holds; hidden events are not in the list.
+  const [show, setShow] = useState<RunShow>(() => parseRunShow(hashQuery()));
+  const changeShow = (v: RunShow) => {
+    setShow(v);
+    const base = window.location.hash.split("?")[0] || `#/runs/${runId}`;
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${base}${v === "all" ? "" : `?show=${v}`}`);
+  };
+  const shown = shownItems(items, show);
+  const [findText, setFindText] = useState("");
+  const query = findQuery(findText);
+  const [at, setAt] = useState<FindSpot | null>(null);
+  const spots = query ? runSpots(shown, query) : [];
+  const here = spotIndex(spots, at);
+  const curSpot = here >= 0 ? spots[here]! : null;
+  const curKey = curSpot ? `${curSpot.id}:${curSpot.n}` : "";
+  const rows = useVirtualizer({ count: shown.length, getScrollElement: () => scroller.current, estimateSize: () => 56, overscan: 12 });
+  // The first match is current until the owner steps; going to a match stops following the end.
+  useEffect(() => {
+    if (spots.length && here < 0) setAt(spots[0]!);
+  }, [spots.length, here, query]);
+  useEffect(() => {
+    if (!curSpot) return;
+    const i = shown.findIndex((it) => String(it.seq) === curSpot.id);
+    if (i < 0) return;
+    follow.current = false;
+    rows.scrollToIndex(i, { align: "center" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [curKey]);
+  const step = (dir: 1 | -1) => setAt(stepSpot(spots, curSpot, dir));
+  const onFindKey = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+      e.preventDefault();
+      step(e.shiftKey ? -1 : 1);
+    }
+  };
+  // Draws one text with its matches marked; `from` is how many matches came before it in the same event.
+  const marked = (text: string, itemSeq: number, from: number) => {
+    if (!query) return text;
+    let n = from;
+    return splitHits(text, query).map((sg, k) =>
+      sg.hit ? (
+        <mark key={k} className={`find-hit${curSpot?.id === String(itemSeq) && curSpot.n === n++ ? " current" : ""}`}>
+          {sg.text}
+        </mark>
+      ) : (
+        <Fragment key={k}>{sg.text}</Fragment>
+      ),
+    );
+  };
 
   useEffect(() => {
-    if (!follow.current || !items.length) return;
-    rows.scrollToIndex(items.length - 1, { align: "end" });
+    if (!follow.current || !shown.length) return;
+    rows.scrollToIndex(shown.length - 1, { align: "end" });
     // Rows are measured as they render, so settle on the true end a frame later.
     const frame = requestAnimationFrame(() => {
       const el = scroller.current;
       if (el && follow.current) el.scrollTop = el.scrollHeight;
     });
     return () => cancelAnimationFrame(frame);
-  }, [items.length, rows]);
+  }, [shown.length, rows]);
 
   if (error && !run && !away(error)) return error.status === 404 ? <NotFoundBlock title="Run not found" backHref="#/runs" backLabel="Back to Runs">This run doesn't exist any more, or the link is wrong.</NotFoundBlock> : <p className="error" role="alert">{error.message}</p>;
   const company = companies.find((c) => c.id === run?.companyId);
@@ -229,14 +401,13 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
               {outcomeTag(run.endedAt ? (run.outcome ?? "end_turn") : null)}
               <span>Started {when(run.startedAt)}</span>
               {run.endedAt && <span>Ended {when(run.endedAt)}</span>}
-              <span className="mono">{run.model ?? "default model"}</span>
               {isInfiniteModel(run.model) && (
                 <span className="tag" title="Synthetic Infinite mode: free (doesn't spend the plan's credits) and slow, in a background run slot.">
                   Infinite mode · free, slow
                 </span>
               )}
-              <span className="mono" title={usage(run).title}>
-                {usage(run).text}
+              <span className="mono" title={usage(run).title} data-testid="run-figures">
+                {runFigures(run)}
               </span>
             </p>
           )}
@@ -247,6 +418,16 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
           )}
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {sibs?.previous && (
+            <a className="btn" href={`#/runs/${sibs.previous.id}`}>
+              Previous run
+            </a>
+          )}
+          {sibs?.next && (
+            <a className="btn" href={`#/runs/${sibs.next.id}`}>
+              Next run
+            </a>
+          )}
           {run && (
             <button type="button" className="btn" onClick={() => void downloadRun()} disabled={preparing}>
               {preparing ? "Preparing" : "Download"}
@@ -256,11 +437,44 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
         </div>
       </header>
       {dlError && <p className="error" role="alert">{dlError}</p>}
+      {run?.ticketId && sibQuery && <SiblingRunsFold runId={runId} sibs={sibs} error={sibRes.error} onRetry={sibRes.reload} />}
+      {run && <TimeSplitFold run={run} items={items} onGoTo={(i) => { follow.current = false; rows.scrollToIndex(i, { align: "center" }); }} />}
       {run && !run.endedAt && <Steer runId={runId} companyId={run.companyId} ticketId={run.ticketId} />}
       {dropped > 0 && (
         <p className="muted" style={{ fontSize: 13 }}>
           Showing the latest {MAX_ITEMS.toLocaleString()} events; {dropped.toLocaleString()} earlier ones aren't kept in this page.
         </p>
+      )}
+      {items.length > 0 && (
+        <div className="chat-find" role="search" data-testid="run-find" style={{ padding: "8px 0" }}>
+          <input type="search" aria-label="Find in this run" placeholder={dropped > 0 ? "Find in the loaded events" : "Find in this run"} value={findText} onChange={(e) => setFindText(e.target.value)} onKeyDown={onFindKey} />
+          {query && (
+            <span className="muted" role="status">
+              {spots.length ? `${here + 1} of ${spots.length}` : "No matches"}
+            </span>
+          )}
+          {query && (
+            <>
+              <button type="button" className="btn" onClick={() => step(-1)} disabled={spots.length < 2} title="Previous match">
+                Previous
+              </button>
+              <button type="button" className="btn" onClick={() => step(1)} disabled={spots.length < 2} title="Next match">
+                Next
+              </button>
+            </>
+          )}
+          <label className="chat-date">
+            Show
+            <select value={show} onChange={(e) => changeShow(e.target.value as RunShow)}>
+              {RUN_SHOWS.map((s) => (
+                <option key={s.value} value={s.value}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {dropped > 0 && <p className="muted">Searches the {MAX_ITEMS.toLocaleString()} events loaded here only, not the earlier ones.</p>}
+        </div>
       )}
       <div
         ref={scroller}
@@ -288,17 +502,21 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
               {run.endedAt ? "No events are kept for this run: runner events older than the retention period (60 days unless the owner changed it) are deleted." : "Nothing recorded yet."}
             </p>
           )
+        ) : shown.length === 0 ? (
+          <p className="muted" style={{ padding: 16 }}>
+            No {show === "messages" ? "messages" : show === "tools" ? "tool calls" : "problems"} in the events loaded here.
+          </p>
         ) : (
           <div style={{ height: rows.getTotalSize(), position: "relative" }}>
             {rows.getVirtualItems().map((v) => {
-              const item = items[v.index]!;
+              const item = shown[v.index]!;
               const d = describe(item);
               return (
                 <div key={item.seq} data-index={v.index} ref={rows.measureElement} className={`line ${d.tone}`} style={{ position: "absolute", top: 0, left: 0, right: 0, transform: `translateY(${v.start}px)` }}>
                   <span className="mono muted at">{new Date(item.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>
                   <div className="what">
-                    <strong>{d.label}</strong>
-                    {d.body && (d.tone === "tool" ? <span className="tag">{d.body.replace(/_/g, " ")}</span> : <p>{d.body}</p>)}
+                    <strong>{marked(d.label, item.seq, 0)}</strong>
+                    {d.body && (d.tone === "tool" ? <span className="tag">{marked(d.body.replace(/_/g, " "), item.seq, query ? countHits([d.label], query) : 0)}</span> : <p>{marked(d.body, item.seq, query ? countHits([d.label], query) : 0)}</p>)}
                   </div>
                 </div>
               );

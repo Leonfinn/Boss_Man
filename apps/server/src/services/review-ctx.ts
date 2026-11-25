@@ -28,6 +28,7 @@ import { CHECK_WAIT_LABEL, createHold, ensureSystemHold, mergeHolds, mergeWaits,
 import { CARRIED_NOTE_PREFIX, type TurnWait } from "./merge-queue.js";
 import type { notificationsService } from "./notifications.js";
 import { goLiveWaitOf } from "./go-live-wait.js";
+import { landingTurns } from "./landing-turn.js";
 import { cardHeld, CHECK_MERGED_KEY, highestRisk, MERGE_CARRY_KEY, MERGE_RETARGET_KEY, MERGE_TURN_DEFAULT_MIN, MERGE_TURN_KEY, MERGE_TURN_MAX_MIN, MERGE_WAIT_MS, raiseCheckStuck, ReviewError, ReviewHeldError, SignoffPendingError, WAIT_FOR_CI_KEY, type CarriedInfo, type GitTemplates, type HoldInput, type LandingStatus, type NotifyHook } from "./review-common.js";
 
 export type ReviewDeps = {
@@ -84,6 +85,21 @@ export function reviewContext(db: Db, deps: ReviewDeps) {
   // a passed check ("push"). It holds no check slot then, so the Merges tab, mergeState and server_status read this one
   // marker for their words. shortcut: in memory like `landings`; the turns it describes are in memory too (DR-026).
   const turnWaits = new Map<string, TurnWait>();
+  // BOS-2479: a merge whose call that can push to main is going (merge-rounds.ts whilePushing): ticket -> when that call
+  // began. The one thing a runner swap waits on for a merge (merge-status.ts landingMergeIds); set from the push call
+  // until the landing ends (land()'s `finally`), so a merged one is held until its record is written (BOS-1645).
+  // shortcut: in memory like `landings`, lost on restart, harmless because a restart ends every merge (DR-014).
+  const pushing = new Map<string, number>();
+  // BOS-2361: a turn promoted from the line, or released by server_status past its cap, writes its merge-line row here.
+  // The ticket is looked up in this server's database; a ticket it doesn't hold (another ctx's) is skipped.
+  landingTurns.onEvent = (e) => {
+    void db
+      .select({ id: tickets.id, companyId: tickets.companyId })
+      .from(tickets)
+      .where(eq(tickets.id, e.ticketId))
+      .then(([t]) => (t ? lineEvent(db, t, { event: "landing_turn", action: e.action, capMin: Math.round(e.capMs / 60_000) }) : undefined))
+      .catch(() => undefined);
+  };
   // Merged trees the git host's CI passed. A merge rebuilt on a moved main with the same tree keeps the pass, as a
   // check-all pass is kept (P11a), so it isn't pushed and waited for again. shortcut: in memory, so a restart waits again.
   const ciPassedTrees = new Set<string>();
@@ -687,6 +703,7 @@ export function reviewContext(db: Db, deps: ReviewDeps) {
     phases,
     ciWaits,
     turnWaits,
+    pushing,
     ciPassedTrees,
     ciCardWaiting,
     ciTiming,

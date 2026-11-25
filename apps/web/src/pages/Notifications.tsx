@@ -5,7 +5,9 @@ import { ShowOlder } from "../components/ShowOlder";
 import { away } from "../server-watch";
 import { when } from "./Runs";
 import { MoreText } from "./Decisions";
+import { READ_IDS_MAX, groupByDay } from "../notice-days";
 import { FeedItem, LevelTag, feedTitle } from "../components/FeedItem";
+import { buildCsv, download } from "../csv";
 
 const LEVEL: Record<NotifyLevel, { label: string; tone: string; help: string }> = {
   note: { label: "Note", tone: "", help: "The feed only" },
@@ -13,6 +15,33 @@ const LEVEL: Record<NotifyLevel, { label: string; tone: string; help: string }> 
   page: { label: "Page", tone: "red", help: "Also the phone: something urgent" },
   ask: { label: "Ask", tone: "amber", help: "Needs an answer" },
 };
+
+/** The full app address for a notice's link: links are in-app ("#/…"), so put the page's own address in front. */
+function fullLink(link: string): string {
+  if (/^https?:\/\//i.test(link)) return link;
+  const base = `${window.location.origin}${window.location.pathname}`;
+  return link.startsWith("#") ? base + link : base + (link.startsWith("/") ? "#" : "#/") + link;
+}
+
+/** (BOS-2520) The notices shown as CSV: every loaded row under the current filters, with nothing marked read. */
+export function noticesToCsv(rows: Notice[]): string {
+  return buildCsv(
+    ["Time", "Company", "Type", "Asked-for type (when lowered)", "Lowered by", "Title", "Text", "Read at", "Pushed to phone at", "Push error", "Link"],
+    rows.map((n) => [
+      n.createdAt,
+      n.company ?? "",
+      LEVEL[n.level].label,
+      n.requested !== n.level ? LEVEL[n.requested].label : "",
+      n.demotedBy ?? "",
+      n.title,
+      n.body ?? "",
+      n.readAt ?? "",
+      n.pushedAt ?? "",
+      n.pushError ?? "",
+      fullLink(n.link),
+    ]),
+  );
+}
 
 function Item({ n, onRead }: { n: Notice; onRead: (id: string) => void }) {
   // When the question became the title, show only what follows its first line (if anything) as the body.
@@ -238,7 +267,10 @@ export function Notifications({ feed, onChanged, companies = null, browserPermis
   const unreadShown = items.filter((n) => !n.readAt);
   const clear = () => setFilters(NO_FILTERS);
 
-  const summary = updating ? "Updating…" : `${older.canMore ? "Latest " : ""}${items.length} shown`;
+  // BOS-2532 (G2): the rows on screen are `items`, so the summary counts those and no more. It said "Latest N shown"
+  // while "Show older" was still to come, counting only the first page; now it says the list is cut and how many are
+  // here, and the button that loads the rest is what brings more in.
+  const summary = updating ? "Updating…" : !older.rows && older.canMore ? `Latest ${items.length} shown, more below` : older.canMore ? `${items.length} shown, more below` : `${items.length} shown`;
   const neverAny = !active && feed && !items.length;
 
   return (
@@ -248,17 +280,28 @@ export function Notifications({ feed, onChanged, companies = null, browserPermis
           <h1>Notifications</h1>
           <p className="sub">Everything Boss Man and the agents have told you, newest first, with where to look.</p>
         </div>
-        {active
-          ? unreadShown.length > 0 && (
-              <button className="btn" type="button" onClick={() => read({ ids: unreadShown.map((n) => n.id) })}>
-                Mark these read
-              </button>
-            )
-          : (feed?.unread ?? 0) > 0 && (
-              <button className="btn" type="button" onClick={() => read({ all: true })}>
-                Mark all read
-              </button>
-            )}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <button
+            className="btn"
+            type="button"
+            disabled={items.length === 0}
+            title="Downloads the notices shown: this filter and search, including older pages already loaded"
+            onClick={() => download(`notifications-${new Date().toISOString().slice(0, 10)}.csv`, noticesToCsv(items))}
+          >
+            Download CSV
+          </button>
+          {active
+            ? unreadShown.length > 0 && (
+                <button className="btn" type="button" onClick={() => read({ ids: unreadShown.map((n) => n.id) })}>
+                  Mark these read
+                </button>
+              )
+            : (feed?.unread ?? 0) > 0 && (
+                <button className="btn" type="button" onClick={() => read({ all: true })}>
+                  Mark all read
+                </button>
+              )}
+        </div>
       </header>
       {/* (BOS-1506) This button used to sit in the side menu; it shows here until the owner turns notifications on. */}
       {browserPermission === "default" && onEnableBrowser && (
@@ -302,11 +345,26 @@ export function Notifications({ feed, onChanged, companies = null, browserPermis
         </div>
       )}
       {items.length > 0 && (
-        <ul aria-busy={updating} style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 10 }}>
-          {items.map((n) => (
-            <Item key={n.id} n={n} onRead={(id) => read({ ids: [id] })} />
+        <div aria-busy={updating} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {groupByDay(items).map((g) => (
+            <section key={g.key} aria-label={g.label}>
+              <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", margin: "0 0 8px" }}>
+                <h2 style={{ margin: 0, fontSize: 16 }}>{g.label}</h2>
+                {g.unreadIds.length > 0 && <span className="muted">{g.unreadIds.length} new</span>}
+                {g.unreadIds.length > 0 && (
+                  <button type="button" className="btn small" style={{ marginLeft: "auto" }} onClick={() => read({ ids: g.unreadIds.slice(0, READ_IDS_MAX) })}>
+                    Mark this day read
+                  </button>
+                )}
+              </div>
+              <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 10 }}>
+                {g.items.map((n) => (
+                  <Item key={n.id} n={n} onRead={(id) => read({ ids: [id] })} />
+                ))}
+              </ul>
+            </section>
           ))}
-        </ul>
+        </div>
       )}
       {!updating && <ShowOlder older={older} />}
     </>

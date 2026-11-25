@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, decisions, ticketDependencies, tickets, wakes as wakesTable } from "../src/db/schema.js";
-import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, ceoAnswerRefusal, isSystemCard, raiseMergeStuck } from "../src/services/decisions.js";
+import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, CEO_QUESTION_HANDOVER_MINUTES, FIXES_LIVE_MAX, ceoAnswerRefusal, ceoFirstMergeNote, fixesLiveProblem, isSystemCard, ownerSetupFixKey, ownerSetupKey, raiseMergeStuck } from "../src/services/decisions.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -660,6 +660,76 @@ describe("more attempts the CEO must fail (BOS-149 adversarial round 6)", () => 
       .values({ companyId: c.company.id, kind: "approval", question: "Sign off the release", options: ["Approve and merge", "Send it back"], recommendedOption: "Approve and merge", tier: "owner", context: { type: "risk_review", ticketId: t.id, reviewer: "the owner" } });
     await expect(c.review.land(t.id, "the owner")).rejects.toThrow(/sign-off/i);
     expect((await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).not.toBe("done");
+  });
+});
+
+describe("fixesLiveProblem: when a 'fixes live' marker can be stored (BOS-639)", () => {
+  it("accepts a normal one-line symptom", () => {
+    expect(fixesLiveProblem("server freezes as memory climbs")).toBeNull();
+  });
+
+  it("treats empty and whitespace-only text as no marker at all", () => {
+    expect(fixesLiveProblem("")).toBeNull();
+    expect(fixesLiveProblem("   \t  ")).toBeNull();
+  });
+
+  it("allows exactly the maximum length once trimmed", () => {
+    expect(fixesLiveProblem("a".repeat(FIXES_LIVE_MAX))).toBeNull();
+    // Leading and trailing spaces are trimmed before the length check.
+    expect(fixesLiveProblem(`  ${"a".repeat(FIXES_LIVE_MAX)}  `)).toBeNull();
+  });
+
+  it("refuses one character over the maximum, naming the limit", () => {
+    const why = fixesLiveProblem("a".repeat(FIXES_LIVE_MAX + 1));
+    expect(why).toContain(`at most ${FIXES_LIVE_MAX} characters`);
+  });
+
+  it("refuses a line break, saying it must be one line", () => {
+    expect(fixesLiveProblem("server freezes\nas memory climbs")).toContain("must be one line");
+    expect(fixesLiveProblem("server freezes\ras memory climbs")).toContain("must be one line");
+    expect(fixesLiveProblem("server freezes\r\nas memory climbs")).toContain("must be one line");
+  });
+
+  it("is fine with a line break only at the very end, which trimming removes", () => {
+    expect(fixesLiveProblem("server freezes as memory climbs\n")).toBeNull();
+  });
+});
+
+describe("ceoFirstMergeNote: the CEO's wake for a CEO-first merge card (BOS-1873)", () => {
+  it("names the ticket, what went wrong and the card", () => {
+    const note = ceoFirstMergeNote("Ship the app", "card-123", "the merge check timed out");
+    expect(note).toContain('"Ship the app"');
+    expect(note).toContain("the merge check timed out");
+    expect(note).toContain("card-123");
+  });
+
+  it("offers the two answers the CEO may give, and marks the skip as the owner's", () => {
+    const note = ceoFirstMergeNote("Ship the app", "card-123", "the check failed");
+    expect(note).toContain(`answer "${CHECK_AGAIN}"`);
+    expect(note).toContain(`"${CHECK_SEND_BACK}"`);
+    expect(note).toContain(`"${CHECK_SKIP}" is the owner's`);
+  });
+
+  it("says how long before the card reaches the owner, and that it isn't the agent's work", () => {
+    const note = ceoFirstMergeNote("Ship the app", "card-123", "the check failed");
+    expect(note).toContain(`after ${CEO_QUESTION_HANDOVER_MINUTES} minutes`);
+    expect(note).toContain("isn't the agent's work");
+  });
+});
+
+describe("owner setup dedupe keys (DR-011, DR-052)", () => {
+  it("gives one owner setup card per ticket, prefixed so it can't collide with other keys", () => {
+    const id = randomUUID();
+    expect(ownerSetupKey(id)).toBe(`owner-setup:${id}`);
+    expect(ownerSetupKey(id)).toBe(ownerSetupKey(id));
+    expect(ownerSetupKey(id)).not.toBe(ownerSetupKey(randomUUID()));
+  });
+
+  it("gives one CEO fix card per ticket, separate from the owner's card", () => {
+    const id = randomUUID();
+    expect(ownerSetupFixKey(id)).toBe(`owner-setup-fix:${id}`);
+    expect(ownerSetupFixKey(id)).not.toBe(ownerSetupKey(id));
+    expect(ownerSetupFixKey(id)).not.toBe(ownerSetupFixKey(randomUUID()));
   });
 });
 

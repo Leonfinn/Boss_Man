@@ -100,7 +100,7 @@ When the merge line needs your attention, a banner shows at the top of the **Das
 | Banner | What it means | What to do |
 |---|---|---|
 | **Merges are stuck:** and a cause | Nothing is moving and someone has to act. The banner is red. | Do what its **Fix:** line says. |
-| **Merging, but slowly:** | Merges land, but the line is long, so the wait is long. The banner is calm, not red. It says how many are waiting, about how long they will take at the current rate, and when the last one landed. For example: "Merging, but slowly: 17 for Boss Man to merge, about 4 h to clear at the current rate, last landed 19:03." | Nothing. The line clears by itself. |
+| **Merging, but slowly:** | Merges land, but the line is long, so the wait is long. The banner is calm, not red. It says how many are waiting, about when the last one is expected to land (worked out from how long a check and the GitHub run usually take, the same figure as the Merge queue page; it says "no estimate yet" until there are enough records), and when the last one landed. For example: "Merging, but slowly: 17 for Boss Man to merge, the last one expected by about 22:40, last landed 19:03." | Nothing. The line clears by itself. |
 | **Paused for a server update** | New checks wait for an update (see above). | Nothing. |
 | **Start brake off** | The merge line has grown for an hour and new starts are not held. It says how many merges are waiting and suggests a limit, for example "Start brake off, 24 waiting; suggested limit 12". | Choose **Open Settings** and set **Hold new starts while this many merges are waiting** ([Guide 4](/guides/board-and-decisions#in-progress-limits)). |
 

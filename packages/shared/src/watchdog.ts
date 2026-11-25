@@ -91,7 +91,7 @@ export function readWatchdogSettings(v: unknown): WatchdogSettings {
   return out;
 }
 
-export const WATCHDOG_RULES = ["unassigned", "run_crashed", "run_ended_unmoved", "idle_agent", "unstarted", "stale_in_progress", "stale_review", "stale_blocked", "blocked_until_passed", "review_loop", "owner_decision_waiting"] as const;
+export const WATCHDOG_RULES = ["unassigned", "run_crashed", "run_ended_unmoved", "idle_agent", "unstarted", "stale_in_progress", "stale_review", "stale_blocked", "blocked_until_passed", "review_loop", "check_line_backed_up", "owner_decision_waiting"] as const;
 export type WatchdogRule = (typeof WATCHDOG_RULES)[number];
 
 export const WATCHDOG_RULE_LABEL: Record<WatchdogRule, string> = {
@@ -105,6 +105,7 @@ export const WATCHDOG_RULE_LABEL: Record<WatchdogRule, string> = {
   stale_blocked: "blocked with no movement",
   blocked_until_passed: "its 'blocked until' time has passed",
   review_loop: "it keeps bouncing between review and changes",
+  check_line_backed_up: "its quick check has waited a long time in the check line",
   owner_decision_waiting: "it waits on the owner's decision",
 };
 

@@ -49,6 +49,8 @@ export type SessionManagerOptions = {
   emit: (event: RunnerEvent) => void;
   /** The company's granted secrets for this run, fetched from the server (which logs the access). */
   resolveEnv: (runId: string) => Promise<Record<string, string>>;
+  /** How long and how often a failed secrets fetch is tried again (BOS-2526); default 3 min, 1 s doubling to 10 s. Tests shorten it. */
+  secretsRetry?: { budgetMs?: number; delayMs?: number; maxDelayMs?: number };
   /** Boss Man's MCP endpoint as agents reach it. */
   mcpUrl: string;
   /** Wait up to this long for the MCP endpoint to answer before a turn starts, retrying once more after telling the owner (0 or unset: no preflight). */
@@ -1066,7 +1068,26 @@ export class SessionManager {
     let env: NodeJS.ProcessEnv;
     let secrets: Record<string, string>;
     try {
-      secrets = await this.opts.resolveEnv(cmd.runId);
+      // BOS-2526: right after a server restart the server's address answers nothing for a minute or two, and a run
+      // dispatched in that gap used to end at once on "fetch failed". A network failure or a 5xx is tried again with a
+      // growing pause until the budget is up or the run is cancelled; a 4xx (refused, not a gap) fails at once.
+      const giveUpAt = Date.now() + (this.opts.secretsRetry?.budgetMs ?? 3 * 60_000);
+      for (let attempt = 1; ; attempt++) {
+        try {
+          secrets = await this.opts.resolveEnv(cmd.runId);
+          break;
+        } catch (err) {
+          if (/HTTP 4\d\d/.test(String(err)) || Date.now() >= giveUpAt) throw err;
+          if (this.cancelledEarly.has(cmd.runId)) {
+            this.cancelledEarly.delete(cmd.runId);
+            emit({ type: "run.ended", runId: cmd.runId, stopReason: "cancelled", error: null });
+            return;
+          }
+          if (attempt === 1) emit({ type: "runner.log", level: "warn", message: `Run ${cmd.runId} can't reach the server for its secrets (${String(err)}); trying again until it answers.` });
+          const base = this.opts.secretsRetry?.delayMs ?? 1_000;
+          await new Promise((r) => setTimeout(r, Math.min(base * 2 ** (attempt - 1), this.opts.secretsRetry?.maxDelayMs ?? 10_000)));
+        }
+      }
       env = this.launchEnv(cmd, secrets);
     } catch (err) {
       emit({ type: "run.ended", runId: cmd.runId, stopReason: null, error: `Couldn't load the company's secrets: ${String(err)}` });

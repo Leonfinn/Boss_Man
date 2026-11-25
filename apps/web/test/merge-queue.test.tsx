@@ -251,6 +251,25 @@ describe("merge queue attention layout (BOS-1239)", () => {
     expect(container.textContent).not.toMatch(/held|Main is red|failing its check/i);
   });
 
+  it("2 running + 3 waiting (one Background lane) are numbered 3, 4, 5, and the header says the real order (BOS-2507)", async () => {
+    // The server's position also counts a waiting merge check (1), which this tab leaves out: the quick ones arrive as 2, 3, 4.
+    const rows = [
+      checkRow({ id: "r1", ticketId: "r1", ref: "APP-11", state: "running", position: null }),
+      checkRow({ id: "r2", ticketId: "r2", ref: "APP-12", state: "running", position: null }),
+      checkRow({ id: "m1", ticketId: "m1", ref: "APP-90", kind: "merge", position: 1 }),
+      checkRow({ id: "w1", ticketId: "w1", ref: "APP-21", position: 2 }),
+      checkRow({ id: "w2", ticketId: "w2", ref: "APP-22", position: 3 }),
+      checkRow({ id: "w3", ticketId: "w3", ref: "APP-23", position: 4, lane: "background lane: newer ordinary work goes first" }),
+    ];
+    serve(calm, { mode: "server", slots: 2, running: 2, rows });
+    goTo("#/merge-queue/c1/checks");
+    const { container } = render(<MergeQueue companies={[company]} companyId="c1" />);
+    await screen.findByText("APP-23");
+    const items = [...container.querySelectorAll("[data-checks-list] article")];
+    expect(items.map((a) => a.querySelector(".mq-pos")?.textContent ?? null)).toEqual([null, null, "3", "4", "5"]);
+    expect(container.textContent).toContain("running first, then in line order (Background lane after ordinary work)");
+  });
+
   it("main red: only the checks main holds are counted as held (BOS-1262)", async () => {
     const rows = [checkRow({ id: "a", position: 1, heldBy: "all 2 check slots are busy" }), checkRow({ id: "h1", ticketId: "t2", ref: "APP-2", position: null, heldBy: "main is red" }), checkRow({ id: "h2", ticketId: "t3", ref: "APP-3", position: null, heldBy: "main is red" })];
     serve(calm, { mode: "server", slots: 2, running: 0, rows });
@@ -312,8 +331,21 @@ describe("merge queue attention layout (BOS-1239)", () => {
     render(<MergeQueue companies={[company]} companyId="c1" />);
     await screen.findByText("First");
     const rows = document.querySelectorAll("article[data-state-word]");
-    expect([...rows].map((r) => [r.querySelector(".mq-pos")?.textContent, r.getAttribute("data-state-word")])).toEqual([["1", "Waiting"], ["2", "Held"]]);
+    expect([...rows].map((r) => [r.querySelector(".mq-pos")?.textContent, r.getAttribute("data-state-word")])).toEqual([["2", "Waiting"], ["3", "Held"]]); // BOS-2508: the shared fixture has one merge running, so the line starts at 2
     expect(rows[0]!.textContent).toContain("waiting 10m");
+  });
+
+  // BOS-2508: Running now is unnumbered, so with 3 running the 3 waiting merges are 4, 5, 6 and the last equals the tab count.
+  it("numbers waiting merges from the running count + 1", async () => {
+    const run = (n: number) => ({ ticketId: `r${n}`, ref: `APP-${n}`, title: `Running ${n}`, minutes: 2, slot: n, state: "running", label: "checking", stuck: false, ranOn: "company runner" });
+    const lined = (n: number) => ({ ...base, ticketId: `w${n}`, ref: `APP-${10 + n}`, title: `Waiting ${n}`, state: "waiting_for_check_capacity", label: "waiting for a check slot" });
+    serve({ ...data, running: [run(1), run(2), run(3)], waitingCount: 3, lineCount: 6, waiting: [lined(1), lined(2), lined(3)] } as never, noChecks);
+    render(<MergeQueue companies={[company]} companyId="c1" />);
+    await screen.findByText("Waiting 1");
+    const rows = document.querySelectorAll("article[data-state-word]");
+    expect([...rows].map((r) => r.querySelector(".mq-pos")?.textContent)).toEqual(["4", "5", "6"]);
+    // The running rows carry no number.
+    expect(document.querySelectorAll(".mq-pos")).toHaveLength(3);
   });
 
   it("tabs show counts, amber when something needs you or main is red", async () => {
@@ -458,11 +490,74 @@ describe("merge queue attention layout (BOS-1239)", () => {
   });
 
   it("draws the title and tabs before the data arrives", () => {
-    vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
-    render(<MergeQueue companies={[company]} companyId="c1" />);
+    // An answer that never comes is what makes the loader visible, but it must not outlive the test: `api` shares one
+    // read per path while it is in flight (shared-get.ts), so a promise left hanging wedged every later read of the
+    // same path and the next tests sat on "Loading the merge queue" (BOS-2532 found this). Settle it when the test ends.
+    let release!: () => void;
+    const held = new Promise<Response>((r) => (release = () => r(json(calm))));
+    vi.stubGlobal("fetch", vi.fn(() => held));
+    const { unmount } = render(<MergeQueue companies={[company]} companyId="c1" />);
     expect(screen.getByRole("heading", { name: "Merge queue" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Merges" })).toBeTruthy();
     // The shared loader stays mounted (silent for the first second).
     expect(screen.getByRole("status")).toBeTruthy();
+    unmount();
+    release();
+  });
+});
+
+// BOS-2532 (G2, from BOS-2524): the four figures the owner saw wrong on 24 Nov, each counted over a different set from
+// the rows under it, now pinned against the real shape so they cannot drift again. The fixes are BOS-2505 (the line's
+// estimate), BOS-2507 (Quick checks numbers), BOS-2508 (Merges numbers, "N ahead") and BOS-2525 (the swap's "N of M").
+describe("owner figures over the rows shown (BOS-2532, G2)", () => {
+  afterEach(() => goTo(""));
+
+  it("Merges tab: the 3 waiting rows are numbered by their place in line (4, 5, 6) after the 3 running (BOS-2508)", async () => {
+    const running = [1, 2, 3].map((n) => ({ ticketId: `r${n}`, ref: `APP-9${n}`, title: `Running ${n}`, phase: "checking", startedAt: new Date(Date.now() - 5 * 60_000).toISOString(), startedBy: "Boss Man", minutes: 5, what: "merge_check", slot: n, overLimit: false }));
+    const waiting = [1, 2, 3].map((n) => ({ ...base, ticketId: `w${n}`, ref: `APP-2${n}`, title: `Waiting ${n}`, state: "waiting_for_slot", label: "waiting for a check slot" }));
+    const view = { ...calm, running, waiting, waitingCount: waiting.length, lineCount: running.length + waiting.length };
+    serve(view, noChecks);
+    render(<MergeQueue companies={[company]} companyId="c1" />);
+    await screen.findByText("Waiting 1");
+    const tab = screen.getByRole("tab", { name: /Merges/ });
+    const count = tab.querySelector(".tab-count")!;
+    expect({ value: count.textContent, label: count.getAttribute("aria-label") }).toEqual({ value: "6", label: "6 in the merge line" });
+    // BOS-2508 numbers each waiting row by its place in the whole line, so with 3 running the 3 waiting rows read 4, 5, 6
+    // (not 1, 2, 3 over a 6-row line). The running rows carry no number.
+    const rows = [...document.querySelectorAll('#mq-panel-merges article')];
+    const numbers = rows.map((a) => a.querySelector(".mq-pos")?.textContent ?? null).filter((v) => v !== null);
+    expect(numbers).toEqual(["4", "5", "6"]);
+  });
+
+  it("Quick checks tab: with 2 running, the waiting quick checks are numbered 3, 4, 5 and the badge matches the list", async () => {
+    const rows = [
+      checkRow({ id: "r1", ticketId: "r1", ref: "APP-11", state: "running", position: null }),
+      checkRow({ id: "r2", ticketId: "r2", ref: "APP-12", state: "running", position: null }),
+      checkRow({ id: "m1", ticketId: "m1", ref: "APP-90", kind: "merge", position: 1 }),
+      checkRow({ id: "w1", ticketId: "w1", ref: "APP-21", position: 2 }),
+      checkRow({ id: "w2", ticketId: "w2", ref: "APP-22", position: 3 }),
+      checkRow({ id: "w3", ticketId: "w3", ref: "APP-23", position: 4 }),
+    ];
+    serve(calm, { mode: "server", slots: 2, running: 2, rows });
+    goTo("#/merge-queue/c1/checks");
+    render(<MergeQueue companies={[company]} companyId="c1" />);
+    await screen.findByText("APP-23");
+    const items = [...document.querySelectorAll("[data-checks-list] article")];
+    const numbers = items.map((a) => a.querySelector(".mq-pos")?.textContent ?? null);
+    expect(numbers).toEqual([null, null, "3", "4", "5"]);
+    const badge = screen.getByRole("tab", { name: /Quick checks/ }).querySelector(".tab-count")!;
+    expect(badge.textContent).toBe(String(items.length));
+    expect(badge.textContent).toBe(numbers.filter((v) => v !== null).at(-1));
+  });
+
+  it("the merge line's estimate is the one figure on the Merges tab, and comes with a time only when the server gives one", async () => {
+    const at = new Date(Date.now() + 25 * 60_000).toISOString();
+    const line = { state: "over_capacity", waiting: 3, inQueue: 3, etaMinutes: 25, etaAt: at, lastLandedAt: null, advice: null };
+    serve({ ...calm, waitingCount: 3, waiting: [1, 2, 3].map((n) => ({ ...base, ticketId: `w${n}`, ref: `APP-2${n}`, title: `Waiting ${n}`, state: "waiting_for_slot", label: "waiting for a check slot" })), line, clearAt: at }, noChecks);
+    render(<MergeQueue companies={[company]} companyId="c1" />);
+    const estimate = await screen.findByText(/Everything in the line is expected to have landed by about/);
+    // The tab's estimate is the server's one clearAt, said as a clock time; the banner and the page share it (BOS-2505).
+    expect(estimate.getAttribute("data-clear-at")).toBe(at);
+    expect(estimate.textContent).toContain(new Date(at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }));
   });
 });

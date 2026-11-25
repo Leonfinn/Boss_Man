@@ -16,7 +16,7 @@ import { clashWords } from "./merge-line.js";
 import { mergeLineHealth, startBrakeOff, type StartBrakeOff, type HeldBehindFix, type HeldFix, type MergeLineHealth } from "./merge-line-health.js";
 import { goLiveWaitOf } from "./go-live-wait.js";
 import { goLiveWaitWords } from "@boss-man/shared";
-import { landingEtas, turnOverdue } from "./landing-turn-eta.js";
+import { landingEtas, lineClearAt, turnOverdue } from "./landing-turn-eta.js";
 
 /** BOS-1942: the place a check job's record names: a check worker by its name, or the company runner (the server's own machine). */
 const placeOf = (workerId: string | null, worker: string | null) => (workerId ? (worker ?? "a check worker") : "company runner");
@@ -273,6 +273,8 @@ export type MergeQueueView = {
   running: RunningNow[];
   waiting: WaitingRow[];
   recent: RecentRow[];
+  /** BOS-2505: when the last ticket of the line is expected to land (ISO), the same figure as the banner's; null when it can't be told. */
+  clearAt?: string | null;
   /** How many approved tickets are waiting to merge, not counting running ones (the start hold's figure). */
   waitingCount: number;
   /**
@@ -460,7 +462,7 @@ export function mergeQueueService(
   db: Db,
   deps: {
     /** This process's running merges, from the review service's own markers. */
-    runningMerges: () => Array<{ ticketId: string; startedAt: string; startedBy: string; phase?: MergePhase; ci?: { since: string; waiting: string[] }; turn?: TurnWait }>;
+    runningMerges: () => Array<{ ticketId: string; startedAt: string; startedBy: string; phase?: MergePhase; ci?: { since: string; waiting: string[] }; turn?: TurnWait; pushingSince?: string }>;
     /** The check slot limit: how many merge checks run at once. */
     limit: () => Promise<number>;
     /** The check queue's own slot setting and mode (BOS-316); null when it is not running. */
@@ -475,6 +477,8 @@ export function mergeQueueService(
     queueStatus?: (companyId: string) => Promise<{ mode: "legacy" | "server"; slots: number; running: number; waiting: number } | null>;
     /** BOS-1384: each queued merge's place in the check queue's serving order, and why it is ahead (urgent, moved to front). */
     places?: (companyId: string) => Promise<Map<string, { place: number | null; why: string | null; seatPlace?: number | null; lane?: string | null }>>;
+    /** BOS-2508: each ticket the merge train holds waiting for a seat, with its place among them (1 = seated next), job or not. */
+    seatPlaces?: (companyId: string) => Promise<Map<string, number>>;
     /** BOS-1486: whether this company's runner is connected right now (a waiting merge can't start without one). */
     runnerConnected?: (companyId: string) => Promise<boolean>;
     /** BOS-1486: a runner update is holding the line (a wrap-up hold is not one). */
@@ -491,6 +495,8 @@ export function mergeQueueService(
     landingTurns?: (companyId: string) => Promise<Array<{ projectId: string; holder: { ticketId: string; ref: string | null; title: string | null; since: string } | null; line: Array<{ ticketId: string; ref: string | null; title: string | null }> }>>;
     /** BOS-2359: the usual GitHub wait of a landing (landing-turn-eta.ts usualCiWait); null with too few recent landings. */
     usualCiWait?: (companyId: string) => Promise<{ ms: number; samples: number } | null>;
+    /** BOS-2505: the usual length of a passed merge check (landing-turn-eta.ts usualMergeCheck); null with too few. */
+    usualMergeCheck?: (companyId: string) => Promise<{ ms: number; samples: number } | null>;
     now?: () => Date;
   },
 ) {
@@ -655,7 +661,9 @@ export function mergeQueueService(
       for (const l of live) if (!slotOf.has(l.ticketId) && /restarted/i.test(l.startedBy)) restarted.add(l.ticketId);
       for (const l of live) if (!slotOf.has(l.ticketId) && l.ci) ciWait.set(l.ticketId, l.ci);
       for (const l of live) if (!slotOf.has(l.ticketId) && l.turn) turnWait.set(l.ticketId, l.turn);
-      live = live.filter((l) => slotOf.has(l.ticketId));
+      // BOS-2479: a push to main under way holds no slot (its check is over) but is what a runner update waits for, so it
+      // stays in Running now: whenever the update banner says a merge is being pushed, this tab shows it.
+      live = live.filter((l) => slotOf.has(l.ticketId) || !!l.pushingSince);
       // BOS-1757: a running merge job is what holds a slot, so it is listed even when no landing marker owns it (the ticket
       // was sent back, or the server restarted). The Checks panel counts the same rows, so the two screens can't disagree.
       const marked = new Set(live.map((l) => l.ticketId));
@@ -702,10 +710,12 @@ export function mergeQueueService(
         const phase = l.phase ?? "checking";
         const slot = slotOf.get(l.ticketId) ?? (i % Math.max(1, limit)) + 1;
         const over = elapsed > RUNNING_LIMIT_MS;
+        // BOS-2479: a push with no slot of its own says so, with when the push began (the banner's "being pushed").
+        const pushOnly = !!l.pushingSince && !slotOf.has(l.ticketId);
         return {
           statusLine: {
-            step: `slot ${slot}: ${PHASE_TEXT[phase]}`,
-            since: started.toISOString(),
+            step: pushOnly ? "pushing to main" : `slot ${slot}: ${PHASE_TEXT[phase]}`,
+            since: pushOnly ? l.pushingSince! : started.toISOString(),
             next: phase === "merging" ? "It is done once the merge is in." : "It merges by itself if the check passes.",
             blocker: over ? "The check has run for over an hour." : null,
           },
@@ -740,6 +750,9 @@ export function mergeQueueService(
       const runnerUp = deps.runnerConnected ? await deps.runnerConnected(companyId).catch(() => null) : null;
       const runnerUpdateOn = deps.runnerUpdateOn ? await deps.runnerUpdateOn().catch(() => false) : false;
       const detail = deps.queueDetail && queue?.mode === "server" ? await deps.queueDetail(companyId).catch(() => null) : null;
+      // BOS-2508: tickets the merge train itself holds waiting for a seat (1 = seated next). Such a merge has no check job yet,
+      // so the check queue knows nothing of it; without this it fell through to the company-wide "ahead" count.
+      const trainSeats = deps.seatPlaces && queue?.mode === "server" ? await deps.seatPlaces(companyId).catch(() => new Map<string, number>()) : new Map<string, number>();
 
       const waiting: WaitingRow[] = [];
       // BOS-1517: the status line's own parts, set as each row's reason is worked out (a hold's label is its step).
@@ -930,7 +943,7 @@ export function mergeQueueService(
           });
           continue;
         }
-        if (detail?.seatWait?.includes(r.id)) {
+        if (detail?.seatWait?.includes(r.id) || trainSeats.has(r.id)) {
           blockerOf.set(r.id, "Every merge-train seat is taken.");
           waiting.push({ ...base, state: "waiting_for_seat", label: `waiting for a train seat${why}`, stuck: overAnHour, next: "It takes a seat as soon as one frees; its check then starts by itself.", actor: "system", decisionId: null });
           continue;
@@ -943,8 +956,11 @@ export function mergeQueueService(
         if (detail && detail.busy.length >= detail.slots) {
           const names = detail.busy.map((b, i) => `slot ${i + 1}: ${b.ref ?? b.title} (${b.kind})`).join("; ");
           blockerOf.set(r.id, `Every slot is busy: ${names}.`);
-          stepOf.set(r.id, `waiting for a check slot (${queue?.waiting ?? 0} ahead)${why}`);
-          waiting.push({ ...base, state: "waiting_for_check_capacity", label: `waiting for a check slot (${queue?.waiting ?? 0} ahead). Every slot is busy: ${names}${why}`, stuck: overAnHour, next: "Boss Man starts it as soon as a slot frees.", actor: "system", decisionId: null });
+          // BOS-2508: `queue.waiting` counts every queued check in the company, quick checks too, so it is worded as that unless
+          // the ticket has its own place (replaced below by "(N ahead)").
+          const shared = `${queue?.waiting ?? 0} ${queue?.waiting === 1 ? "check" : "checks"} waiting in the shared line`;
+          stepOf.set(r.id, `waiting for a check slot (${shared})${why}`);
+          waiting.push({ ...base, state: "waiting_for_check_capacity", label: `waiting for a check slot (${shared}). Every slot is busy: ${names}${why}`, stuck: overAnHour, next: "Boss Man starts it as soon as a slot frees.", actor: "system", decisionId: null });
           continue;
         }
         if (!detail) {
@@ -964,14 +980,17 @@ export function mergeQueueService(
           // BOS-1405: the label counts this merge's own place, not the whole queue's length (place 1 is next up).
           if (w.state === "waiting_for_check_capacity") {
             const ahead = Math.max(0, p.place - 1);
-            w.label = w.label.replace(/\(\d+ ahead\)/, ahead === 0 ? "(next up)" : `(${ahead} ahead)`);
+            const own = ahead === 0 ? "(next up)" : `(${ahead} ahead)`;
+            const shared = /\(\d+ (?:ahead|checks? waiting in the shared line)\)/;
+            w.label = w.label.replace(shared, own);
             const s = stepOf.get(w.ticketId);
-            if (s) stepOf.set(w.ticketId, s.replace(/\(\d+ ahead\)/, ahead === 0 ? "(next up)" : `(${ahead} ahead)`));
+            if (s) stepOf.set(w.ticketId, s.replace(shared, own));
           }
         }
         // BOS-1803: a train-seat wait says how many wait ahead of it, and a background-lane merge says so and for how long,
         // in the label the ticket's status line shows too, so "merging since …" with nothing running isn't read as lost.
-        if (p?.seatPlace && w.state === "waiting_for_seat" && !w.heldAlone) w.label = w.label.replace(/^waiting for a train seat/, `waiting for a train seat (${p.seatPlace === 1 ? "next up" : `${p.seatPlace - 1} ahead`})`);
+        const seatPlace = p?.seatPlace ?? trainSeats.get(w.ticketId);
+        if (seatPlace && w.state === "waiting_for_seat" && !w.heldAlone) w.label = w.label.replace(/^waiting for a train seat/, `waiting for a train seat (${seatPlace === 1 ? "next up" : `${seatPlace - 1} ahead`})`);
         if (p?.lane) {
           w.lane = p.lane;
           w.label = `${w.label}; ${p.lane}`;
@@ -1018,7 +1037,22 @@ export function mergeQueueService(
       const heldBehindFix = await heldBehindFixOf(db, prefix, heldWaits, { running, waiting });
       // R44: a server update holding new checks is a deliberate pause: its own verdict, with the reason and the latest end.
       const pause = soft.on ? { reason: "a server update", since: softHoldReason(soft).since, until: softHoldReason(soft).until } : null;
-      const line = mergeLineHealth({ running, waiting, recent: recentRows, slots }, { now: t, emptySeatSince, workerReady, heldBehindFix, pause });
+      // BOS-2505: when the last one lands, from the same usual times as the landing estimates above (check time, GitHub wait).
+      const mergeRunning = running.filter((r) => r.what === "merge_check");
+      const queuedForCheck = waiting.filter((w) => w.actor === "system" && !w.decisionId && (w.state === "waiting_for_check_capacity" || w.state === "waiting_for_seat" || w.state === "waiting_for_slot")).length;
+      // A running check carries its GitHub run beside it (r.ci, minutes so far); a landing past its check is in ciWait.
+      const ciOnlySinceMs = [...ciWait.values()].map((c) => Date.parse(c.since));
+      const [usualCheckT, usualCiT] = mergeRunning.length + queuedForCheck + ciOnlySinceMs.length > 0 && deps.usualMergeCheck && deps.usualCiWait ? await Promise.all([deps.usualMergeCheck(companyId).catch(() => null), deps.usualCiWait(companyId).catch(() => null)]) : [null, null];
+      const clearAt = lineClearAt({
+        nowMs: t.getTime(),
+        usualCheckMs: usualCheckT?.ms ?? null,
+        usualCiMs: usualCiT?.ms ?? null,
+        slots: Math.max(1, slots),
+        running: mergeRunning.map((r) => ({ startedMs: Date.parse(r.startedAt), ciSinceMs: r.ci ? t.getTime() - r.ci.minutes * 60_000 : null })),
+        ciOnlySinceMs,
+        queued: queuedForCheck,
+      });
+      const line = mergeLineHealth({ running, waiting, recent: recentRows, slots }, { now: t, emptySeatSince, workerReady, heldBehindFix, pause, clearAt });
       // R47: only read the landings when there is no limit, so a company with the brake on pays nothing.
       const landed = company?.brakeLimit == null ? (await mergeQueueQueries.landedSince(db, companyId, new Date(t.getTime() - 24 * 3_600_000))).map((r) => r.at.getTime()) : [];
       const brakeOff = startBrakeOff({ brakeLimit: company?.brakeLimit ?? null, waiting, landed, now: t });
@@ -1040,6 +1074,8 @@ export function mergeQueueService(
         // BOS-1594: the side-menu "stuck" badge follows the same verdict as the banner: 1 while the line is stuck, 0 when merging (even slowly) or healthy.
         stuckCount: line.state === "stuck" ? 1 : 0,
         line,
+        /** BOS-2505: when the last ticket of the line is expected to land (ISO); the figure the banner gives too. Null when it can't be told or the line is empty. */
+        clearAt: clearAt === null ? null : new Date(clearAt).toISOString(),
         ...(landingTurns.length ? { landingTurns } : {}),
       };
     },

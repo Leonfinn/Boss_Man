@@ -6,7 +6,7 @@ import { createPermissionLog, type PermissionLog } from "./permission-log.js";
 import { leaveClosedNotice, leaveWithdrawnNotice, parseReplacedBy, recheckBackBy as backByAt, recheckLine, switchedBackNotice, withdrawnNotice, type ClosedNotice, type ReplacedBy } from "./closed-notice.js";
 import type { NotifyInput } from "./notifications.js";
 import { applyFenceAnswer, applyFenceUnavailableAnswer, applyGuardAnswer, checkFenceAnswer } from "./fence-default.js";
-import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from "drizzle-orm";
 import {
   effectiveDueDate,
   evaluatePermission,
@@ -69,14 +69,15 @@ import { REVIEW_REASON } from "./review-kinds.js";
 import { signoffFacts, type SignoffFacts } from "./signoff-facts.js";
 import { planOverlapNote as overlapNoteOf, planOverlaps } from "./merge-line-conflicts.js";
 import { overrideLines, parseStoredOverride, resolveOverride } from "./lint-override.js";
-import { type CardLint, type LintFinding, THIS_HOST_POINTER, fillHostTokensIn, lintLines, unfilledTokens } from "./steps.js";
+import { type CardLint, type LintFinding, SCREEN_DIFFERENT_OPTION, THIS_HOST_POINTER, fillHostTokensIn, lintLines, outsideSiteKeys, unfilledTokens } from "./steps.js";
 import { HOST_TOKEN_HELP, NOT_GIVEN, type OwnerSetupFacts, checkOwnerSetup } from "./owner-setup-check.js";
 import { loadCompanyFacts } from "./company-facts.js";
 import type { Addon } from "./addons.js";
 import { type CardOpening, type OwnerOnlyKind, routeAgentCard, CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, isSystemCard, ceoAnswerRefusal, OWNER_ONLY_ANSWER_TYPES, fileList } from "./card-check.js";
 import { addTicketDependency, blockedHolds } from "./ticket-links.js";
 import { revokeApproveTokens } from "./approve-tokens.js";
-import { ATTACHMENT_LINK } from "./ticket-images.js";
+import { ATTACHMENT_LINK, seenImageDates } from "./ticket-images.js";
+import { screenMismatchSites } from "./outside-site-mismatch.js";
 import type { Ladder } from "./alert-ladder.js";
 import { recordGoalAnswer } from "./goal-check.js";
 import { applyPortalAnswer } from "./feature-portal.js";
@@ -89,6 +90,7 @@ import type { ClearWhen } from "./alert-clearing.js";
 import { unlinkedWaiters } from "./owner-todo.js";
 import { openAlertsLine } from "./go-live-card.js";
 import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer, similarQuestion } from "./stale-requests.js";
+import { infoAskOf, reportBackNote, startedInfoAnswer } from "./owner-result.js";
 import { openReviewProposal } from "./skill-proposals.js";
 import { lineEvent } from "./merge-line.js";
 import { mergeContext } from "./decision-context.js";
@@ -96,6 +98,15 @@ import { cardInvalidReason, closeCardBySystem, isCheckableCard, hiddenWhileReche
 import { runFolder } from "./run-folder.js";
 import { heldTicketIds } from "./review-holds.js";
 import { runCapabilities } from "./run-capabilities.js";
+
+/**
+ * (BOS-2382) The Answered list's kind of card: a plan card is "plan" whatever its type; a merge review is "merge",
+ * a model change "model", the deploy cards "deploy"; every other card keeps its context type.
+ */
+const ANSWERED_KIND = sql<string>`case when ${decisions.context}->>'plan' = 'true' then 'plan' when ${decisions.context}->>'type' = 'risk_review' then 'merge' when ${decisions.context}->>'type' = 'model_change' then 'model' when ${decisions.context}->>'type' in ('self_deploy', 'deploy_wait', 'deploy') then 'deploy' else coalesce(${decisions.context}->>'type', ${decisions.kind}::text) end`;
+/** The CEO's own answers (a settled card carrying the settler's name). */
+const ANSWERED_BY_CEO = sql`(${decisions.status} = 'answered' and ${decisions.context}->'settled'->>'name' is not null)`;
+const ANSWERED_BY_AUTO = sql`(${decisions.status} = 'answered' and ${decisions.context}->'settled'->>'name' is null and ${decisions.context}->'settledByRepeat' is not null)`;
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
 type Sender = (runnerId: string, command: RunnerCommand) => boolean;
@@ -269,7 +280,7 @@ export type DecisionContext =
    */
   | { type: "owner_setup"; ticketId: string; tickets?: { ticketId: string; title: string; why?: string | null; ifSkipped?: string | null }[]; steps: string[]; commit: string }
   /** Boss Man updating itself through the host deployer; `infra` ones are only an alert (the owner deploys those by hand on the host). */
-  | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; /** Runner card only (DR-042 point 5): the live tickets whose only setup step is the runner update and whose merge the runners lack, named when the card was raised. */ tickets?: { ticketId: string; title: string }[]; /** Runner card only: raised by the owner's Build and update runners button, so it is never closed under them. */ requested?: boolean; infra?: boolean; /** Commit subjects, so the "updated" note says what changed. */ changes?: string[]; /** For an infra change the owner applies by hand: numbered steps, how to check it worked, and how to roll back. */ handSteps?: string[]; check?: string; rollback?: string; /** What the update contains, in plain words (BOS-213). */ update?: DeployUpdate; /** It carries the fix for a live problem (BOS-639): headed, paged once and sorted first. */ urgent?: DeployUrgent; result?: { result: string; message: string; at: string }; /** Owner cards to do first, because this update restarts Boss Man (BOS-551). */ doAfter?: OrderLink[]; /** When the owner last opened its hand-apply steps (BOS-739). */ ownerOpenedAt?: string; /** Why Boss Man closed it, shown where it was (BOS-739). */ closedNotice?: ClosedNotice }
+  | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; /** Runner card only (DR-042 point 5): the live tickets whose only setup step is the runner update and whose merge the runners lack, named when the card was raised. */ tickets?: { ticketId: string; title: string }[]; /** Runner card only: raised by the owner's Build and update runners button, so it is never closed under them. */ requested?: boolean; infra?: boolean; /** Commit subjects, so the "updated" note says what changed. */ changes?: string[]; /** For an infra change the owner applies by hand: numbered steps, how to check it worked, and how to roll back. */ handSteps?: string[]; check?: string; rollback?: string; /** What the update contains, in plain words (BOS-213). */ update?: DeployUpdate; /** It carries the fix for a live problem (BOS-639): headed, paged once and sorted first. */ urgent?: DeployUrgent; result?: { result: string; message: string; at: string }; /** Owner cards to do first, because this update restarts Boss Man (BOS-551). */ doAfter?: OrderLink[]; /** When the owner last opened its hand-apply steps (BOS-739). */ ownerOpenedAt?: string; /** Why Boss Man closed it, shown where it was (BOS-739). */ closedNotice?: ClosedNotice; /** BOS-2554 (DR-076 A): the owner hold (id and state) the card was raised under after a failed update; a card whose hold has moved on is replaced. */ holdStamp?: string }
   /** The runner update's deadline question (services/maintenance.ts): stop the rest, wait more, or cancel. */
   | { type: "maintenance"; since: string; /** BOS-1377: the runs the card listed; "Stop these" touches no others. Absent on an older card. */ runIds?: string[] }
   /** An approved server update still waiting for a quiet machine (services/deploy-wait.ts, BOS-420): keep waiting, update now, or cancel. */
@@ -572,23 +583,146 @@ export function ceoFirstMergeNote(title: string, cardId: string, what: string) {
  */
 export async function raiseOwnerTodo(
   db: Db,
-  t: { companyId: string; question: string; key: string; steps: string[]; check?: string; rollback?: string; ofDecisionId: string; raisedByAgentId?: string | null; target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; update?: DeployUpdate; doAfter?: OrderLink[]; /** Offer "Quiet the machine first" (a hand-applied server update, BOS-420). */ quietFirst?: boolean },
+  t: { companyId: string; question: string; key: string; steps: string[]; check?: string; rollback?: string; ofDecisionId: string; raisedByAgentId?: string | null; target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; update?: DeployUpdate; doAfter?: OrderLink[]; /** Offer "Quiet the machine first" (a hand-applied server update, BOS-420). */ quietFirst?: boolean; /** An extra answer that closes the card for good (the CI-identity card's "Keep the emails"); "A step failed" never does. */ extraOption?: string; /** BOS-2336: host facts for the step check; absent = the provider app.ts wires (setOwnerTodoFacts). */ facts?: OwnerSetupFacts },
 ) {
+  // BOS-2336: Boss Man's own cards pass the same step checks as an agent's card and a ticket's setup (R19, R19b, R19c,
+  // the host fences). A refused step list never reaches the owner: the CEO gets a card with the findings instead.
+  const facts = await ownerTodoBaseFacts(t.facts);
+  // A step on someone else's website offers "My screen looks different": it is what R19b reads for the next card, and
+  // the owner's way to say a step doesn't match their screen.
+  const sendsToSite = t.steps.some((s) => outsideSiteKeys(s, facts.serverHost).length > 0);
+  const options = [...(t.quietFirst ? [QUIET_FIRST] : []), TODO_DONE, ...(t.extraOption ? [t.extraOption] : []), ...(sendsToSite ? [SCREEN_DIFFERENT_OPTION] : []), TODO_FAILED];
+  const steps = await vetOwnerTodoSteps(db, { companyId: t.companyId, key: t.key, question: t.question, steps: t.steps, options, facts });
+  if (!steps) return null;
   const [row] = await db
     .insert(decisions)
     .values({
       companyId: t.companyId,
       kind: "question",
       question: t.question,
-      options: t.quietFirst ? [QUIET_FIRST, TODO_DONE, TODO_FAILED] : [TODO_DONE, TODO_FAILED],
+      options,
       recommendedOption: t.quietFirst ? QUIET_FIRST : TODO_DONE,
       tier: "owner",
       raisedByAgentId: t.raisedByAgentId ?? null,
       dedupeKey: t.key,
-      context: { type: "owner_todo", ofDecisionId: t.ofDecisionId, steps: t.steps, ownerMustDo: true, ...(t.check ? { check: t.check } : {}), ...(t.rollback ? { rollback: t.rollback } : {}), ...(t.target ? { target: t.target } : {}), ...(t.commit ? { commit: t.commit } : {}), ...(t.fromCommit ? { fromCommit: t.fromCommit } : {}), ...(t.deployId ? { deployId: t.deployId } : {}), ...(t.update ? { update: t.update } : {}), ...(t.doAfter?.length ? { doAfter: t.doAfter } : {}) } satisfies DecisionContext,
+      context: { type: "owner_todo", ofDecisionId: t.ofDecisionId, steps, ownerMustDo: true, ...(t.check ? { check: t.check } : {}), ...(t.rollback ? { rollback: t.rollback } : {}), ...(t.target ? { target: t.target } : {}), ...(t.commit ? { commit: t.commit } : {}), ...(t.fromCommit ? { fromCommit: t.fromCommit } : {}), ...(t.deployId ? { deployId: t.deployId } : {}), ...(t.update ? { update: t.update } : {}), ...(t.doAfter?.length ? { doAfter: t.doAfter } : {}) } satisfies DecisionContext,
     })
     .onConflictDoNothing()
     .returning({ id: decisions.id });
+  // The checked steps went out, so the CEO's card about them is done with.
+  if (row) {
+    await clearOwnerTodo(db, ownerTodoFixKey(t.key), "The fixed steps went to the owner.");
+    // A fix card the CEO already answered still holds its key; let go so the re-raise sweep stops looking at it.
+    await db.update(decisions).set({ dedupeKey: null }).where(eq(decisions.dedupeKey, ownerTodoFixKey(t.key)));
+  }
+  return row ?? null;
+}
+
+const HAND_APPLY_KEY = "owner-todo:self-deploy:";
+/** The hand-apply to-do of an approved infra update (BOS-122), raised when the owner approves and again by reraiseHeldHandApply. */
+export async function raiseHandApplyTodo(db: Db, d: { id: string; companyId: string; question: string; raisedByAgentId: string | null }, ctx: SelfDeployCtx, quietFirst: boolean) {
+  return raiseOwnerTodo(db, {
+    companyId: d.companyId,
+    question: `"${d.question.split("\n\n")[0]}" was approved. It's waiting for you to apply it by hand on the machine that runs Boss Man.`,
+    key: `${HAND_APPLY_KEY}${ctx.commit}`,
+    steps: ctx.handSteps?.length ? ctx.handSteps : ["Apply the approved change by hand on the server that runs Boss Man."],
+    check: ctx.check,
+    rollback: ctx.rollback,
+    ofDecisionId: d.id,
+    raisedByAgentId: d.raisedByAgentId,
+    target: ctx.target,
+    commit: ctx.commit,
+    fromCommit: ctx.fromCommit,
+    update: ctx.update,
+    doAfter: ctx.doAfter,
+    quietFirst,
+  });
+}
+
+/**
+ * BOS-2336: a hand-apply to-do is raised once, when the owner approves, so one held by the card check would be lost.
+ * Each pass looks for the CEO's hold cards of hand-apply to-dos and raises the owner's card again (it is checked again,
+ * and goes out once the steps or the host's facts pass). Returns how many went out.
+ */
+export async function reraiseHeldHandApply(db: Db) {
+  const held = await db.select({ key: decisions.dedupeKey }).from(decisions).where(sql`${decisions.dedupeKey} like ${ownerTodoFixKey(HAND_APPLY_KEY) + "%"}`);
+  let raised = 0;
+  for (const h of held) {
+    const commit = h.key!.slice(ownerTodoFixKey(HAND_APPLY_KEY).length);
+    const [d] = await db.select().from(decisions).where(and(eq(decisions.status, "answered"), eq(decisions.answer, APPROVE_HAND_APPLY), sql`${decisions.context}->>'type' = 'self_deploy' and ${decisions.context}->>'commit' = ${commit}`)).orderBy(desc(decisions.answeredAt)).limit(1);
+    if (!d) continue;
+    const ctx = d.context as SelfDeployCtx;
+    if (await raiseHandApplyTodo(db, d, ctx, ctx.target === "server")) raised++;
+  }
+  return raised;
+}
+
+// lost on restart, harmless because app.ts wires the provider again at every start
+let todoFactsProvider: (() => Promise<OwnerSetupFacts>) | null = null;
+/** BOS-2336: wired in app.ts to the host facts, so every to-do is checked against this server's real values. */
+export function setOwnerTodoFacts(fn: (() => Promise<OwnerSetupFacts>) | null) {
+  todoFactsProvider = fn;
+}
+async function ownerTodoBaseFacts(given: OwnerSetupFacts | undefined): Promise<OwnerSetupFacts> {
+  if (given) return given;
+  // A provider that fails leaves the facts empty, not the card unchecked: the check still runs, and a host token it
+  // can't fill goes to the CEO (R4) rather than to the owner.
+  return (await todoFactsProvider?.().catch(() => null)) ?? {};
+}
+
+/** The dedupe key for the CEO's card about an owner to-do whose steps failed the card check (BOS-2336). */
+export const ownerTodoFixKey = (key: string) => `owner-todo-fix:${key}`;
+
+/**
+ * BOS-2336: the card check (DR-052) on a Boss Man-written to-do: the same fill and lint as a ticket's setup at go-live,
+ * with the options the card will offer, the site-mismatch record and the images. Returns the steps as the owner will
+ * read them, or null after raising the CEO's card with the findings: the owner never sees unchecked steps. Fails
+ * closed: a check that throws holds the card too.
+ */
+export async function vetOwnerTodoSteps(db: Db, t: { companyId: string; key: string; question: string; steps: string[]; options: string[]; facts?: OwnerSetupFacts }): Promise<string[] | null> {
+  if (!t.steps.length) return t.steps;
+  let findings: LintFinding[];
+  let checked: string[] = t.steps;
+  try {
+    const base = await ownerTodoBaseFacts(t.facts);
+    const [company, images, mismatchedSites] = await Promise.all([
+      base.company ?? loadCompanyFacts(db, t.companyId, t.steps),
+      seenImageDates(db, t.companyId, t.steps),
+      screenMismatchSites(db, t.companyId, t.steps, base.serverHost),
+    ]);
+    const check = checkOwnerSetup(t.steps, { ...base, ...(company ? { company } : {}), options: t.options, todo: true, ...(images ? { images } : {}), ...(mismatchedSites ? { mismatchedSites } : {}) }, "raise");
+    findings = [...check.hard, ...check.soft];
+    checked = check.steps;
+  } catch (err) {
+    findings = [{ step: 0, rule: "warn", problem: `couldn't be checked (${err instanceof Error ? err.message : String(err)}), so it was held` }];
+  }
+  if (!findings.length) return checked;
+  await raiseOwnerTodoFix(db, { companyId: t.companyId, key: t.key, question: t.question, findings });
+  return null;
+}
+
+/** BOS-2336: the CEO's card when Boss Man's own owner card is held. A "Got it" notice; the real close is the owner's card going out. */
+async function raiseOwnerTodoFix(db: Db, t: { companyId: string; key: string; question: string; findings: LintFinding[] }) {
+  const at = new Date().toISOString();
+  // A "Got it" card keeps its dedupe key, which would swallow a later hold of the same card. After a day the answered
+  // card lets go of the key, so the CEO is told again if the steps still fail; within the day a sweep doesn't re-ask.
+  await db.update(decisions).set({ dedupeKey: null }).where(and(eq(decisions.dedupeKey, ownerTodoFixKey(t.key)), ne(decisions.status, "open"), lt(decisions.answeredAt, new Date(Date.now() - 24 * 3_600_000))));
+  const [row] = await db
+    .insert(decisions)
+    .values({
+      companyId: t.companyId,
+      kind: "question",
+      question: `A card Boss Man wrote for the owner was held back because its steps failed the owner-card check ("${t.question.slice(0, 160)}", card key ${t.key}):\n${lintLines(t.findings)}\nThe owner has not seen it and has nothing to do. These steps are written in Boss Man's own code, so make a ticket to fix the text (if a site's docs misled the owner, the fix is one screenshot of their screen to write the first step from). Boss Man raises the owner's card again on its next pass and closes this one itself once the steps pass.`,
+      options: ["Got it"],
+      recommendedOption: "Got it",
+      tier: "ceo",
+      dedupeKey: ownerTodoFixKey(t.key),
+      // Kept on the CEO's rung, never climbing to the owner (BOS-1953): the owner can do nothing with it.
+      context: { type: "question", triedFirst: "Boss Man checked the steps of its own owner card against the owner-card rules before raising it, and they failed.", ladder: { rung: "ceo", since: at, minutes: CEO_QUESTION_HANDOVER_MINUTES, about: [] as string[], hops: [{ to: "ceo", at, why: "only the CEO can have Boss Man's own card text fixed" }], topRung: "ceo" } } as DecisionContext,
+    })
+    .onConflictDoNothing()
+    .returning({ id: decisions.id });
+  if (row) await record(db, { companyId: t.companyId, kind: "decision_raised", summary: `An owner card was held: its steps failed the card check: ${t.findings.map((f) => `step ${f.step}: ${f.problem}`).join("; ").slice(0, 400)}`, at: new Date() });
   return row ?? null;
 }
 
@@ -2339,11 +2473,18 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
      * (BOS-2187) Answered and withdrawn cards, newest first, a page at a time. The cursor is the last row's
      * "when|id" from the page before. `q` keeps cards whose question contains the text.
      */
-    async answeredList(opts: { limit?: number; cursor?: string; q?: string; companyId?: string; id?: string } = {}) {
+    async answeredList(opts: { limit?: number; cursor?: string; q?: string; companyId?: string; id?: string; by?: "owner" | "ceo" | "auto" | "withdrawn"; kind?: string; weeks?: number } = {}) {
       const limit = Math.min(Math.max(opts.limit ?? 50, 1), 100);
       const when = sql<Date>`coalesce(${decisions.answeredAt}, ${decisions.createdAt})`;
       const conds = [ne(decisions.status, "open")];
       if (opts.companyId) conds.push(eq(decisions.companyId, opts.companyId));
+      // (BOS-2382) Who answered, what kind of card, and how far back (at most 8 weeks when asked).
+      if (opts.by === "withdrawn") conds.push(eq(decisions.status, "withdrawn"));
+      else if (opts.by === "ceo") conds.push(ANSWERED_BY_CEO);
+      else if (opts.by === "auto") conds.push(ANSWERED_BY_AUTO);
+      else if (opts.by === "owner") conds.push(sql`(${decisions.status} = 'answered' and not ${ANSWERED_BY_CEO} and not ${ANSWERED_BY_AUTO})`);
+      if (opts.kind) conds.push(sql`${ANSWERED_KIND} = ${opts.kind}`);
+      if (opts.weeks && !opts.id) conds.push(sql`${when} >= ${new Date(now().getTime() - Math.min(opts.weeks, 8) * 7 * 86_400_000).toISOString()}::timestamptz`);
       // (BOS-2326) One closed card, for a #/decisions/<id> link from the search box.
       if (opts.id) conds.push(eq(decisions.id, opts.id));
       if (opts.q?.trim()) conds.push(sql`position(lower(${opts.q.trim()}) in lower(${decisions.question})) > 0`);
@@ -2352,7 +2493,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (at && cid && !Number.isNaN(Date.parse(at))) conds.push(sql`(${when}, ${decisions.id}) < (${new Date(at).toISOString()}::timestamptz, ${cid}::uuid)`);
       }
       const rows = await db
-        .select({ d: decisions, when, companyName: companies.name })
+        .select({ d: decisions, when, companyName: companies.name, kind: ANSWERED_KIND })
         .from(decisions)
         .innerJoin(companies, eq(companies.id, decisions.companyId))
         .where(and(...conds))
@@ -2360,17 +2501,19 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .limit(limit + 1);
       const page = rows.slice(0, limit);
       const items = [];
-      for (const { d, when: at, companyName } of page) {
+      for (const { d, when: at, companyName, kind } of page) {
         const c = d.context as { settled?: { name?: string; note?: string | null }; settledByRepeat?: unknown; judge?: unknown; answerNote?: string | null };
         const ids = await decisionTicketIds(db, d).catch(() => [] as string[]);
         const ts = ids.length
           ? await db
-              .select({ id: tickets.id, title: tickets.title, number: tickets.number, prefix: companies.ticketPrefix })
+              .select({ id: tickets.id, title: tickets.title, number: tickets.number, prefix: companies.ticketPrefix, systemState: tickets.systemState, mergedAt: tickets.mergedAt })
               .from(tickets)
               .innerJoin(companies, eq(companies.id, tickets.companyId))
               .where(and(eq(tickets.companyId, d.companyId), inArray(tickets.id, ids)))
           : [];
         const t = ts[0];
+        // What happened next to the ticket the card was about: merged, closed without a merge, or still open.
+        const outcome = t ? (t.mergedAt ? "merged" : t.systemState === "done" ? "closed" : "open") : null;
         const by = d.status === "withdrawn" ? "withdrawn" : c.settled?.name ? "ceo" : c.settledByRepeat ? "auto" : "owner";
         items.push({
           id: d.id,
@@ -2382,12 +2525,29 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           companyName,
           note: d.status === "answered" ? c.settled?.note ?? c.answerNote ?? null : null,
           at: new Date(at).toISOString(),
+          // (BOS-2488) When the card was raised, so the list can say how long it waited.
+          askedAt: new Date(d.createdAt).toISOString(),
           ticket: t ? { id: t.id, title: t.title, ref: ticketRef(t.prefix, t.number) } : null,
+          kind,
+          outcome,
+          state: t?.systemState ?? null,
         });
       }
       const last = page[page.length - 1];
       const next = rows.length > limit && last ? `${new Date(last.when).toISOString()}|${last.d.id}` : null;
-      return { items, next };
+      // (BOS-2382) On the first page: what the CEO answered for the owner in the last 7 days, by kind.
+      let ceoWeek: { total: number; byKind: Array<{ kind: string; count: number }> } | undefined;
+      if (!opts.cursor && !opts.id) {
+        const weekAgo = new Date(now().getTime() - 7 * 86_400_000).toISOString();
+        const week = await db
+          .select({ kind: ANSWERED_KIND, count: sql<number>`count(*)::int` })
+          .from(decisions)
+          .where(and(...(opts.companyId ? [eq(decisions.companyId, opts.companyId)] : []), ANSWERED_BY_CEO, sql`${when} >= ${weekAgo}::timestamptz`))
+          .groupBy(ANSWERED_KIND)
+          .orderBy(desc(sql`count(*)`));
+        ceoWeek = { total: week.reduce((n, w) => n + w.count, 0), byKind: week.map((w) => ({ kind: w.kind, count: w.count })) };
+      }
+      return { items, next, ...(ceoWeek ? { ceoWeek } : {}) };
     },
 
     /** Boss Man's alerts the team is still handling (BOS-64), for the owner's collapsed "being handled" line. */
@@ -3316,6 +3476,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // The owner's own note is kept on the card too (BOS-951), so a card read by id after it drops off the queue
       // shows it beside the answer. `settled` covers the CEO's note; this is the owner's, kept whole in the card.
       const ownerNote = !extra.settledBy && extra.note?.trim() ? extra.note.trim().slice(0, 4000) : null;
+      // BOS-2555: a card whose purpose was to get information from the owner. Only their own answer counts (a CEO settling it
+      // is answering for them), and only a plain question card, so nothing else is turned into one.
+      const infoWhy = !extra.settledBy && extra.by !== "ceo" ? infoAskOf(d) : null;
+      const infoAsk = !!infoWhy;
       // Conditional on still being open (and, for the CEO, still asked) and still on the same tier it
       // was read on, so whoever closes it first wins and the loser changes nothing. The tier clause
       // closes the race where the ladder hands the open card to the owner between the CEO reading it
@@ -3369,6 +3533,15 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           await postAnswerOnTickets(db, { companyId: d.companyId, question: d.question, answer }, await decisionTicketIds(db, d), extra.by === "ceo" ? "The CEO" : "The owner", extra.note, log, now);
         } catch (err) {
           log(`answering decision ${id} was saved, but posting it on its tickets failed: ${(err as Error).message}`);
+        }
+      }
+      // BOS-2555: the owner gave information a card asked for, so they hear at once that it is with someone, and the deadline
+      // for the result is set. Their own answer only; a CEO settling it is answering for them.
+      if (infoAsk) {
+        try {
+          await startedInfoAnswer(db, d, infoWhy!, { notify: notifyFeed, log, now: now() });
+        } catch (err) {
+          log(`answering decision ${id} was saved, but telling the owner their answer was received failed: ${(err as Error).message}`);
         }
       }
 
@@ -3455,22 +3628,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (ctx.infra && answer === APPROVE_HAND_APPLY) {
           // The change touches deployment files, so Boss Man can't deploy it. Approval doesn't clear it:
           // it leaves an owner to-do with the steps, the check and the rollback (BOS-122).
-          await raiseOwnerTodo(db, {
-            companyId: d.companyId,
-            question: `"${d.question.split("\n\n")[0]}" was approved. It's waiting for you to apply it by hand on the machine that runs Boss Man.`,
-            key: `owner-todo:self-deploy:${ctx.commit}`,
-            steps: ctx.handSteps?.length ? ctx.handSteps : ["Apply the approved change by hand on the server that runs Boss Man."],
-            check: ctx.check,
-            rollback: ctx.rollback,
-            ofDecisionId: id,
-            raisedByAgentId: d.raisedByAgentId,
-            target: ctx.target,
-            commit: ctx.commit,
-            fromCommit: ctx.fromCommit,
-            update: ctx.update,
-            doAfter: ctx.doAfter,
-            quietFirst: ctx.target === "server" && !!deployWait,
-          });
+          // A hold by the card check is retried by reraiseHeldHandApply on each deployer pass.
+          await raiseHandApplyTodo(db, d, ctx, ctx.target === "server" && !!deployWait);
         } else if (answer === DEPLOY || answer === UPDATE_RUNNERS || answer === DEPLOY_AND_RUNNERS) {
           try {
             // A server update waits for a quiet machine (BOS-420); it is sent at once when the machine is quiet already.
@@ -3709,6 +3868,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           } else if (ctx.type === "stalled_run") skipWake = true;
         }
         if (skipWake) return { id, answer, delivered, endedHere };
+        // BOS-2555: a card that asked the owner for information (a log, a screenshot, a value) must come back to them with
+        // the result where they are. The owner already has the line and flag (posted below); the raiser is who reports back.
         // An answer in the owner's own words can carry pictures or files (BOS-759): say so plainly, so
         // the agent opens them with open_attachment instead of reading the links as part of the answer.
         const pictures = ownWords && ATTACHMENT_LINK.test(answer) ? " It includes picture(s) or file(s) they attached; open each with open_attachment." : "";
@@ -3716,7 +3877,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         // match is said here, where waiting still saves the build. Read-only; nothing is linked.
         const plan = (ctx as { plan?: boolean; planText?: string | null; ticketId?: string | null });
         const overlap = plan.plan && plan.ticketId && answer === APPROVE_PLAN ? await planApprovalOverlapNote(plan.ticketId, plan.planText ?? "").catch(() => "") : "";
-        await wake({ agentId: d.raisedByAgentId, reason: "decision answered", ticketId: onTicket?.id ?? null, note: `${settled ? `${settled.name} settled` : extra.by === "ceo" ? "The CEO settled" : "The owner answered"} your question "${d.question}": ${answer}${extra.note ? ` — their note: ${extra.note}` : ""}${pictures}${overlap ? ` ${overlap}` : ""}` });
+        const reportBack = infoAsk && !extra.settledBy ? `\n\n${reportBackNote({ ownerVoice: "The owner", question: d.question, ticketId: onTicket?.id ?? "", ref: null })}` : "";
+        await wake({ agentId: d.raisedByAgentId, reason: "decision answered", ticketId: onTicket?.id ?? null, note: `${settled ? `${settled.name} settled` : extra.by === "ceo" ? "The CEO settled" : "The owner answered"} your question "${d.question}": ${answer}${extra.note ? ` — their note: ${extra.note}` : ""}${pictures}${overlap ? ` ${overlap}` : ""}${reportBack}` });
       }
       for (const t of unblocked) {
         if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "unblocked", ticketId: t.id, note: await unblockedNote(db, t.id, { question: d.question, answer, raisedByAgentId: d.raisedByAgentId }) });

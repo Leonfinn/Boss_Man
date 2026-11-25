@@ -27,6 +27,41 @@ Release step: adding to this file is part of every release (Release Manager, on 
 Check before committing: pnpm --filter @boss-man/site build (it stops on a heading that is not a date, or one out of order).
 -->
 
+## 24 November 2026
+
+- The Feedback page has a summary above the list: how many notes are waiting to be triaged, how long the oldest has waited (with a link to it), and this week's notes by source. The list can be shown newest first or oldest first, the order is kept in the page address, "Show older" reads notes past the newest 50, and Download CSV follows the order you chose.
+- Settings → Team and CEO → Standing rules has a "Past versions" fold with the last 20 changes: who made each, when, and how many lines were added and removed. Each opens a before/after view, and "Put this version back" restores it after asking you first. Undo still reverses it.
+- Key results on the Roadmap keep their history. Each says "updated N days ago" (or "never updated"), shows a small trend, and is tagged "Not updated in 14 days" when it goes stale. A "Readings" fold lists every value with when and who. Key results from before this update say "never updated" until they get a new value.
+- Settings → Server and runner → Runner has a "Connection, last 7 days" fold: the share of time the runner was connected, how many times it dropped, the longest gap, and the last 10 gaps with their length and how each ended. Gaps under 30 seconds are counted but not listed. The history builds up by itself.
+- On the Projects page, each project's summary line says how many of its tickets are blocked, and the list can be sorted by name, most open, most blocked or latest merge. The sort is kept in the link.
+- In Settings → Tools → Deploy targets, each target's row shows its newest deploy when that failed, was refused, is waiting for your approval or is running (for example "Latest: failed" and when), not only inside the Deploys fold.
+- The Dashboard shows "Oldest block" with the ticket and how long it has been blocked, linking to the ticket that has waited longest. It only shows when something is blocked.
+- Chat keeps answering while Boss Man or the runners update. It pauses only while a runner is actually being swapped, usually under a minute, and says by when it will answer again.
+- Download CSV buttons on more lists: Engagements (following the search and state filter), Permission rules (with each rule's use in the last 7 and 30 days), a deploy target's deploy history in Settings → Tools and deploys → Deploy targets (following the status filter), the Projects list (each project's summary figures, in the sort you chose), and each funding source's "Last 8 weeks" fold in Settings → Funding.
+- The Scrum Master log has a Download CSV button for the entries shown and an "Undone only" switch.
+- On the Agents page, each agent's 30-day record also shows how many runs it had and how many failed, so an agent that keeps failing stands out. "N failed" opens the Runs page filtered to its failed runs.
+- The Agents page has a "Team record, last 30 days" fold: every agent's record in one table, sortable by any column. The sort is kept in the link.
+- The Runs page has a "Why runs started, last 7 days" fold with the runs and cost for each reason, and the finished list can be filtered by reason.
+- A project's budget shows a forecast: "At this pace: about $X by the end of the month", with the limit and whether it stays under it or the day it reaches it. In the first 2 days of the month it says it is too early for a forecast.
+- Settings → Server and runner → Updates → Server health has a "Database size, last 14 days" fold with each day's size and change. A day that grew by more than 10% is marked.
+- In Decisions → Answered, each card says how long it waited for your answer (for example "answered after 3 h"), with a summary line: how many, the middle wait and the slowest kind. The Download CSV has a "Waited (minutes)" column.
+- Settings → Watchdog can test its limits against the past 48 hours, 7 days or 14 days, shows a count for each kind of problem and how many cleared by themselves, and can hide the ones that cleared by themselves.
+- On the Board, a card that other open cards wait on says "N waiting on this" (hover to see which). A "Holding others up" filter shows only those cards and is kept in the link, and the Download CSV has a "Waiting on this" column.
+- The Features page has a "Last moved" column and marks a part-done feature "Stalled" when nothing has moved for over 3 days. You can show stalled features only and sort by last moved.
+- The Wiki has a "Not changed in 30 days" list beside "Recently changed": the stalest pages first, with how long since their last change and who made it.
+- Search results show each ticket's state (such as In progress, Done or Cancelled), and the Search page has an "Open tickets only" switch that is kept in the link.
+- A run's page has "Find in this run" to search its transcript, with a match count and next and previous, and a "Show" filter for everything, messages, tool calls or problems.
+- Each message in a ticket conversation has a "Copy link" button. Opening the link scrolls to that message and highlights it, loading older messages if needed.
+- On the Merge queue's Quick checks tab, waiting checks are numbered after the running ones, so the last number matches the count on the tab.
+- The Board loads fast again. It had been waiting for GitHub about every card before showing anything; build results now fill in on the next refresh.
+- The Board layout is repaired: lane headers no longer squash or split "oldest 3 d", and the card footer no longer covers the agent's picture.
+- The Dashboard's "Oldest block" line is laid out properly, and the ages in Board lane headers stay on one line.
+- The merge banner's time to clear is more accurate and now gives a clock time ("the last one expected by about HH:MM"), or says "no estimate yet" when there is too little to go on.
+- Settings → Server and runner → This server → This host names each container that is unhealthy or restarting and each fact the host has not reported, and no longer counts a container that is still starting after a runner swap.
+- A wiki page's header says when it was created and by whom, as well as when it last changed and by whom. History shows how many versions there are and how many people edited the page.
+- The Notifications page groups notices by day ("Today", "Yesterday", then the date), shows each day's unread count, and has "Mark this day read".
+- In Settings → Server and runner → Updates, "Deploy to staging" has a help line saying it is optional, that agents deploy to staging themselves, and when you might press it.
+
 ## 23 November 2026
 
 - Parts of Boss Man that are still loading now say "Loading…", and a part that fails to load says what failed and offers Retry, instead of a blank space or a false "none yet". This covers the Dashboard, ticket pages, the Spend report, Settings → Funding → Budgets, the Features page, a feature's own page, Settings → Devices, the Roadmap tabs, the Notifications page, four Wiki loads, Settings → Reviews, the CEO's chapters, and Settings → Tools.
@@ -47,6 +82,23 @@ Check before committing: pnpm --filter @boss-man/site build (it stops on a headi
 - The website install guide now leads with the ready-made Docker image install, keeping build-from-source as a second option.
 - A new website guide explains moving a company from Paperclip, and the Paperclip guide now marks the export step confirmed on TrueNAS, adds an scp copy step, and runs the issues export from a throwaway Postgres container.
 - Each release now runs an install test on a clean machine, and the install guide shows the date of the latest test, whether it passed and how long the install took.
+- The Merge queue page shows which ticket holds the landing turn, what it is waiting for, and roughly when it and the tickets behind it will land.
+- On the Board, clicking "N looks stuck" shows only those cards, with "Show all" to go back.
+- Settings has a "Find a setting" box that narrows the menu by name, hint, help text and "On this page" entries.
+- On the Dashboard, "N failed in 14 days" opens the Runs page already filtered to failed runs.
+- Ctrl+K search now also finds agents and skills, each in its own group.
+- The public roadmap portal's Released tab is now "What's new", with month headings and dates, and visitors can follow new releases in a feed reader.
+- On the Roadmap, each milestone shows points done and left and an expected finish date at the last 4 weeks' pace, marked when that is after the target date.
+- The Runs page has a "Waiting to start" list: which agents are queued, for which ticket, why, and how long they have waited.
+- Settings → Tools → Deploy targets has "Deploy this version again" on a past successful deploy, a way back after a bad deploy. It still needs your approval.
+- The Spend report has a "Costliest tickets" table for the chosen period, each linking to its ticket.
+- A wiki page has a "Links" section: the pages it links to, with missing pages marked, and the pages that link to it.
+- The Notifications page has a search box that finds notices by words in their title or text.
+- Keyboard shortcuts on the Runs and Features pages: j and k move between rows, Enter opens one, and "?" lists the keys.
+- The Skills page shows each skill's history: when it changed, who changed it, and a fold showing what changed.
+- A run's page shows its model, tokens and cost in one line, and says "not reported" for any figure the harness did not give.
+- The Workflow report has a "Week by week" table for the last 8 weeks.
+- The card asking for a second GitHub account token now asks for a classic token (repo and workflow), because a collaborator cannot make a fine-grained one for the repo.
 
 ## 22 November 2026
 

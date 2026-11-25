@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { atTime, checkSentence, drainTiming, deployerLine, historyWhat, inAbout, isReplaced, runsSentence, waitCancelLabel, waitLine, type DeployWaitView, type HistoryRow, type RunnerCheckView, type SelfDeployView, type WrapUpRun } from "../src/pages/settings/updates";
+import { atTime, checkSentence, drainTiming, deployerLine, historyWhat, inAbout, isReplaced, runsSentence, waitCancelLabel, waitLine, wrapUpFor, type DeployWaitView, type HistoryRow, type RunnerCheckView, type SelfDeployView, type WrapUpRun } from "../src/pages/settings/updates";
 import { when } from "../src/pages/Runs";
 
 // BOS-1846: the sentences the owner reads in Settings → Updates, pinned with a fixed clock. Clock times are built
@@ -14,7 +14,9 @@ describe("drainTiming (BOS-1877)", () => {
     expect(drainTiming({ runs: 0, since: iso(-30), phase: "waiting", expectedFinishAt: iso(20) })).toBe(`Started ${hhmm(iso(-30))}. Expected to finish about ${hhmm(iso(20))}.`);
     expect(drainTiming({ runs: 0, since: iso(-30), phase: "waiting", expectedFinishAt: null, overdue: true })).toBe(`Started ${hhmm(iso(-30))}. This is taking longer than expected.`);
     expect(drainTiming({ runs: 2, since: iso(-5), phase: "waiting", expectedFinishAt: null })).toMatch(/No time estimate/);
-    expect(drainTiming({ runs: 0, phase: "swapping" })).toBe("The runners are being swapped now.");
+    // BOS-2531: "being swapped now" only while a runner is really being recreated (chatOpen false), with a back-by time.
+    expect(drainTiming({ runs: 0, phase: "swapping", chatOpen: false, chatBackBy: iso(2) })).toBe(`Back by ${hhmm(iso(2))} at the latest.`);
+    expect(drainTiming({ runs: 0, phase: "swapping", chatOpen: true, chatBackBy: null })).toBe("The runners are swapped next.");
     expect(drainTiming({ runs: 0 })).toBe("");
   });
 });
@@ -148,5 +150,27 @@ describe("historyWhat", () => {
   });
   it("a server row with no changes is just Server", () => {
     expect(historyWhat(row({ changes: 0 }))).toBe("Server");
+    // BOS-2549: the real count, and what is cut from the list; a replaced row names its successor.
+    expect(historyWhat(row({ changes: 38, shown: 20 }))).toBe("Server, 38 changes (showing 20 of 38)");
+    expect(historyWhat(row({ changes: 3, shown: 3 }))).toBe("Server, 3 changes");
+    expect(historyWhat(row({ changes: 4, result: "replaced", replacedBy: "a63be888" }))).toBe("Server, 4 changes: replaced by a newer update (a63be888)");
+  });
+});
+
+describe("wrapUpFor (BOS-2056)", () => {
+  it("an explicit answer wins over the kind", () => {
+    expect(wrapUpFor({ kind: "wrapup", wrapForUpdate: "server" })).toEqual({ forUpdate: "server", at: null });
+    expect(wrapUpFor({ kind: "update", wrapForUpdate: "runner" })).toEqual({ forUpdate: "runner", at: null });
+    expect(wrapUpFor({ kind: "update", wrapForUpdate: "none" })).toEqual({ forUpdate: "none", at: null });
+  });
+  it("a plain wrap-up is for no update; a hold that joined an update is for the runner update", () => {
+    expect(wrapUpFor({ kind: "wrapup" })).toEqual({ forUpdate: "none", at: null });
+    expect(wrapUpFor({ kind: "update" })).toEqual({ forUpdate: "runner", at: null });
+    expect(wrapUpFor({})).toEqual({ forUpdate: "runner", at: null });
+  });
+  it("names when it was asked: wrapSince first, then since, then null", () => {
+    expect(wrapUpFor({ kind: "update", wrapSince: iso(0), since: iso(-5) })).toEqual({ forUpdate: "runner", at: iso(0) });
+    expect(wrapUpFor({ kind: "wrapup", since: iso(-5) })).toEqual({ forUpdate: "none", at: iso(-5) });
+    expect(wrapUpFor({ kind: "update", wrapSince: undefined, since: undefined })).toEqual({ forUpdate: "runner", at: null });
   });
 });

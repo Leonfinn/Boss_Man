@@ -285,3 +285,24 @@ describe("R11: host commands need proof", () => {
     expect(checkAsk({ triedFirst: TRIED, proof: "rehearsed tailscale @ 0123abcd" })).toEqual({ error: null, triedFirst: TRIED });
   });
 });
+
+// BOS-2527: step 4 of the hand-apply card copies host-deployer.sh out of the install folder, which the host records
+// as private (backups live there). The old `cp` kept the source's open mode and was held; `install -m 0750` is not.
+describe("R6: the hand-apply card's host-deployer.sh copy", () => {
+  const HOSTS = [{ name: "nas01", login: "owner", ownership: [{ path: "/srv/bm/src", owner: "root", group: "root", mode: "755", role: "backups" as const }, { path: "/srv/bm/deployer", owner: "root", group: "root", mode: "755" }] }];
+  const lint = (cmd: string) => lintOwnerSteps([step("Copy the deployer script.", sh(cmd, { host: "nas01", as: "root" }))], { hosts: HOSTS, serverHost: "nas01" }).refuse.filter((f) => f.rule === "R6"); // R11 (proof) is a separate rule, not under test here
+  const SRC = "/srv/bm/src/scripts/host-deployer.sh";
+  const DEST = "/srv/bm/deployer/host-deployer.sh";
+
+  it("finds nothing wrong with the owner-only install copy", () => {
+    expect(lint(`install -v -m 0750 -o root -g root ${SRC} ${DEST}`)).toEqual([]);
+  });
+
+  it("held the old copy-then-chmod step", () => {
+    expect(lint(`cp -v ${SRC} ${DEST} && chown root:root ${DEST} && chmod 750 ${DEST}`)).toEqual([expect.objectContaining({ rule: "R6", problem: expect.stringMatching(/opens it to everyone/) })]);
+  });
+
+  it("still refuses an install copy with an open mode", () => {
+    expect(lint(`install -v -m 0755 ${SRC} ${DEST}`)).toEqual([expect.objectContaining({ rule: "R6" })]);
+  });
+});

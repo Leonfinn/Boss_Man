@@ -39,7 +39,8 @@ export const OWNER_CONTROLS = {
     // Every page intro's fold (P7, BOS-1278): Agents, Server and runner, Notifications and Features show it.
     "More about this",
     // The search box (Ctrl+K) and its sidebar button (BOS-2192).
-    "Search", "Close",
+    // "Clear" empties the recent searches listed when the box is empty (BOS-2433).
+    "Search", "Close", "Clear",
   ],
   "Log in": ["Create owner account", "Log in"],
   Setup: [
@@ -64,8 +65,8 @@ export const OWNER_CONTROLS = {
     // Under each command in a step (the label is set in code, so the test can't read it).
     "Copy",
   ],
-  Notifications: ["Turn on browser notifications", "Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole", "Create phone login", "Set up ntfy for me", "Reset password", "Copy password", "I've saved it", "Waiting for the host", "Save", "Send a test message", "Switch off", "Switch on", "Change", "Remove", "Save changes", "Add", "Cancel", "Send one now"],
-  Chat: ["Ask the CEO", "Send", "Show more", "Show less", "Running now", "Load older messages", "Loading", "Download", "Preparing","Remember this", "Add to standing rules", "Undo", "Cancel"],
+  Notifications: ["Turn on browser notifications", "Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark this day read", "Mark all read", "Download CSV", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole", "Create phone login", "Set up ntfy for me", "Reset password", "Copy password", "I've saved it", "Waiting for the host", "Save", "Send a test message", "Switch off", "Switch on", "Change", "Remove", "Save changes", "Add", "Cancel", "Send one now"],
+  Chat: ["Ask the CEO", "Send", "Show more", "Show less", "Running now", "Load older messages", "Loading", "Download", "Preparing", "Previous", "Next", "Search older messages", "Searching", "Remember this", "Add to standing rules", "Undo", "Cancel", "Copy link", "Link copied", "Jump to newest", "Clear"],
   // A project's page (Projects → a project). Its tabs along the top, then the Kanban tab's buttons.
   Board: [
     "Kanban", "Budget", "Config",
@@ -95,29 +96,37 @@ export const OWNER_CONTROLS = {
     "Send", "Interrupt and send", "Stop", "Add", "Remove", "Reviews",
     // Past the newest 500 messages, the conversation's older pages (BOS-2168).
     "Load older messages", "Loading older messages",
+    // "Copy link" under each message, "Link copied" for a moment after a copy (BOS-2456).
+    "Link copied",
     // The Scrum Master's log of this ticket.
-    "Undo", "Undoing", "Scrum Master", "Show all …",
+    "Undo", "Undoing", "Scrum Master", "Show all …", "Download CSV",
     // The header's "Copy link", "Copied" for a moment after a copy (BOS-2233).
     "Copy link", "Copied",
     // The header's "Download": the ticket as Markdown, "Preparing" while it fetches the conversation (BOS-2314).
     "Download", "Preparing",
+    // Find in this conversation (BOS-2422): the header's "Find", and the labels BOS-2411 added to Chat.
+    "Find", "Previous", "Next", "Search older messages", "Searching",
   ],
   // A project's Config tab (repo and merge-check settings, brief, archive), and the Projects page, which shows
   // the same settings for every project. The merge-check setting ("Before merging, Boss Man will…") is here,
   // not under Settings.
   Config: ["Re-detect", "Refresh brief", "Write brief", "Archive", "Unarchive"],
   // Each project is a collapsed row; "Edit settings" opens its form and "Hide settings" folds it away (BOS-1876).
-  Projects: ["Open …", "Unarchive", "Saving", "Re-detect", "Check now", "Edit settings", "Hide settings"],
+  // "Download CSV" saves the active projects' figures in the chosen sort (BOS-2502).
+  Projects: ["Open …", "Unarchive", "Saving", "Re-detect", "Check now", "Edit settings", "Hide settings", "Download CSV"],
   // "Copy link" in the header says "Copied" for a moment after a copy (BOS-2233).
-  Run: ["Send after this turn", "Interrupt and send", "Stop run", "Copy link", "Copied", "Download", "Preparing"],
+  Run: ["Send after this turn", "Interrupt and send", "Stop run", "Copy link", "Copied", "Download", "Preparing", "Previous", "Next"],
   // The Runs page's emergency stop: every run going now, in every company (BOS-837).
   // The Engagements list: the paged list's own buttons come from "Any screen"; its "Show" filter is a field (OWNER_FIELDS).
-  Engagements: [],
-  Runs: ["End all running runs", "Ending", "Loading", "Show more", "Retry", "Download CSV"],
+  Engagements: ["Download CSV"],
+  // The Search page (#/search, BOS-2378): its hits and "Show more" are links, so no buttons; its tick box is a field.
+  Search: [],
+  Runs: ["End all running runs", "Ending", "Loading", "Show more", "Retry", "Download CSV", "Start now", "Cancel", "Starting", "Cancelling"],
   // The Merge queue page's two views (BOS-1174).
   // Below three recently finished checks, "Show N more" opens the rest (BOS-1239).
-  "Merge queue": ["Merges", "Quick checks", "Show …", "Move to front"],
-  Roadmap: ["Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "No date …", "Add objective", "Milestones", "Change"],
+  // BOS-2473: Merge history's CSV of the rows shown.
+  "Merge queue": ["Merges", "Quick checks", "Show …", "Move to front", "Download CSV"],
+  Roadmap: ["Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "Add objective", "Milestones", "Change", "Download CSV"],
   Plan: [
     "Refresh",
     // "What's holding work up" (BOS-745): its heading folds the section away and opens it again (the label carries
@@ -125,9 +134,11 @@ export const OWNER_CONTROLS = {
     "What's holding work up …", "Show all …", "Show fewer",
     // BOS-1306: the labelled Hide / Show button at the right end of that heading.
     "Hide", "Show",
+    // BOS-2430: the filters' reset and the CSV of the items shown.
+    "Clear filters", "Download CSV", "Unassigned",
   ],
   Wiki: [
-    "Show older versions", "Compare", "Close compare", "Show", "Restore this version",
+    "Show older versions", "Compare", "Close compare", "Show", "Show all …", "Show fewer", "Restore this version",
     "Write", "Preview", "Cancel", "Edit", "New page here", "History …", "Delete", "Put this version back",
     "Back to the current one", "Re-embed all", "Test", "Hide pages", "Show pages", "New page", "Discard draft",
     "Deleted pages", "Restore", "Restoring", "Download",
@@ -146,9 +157,9 @@ export const OWNER_CONTROLS = {
     "Add feedback", "Add to the inbox", "Cancel", "Use the whole note", "Create …", "Creating", "Back to the list", "Unlink",
     "Link to …", "Done: mark processed", "Back to unprocessed", "Archive", "Delete", "Copy", "New link", "Remove",
     "Feedback portal", "Search", "Anonymous …", "Save times",
-    "Download CSV", "Preparing",
+    "Download CSV", "Preparing", "Show older", "Show newer",
   ],
-  "Feedback portal": ["Edit your comment", "Tell us why", "Remove my vote", "Send", "Cancel", "Send idea", "Send my vote"],
+  "Feedback portal": ["Edit your comment", "Tell us why", "Remove my vote", "Send", "Cancel", "Send idea", "Send my vote", "Copy link", "Copied"],
   Agents: [
     "Refresh models", "Asking the runner", "Choose from the list", "Hire …", "Use the default", "Replace with the current …",
     "Fill in from the …", "Rehire", "Undo", "Save", "Add note", "Cancel", "Edit", "Delete", "Start", "Pause", "Close",
@@ -156,9 +167,9 @@ export const OWNER_CONTROLS = {
   ],
   Skills: [
     "Add", "Adding", "Search", "Added", "Add to …", "Edit", "Check for updates", "Delete", "Save", "Cancel", "Remove pack",
-    "Add a skill", "Discard draft",
+    "Add a skill", "Discard draft", "Download CSV",
   ],
-  "Scrum Master": ["Undo", "Undoing", "Scrum Master", "Show all …"],
+  "Scrum Master": ["Undo", "Undoing", "Scrum Master", "Show all …", "Download CSV"],
   // Settings itself: the tabs along the top (each tab is a screen of its own below, BOS-442).
   Settings: [
     // "Server and runner" is the name of the last group, not a page (BOS-1492); its pages are Updates … Devices and privacy.
@@ -168,7 +179,7 @@ export const OWNER_CONTROLS = {
     "Run the setup wizard", "Clear",
   ],
   "Server and runner": [
-    "Reconnect runner", "Start runner", "Restart", "Stop", "Copy token", "Issue a new runner token", "Register a runner",
+    "Reconnect runner", "Start runner", "Restart", "Stop", "Download CSV", "Copy token", "Issue a new runner token", "Register a runner",
     "Review and deploy", "Check for updates now", "Build and update runners", "Deploy to staging", "Cancel queued runner update", "Save", "Save add-ons", "Cancel the update", "Update runners (finish runs first)",
     // The update wait (BOS-420): the same button reads by phase.
     "Stop making room", "Lift the hold now",
@@ -192,6 +203,8 @@ export const OWNER_CONTROLS = {
     "Add a check worker", "Add", "Done", "Change", "Turn on", "Remove", "Cancel",
     // BOS-1550: copy the ready-filled compose file shown after adding.
     "Copy compose file",
+    // Check workers (BOS-2519): the machines' 7 days and the check line's 7 days, each saved as a CSV.
+    "Download CSV",
   ],
   // Tool servers and deploy targets (a funding source is added on Funding, not here).
   "Tools and deploys": [
@@ -204,20 +217,23 @@ export const OWNER_CONTROLS = {
     "Remove anyway",
     // The Deploys fold under each deploy target (BOS-2318): the next page of older deploys.
     "Show older",
+    // A past successful deploy in that fold: ship that version again (BOS-2329).
+    "Deploy this version again",
+    "Download CSV",
   ],
   // Who approves and reviews work at each risk level, and whether it moved the goal.
   Reviews: ["Reset to defaults"],
   // Standing rules, the CEO chapters, the advice setting, nudges, the run time limit and the retros.
-  "Team and CEO": ["Pause company", "Resume company", "Cancel", "Edit", "Start a new chapter", "Clear", "Undo last change", "Discard draft", "Run a retro now"],
+  "Team and CEO": ["Pause company", "Resume company", "Cancel", "Edit", "Start a new chapter", "Clear", "Undo last change", "Put this version back", "Discard draft", "Run a retro now"],
   // The permission rules page, its advice mode, the second opinion and the fence.
-  Permissions: ["Delete", "Edit", "Save", "Cancel", "Ask the CEO to draft it", "Add rule", "Check", "Test", "Choose Off: run agents without the fence"],
+  Permissions: ["Delete", "Edit", "Save", "Cancel", "Ask the CEO to draft it", "Add rule", "Make a rule", "Check", "Test", "Choose Off: run agents without the fence", "Download CSV"],
   // The Scrum Master's watchdog: its limits, its record-only rehearsal and its safety cap.
-  Watchdog: ["Switch off", "Switch back on", "Switch on", "Test on the past 48 hours"],
+  Watchdog: ["Switch off", "Switch back on", "Switch on", "Run the test", "Download CSV"],
   "Import and export": ["Check name", "Import as a new company", "Open …"],
   // The owner's password and other logins (BOS-2159).
   Account: ["Change password", "Sign out other devices"],
   // Spend, the hold and the Claude accounts' order, and adding or editing a funding source.
-  Funding: ["Save", "Add funding source", "Add limit", "Edit", "Delete", "Cancel"],
+  Funding: ["Save", "Add funding source", "Add limit", "Edit", "Delete", "Cancel", "Download CSV"],
   // Every stored credential: adding one (the Claude token included), granting and rotating it.
   Secrets: ["Revoke", "Rotate", "Delete", "Check with Claude", "Check", "Remove"],
   // The "What this shows" card's button when there is too little data (BOS-1937).
@@ -239,7 +255,11 @@ export const OWNER_FIELDS = {
   // The Engagements list's status filter (BOS-2260).
   Engagements: ["Show", "Search engagements"],
   // The Runs page's search box (BOS-2317).
-  Runs: ["Search by ticket"],
+  Runs: ["Search by ticket", "Reason"],
+  // The Search page's tick box that leaves out done tickets (BOS-2477).
+  Search: ["Open tickets only"],
+  // The Plan page's filters (BOS-2430).
+  Plan: ["Project", "Assignee", "Kind", "Show finished"],
   // The Settings page's search box (BOS-2348).
   Settings: ["Find a setting"],
   Setup: [
@@ -256,9 +276,11 @@ export const OWNER_FIELDS = {
     "Your answer, in your own words. It goes to …", "What's unclear (optional, one line)",
     "Every agent in this company",
     "Your one-line reason, or the corrected lesson (needed for Edit)",
+    "Who answered", "Kind",
   ],
   // The "Remember this" box under the owner's own message (BOS-2184).
-  Chat: ["Add this to the standing rules every agent reads"],
+  // And the find box and date field above the conversation (BOS-2411).
+  Chat: ["Add this to the standing rules every agent reads", "Go to date", "Couldn't copy here. Copy the link by hand", "Unread only"],
   Notifications: [
     "Search notifications", "Company", "Quiet hours: pages and asks become flags, flags become notes", "From", "Until", "Time zone",
     "Per agent, per hour, before the rest become notes", "Send to my phone through my own ntfy server", "Send to my phone",
@@ -273,14 +295,16 @@ export const OWNER_FIELDS = {
     "Assign to", "Risk", "Project", "Assigned to", "Feature", "Spending limit per month (USD)", "At the limit",
   ],
   Ticket: [
-    "Filter", "To", "Feature", "Milestone", "Make it wait on", "Acceptance criteria, one per line",
+    "Filter", "Undone only", "To", "Feature", "Milestone", "Make it wait on", "Acceptance criteria, one per line",
     "What you have to do, one step per line", "Why it matters (opens the card)", "If you skip it", "What should the agent change",
     "Lesson learned (optional) — the CEO decides whether to add it to the project brief, and you are told the outcome", "Doesn't need code changes",
-    "Priority 1", "Blocked until (optional)", "Why (one line)", "Written by", "Assigned to", "Risk", "Size", "Watcher",
+    "Priority 1", "Recurring", "Blocked until (optional)", "Why (one line)", "Written by", "Assigned to", "Risk", "Size", "Watcher",
     // Shown by "Copy link" when copying fails, so the address can be copied by hand (BOS-2233).
     "Page address",
+    // Under a message's "Copy link" when copying fails here (BOS-2456).
+    "Couldn't copy here. Copy the link by hand",
   ],
-  Run: ["Page address"],
+  Run: ["Page address", "Show"],
   // The project settings (ProjectRow): on a project's Config tab and, for every project, on the Projects page.
   Config: [
     "Reviews for this project", "Name", "Cost cap per task (USD)", "Monthly spend cap (USD)", "Git repo", "Default branch",
@@ -293,6 +317,8 @@ export const OWNER_FIELDS = {
     "Watch this repo", "GitHub repo (owner/name)", "Check every (minutes, at least 15)", "Issues", "Discussions",
     "Skip posts by these GitHub logins (yours, Boss Man's account)",
     "Security alerts (this project owns the repo's alerts)",
+    // The order of the project list (BOS-2463).
+    "Sort by",
   ],
   Roadmap: ["Milestone", "Target date", "New milestone", "Company", "New objective", "Priority", "Where", "Show done work", "Key result", "Current", "Target", "Unit", "Objective"],
   Wiki: [
@@ -304,7 +330,7 @@ export const OWNER_FIELDS = {
   ],
   Features: [
     "Weight of demand", "The CEO triages new feedback (each batch costs a run)", "New criterion", "Weight", "New area",
-    "New feature", "Area", "Search features", "Sort by", "Show released and declined", "New task", "Project", "Risk", "Description", "Status",
+    "New feature", "Area", "Search features", "Sort by", "Show released and declined", "Stalled only", "Unfinished setup", "New task", "Project", "Risk", "Description", "Status",
     "Effort", "Subfeature of", "Objective or milestone", "Roadmap column", "Rank",
     "Priority 1: every open task of it goes first, and you get one page when all of it has merged",
     "Show on the feedback portal, where visitors can vote on it", "Keep off the portal (sensitive)", "Why it's kept off (optional)", "Public title (optional)", "Public summary", "Not shown yet",
@@ -313,13 +339,13 @@ export const OWNER_FIELDS = {
   ],
   Feedback: [
     "Feedback, as they said it", "Title (optional)", "From (optional)", "Their email (optional)", "Segment (optional)",
-    "Came in by", "Feature", "Portal on", "Heading", "Replace", "Add logo", "Introduction", "Link back to your website (optional)", "Link text (optional)", "Search feedback",
+    "Came in by", "Order", "Feature", "Portal on", "Heading", "Replace", "Add logo", "Introduction", "Link back to your website (optional)", "Link text (optional)", "Search feedback",
     "Visitors must click a link we email them before a post, comment or vote counts", "Link works for (hours)",
     "Remember a confirmed browser for (days)", "Open this portal at the public address itself",
   ],
   "Feedback portal": [
     "Your name (optional)", "Email, if you'd like to hear back (optional)", "What would it let you do",
-    "Your idea, in a few words", "What problem would it solve for you", "Website", "Your email",
+    "Your idea, in a few words", "What problem would it solve for you", "Website", "Your email", "Search features", "Copy the address by hand",
   ],
   Agents: [
     "Only start", "From", "To", "Time zone",
@@ -330,7 +356,7 @@ export const OWNER_FIELDS = {
     "GitHub link to a repository, a folder or a SKILL.md", "Name", "What it does and when to use it",
     "Instructions, in Markdown", "A skill folder, its files, or a .zip", "Filter",
   ],
-  "Scrum Master": ["Filter"],
+  "Scrum Master": ["Filter", "Undone only", "With you only"],
   "Server and runner": [
     "Across all companies (1 to 32)", "In one company (1 to 16, no more than the number above)",
     "Background agents at once (0 to 16)",
@@ -374,6 +400,8 @@ export const OWNER_FIELDS = {
     "Requires approval (you approve each deploy here too)", "After a successful deploy, move tag", "Tag name", "In the repo of",
     // The Penpot form (BOS-1582).
     "Penpot address", "Access token", "Export email (optional)", "Export password (optional)",
+    // The status filter on a deploy target's history (BOS-2409).
+    "Show",
   ],
   // Who reviews at each risk level, and the "did it move the goal?" check.
   Reviews: ["Ask after (days)"],
@@ -382,7 +410,7 @@ export const OWNER_FIELDS = {
     "Prefix", "Minutes the CEO has", "Nudges per hour", "Most minutes per run", "Who runs it", "What waits for you from the CEO",
   ],
   // The Scrum Master's watchdog.
-  Watchdog: ["Record only (rehearse)", "Scrum Master"],
+  Watchdog: ["Record only (rehearse)", "Scrum Master", "Test the rules against", "Hide ones that cleared by themselves"],
   // The permission rules page, the advice mode, the second opinion and the fence's mode (BOS-325).
   Permissions: [
     "Rules for", "Filter rules", "Show rules that", "What should this rule do", "New rule", "Rule name", "Command matches (regex)", "Tool title matches (regex)", "Then", "An agent of",
@@ -441,7 +469,7 @@ export const OWNER_SECTIONS = {
   ],
   Watchdog: ["Watchdog"],
   Permissions: ["Permission rules", "Advice on permission cards", "Second opinion", "Second opinion from a model (optional)", "Agent fence", "Setting up a host", "Try a command"],
-  Updates: ["Updates", "Other actions", "Now running", "Recent updates", "Stop all work", "What the host said"],
+  Updates: ["Updates", "Other actions", "Now running", "Recent updates", "Stop all work", "Server health", "What the host said"],
   "Limits and checks": ["Agents at once", "Tickets in progress", "Checks", "Check workers"],
   Runner: ["Runner", "Add-ons", "Workspace disk"],
   Email: ["Outgoing email", "Main's CI"],

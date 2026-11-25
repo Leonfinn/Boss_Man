@@ -7,14 +7,17 @@ import { Board, workingFor } from "../src/pages/Board";
 afterEach(() => {
   cleanup();
   sessionStorage.clear();
+  window.history.replaceState(null, "", window.location.pathname);
   stuckIds = [];
+  holdUp = false;
   vi.unstubAllGlobals();
 });
 
 const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200 });
 const company: Company = { id: "c1", name: "App Co", mission: null, paused: false, agents: [{ id: "a1", name: "Developer" }] } as Company;
 let stuckIds: string[] = [];
-const card = (over: Record<string, unknown>) => ({ ...(stuckIds.includes(String(over.id)) ? { looksStuck: { idleMs: 3_600_000 } } : {}), systemState: "ready", outcome: null, assigneeAgentId: null, assignedToOwner: false, dueDate: null, blockedBy: [], branch: null, risk: null, planFirst: false, plan: null, planApprovedAt: null, ...over });
+let holdUp = false;
+const card = (over: Record<string, unknown>) => ({ ...(stuckIds.includes(String(over.id)) ? { looksStuck: { idleMs: 3_600_000 } } : {}), systemState: "ready", outcome: null, assigneeAgentId: null, assignedToOwner: false, dueDate: null, blockedBy: [], branch: null, risk: null, planFirst: false, plan: null, planApprovedAt: null, ...(holdUp && (over.id === "t2" || over.id === "t3") ? { blockedBy: [{ ticketId: "t1", engagementId: null, decisionId: null }] } : {}), ...over });
 const feat = (id: string, title: string) => ({ id, companyId: "c1", areaId: null, parentId: null, title, description: null, status: "in_progress", effort: null, driverScores: {}, milestoneId: null, portalVisible: false, createdAt: "2026-10-19T09:00:00Z", updatedAt: "2026-10-19T09:00:00Z", releasedAt: null, demand: 0, insightCount: 0, customerCount: 0, value: 0, demandPart: 0, priority: 0, tickets: { total: 0, done: 0, items: [] } });
 
 function stub(extra: Record<string, unknown> = {}) {
@@ -32,7 +35,7 @@ function stub(extra: Record<string, unknown> = {}) {
               id: "col1", name: "Ready", systemState: "ready", wipLimit: null,
               tickets: [
                 card({ id: "t1", title: "Alpha task", featureId: "f1", featureTitle: "Dark mode", working: ["Developer working"], workingSince: since, assigneeAgentId: "a1" }),
-                card({ id: "t2", title: "Beta task", featureId: "f1", featureTitle: "Dark mode", assigneeAgentId: "a1" }),
+                card({ id: "t2", title: "Beta task", featureId: "f1", featureTitle: "Dark mode", assigneeAgentId: "a1", recurring: true }),
                 card({ id: "t3", title: "Gamma task", featureId: "f2", featureTitle: "Export", working: ["Developer working"], workingSince: since }),
                 card({ id: "t4", title: "Delta task" }),
               ],
@@ -106,6 +109,35 @@ describe("board filters", () => {
     expect(shown()).toEqual([]);
   });
 
+  it("BOS-2475: a card others wait on says so, and Holding others up shows only it, kept for the session", async () => {
+    holdUp = true;
+    stub();
+    open();
+    const alpha = (await screen.findByText("Alpha task", { selector: "h3 a" })).closest("article")!;
+    expect(alpha.textContent).toContain("2 waiting on this");
+    expect(screen.getAllByText(/waiting on this/)).toHaveLength(1);
+    openPanel();
+    fireEvent.click(screen.getByRole("switch", { name: /^Holding others up/ }));
+    expect(shown()).toEqual(["Alpha"]);
+    expect(JSON.parse(sessionStorage.getItem("board-filters") ?? "{}").holding).toBe(true);
+  });
+
+  it("BOS-2475: a link with ?holding=1 opens with Holding others up on, and the switch writes it to the link", async () => {
+    holdUp = true;
+    stub();
+    window.location.hash = "#/board/p1?holding=1";
+    open();
+    await screen.findByText("Alpha task", { selector: "h3 a" });
+    expect(shown()).toEqual(["Alpha"]);
+    openPanel("Filter, 1 on");
+    fireEvent.click(screen.getByRole("switch", { name: /^Holding others up/ }));
+    expect(window.location.hash).not.toContain("holding");
+    expect(shown().length).toBeGreaterThan(1);
+    fireEvent.click(screen.getByRole("switch", { name: /^Holding others up/ }));
+    expect(window.location.hash).toContain("holding=1");
+    window.location.hash = "";
+  });
+
   it("treats a saved feature that is not in the list as Any feature", async () => {
     sessionStorage.setItem("board-filters", JSON.stringify({ feature: "gone", working: false }));
     stub();
@@ -134,6 +166,27 @@ describe("board filters", () => {
     expect(screen.getByText("Working now", { selector: ".filter-chip span" })).toBeTruthy();
     openPanel("Filter, 2 on");
     expect(screen.getByRole("switch", { name: /^Working now/ }).getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("labels a recurring card, and the Recurring switch hides those cards and is kept (BOS-2485)", async () => {
+    stub();
+    open();
+    await screen.findByText("Beta task", { selector: "h3 a" });
+    // Only the recurring card carries the label; everything shows by default.
+    expect(screen.getAllByTestId("recurring-tag")).toHaveLength(1);
+    expect(shown()).toEqual(["Alpha", "Beta", "Gamma", "Delta"]);
+    openPanel();
+    const sw = screen.getByRole("switch", { name: /^Recurring/ });
+    expect(sw.getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(sw);
+    expect(shown()).toEqual(["Alpha", "Gamma", "Delta"]);
+    expect(screen.getByRole("button", { name: "Filter, 1 on" })).toBeTruthy();
+    cleanup();
+    open();
+    await screen.findByText("Alpha task", { selector: "h3 a" });
+    expect(shown()).toEqual(["Alpha", "Gamma", "Delta"]);
+    fireEvent.click(screen.getByRole("button", { name: "Remove filter: recurring hidden" }));
+    expect(shown()).toEqual(["Alpha", "Beta", "Gamma", "Delta"]);
   });
 
   it("removes a filter from its chip, and Clear all leaves the search text alone", async () => {

@@ -24,9 +24,12 @@ jq -e --arg r "$registry" '.registries | index($r) != null' "$f" >/dev/null || d
 echo "# Made by scripts/render-image-env.sh from release.json. Do not edit the digests: they are what was signed."
 echo "BOSSMAN_VERSION=$(jq -r '.version' "$f")"
 echo "BOSSMAN_REGISTRY=$registry"
-for image in server launcher netguard runner; do
+# BOS-1227: the updater is part of the default stack now (it makes the first server and the launcher), so it is needed too.
+for image in server launcher netguard runner updater; do
   d="$(jq -r --arg n "boss-man-$image" '.images[] | select(.name == $n) | .digest' "$f")"
-  [ -n "$d" ] || die "release.json lists no boss-man-$image image. The install needs all four (the runner image must be published: add boss-man-runner to PUBLISH_IMAGES)."
+  [ -n "$d" ] || die "release.json lists no boss-man-$image image. The install needs all five (add boss-man-runner and boss-man-updater to PUBLISH_IMAGES)."
   [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]] || die "boss-man-$image has a bad digest '$d'"
   echo "BOSSMAN_$(echo "$image" | tr '[:lower:]' '[:upper:]')_DIGEST=$d"
 done
+# The GitHub repository whose workflow signed this release: the updater reads releases from it (release.yml passes GITHUB_REPOSITORY).
+if [ -n "${GITHUB_REPOSITORY:-}" ]; then echo "BOSSMAN_UPDATER_REPO=$GITHUB_REPOSITORY"; fi

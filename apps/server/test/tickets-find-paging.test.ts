@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { eq } from "drizzle-orm";
 import { afterEach, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -99,6 +100,27 @@ describe("tickets find paging and assignee (BOS-2262)", () => {
     expect(featured[0]!.feature).toEqual({ id: feat!.id, title: "Search" });
     expect(featured[0]!.createdAt).toContain("2026-01-01");
     expect(await call({ since: "nonsense" })).toContain("is not a time");
+    await client.close();
+  });
+
+  it("tickets read and find show Recurring and Urgent only when set (BOS-2548)", async () => {
+    const c = (ctx = await setup());
+    await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "FlagPlain" });
+    await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "FlagBoth" });
+    await c.db.update(tickets).set({ recurring: true, urgent: true }).where(eq(tickets.title, "FlagBoth"));
+    const client = await c.mcp();
+    const find = async (q: string) => split(textOf(await client.callTool({ name: "tickets", arguments: { action: "find", q } }))).rows as unknown as Array<Record<string, unknown> & { id: string }>;
+    const plain = (await find("FlagPlain"))[0]!;
+    const both = (await find("FlagBoth"))[0]!;
+    expect(plain).not.toHaveProperty("recurring");
+    expect(plain).not.toHaveProperty("urgent");
+    expect(both.recurring).toBe(true);
+    expect(both.urgent).toBe(true);
+    const read = async (id: string) => textOf(await client.callTool({ name: "tickets", arguments: { action: "read", ticketId: id } }));
+    expect(await read(both.id)).toContain("Recurring: yes. Urgent: yes.");
+    const plainRead = await read(plain.id);
+    expect(plainRead).not.toContain("Recurring: yes");
+    expect(plainRead).not.toContain("Urgent: yes");
     await client.close();
   });
 

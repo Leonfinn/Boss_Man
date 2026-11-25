@@ -337,10 +337,11 @@ p { margin: 0; }
 .lane-head { display: flex; flex-direction: column; gap: 2px; padding: 0 2px 0 6px; }
 .lane-title { display: flex; align-items: center; gap: 6px; min-height: 36px; }
 .lane h2 { font-size: 14px; font-weight: 600; }
-.lane-title .mono { font-size: 12px; color: var(--muted); }
-.lane-title .count-badge { color: var(--side); }
+.lane-title .mono { font-size: 12px; color: var(--muted); white-space: nowrap; flex: none; }.lane-title .count-badge { color: var(--side); }
 .lane-empty { margin: 0; font-size: 13px; color: var(--muted); }
 .lane-hint { font-size: 12px; color: var(--muted); }
+.lane-head .lane-oldest { white-space: nowrap; }
+.lane-title h2 { min-width: 0; overflow-wrap: normal; }
 /* BOS-1909: lanes that move by themselves (Being checked, Merged watching) read as parked: a dashed edge, flat cards. */
 .lane.parked { background: transparent; border: 1px dashed var(--line-strong); }
 .lane.parked h2 { color: var(--muted); }
@@ -377,9 +378,12 @@ p { margin: 0; }
 .ticket h3 { font-size: 14px; font-weight: 500; line-height: 1.35; overflow-wrap: anywhere; }
 .ticket .top { display: flex; justify-content: space-between; align-items: center; gap: 6px; flex-wrap: wrap; }
 .ticket .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
-.ticket .row .who { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+/* BOS-2509: the picture keeps its own room (28px + gap + a few letters); the end group shrinks and cuts its text instead of drawing over the picture. */
+.ticket .row .who { display: inline-flex; align-items: center; gap: 6px; min-width: 56px; flex: 0 1 auto; }
 .ticket .row .who-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.ticket .row .end { display: inline-flex; align-items: center; gap: 4px; flex: none; }
+.ticket .row .end { display: inline-flex; align-items: center; gap: 4px; flex: 0 1 auto; min-width: 0; }
+.ticket .row .end .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.ticket .row .end .icon-btn, .ticket .row .end .state-age { flex: none; }
 .ticket .row .icon-btn { margin-left: 0; }
 .ticket .row .icon-btn svg { transition: transform 0.15s; }
 @media (prefers-reduced-motion: reduce) { .ticket .row .icon-btn svg { transition: none; } }
@@ -519,27 +523,69 @@ code { font-family: var(--mono); font-size: 0.92em; }
 .rm-head h3 { font-size: 16px; font-weight: 600; }
 .rm-krs { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
 .rm-krs li { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-.rm-track { position: relative; background: var(--ground); border-radius: 8px; overflow: hidden; }
-.rm-month { position: absolute; top: 0; bottom: 0; padding: 4px 6px; border-left: 1px solid var(--line-strong); font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; }
-.rm-today { position: absolute; top: 0; bottom: 0; border-left: 2px solid var(--accent); }
-.rm-today::after { content: "Today"; position: absolute; bottom: 2px; left: 4px; font-family: var(--mono); font-size: 10px; color: var(--link); }
-.rm-ms { position: absolute; display: flex; gap: 6px; align-items: flex-start; max-width: 150px; padding: 2px 4px; margin-left: -7px; border: 0; border-radius: 6px; background: none; color: var(--ink); text-align: left; font-size: 13px; line-height: 1.25; }
-.rm-ms[style*="translateX"] { margin-left: 7px; }
-.rm-ms:hover, .rm-ms[aria-pressed="true"] { background: var(--card); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4); z-index: 1; max-width: 240px; }
-.rm-ms b { display: block; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rm-ms small { display: block; color: var(--muted); font-size: 11.5px; white-space: nowrap; }
-.rm-dot { flex: none; width: 11px; height: 11px; margin-top: 3px; transform: rotate(45deg); background: var(--c); border-radius: 2px; }
-.rm-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-.rm-list button { width: 100%; display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; min-height: 44px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--ink); text-align: left; font-size: 14px; }
-.rm-list button[aria-pressed="true"] { border-color: var(--accent); }
-.rm-list .tag { margin-left: auto; }
-.rm-list li.dated { display: none; }
+/* The milestone rows (BOS-2560). One row each, in normal flow: a long title wraps and pushes the next row down, so nothing
+   prints over anything else. Only the markers inside a row's own date strip are positioned. No title is nowrap or cut. */
+.rm-summary { margin: 0; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.rm-axis { position: relative; height: 18px; margin: 0 11px; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.rm-axis .month { position: absolute; top: 0; height: 18px; line-height: 18px; padding-left: 4px; border-left: 1px solid var(--line-strong); white-space: nowrap; }
+.rm-axis .month.end { transform: translateX(-100%); padding: 0 4px 0 0; border-left: 0; border-right: 1px solid var(--line-strong); }
+.rm-rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.rm-row { min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+.rm-row:has(> .rm-rowbtn[aria-expanded="true"]) { border-color: var(--accent); }
+.rm-rowbtn { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 4px 12px; align-items: start; width: 100%; min-height: 44px; padding: 10px; border: 0; border-radius: 8px; background: none; color: var(--ink); text-align: left; font-size: 14px; }
+.rm-rowbtn:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+.rm-rowbtn > .rm-strip { grid-column: 1 / -1; }
+.rm-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.rm-title { font-weight: 600; overflow-wrap: anywhere; }
+.rm-meta, .rm-meta2 { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.rm-meta2.warn { color: var(--amber-ink); }
+.rm-chip { display: inline-flex; align-items: center; gap: 4px; justify-self: start; padding: 2px 8px; border-radius: 6px; background: var(--grey-soft); color: var(--grey-ink); font-size: 12px; font-weight: 500; line-height: 1.4; white-space: nowrap; }
+.rm-chip.red { background: var(--red-soft); color: var(--red-ink); }
+.rm-chip.amber { background: var(--amber-soft); color: var(--amber-ink); }
+.rm-chip.green { background: var(--green-soft); color: var(--green-ink); }
+.rm-chip.blue { background: var(--accent-soft); color: var(--accent-ink); }
+.rm-strip { position: relative; display: block; height: 16px; margin-top: 6px; border-radius: 4px; background: var(--ground); }
+.rm-strip > span { position: absolute; top: 0; bottom: 0; }
+.rm-strip .tick { border-left: 1px solid var(--line); }
+.rm-strip .today { border-left: 2px solid var(--accent-dark); }
+.rm-strip .bar { top: 5px; bottom: 5px; border-radius: 3px; background: var(--line-strong); }
+.rm-strip .bar.on_track { background: var(--accent); }
+.rm-strip .bar.at_risk { background: var(--amber-line); }
+.rm-strip .bar.late { background: var(--red-ink); opacity: 0.6; }
+.rm-strip .finish { top: 3px; bottom: auto; z-index: 1; width: 10px; height: 10px; margin-left: -5px; box-sizing: border-box; border: 2px solid var(--ink); border-radius: 50%; background: var(--ground); }
+.rm-strip .due { top: 3px; bottom: auto; z-index: 2; width: 9px; height: 9px; margin-left: -4.5px; background: var(--ink); transform: rotate(45deg); }
+.rm-key { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 0; font-size: 12px; }
+.rm-key i { display: inline-block; vertical-align: middle; margin-right: 6px; }
+.rm-key i.due { width: 8px; height: 8px; background: var(--ink); transform: rotate(45deg); }
+.rm-key i.finish { width: 10px; height: 10px; box-sizing: border-box; border: 2px solid var(--ink); border-radius: 50%; }
+.rm-key i.today { width: 0; height: 12px; border-left: 2px solid var(--accent-dark); }
+.rm-rules ul { margin: 0; padding: 0 0 0 22px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.rm-done ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
+.rm-done li { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+.rm-done .rm-title { flex: 1 1 200px; min-width: 0; font-weight: 500; }
+.rm-open { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 0 10px 10px; }
+.rm-open h4 { margin: 0; font-size: 14px; }
+.rm-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 0; font-size: 12px; color: var(--muted); }
+.rm-legend i { display: inline-block; width: 22px; margin-right: 6px; vertical-align: middle; border-top: 2px solid var(--accent-ink); }
+.rm-legend i.dashed { border-top: 2px dashed var(--muted); }
+.rm-legend i.dotted { border-top: 2px dotted var(--accent-ink); }
+.rm-chart-holder { width: 100%; max-width: 560px; min-width: 0; }
+.rm-chart { display: block; max-width: 100%; font-family: var(--sans); font-size: 10.5px; fill: var(--muted); }
+.rm-chart .axis { stroke: var(--line-strong); stroke-width: 1; }
+.rm-chart .today { stroke: var(--accent-dark); stroke-width: 2; }
+.rm-chart .due { stroke: var(--muted); stroke-dasharray: 3 3; }
+.rm-chart .planned { fill: none; stroke: var(--muted); stroke-width: 2; stroke-dasharray: 5 4; }
+.rm-chart .done { fill: none; stroke: var(--accent-ink); stroke-width: 2; }
+.rm-chart .pace { stroke: var(--accent-ink); stroke-width: 2; stroke-dasharray: 1 4; stroke-linecap: round; }
+.rm-chart .finish { fill: var(--ground); stroke: var(--accent-ink); stroke-width: 2; }
+.rm-pace { margin: 0; font-size: 13px; }
 .rm-detail { display: flex; flex-direction: column; gap: 10px; padding: 14px; border-radius: 8px; background: var(--ground); }
 .rm-tickets, .link-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
 .rm-tickets li, .link-list li { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-@media (max-width: 720px) {
-  .rm-wide { display: none; }
-  .rm-list li.dated { display: block; }
+@media (max-width: 600px) {
+  /* The chip sits on its own line above the title; month names lose their year. */
+  .rm-rowbtn { grid-template-columns: minmax(0, 1fr); }
+  .rm-axis .yr { display: none; }
 }
 
 /* ---------- Plan ---------- */
@@ -576,6 +622,24 @@ code { font-family: var(--mono); font-size: 0.92em; }
 .pl-refresh { min-height: 32px; padding: 4px 12px; font-size: 13px; }
 .plan-page { display: flex; flex-direction: column; gap: 24px; }
 .pl-count { flex-basis: 100%; }
+.pl-tools { display: flex; flex-direction: column; gap: 24px; }
+@media (max-width: 900px), (max-height: 800px) {
+  /* A short or narrow screen: the chart comes first (top third, BOS-1525); the two folds sit under it. */
+  .pl-tools { order: 2; flex-direction: row; flex-wrap: wrap; align-items: flex-start; gap: 8px; }
+  .pl-tools > .pl-people, .pl-tools > .pl-people:not([open]) { flex: 1 1 140px; padding: 0 14px; gap: 0; }
+  .pl-tools > .pl-people[open] { flex-basis: 100%; padding-bottom: 10px; }
+  .pl-tools > .pl-people > summary { min-height: 36px; display: flex; align-items: center; }
+}
+.pl-people:not([open]) { padding-top: 8px; padding-bottom: 8px; }
+.pl-people[open] > .pl-filters { margin-top: 8px; }
+.pl-filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 12px; }
+.pl-filters label { display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.pl-filters label.pl-finished { flex-direction: row; align-items: center; gap: 6px; min-height: 32px; }
+.pl-people > summary { cursor: pointer; font-weight: 600; }
+.pl-people-table { width: 100%; margin-top: 8px; border-collapse: collapse; font-size: 14px; }
+.pl-people-table th, .pl-people-table td { text-align: left; padding: 4px 8px; font-weight: normal; }
+.pl-people-table thead th { color: var(--muted); font-size: 12px; }
+.pl-person-btn { background: none; border: 0; padding: 0; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; min-height: 28px; }
 /* A short or narrow screen (a foldable at 724x784, BOS-1525): a small heading, the hint on one
    line, the count with Last updated and Refresh on one row, and tight gaps, so the chart starts
    in the top third. Wide, tall screens keep the roomy layout. */
@@ -614,6 +678,9 @@ details > summary { cursor: pointer; font-size: 14px; }
 .chat-msg p { padding: 10px 14px; border-radius: 12px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }
 .chat-msg small { font-size: 12px; color: var(--muted); padding: 0 4px; }
 .chat-msg.owner { align-self: flex-end; align-items: flex-end; }
+.chat-msg .msg-link-btn { font-size: 12px; padding: 0 4px; align-self: inherit; }
+.chat-msg .msg-link-box { display: flex; flex-direction: column; gap: 2px; font-size: 13px; width: min(420px, 100%); }
+.chat-log .jump-newest { position: sticky; bottom: 4px; align-self: center; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25); }
 .chat-msg .remember-btn { font-size: 12px; padding: 0 4px; }
 .chat-msg .remember-note { font-size: 13px; margin: 0; padding: 0 4px; }
 .chat-msg .remember-box { width: min(420px, 100%); display: flex; flex-direction: column; gap: 6px; padding: 4px; }
@@ -921,6 +988,14 @@ a.btn { display: inline-flex; align-items: center; text-decoration: none; }
 .md > * + * { margin-top: 0.75em; }
 .md h1 { font-size: 24px; } .md h2 { font-size: 20px; margin-top: 1.2em; } .md h3 { font-size: 17px; margin-top: 1em; }
 .md h1, .md h2, .md h3, .md h4 { font-weight: 600; line-height: 1.3; }
+/* A wiki heading's "Copy link to this section" (BOS-2443): always shown on touch, on hover or focus with a mouse. */
+.md :is(h1, h2, h3, h4, h5, h6) { scroll-margin-top: 12px; }
+.heading-link { display: inline-flex; vertical-align: middle; margin-left: 6px; padding: 4px; min-width: 24px; min-height: 24px; align-items: center; justify-content: center; border: 0; border-radius: 6px; background: none; color: var(--muted); cursor: pointer; }
+.heading-link:hover, .heading-link:focus-visible { color: var(--ink); background: var(--ground); }
+@media (hover: hover) { .md :is(h1, h2, h3, h4, h5, h6) .heading-link { opacity: 0; } .md :is(h1, h2, h3, h4, h5, h6):hover .heading-link, .heading-link:focus-visible { opacity: 1; } }
+.heading-link-field { display: block; margin-top: 4px; width: min(480px, 100%); font-size: 13px; font-weight: 400; }
+.wiki-outline summary { cursor: pointer; font-weight: 600; }
+.wiki-outline ul { margin-top: 6px; display: flex; flex-direction: column; gap: 2px; font-size: 14px; }
 .md ul, .md ol { padding-left: 1.4em; } .md ul { list-style: disc; } .md ol { list-style: decimal; }
 .md li + li { margin-top: 0.25em; }
 .md code { font-family: var(--mono, "IBM Plex Mono", monospace); font-size: 0.9em; background: var(--ground); padding: 1px 5px; border-radius: 4px; }
@@ -964,6 +1039,10 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .wiki-list details > summary { cursor: pointer; padding: 6px 10px; border-radius: 6px; font-weight: 500; }
 .wiki-list details > summary:hover { background: var(--ground); }
 .wiki-list details > ul { padding-left: 14px; border-left: 1px solid var(--line); margin-left: 12px; }
+/* "N need attention" and its switch (BOS-2518): one line beside the filter box, counted, never pushed off. */
+.wiki-list .skills-attention { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; }
+.wiki-list .skills-attention-count { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.wiki-list .skills-attention .muted { font-size: 13px; }
 
 /* Chat as a messenger (R70) */
 /* The page fills the window under the heading (BOS-270): the panel takes the room left over instead
@@ -974,6 +1053,10 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .messenger-chat > .chat-log { min-height: 160px; }
 .messenger-list { border-right: 1px solid var(--line); overflow-y: auto; min-height: 0; }
 .messenger-list ul { list-style: none; margin: 0; padding: 6px; display: flex; flex-direction: column; gap: 2px; }
+.messenger-list .team-find { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 8px 0; }
+.messenger-list .team-find input[type="search"] { flex: 1 1 140px; min-width: 0; }
+.messenger-list .team-unread { display: flex; align-items: center; gap: 6px; font-size: 13px; white-space: nowrap; }
+.messenger-list .team-none { margin: 8px 12px; font-size: 13px; }
 .messenger-list a { display: flex; gap: 10px; align-items: flex-start; padding: 10px; border-radius: 8px; color: var(--ink); text-decoration: none; }
 .messenger-list a:hover { background: var(--ground); }
 .messenger-list a[aria-current="page"] { background: var(--accent-soft); }
@@ -1009,11 +1092,13 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .messenger .chat-form textarea { flex: 1 1 220px; }
 @media (max-width: 760px) {
   .messenger { grid-template-columns: minmax(0, 1fr); height: auto; min-height: 0; }
-  .messenger .chat-log { max-height: 55dvh; min-height: 160px; }
+  .messenger .chat-log { max-height: 55dvh; min-height: 100px; }
   .messenger[data-picked="no"] .messenger-chat { display: none; }
   .messenger[data-picked="yes"] .messenger-list { display: none; }
   .messenger-list { border-right: 0; }
   .messenger-head { padding: 10px 12px; }
+  /* The find bar (BOS-2411) takes room from the log, so the log may shrink further and the bar is tighter. */
+  .messenger .chat-find { padding: 6px 12px; gap: 6px; }
   .messenger-head .back { display: inline-grid; }
   /* An open thread fills the phone, so the message box is on screen: the page intro is only
      for the team list, and dvh keeps the box above the keyboard. */
@@ -1056,6 +1141,10 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 @media (prefers-reduced-motion: reduce) { .pulse-dot { animation: none; } }
 .dash-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
 .stat { display: flex; flex-direction: column; gap: 2px; padding: 16px 18px; color: var(--ink); text-decoration: none; }
+.stat-cell { display: flex; flex-direction: column; gap: 4px; }
+.stat-cell > .stat { flex: 1; }
+.stat-oldest { font-size: 13px; padding: 0 18px; line-height: 1.4; }
+.stat-oldest .nowrap { white-space: nowrap; }
 .stat:hover { border-color: var(--line-strong); }
 .stat strong { font-family: var(--display, inherit); font-size: 30px; line-height: 1.1; }
 .stat span { font-weight: 500; }
@@ -1103,6 +1192,12 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .dash-line-link { display: flex; gap: 10px; align-items: flex-start; padding: 9px 0; color: var(--ink); text-decoration: none; min-height: 44px; }
 .dash-line-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
 .dash-sentence { font-size: 13px; color: var(--muted); }
+.dash-refresh { font-size: 12px; color: var(--muted); }
+/* BOS-2538: each "Right now" line names its own poll interval. Wide, the heading cuts the small note short as the
+   panel narrows (no second line above the lines); a phone shows the heading's own short line instead. */
+.dash-head-wide { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; max-width: 100%; }
+.dash-panel-head small { min-width: 0; }
+.dash-head-narrow { display: none; }
 .dash-pill { display: none; }
 p.dash-line { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0; }
 .dash-needs-item { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "tag title btn" ". small btn"; gap: 2px 10px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); }
@@ -1126,6 +1221,9 @@ p.dash-line { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0;
   .dash-line-link { padding: 6px 10px; min-height: 48px; align-items: center; }
   .dash-state, .dash-sentence { display: none; }
   .dash-pill { display: inline; font-weight: 600; font-size: 13px; }
+  .dash-refresh { display: none; }
+  .dash-head-wide { display: none; }
+  .dash-head-narrow { display: inline; }
   .dash-needs-item { grid-template-columns: minmax(0, 1fr); grid-template-areas: "tag" "title" "small" "btn"; gap: 4px; justify-items: start; }
   .dash-needs-btn { min-height: 44px; }
 }
@@ -1832,6 +1930,8 @@ details.pushes[open] > summary { margin-bottom: 8px; }
 .search-results li { display: flex; flex-direction: column; gap: 2px; padding: 8px 16px; cursor: pointer; min-height: 44px; justify-content: center; }
 .search-results li.active { background: var(--accent-soft); }
 .search-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A ticket hit's state (BOS-2477), first on the title line so a long title's "…" never hides it. */
+.search-title .search-state { margin-right: 6px; font-weight: 500; vertical-align: 1px; }
 /* Keyboard shortcuts list (BOS-2321): reuses the search box's back and panel. */
 .shortcuts-title { flex: 1; margin: 0; font-size: 16px; }
 .shortcuts-list { margin: 0; padding: 8px 16px; overflow-y: auto; }
@@ -1844,4 +1944,23 @@ details.pushes[open] > summary { margin-bottom: 8px; }
 /* BOS-2330: the card j/k moved to. Inside the outline, as a lane's scroll box would clip one drawn outside. */
 [data-shortcut-card]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .search-snippet { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The box's "See all N results" link and the Search page (BOS-2378). */
+.search-all { margin: 0; padding: 10px 16px; border-top: 1px solid var(--line); }
+.search-filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 16px; }
+.search-filters input[type="search"] { flex: 1 1 260px; min-width: 0; }
+.search-open { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; }
+.search-group { margin: 0 0 20px; }
+.search-group h2 { font-size: 15px; margin: 0 0 6px; }
+.search-list { list-style: none; margin: 0; padding: 0; }
+.search-list li { border-bottom: 1px solid var(--line); }
+.search-list a { display: flex; flex-direction: column; gap: 2px; padding: 8px 4px; min-height: 44px; justify-content: center; color: var(--ink); text-decoration: none; }
+.search-list a:hover, .search-list a:focus-visible { background: var(--accent-soft); }
+.search-more { margin: 8px 0 0; }
 .chat-msg.found p { outline: 2px solid var(--badge); outline-offset: 2px; }
+/* Find in this conversation (BOS-2411): the box, its count and buttons sit above the log; matches are marked. */
+.chat-find { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 20px; border-bottom: 1px solid var(--border); }
+.chat-find input[type="search"] { flex: 1 1 200px; min-width: 0; }
+.chat-find .chat-date { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.chat-find p { flex: 1 0 100%; margin: 0; font-size: 13px; }
+.find-hit { background: #ffe58a; color: inherit; border-radius: 2px; }
+.find-hit.current { background: #ffb020; outline: 2px solid var(--badge); }

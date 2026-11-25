@@ -3,12 +3,16 @@
 //
 //   node scripts/screenshot.mjs --route "#settings/funding" --width 1667 --out shot.png --wait ".funding h2"
 //   node scripts/screenshot.mjs --url http://host:3100/#board/p1 --width 380 --out shot.png --wait ".board"
+//   node scripts/screenshot.mjs --route "#watchdog/c1" --wait "#watchdog-h" --click "#test-rules" --click "#run" \
+//        --wait-after ".rule-result" --api my-api.json --out shot.png
 //
 // What it does: serves the built web app (apps/web/dist, build it first with `pnpm --filter @boss-man/web build`)
 // from a tiny in-process server on 127.0.0.1, answers every /api/* request from fixtures (a built-in set that
 // lets the app boot as a signed-in owner with one company and one project, merged with --api FILE: a JSON map
 // of "/api/path" -> response body; an unknown path gets {}), opens it in headless Chromium at --width, waits for
-// the --wait CSS selector (never a fixed time), and writes a PNG.
+// the --wait CSS selector (never a fixed time), and writes a PNG. With --api (and no --url) the PNG carries a
+// `bossman-screenshot` = `api=seeded` text chunk (png-marker.mjs): the move to review counts only marked
+// before/after shots for a screen change (BOS-2511, DR-075). An --out ending .jpg/.jpeg writes an unmarked JPEG.
 //
 // Why it is built this way (the blank/failed captures on BOS-1053):
 //  - /dev/shm on the runner is small (64 MB) and can be nearly full. Chromium's default of using it for renderer
@@ -23,6 +27,9 @@
 //          --width N (CSS px, default 1280) --height N (default 900) --ratio N (device pixel ratio, default 1)
 //          --touch (touch + mobile) --full-page --wait SELECTOR (required) --timeout MS (default 20000)
 //          --out FILE (required) --dist DIR (default apps/web/dist) --api FILE
+//          --click SELECTOR (repeatable: after --wait, each is waited for until visible, within --timeout, then
+//          clicked, in the order given; for a state behind a button, tab or fold, BOS-2547)
+//          --wait-after SELECTOR (waited for after the clicks, before the shot)
 // Exit 0 with the output path on the last line; non-zero with one error line otherwise.
 // Playwright is a global tool on the runner, not a project dependency; BOSSMAN_CHROMIUM overrides the browser.
 import { execFileSync } from "node:child_process";
@@ -33,11 +40,12 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, extname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { addPngText, SCREENSHOT_MARKER_KEY, SCREENSHOT_MARKER_SEEDED } from "./png-marker.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-function parseArgs(argv) {
-  const o = { route: "#board/p1", width: 1280, height: 900, ratio: 1, touch: false, fullPage: false, timeout: 20000, dist: join(repoRoot, "apps/web/dist") };
+export function parseArgs(argv) {
+  const o = { route: "#board/p1", width: 1280, height: 900, ratio: 1, touch: false, fullPage: false, timeout: 20000, dist: join(repoRoot, "apps/web/dist"), clicks: [] };
   const num = (k, v) => {
     const n = Number(v);
     if (!Number.isFinite(n) || n <= 0) fail(`${k} needs a positive number, got "${v}"`);
@@ -56,6 +64,8 @@ function parseArgs(argv) {
     else if (a === "--ratio") o.ratio = num(a, val());
     else if (a === "--timeout") o.timeout = num(a, val());
     else if (a === "--wait") o.wait = val();
+    else if (a === "--click") o.clicks.push(val());
+    else if (a === "--wait-after") o.waitAfter = val();
     else if (a === "--out") o.out = val();
     else if (a === "--dist") o.dist = resolve(val());
     else if (a === "--api") o.api = val();
@@ -177,6 +187,32 @@ function findChromium() {
   return undefined; // Playwright's own download, if any
 }
 
+// The steps between load and shot: --wait, then each --click in order, then --wait-after. Exported so
+// screenshot.test.mjs can drive it with a fake page (GitHub's script-test job has no browser).
+export async function afterLoad(page, o, target) {
+  const visible = async (sel, what) => {
+    try {
+      await page.waitForSelector(sel, { state: "visible", timeout: o.timeout });
+    } catch {
+      // Keep what the page showed, so a wrong selector or a missing fixture can be seen rather than guessed.
+      mkdirSync(dirname(resolve(o.out)), { recursive: true });
+      await page.screenshot({ path: `${o.out}.failed.png` }).catch(() => {});
+      fail(`${what}"${sel}" did not appear within ${o.timeout} ms at ${target}`);
+    }
+  };
+  await visible(o.wait, "");
+  for (const sel of o.clicks) {
+    await visible(sel, "--click ");
+    try {
+      await page.click(sel, { timeout: o.timeout });
+    } catch (e) {
+      // Playwright's message runs to many lines (call log); keep the one-line contract.
+      fail(`--click "${sel}" could not be clicked at ${target}: ${String(e.message).split("\n")[0]}`);
+    }
+  }
+  if (o.waitAfter) await visible(o.waitAfter, "--wait-after ");
+}
+
 async function main() {
   const o = parseArgs(process.argv.slice(2));
   if (!o.url && !existsSync(join(o.dist, "index.html"))) fail(`no web build at ${o.dist}; run: pnpm --filter @boss-man/web build`);
@@ -230,23 +266,22 @@ async function main() {
       if (!o.url && p.startsWith("/api/") && !(p in api)) console.error(`screenshot: no fixture for ${p}, answered {} (add it with --api FILE)`);
     });
     await page.goto(target, { waitUntil: "load", timeout: o.timeout });
-    try {
-      await page.waitForSelector(o.wait, { state: "visible", timeout: o.timeout });
-    } catch {
-      // Keep what the page showed, so a wrong selector or a missing fixture can be seen rather than guessed.
-      mkdirSync(dirname(resolve(o.out)), { recursive: true });
-      await page.screenshot({ path: `${o.out}.failed.png` }).catch(() => {});
-      fail(`"${o.wait}" did not appear within ${o.timeout} ms at ${target}`);
-    }
+    await afterLoad(page, o, target);
     mkdirSync(dirname(resolve(o.out)), { recursive: true });
-    await page.screenshot({ path: o.out, fullPage: o.fullPage });
+    // BOS-2511 (DR-075): a PNG made from seeded --api data carries a marker, which the move to review looks for.
+    const jpeg = /\.jpe?g$/i.test(o.out);
+    const shot = await page.screenshot({ type: jpeg ? "jpeg" : "png", fullPage: o.fullPage });
+    writeFileSync(o.out, !jpeg && o.api && !o.url ? addPngText(shot, SCREENSHOT_MARKER_KEY, SCREENSHOT_MARKER_SEEDED) : shot);
     console.log(resolve(o.out));
   } finally {
     await cleanup();
   }
 }
 
-main().catch((e) => {
-  console.error(`screenshot: ${e.message}`);
-  process.exit(1);
-});
+// Run only when started as a script, not when the test imports parseArgs/afterLoad.
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((e) => {
+    console.error(`screenshot: ${e.message}`);
+    process.exit(1);
+  });
+}

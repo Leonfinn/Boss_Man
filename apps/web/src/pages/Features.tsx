@@ -28,6 +28,7 @@ import { Loader } from "../components/Loader";
 import { LoadError } from "../components/LoadError";
 import { CopyLinkButton } from "../components/CopyLinkButton";
 import { buildCsv, download } from "../csv";
+import { STALL_DAYS, compareLastMoved, isStalled, lastMovedLabel, lastMovedTitle } from "../feature-stall";
 
 export const STATUS_TONE: Record<FeatureStatus, string> = { idea: "", considering: "blue", planned: "blue", in_progress: "amber", released: "green", declined: "red" };
 const EFFORT = ["", "Tiny", "Small", "Medium", "Large", "Huge"];
@@ -340,7 +341,7 @@ function AddFeature({ companyId, areas, onAdded }: { companyId: string; areas: A
   );
 }
 
-type Sort = "priority" | "demand" | "newest";
+type Sort = "priority" | "demand" | "newest" | "moved";
 const ACTIVE: FeatureStatus[] = ["idea", "considering", "planned", "in_progress"];
 
 // (BOS-956) Each feature's tasks are folded behind the arrow and the choice stays in this browser,
@@ -361,6 +362,35 @@ function saveFeatureOpen(state: { ids: string[] }) {
   } catch {}
 }
 
+/** BOS-2396: a feature's points and expected finish, as the server sends them (kept here, not in api.ts). */
+type FeatureForecastView = { pointsDone: number; pointsLeft: number; unsized: number; pace: number; expectedFinish: string | null };
+type FeatureWithPoints = Feature & { pointsDone?: number; pointsTotal?: number };
+
+/** "N of M points" for a feature card; empty when no task is sized. */
+export function cardPoints(f: Feature): string {
+  const p = f as FeatureWithPoints;
+  return p.pointsTotal ? `${p.pointsDone ?? 0} of ${p.pointsTotal} points` : "";
+}
+
+/** "3 Dec" from a YYYY-MM-DD date. */
+function dayMonth(date: string): string {
+  const d = new Date(`${date}T00:00:00Z`);
+  return `${d.getUTCDate()} ${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getUTCMonth()]}`;
+}
+
+/** The feature page's forecast lines in plain words; empty when nothing is sized and nothing is unsized. */
+export function forecastLines(fc: FeatureForecastView): string[] {
+  const lines: string[] = [];
+  const total = fc.pointsDone + fc.pointsLeft;
+  if (total > 0) {
+    const finish = fc.pointsLeft === 0 ? "" : fc.expectedFinish ? ` · at this pace about ${dayMonth(fc.expectedFinish)}` : "";
+    lines.push(`${fc.pointsDone} of ${total} points done · ${fc.pointsLeft} left${finish}`);
+  }
+  if (fc.unsized > 0) lines.push(`${fc.unsized} ${fc.unsized === 1 ? "task has" : "tasks have"} no size`);
+  if (fc.pointsLeft > 0 && fc.pace === 0) lines.push("No finished work in the last 4 weeks to estimate from.");
+  return lines;
+}
+
 /** Done, all and blocked tasks of a feature (cancelled ones count for none). */
 function taskCounts(f: Feature) {
   const live = f.tickets.items.filter((t) => t.outcome !== "cancelled");
@@ -372,6 +402,43 @@ export function taskSummary(f: Feature): string {
   const { total, done, blocked } = taskCounts(f);
   if (!total) return "–";
   return `${done} of ${total} complete${blocked ? ` · ${blocked} blocked` : ""}`;
+}
+
+/** "Stalled" mark for a part-done, in-progress feature with no task movement for over 3 days (BOS-2454). */
+function StalledTag({ f }: { f: Feature }) {
+  return isStalled(f) ? (
+    <span className="tag amber" title={`In progress, part done, nothing moved for over ${STALL_DAYS} days`} style={{ marginLeft: 6 }}>
+      Stalled
+    </span>
+  ) : null;
+}
+
+/** What a feature still needs before it counts as set up (BOS-2521): a size, a place on the roadmap, and a portal
+ * decision (on the portal, or deliberately kept off it). A feature with none of these is set up. */
+export type SetupGap = "size" | "roadmap" | "portal";
+export const SETUP_GAP_LABEL: Record<SetupGap, string> = { size: "No size", roadmap: "Not on the roadmap", portal: "Portal not decided" };
+
+export function setupGaps(f: Pick<Feature, "effort" | "objectiveId" | "milestoneId" | "portalVisible" | "keepOffPortal">): SetupGap[] {
+  const gaps: SetupGap[] = [];
+  if (f.effort == null) gaps.push("size");
+  if (!f.objectiveId && !f.milestoneId) gaps.push("roadmap");
+  if (!f.portalVisible && !f.keepOffPortal) gaps.push("portal");
+  return gaps;
+}
+
+/** The small tags on a row naming what the feature still needs (BOS-2521); nothing once it is set up. */
+function SetupTags({ f }: { f: Feature }) {
+  const gaps = setupGaps(f);
+  if (!gaps.length) return null;
+  return (
+    <span className="feature-setup" style={{ display: "inline-flex", flexWrap: "wrap", gap: 4, marginLeft: 6 }}>
+      {gaps.map((g) => (
+        <span key={g} className="tag amber">
+          {SETUP_GAP_LABEL[g]}
+        </span>
+      ))}
+    </span>
+  );
 }
 
 /** A blocked task is said on its own line, with a mark so it isn't colour alone (BOS-1257). */
@@ -429,7 +496,7 @@ function FeatureRow({ f, drivers, maxDemand, sub, hasSubfeatures, open, onToggle
   const foldable = f.tickets.items.length > 0;
   return (
     <>
-    <tr>
+    <tr data-shortcut-card tabIndex={-1}>
       <td className="feature-name" style={{ paddingLeft: sub ? 28 : undefined }}>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
           {foldable && (
@@ -437,15 +504,20 @@ function FeatureRow({ f, drivers, maxDemand, sub, hasSubfeatures, open, onToggle
               <span className="pl-arrow" aria-hidden="true">{open ? "▾" : "▸"}</span>
             </button>
           )}
-          <a href={`#/features/${f.companyId}/${f.id}`}>{f.title}</a>
+          <a href={`#/features/${f.companyId}/${f.id}`} data-shortcut-open>{f.title}</a>
         </span>
         <VisitorsWillSee f={f} />
+        <SetupTags f={f} />
       </td>
       <td style={{ whiteSpace: "nowrap" }}>
         <PortalTick f={f} onPatch={onPatch} />
       </td>
       <td>
         <StatusSelect f={f} onPatch={onPatch} />
+        <StalledTag f={f} />
+      </td>
+      <td className="muted" style={{ whiteSpace: "nowrap" }} title={lastMovedTitle(f.lastMovedAt)}>
+        {lastMovedLabel(f.lastMovedAt)}
       </td>
       <td className="mono" style={{ whiteSpace: "nowrap" }}>
         <Bar value={f.demand} max={maxDemand} label={`Demand ${f.demand}`} /> {f.demand}
@@ -469,12 +541,13 @@ function FeatureRow({ f, drivers, maxDemand, sub, hasSubfeatures, open, onToggle
         ) : (
           "–"
         )}
+        {cardPoints(f) && <div style={{ fontSize: 12 }}>{cardPoints(f)}</div>}
         <BlockedLine n={counts.blocked} />
       </td>
     </tr>
     {foldable && (
       <tr id={`feature-tasks-${f.id}`} hidden={!open}>
-        <td colSpan={8 + drivers.length} style={{ paddingLeft: sub ? 56 : 32 }}>
+        <td colSpan={9 + drivers.length} style={{ paddingLeft: sub ? 56 : 32 }}>
           <ul className="link-list" aria-label={`Tasks of ${f.title}`}>
             {f.tickets.items.map((t) => (
               <li key={t.id}>
@@ -501,12 +574,15 @@ function FeatureCard({ f, drivers, sub, hasSubfeatures, open, onToggle, onPatch 
   const counts = taskCounts(f);
   const foldable = f.tickets.items.length > 0;
   return (
-    <li className={`fcard${sub ? " sub" : ""}`}>
+    <li className={`fcard${sub ? " sub" : ""}`} data-shortcut-card tabIndex={-1}>
       <div className="fcard-top">
         <div className="fcard-title">
-          <a href={`#/features/${f.companyId}/${f.id}`}>{f.title}</a>
+          <a href={`#/features/${f.companyId}/${f.id}`} data-shortcut-open>{f.title}</a>
           <VisitorsWillSee f={f} />
           <StatusSelect f={f} onPatch={onPatch} />
+          <StalledTag f={f} />
+          <SetupTags f={f} />
+          <small className="muted" title={lastMovedTitle(f.lastMovedAt)}>Last moved: {lastMovedLabel(f.lastMovedAt)}</small>
         </div>
         <div className="fcard-priority" title="Value × 3 ÷ effort">
           <b className="mono">{f.priority.toFixed(1)}</b>
@@ -573,13 +649,14 @@ function FeatureCard({ f, drivers, sub, hasSubfeatures, open, onToggle, onPatch 
  * parent's title in a column, one column per criterion, numbers as numbers (blank where unscored). */
 export function featuresToCsv(rows: Array<{ f: Feature; area: string }>, drivers: Driver[], all: Feature[]): string {
   return buildCsv(
-    ["area", "feature", "parent", "portal", "status", "demand", ...drivers.map((x) => x.name), "effort", "value", "priority", "tasks_done", "tasks"],
+    ["area", "feature", "parent", "portal", "status", "last_moved", "demand", ...drivers.map((x) => x.name), "effort", "value", "priority", "tasks_done", "tasks"],
     rows.map(({ f, area }) => [
       area,
       f.title,
       all.find((p) => p.id === f.parentId)?.title ?? "",
       f.portalVisible ? "yes" : "no",
       FEATURE_STATUS_LABEL[f.status],
+      f.lastMovedAt?.slice(0, 10) ?? "",
       f.demand,
       ...drivers.map((x) => f.driverScores[x.id] ?? ""),
       f.effort ?? "",
@@ -603,6 +680,8 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
   const phone = useMediaQuery("(max-width: 640px)");
   const [sort, setSort] = useState<Sort>("priority");
   const [all, setAll] = useState(false);
+  const [stalledOnly, setStalledOnly] = useState(false);
+  const [unfinishedOnly, setUnfinishedOnly] = useState(false);
   const [query, setQuery] = useState("");
   const [showSettings, setShowSettings] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
@@ -617,8 +696,19 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
   };
   const d = data.data;
   const areas = settings.data?.areas ?? [];
-  const order = (a: Feature, b: Feature) => (sort === "priority" ? b.priority - a.priority || b.demand - a.demand : sort === "demand" ? b.demand - a.demand || b.priority - a.priority : b.createdAt.localeCompare(a.createdAt));
-  const listed = (d?.features ?? []).filter((f) => all || ACTIVE.includes(f.status));
+  // "Last moved" puts the longest-quiet first and the features with no tasks last.
+  const order = (a: Feature, b: Feature) =>
+    sort === "priority" ? b.priority - a.priority || b.demand - a.demand : sort === "demand" ? b.demand - a.demand || b.priority - a.priority : sort === "moved" ? compareLastMoved(a, b) : b.createdAt.localeCompare(a.createdAt);
+  // "Unfinished setup" (BOS-2521) counts features missing a size, a roadmap place or a portal decision; it narrows the list
+  // with search and "Stalled only", and features with no parent stay under their parent as search does.
+  const needsSetup = (f: Feature) => setupGaps(f).length > 0;
+  const unfiltered = (d?.features ?? []).filter((f) => all || ACTIVE.includes(f.status));
+  const needsSetupCount = unfiltered.filter(needsSetup).length;
+  const listed = unfiltered.filter(
+    (f) =>
+      (!stalledOnly || isStalled(f)) &&
+      (!unfinishedOnly || needsSetup(f) || (f.parentId != null && unfiltered.some((p) => p.id === f.parentId && needsSetup(p)))),
+  );
   // Search (BOS-2256): a feature matches on title or description; its subfeatures stay under it, and a matching subfeature brings its parent.
   const needle = query.trim().toLowerCase();
   const hit = (f: Feature) => `${f.title}\n${f.description ?? ""}`.toLowerCase().includes(needle);
@@ -636,7 +726,7 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
     setFold(next);
     saveFeatureOpen(next);
   };
-  const cols = 8 + (d?.drivers.length ?? 0);
+  const cols = 9 + (d?.drivers.length ?? 0);
   return (
     <>
       <header className="page-head">
@@ -680,7 +770,17 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
                   <option value="priority">Priority</option>
                   <option value="demand">Demand</option>
                   <option value="newest">Newest</option>
+                  <option value="moved">Last moved</option>
                 </select>
+              </label>
+              <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <input type="checkbox" checked={stalledOnly} onChange={(e) => setStalledOnly(e.target.checked)} />
+                Stalled only
+              </label>
+              <label style={{ display: "flex", gap: 6, alignItems: "center" }} title="Features with no size, no place on the roadmap, or no portal decision">
+                <input type="checkbox" checked={unfinishedOnly} onChange={(e) => setUnfinishedOnly(e.target.checked)} />
+                Unfinished setup
+                {d && <span className="muted" data-testid="needs-setup-count">{needsSetupCount} feature{needsSetupCount === 1 ? " needs" : "s need"} setup</span>}
               </label>
               <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
                 <input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} />
@@ -730,6 +830,10 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
                 Clear
               </button>
             </p>
+          ) : d && !shown.length && (unfinishedOnly || stalledOnly) && !needle ? (
+            <p className="muted" data-testid="setup-empty">
+              {unfinishedOnly ? "Every feature is set up" : "No stalled features"}
+            </p>
           ) : d && !shown.length ? (
             <p className="muted">No features yet. Add one above, or create one while linking feedback in the inbox.</p>
           ) : d && phone ? (
@@ -757,6 +861,7 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
                     <th className="feature-name">Feature</th>
                     <th title="Show on the feedback portal, where visitors can vote on it">Portal</th>
                     <th>Status</th>
+                    <th title="When one of its tasks last changed state">Last moved</th>
                     <th title="Importance from linked feedback; each customer counts once. In brackets: how many people.">Demand</th>
                     {d.drivers.map((x) => (
                       <th key={x.id} className="num" title={`${x.name} (weight ${x.weight})`}>
@@ -882,7 +987,7 @@ export function GoalSelect({ id, tree, value, onChange }: { id: string; tree: Tr
 }
 
 function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go: (to: string) => void }) {
-  const data = usePoll((signal) => api<FeatureDetail>(`/api/features/${id}`, { signal }), 30_000, `feature-${id}`);
+  const data = usePoll((signal) => api<FeatureDetail & { forecast?: FeatureForecastView | null }>(`/api/features/${id}`, { signal }), 30_000, `feature-${id}`);
   const list = usePoll((signal) => api<ScoredFeatures>(`/api/companies/${companyId}/features`, { signal }), 60_000, `fl-${companyId}`);
   const settings = usePoll((signal) => api<FeedbackSettingsView>(`/api/companies/${companyId}/feedback-settings`, { signal }), 60_000, `fs-page-${companyId}`);
   const tree = usePoll((signal) => api<Tree>(`/api/companies/${companyId}/objectives`, { signal }), 120_000, `tree-f-${companyId}`);
@@ -974,6 +1079,12 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
             </span>
             {f.releasedAt && <span>Released {when(f.releasedAt)}</span>}
           </p>
+          {d.forecast &&
+            forecastLines(d.forecast).map((line) => (
+              <p key={line} className="sub feature-forecast" style={{ margin: "2px 0 0" }}>
+                {line}
+              </p>
+            ))}
         </div>
         <CopyLinkButton />
       </header>

@@ -13,6 +13,8 @@ import { BranchOverlaps } from "../components/BranchOverlaps";
 import { TicketOpenCards } from "../components/TicketOpenCards";
 import { TicketRelated } from "../components/TicketRelated";
 import { TicketRecord } from "../components/TicketRecord";
+import { TicketChecks } from "../components/TicketChecks";
+import { TicketStateHistory } from "../components/TicketStateHistory";
 import { ScrumMasterLog } from "../components/ScrumMasterLog";
 import { TicketOutputs, type Artifact } from "../components/TicketOutputs";
 import { criterionText, criteriaText, goLiveWaitWords, isAfterMerge, readVerdicts, type Criterion } from "@boss-man/shared";
@@ -29,6 +31,7 @@ import { when } from "./Runs";
 import { ago } from "./Dashboard";
 import { StatusLineView, type StatusLine } from "./MergeQueue";
 import { CopyLinkButton } from "../components/CopyLinkButton";
+import { RecurringTag } from "../components/RecurringTag";
 import { TicketDownloadButton } from "../components/TicketDownloadButton";
 
 /** The mark for one verdict on a "Done when" checklist row. */
@@ -857,6 +860,8 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
         <div className="ticket-main">
           <TicketOpenCards ticketId={t.id} />
           <TicketRecord ticketId={t.id} />
+          <TicketChecks ticketId={t.id} />
+          <TicketStateHistory ticketId={t.id} />
           <section className="card" aria-labelledby="desc-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
               <h2 id="desc-h" style={{ fontSize: 17, fontWeight: 600 }}>
@@ -929,6 +934,13 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
               </span>
             </label>
           )}
+
+          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14 }}>
+            <input type="checkbox" checked={!!t.recurring} disabled={busy} onChange={(e) => patch({ recurring: e.target.checked })} />
+            <span>
+              Recurring <span className="muted">(a standing job that stays on the board; shows a Recurring label, changes nothing else)</span>
+            </span>
+          </label>
 
           <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14 }}>
             <input type="checkbox" checked={!!t.urgent} disabled={busy} onChange={(e) => patch({ urgent: e.target.checked })} />
@@ -1173,6 +1185,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             </dt>
             <dd>
               <span className={`tag ${t.systemState === "review" && (t.signoff === "waiting" || t.signoff === "missing") ? "amber" : (STATE_TONE[t.systemState] ?? "")}`}>{t.systemState === "done" && t.outcome === "cancelled" ? "Cancelled" : (STATE_LABEL[t.systemState] ?? t.systemState)}</span>
+              {t.recurring && <RecurringTag />}
               <select aria-label="Change status" value="" onChange={(e) => e.target.value && void moveTo(e.target.value)}>
                 <option value="">Change…</option>
                 {Object.entries(STATE_LABEL).map(([k, label]) => (

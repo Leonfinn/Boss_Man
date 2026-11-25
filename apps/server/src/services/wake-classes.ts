@@ -48,6 +48,8 @@ const WAKE_TABLE = {
   "after-merge check reported": "waiting",
   // The owner's note on a card nobody watches (a Boss Man card, or one whose ticket is done) goes to the CEO (BOS-2077). Never dropped.
   "owner hand-back": "waiting",
+  // BOS-2555: no result reached the owner after their answer to a card that asked them for information; the CEO posts it. Never dropped.
+  "a result for the owner": "waiting",
   // BOS-2288: a merged ticket's named watch trigger happened (a gate CI failure, a main CI failure). Never dropped.
   "watch trigger": "waiting",
   // Scheduled by Boss Man.
@@ -88,6 +90,9 @@ const WAKE_TABLE = {
   "deploy left the server unchanged": "scheduled",
   // The nightly secrets pass found a key-shaped string on main, or one whose closed ticket is still there (BOS-1932). Never dropped.
   "secret scan": "scheduled",
+  // BOS-2356: Boss Man tells an agent its nudge was dropped, and why. Ticketless; scheduled so it never takes the
+  // agent's hourly allowance of ticketless wakes or is itself dropped as stale (it would be silent again).
+  "nudge dropped": "scheduled",
   // Started by agents.
   nudge: "agent",
   chased: "agent",

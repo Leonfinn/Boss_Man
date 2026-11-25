@@ -64,6 +64,8 @@ Open the [Boss Man releases page](@repo/releases) and pick a version. The newest
 - `docker-compose.images.yml`
 - `images.env`
 
+If the release you pick has no `images.env`, its images are not published yet: use [Build from source](#build-from-source) further down instead.
+
 `images.env` holds the registry and the exact digest of every image. Do not edit the digests.
 
 Optional: check the signatures with [cosign](https://docs.sigstore.dev/cosign/installation/). Download `images.env.sigstore.json` and `docker-compose.images.yml.sigstore.json` from the same release, then run:

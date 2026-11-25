@@ -15,6 +15,8 @@ const TAIL_FROM = 0.75;
 const TAIL_FLAG_TIMES = 2;
 /** A size needs this many timed tickets before the "behaves like the next size" note will lean on its median. */
 const SIGNAL_MIN = 3;
+/** Whole weeks in the week-by-week table (the part-week so far comes after them). */
+const TREND_WEEKS = 8;
 /** Reference tickets kept per size for the sizing guide. */
 const EXAMPLES_PER_SIZE = 3;
 
@@ -81,6 +83,74 @@ export function sizeSignals(rows: SizeRow[], timed: (r: SizeRow) => number = (r)
     }
   }
   return out;
+}
+
+/** The states "Where tickets wait" splits a finished ticket's time into (BOS-2425). Review is split three ways, below. */
+export const WAIT_STATES = ["in_progress", "checking", "in_review", "blocked", "merging"] as const;
+export type WaitState = (typeof WAIT_STATES)[number];
+type Move = { fromState: string | null; toState: string; at: Date };
+type ReviewSlot = { status: string; createdAt: Date; decidedAt: Date | null };
+
+/**
+ * One finished ticket's time in each state, from its first start to its last move to done; null when its history began
+ * before ticket_transitions (no start, no finish, or the first recorded move leaves a working state).
+ *
+ * Transitions only know "review", so each stay in review is split by its review slots (review_requests created in it):
+ * - checking: until the first slot opens. Since BOS-1906 slots open only once the quick check passes; a stay with no
+ *   slot that went back to work was a failed check, so it is all checking.
+ * - merging: from the last verdict to leaving review, when every slot in the stay approved (or was overruled); a
+ *   stay with no slot that ended in done had no reviewers, so it is all merging.
+ * - in_review: the rest.
+ * Time in Ready or Backlog after the start (unassigned, parked) counts in none of them.
+ */
+export function timeInStates(moves: Move[], slots: ReviewSlot[]): Record<WaitState, number> | null {
+  const m = [...moves].sort((a, b) => a.at.getTime() - b.at.getTime());
+  if (!m.length || ["in_progress", "review", "blocked"].includes(m[0]!.fromState ?? "")) return null;
+  const start = m.findIndex((x) => x.toState === "in_progress");
+  const end = m.map((x) => x.toState).lastIndexOf("done");
+  if (start < 0 || end <= start) return null;
+  const out: Record<WaitState, number> = { in_progress: 0, checking: 0, in_review: 0, blocked: 0, merging: 0 };
+  const live = slots.filter((s) => s.status !== "skipped");
+  for (let i = start; i < end; i++) {
+    const state = m[i]!.toState;
+    const a = m[i]!.at.getTime(), b = m[i + 1]!.at.getTime();
+    if (state === "in_progress" || state === "blocked") out[state] += b - a;
+    if (state !== "review") continue;
+    const mine = live.filter((s) => s.createdAt.getTime() >= a && s.createdAt.getTime() < b);
+    const toDone = m[i + 1]!.toState === "done";
+    if (!mine.length) {
+      out[toDone ? "merging" : "checking"] += b - a;
+      continue;
+    }
+    const opened = Math.max(a, Math.min(...mine.map((s) => s.createdAt.getTime())));
+    const passed = mine.every((s) => (s.status === "approved" || s.status === "overruled") && s.decidedAt);
+    const lastVerdict = passed ? Math.min(b, Math.max(opened, ...mine.map((s) => s.decidedAt!.getTime()))) : b;
+    out.checking += opened - a;
+    out.in_review += lastVerdict - opened;
+    out.merging += b - lastVerdict;
+  }
+  return out;
+}
+
+export type WaitRow = { state: WaitState; tickets: number; p50Ms: number | null; p90Ms: number | null; share: number | null };
+export type SlowTicket = { id: string; ref: string | null; title: string; totalMs: number; longest: WaitState; longestMs: number };
+
+/** The "Where tickets wait" figures: per state, the middle and 90th-percentile time of the tickets that spent any time in it, and its share of all the time; then the 5 slowest. */
+export function whereTicketsWait(timed: { id: string; ref: string | null; title: string; times: Record<WaitState, number> }[]): { rows: WaitRow[]; slowest: SlowTicket[] } {
+  const total = (t: Record<WaitState, number>) => WAIT_STATES.reduce((n, s) => n + t[s], 0);
+  const all = timed.reduce((n, x) => n + total(x.times), 0);
+  const rows = WAIT_STATES.map((state) => {
+    const ms = timed.map((x) => x.times[state]).filter((v) => v > 0);
+    return { state, tickets: ms.length, p50Ms: median(ms), p90Ms: percentile(ms, 0.9), share: all ? ms.reduce((a, b) => a + b, 0) / all : null };
+  });
+  const slowest = timed
+    .map((x) => {
+      const longest = WAIT_STATES.reduce((best, s) => (x.times[s] > x.times[best] ? s : best), WAIT_STATES[0]);
+      return { id: x.id, ref: x.ref, title: x.title, totalMs: total(x.times), longest, longestMs: x.times[longest] };
+    })
+    .sort((a, b) => b.totalMs - a.totalMs)
+    .slice(0, 5);
+  return { rows, slowest };
 }
 
 export type Stats = { done: number; firstPassRate: number | null; meanRework: number | null; medianCycleMs: number | null; costPerDoneMicros: number | null; ownCostPerDoneMicros: number | null; watchdogFlags: number; overrideShare: number | null; answered: number };
@@ -372,7 +442,49 @@ export function workflowService(db: Db, deps: { now?: () => Date } = {}) {
 
       // The whole team over the same window: a company-wide middle time can't be summed from the roles.
       const overall = stats(done, flagRows.length, answeredRows.length, answeredRows.filter((x) => x.answer !== x.recommended).length, () => true);
-      return { days, since: since.toISOString(), costBasis, overall, byRole, byAgent, handoffs, features: featureRows, sizes, sizeNotes, sizeExamples: examples };
+      // ----- Week by week: the last 8 whole weeks (Monday 00:00 UTC), oldest first, then the part-week so far -----
+      const dow = (t.getUTCDay() + 6) % 7;
+      const thisMonday = Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate()) - dow * DAY;
+      const weekStarts = Array.from({ length: TREND_WEEKS + 1 }, (_, i) => thisMonday - (TREND_WEEKS - i) * 7 * DAY);
+      const trendRows = doneRows.filter((r) => r.assigneeAgentId && r.stateChangedAt.getTime() >= weekStarts[0]!);
+      const trendIds = trendRows.map((r) => r.id);
+      const trendReviews = trendIds.length ? await db.select({ ticketId: ticketReviews.ticketId, verdict: ticketReviews.verdict }).from(ticketReviews).where(inArray(ticketReviews.ticketId, trendIds)) : [];
+      const trendRework = new Map<string, number>();
+      const trendReviewed = new Set<string>();
+      for (const r of trendReviews) {
+        trendReviewed.add(r.ticketId);
+        if (r.verdict === "changes_requested") trendRework.set(r.ticketId, (trendRework.get(r.ticketId) ?? 0) + 1);
+      }
+      const trendCosts = trendIds.length
+        ? await db.select({ ticketId: runs.ticketId, micros: sql<number>`coalesce(sum(${costEvents.costMicros}), 0)::float8` }).from(costEvents).innerJoin(runs, eq(runs.id, costEvents.runId)).where(inArray(runs.ticketId, trendIds)).groupBy(runs.ticketId)
+        : [];
+      const trendCost = new Map(trendCosts.map((c) => [c.ticketId!, Number(c.micros)]));
+      const trend = weekStarts.map((start, i) => {
+        const end = i === TREND_WEEKS ? Infinity : weekStarts[i + 1]!;
+        const wk: Done[] = trendRows
+          .filter((r) => r.stateChangedAt.getTime() >= start && r.stateChangedAt.getTime() < end)
+          .map((r) => ({ agentId: r.assigneeAgentId!, cycleMs: cycleOf.get(r.id) ?? null, rework: trendRework.get(r.id) ?? 0, reviewed: trendReviewed.has(r.id), costMicros: trendCost.get(r.id) ?? 0, costBy: new Map() }));
+        const s = stats(wk, 0, 0, 0, () => true);
+        return { weekStart: new Date(start).toISOString(), partial: i === TREND_WEEKS, done: s.done, firstPassRate: s.firstPassRate, meanRework: s.meanRework, medianCycleMs: s.medianCycleMs, costPerDoneMicros: s.costPerDoneMicros };
+      });
+
+      // ----- Where tickets wait (BOS-2425): every ticket finished in the window, assigned or not -----
+      const waitRows = doneRows.filter((r) => r.stateChangedAt >= since);
+      const waitIds = waitRows.map((r) => r.id);
+      const slots = waitIds.length ? await db.select({ ticketId: reviewRequests.ticketId, status: reviewRequests.status, createdAt: reviewRequests.createdAt, decidedAt: reviewRequests.decidedAt }).from(reviewRequests).where(inArray(reviewRequests.ticketId, waitIds)) : [];
+      const byTicket = <T extends { ticketId: string }>(rows: T[]) => {
+        const m = new Map<string, T[]>();
+        for (const x of rows) m.set(x.ticketId, [...(m.get(x.ticketId) ?? []), x]);
+        return m;
+      };
+      const movesOf = byTicket(moves);
+      const slotsOf = byTicket(slots);
+      const timed = waitRows.flatMap((r) => {
+        const times = timeInStates(movesOf.get(r.id) ?? [], slotsOf.get(r.id) ?? []);
+        return times ? [{ id: r.id, ref: ticketRef(company?.prefix, r.number), title: r.title, times }] : [];
+      });
+      const stateWaits = { ...whereTicketsWait(timed), timed: timed.length, leftOut: waitRows.length - timed.length };
+      return { days, since: since.toISOString(), costBasis, trend, overall, byRole, byAgent, handoffs, features: featureRows, sizes, sizeNotes, sizeExamples: examples, stateWaits };
     },
     /** The scorecard plus `previous`: the whole team's figures and the handoffs for the same length of time just before (as the retro builds its earlier period). */
     async scorecardWithPrevious(companyId: string, days: number) {

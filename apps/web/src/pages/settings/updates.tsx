@@ -6,7 +6,7 @@ export type Report = { live: LiveRow[]; update: UpdateRow | null };
 export type LastUpdate = { at: string; startedAt: string | null; ok: boolean; title: string; body: string } | null;
 /** BOS-1600: a check on a runner that a swap waits on. Absent (`checks` undefined) from an older server. */
 export type RunnerCheckView = { ticket: string | null; kind: string; scope: string; startedAt: string | null; runningForMinutes: number; usuallyMinutes: number | null };
-export type MaintenanceView = ({ on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; deadline: string; runs: number; companies: number; blocking?: boolean; checks?: number; checksList?: RunnerCheckView[]; since?: string; phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean; /** BOS-1951 */ merges?: number; mergesList?: { ticket: string | null }[]; unknownWait?: boolean; /** BOS-2056: the owner's wrap-up: since when, and which update it is for. */ wrapAsked?: boolean; wrapSince?: string; wrapForUpdate?: "server" | "runner" | "none" }) & { last?: LastUpdate };
+export type MaintenanceView = ({ on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; deadline: string; runs: number; companies: number; blocking?: boolean; checks?: number; checksList?: RunnerCheckView[]; since?: string; phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean; /** BOS-2531: false only while a runner is being swapped, until chatBackBy at the latest. */ chatOpen?: boolean; chatBackBy?: string | null; /** BOS-1951 */ merges?: number; mergesList?: { ticket: string | null }[]; unknownWait?: boolean; /** BOS-2479: checks on a check worker (not waited for) and the latest go-ahead. */ workerChecksList?: WorkerCheckView[]; goAheadAt?: string | null; /** BOS-2056: the owner's wrap-up: since when, and which update it is for. */ wrapAsked?: boolean; wrapSince?: string; wrapForUpdate?: "server" | "runner" | "none" }) & { last?: LastUpdate };
 
 /** "BOS-1525 merge check, started 19:41, usually about 15 min" (BOS-1600). */
 export function checkSentence(c: RunnerCheckView): string {
@@ -18,7 +18,7 @@ export function checkSentence(c: RunnerCheckView): string {
  * What a runner update is waiting for, in plain words, from live state (BOS-1600). "swapping the runners now" only
  * when nothing is left to wait for. Agent runs and checks are named separately.
  */
-export function waitingFor(m: { runs: number; companies: number; checks?: number; checksList?: RunnerCheckView[]; merges?: number; mergesList?: { ticket: string | null }[]; unknownWait?: boolean }): string {
+export function waitingFor(m: { runs: number; companies: number; checks?: number; checksList?: RunnerCheckView[]; merges?: number; mergesList?: { ticket: string | null }[]; unknownWait?: boolean; chatOpen?: boolean }): string {
   const n = m.runs;
   const k = m.checks ?? 0;
   const g = m.merges ?? 0;
@@ -31,15 +31,46 @@ export function waitingFor(m: { runs: number; companies: number; checks?: number
   const parts = [...(n > 0 ? [agents] : []), ...(k > 0 ? [checks] : []), ...(g > 0 ? [merges] : [])];
   if (parts.length) return `waiting for ${parts.join(", and for ")}`;
   if (m.unknownWait) return "waiting on something Boss Man cannot name (no agent run, check or merge is going)";
+  // BOS-2531: "now" only while a runner is really being recreated (the server says so with chatOpen false). With
+  // nothing left to wait for and no runner mid-swap, the swap is next, not under way. An older server sends no chatOpen.
+  if (m.chatOpen === true) return "about to swap the runners (nothing is left to wait for)";
   return "swapping the runners now";
 }
+/** BOS-2479: a check on a separate check worker, which a runner update lets run and never waits for. */
+export type WorkerCheckView = { ticket: string | null; kind: string; scope: string };
+
+/**
+ * BOS-2479: what the banner adds after "waiting for …": the checks on a check worker it does not wait for, named by ticket
+ * and counted by kind ("2 quick checks on a check worker keep running and are not waited for (BOS-2456, BOS-2468)."), and
+ * the latest time the update goes ahead. On 24 Nov the owner saw two quick checks running and read them as the wait.
+ * Both fields are absent from an older server, which then gets nothing extra.
+ */
+export function updateWaitExtras(m: { workerChecksList?: WorkerCheckView[]; goAheadAt?: string | null }): string {
+  const list = m.workerChecksList ?? [];
+  const counts = new Map<string, number>(); // not state: local to this call
+  for (const c of list) {
+    const word = c.kind === "merge" ? "merge check" : c.scope === "full" ? "full check" : c.scope === "quick" ? "quick check" : "check";
+    counts.set(word, (counts.get(word) ?? 0) + 1);
+  }
+  const kinds = [...counts].map(([word, k]) => plural(k, word, `${word}s`)).join(" and ");
+  const names = list.map((c) => c.ticket).filter((t): t is string => !!t);
+  const one = list.length === 1;
+  const worker = list.length ? `${kinds} on a check worker ${one ? "keeps" : "keep"} running and ${one ? "is" : "are"} not waited for${names.length ? ` (${names.join(", ")})` : ""}.` : "";
+  const goAhead = m.goAheadAt ? `Goes ahead by ${atTime(m.goAheadAt)} at the latest.` : "";
+  return [worker, goAhead].filter(Boolean).join(" ");
+}
+
 /**
  * BOS-1877: when a drain started and when it should end, in plain words, from the server's forecast. All fields are
  * absent from an older server, which then gets no timing line. `overdue` says so plainly instead of promising a time.
  */
-export function drainTiming(m: { since?: string; phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean; runs: number }): string {
+export function drainTiming(m: { since?: string; phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean; runs: number; chatOpen?: boolean; chatBackBy?: string | null }): string {
   if (!m.phase) return "";
-  if (m.phase === "swapping") return "The runners are being swapped now.";
+  if (m.phase === "swapping") {
+    // BOS-2531: phase "swapping" only means nothing counted is left. A runner is being recreated when chatOpen is false.
+    if (m.chatOpen === true) return "The runners are swapped next.";
+    return m.chatBackBy ? `Back by ${atTime(m.chatBackBy)} at the latest.` : "";
+  }
   const started = m.since ? `Started ${atTime(m.since)}. ` : "";
   if (m.overdue) return `${started}This is taking longer than expected.`;
   if (m.expectedFinishAt) return `${started}Expected to finish about ${atTime(m.expectedFinishAt)}.`;
@@ -81,6 +112,8 @@ export type SelfDeployView = {
   heldDeploy?: { id: string; commit: string; since: string } | null;
   /** Why a queued runner update was cancelled (a rolled-back server update), until the next press. */
   queueCancelled?: { at: string; why: string } | null;
+  /** BOS-2554 (DR-076 A): a failed update that is held while its failure is looked into, with the words to show. Absent from an older server. */
+  failureHolds?: { subject: "server_deploy" | "runner_update"; commit: string; since: string; releaseBy: string; outcome: string | null; words: string }[];
 };
 
 /** A server update waiting for a quiet machine (BOS-420). */
@@ -89,7 +122,7 @@ export type DeployWaitView =
   | { on: true; phase: "waiting" | "sent" | "window" | "handover"; origin: "approve" | "hand"; commit: string; deadline: string; windowUntil?: string; quiet?: { ready: boolean; runs: number; checks: number; freeMb: number | null; needMb: number | null; why: string[] } };
 
 /** One row of Recent updates, from GET /api/self-deploy/history (BOS-1238). */
-export type HistoryRow = { id: string; target: "server" | "runner"; commit: string; changes: number; result: string | null; message: string | null; at: string };
+export type HistoryRow = { id: string; target: "server" | "runner"; commit: string; changes: number; /** BOS-2549: how many of them the card names (the rest are only counted). */ shown?: number; /** BOS-2549: the short commit of the update that replaced this one. */ replacedBy?: string | null; result: string | null; message: string | null; at: string };
 
 const gbOf = (mb: number) => `${(mb / 1024).toFixed(1)} GB`;
 
@@ -245,7 +278,10 @@ export function updateStatus(view: SelfDeployView | null, maint: MaintenanceView
   // 1. Update failed: the last report was a failure and nothing newer has deployed.
   const failed = !!s && (s.result === "failed" || s.result === "rolled_back" || s.result === "rejected");
   const ignorable = !!s && s.result === "rejected" && (isReplaced(s.message) || s.target === "runner" || rateLimited);
-  if (s && failed && !ignorable && !view.active) {
+  // BOS-2556: a newer update already waiting on the server (approved, sent, or in its window) or queued for the host
+  // takes the banner; the older failure stays as its row in Recent updates and "Try again" is not offered twice.
+  const newerPending = !!w || view.pending;
+  if (s && failed && !ignorable && !view.active && !newerPending) {
     const what = s.target === "runner" ? "runner update" : s.target === "restart" ? "restart" : "update";
     const earlier = s.target === "runner" ? "the earlier runner image" : "the earlier version";
     const more = [`Why: ${plainReason(s.message)}.`, view.queueCancelled?.why].filter(Boolean).join(" ");
@@ -276,7 +312,7 @@ export function updateStatus(view: SelfDeployView | null, maint: MaintenanceView
         tone: "amber",
         tag: "Waiting for checks",
         say: `The ${what} is ${waitingFor(maint)}.`,
-        more: `Nothing new starts until ${k === 1 ? "it is" : "they are"} done. Waiting is safe: ${k === 1 ? "it carries" : "they carry"} on and the swap follows by itself. Checks on a separate check worker are not waited for.`,
+        more: `Nothing new starts until ${k === 1 ? "it is" : "they are"} done. Waiting is safe: ${k === 1 ? "it carries" : "they carry"} on and the swap follows by itself. ${maint.workerChecksList?.length ? "" : "Checks on a separate check worker are not waited for. "}${updateWaitExtras(maint)}`.trim(),
         next: `Or stop ${k === 1 ? "it" : "them"} now: ${k === 1 ? "it starts" : "they start"} again from the beginning after the swap, so the time already spent is lost.`,
         primary: { id: "update-now", label: `Stop the ${k === 1 ? "check" : "checks"} and update now`, blue: false },
         normal: [{ id: "cancel-update", label: `Cancel the ${what}` }],
@@ -415,11 +451,14 @@ export function deployerLine(v: SelfDeployView): string {
 
 /** How far the runner swap has got (BOS-1558): the newest image any runner reports is the new one; the rest are still waiting. */
 export type RunnerProgress = { inProgress: boolean; done: number; total: number; newest: string | null };
-export function runnerProgress(live: LiveRow[] | null | undefined, maint: MaintenanceView | null | undefined): RunnerProgress {
+export function runnerProgress(live: LiveRow[] | null | undefined, maint: MaintenanceView | null | undefined, needed?: string | null): RunnerProgress {
   const runners = (live ?? []).filter((l) => l.registered);
   const stamps = runners.map((l) => l.imageVersion).filter((v): v is string => !!v);
-  const newest = stamps.length ? stamps.reduce((a, b) => (b > a ? b : a)) : null;
-  const done = runners.filter((l) => l.connected && !l.swap && l.imageVersion === newest).length;
+  // BOS-2546: "done" is measured against the image the update is for (`runnerImage.needed`); only without one does the fleet's newest stand in.
+  const newest = needed || (stamps.length ? stamps.reduce((a, b) => (b > a ? b : a)) : null);
+  // Same test as LiveState's "Connected" (a leftover swap mark must not hide a runner that is already up on the new image, BOS-2525).
+  // Image stamps are fixed-width (YYYYMMDDHHMM), so the string comparison orders them correctly.
+  const done = runners.filter((l) => l.connected && !!l.imageVersion && !!newest && l.imageVersion >= newest).length;
   // A runner update's hold (not a setting change or a wrap-up) is on, so the swap is not finished whatever the images say.
   const held = !!maint && maint.on && maint.kind !== "settings" && maint.kind !== "wrapup" && maint.kind !== "building";
   return { inProgress: held, done, total: runners.length, newest };
@@ -429,13 +468,14 @@ export function runnerProgress(live: LiveRow[] | null | undefined, maint: Mainte
 export function historyTag(r: HistoryRow, swap?: RunnerProgress | null): { tag: string; tone: StatusTone } {
   if (r.result === "deployed" && r.target === "runner" && swap?.inProgress) return { tag: swap.total > 0 ? `Swapping (${swap.done} of ${plural(swap.total, "company", "companies")} done)` : "Swapping", tone: "amber" };
   if (r.result === "deployed") return { tag: r.target === "runner" ? "Done" : "Live", tone: "green" };
+  if (r.result === "replaced") return { tag: "Replaced", tone: "grey" };
   if (r.result === "rolled_back") return { tag: "Switched back", tone: "red" };
   if (r.result === "failed") return { tag: "Failed", tone: "red" };
   if (r.result === "rejected") return isReplaced(r.message) ? { tag: "Replaced", tone: "grey" } : { tag: "Failed", tone: "red" };
   if (r.result === "nothing_new") return { tag: "Done", tone: "grey" };
   return { tag: "Waiting", tone: "amber" };
 }
-export const historyWhat = (r: HistoryRow) => (r.target === "runner" ? "Runners, all companies" : r.result === "rejected" && isReplaced(r.message) ? "Server: not sent, a newer update replaced it" : r.changes ? `Server, ${plural(r.changes, "change", "changes")}` : "Server");
+export const historyWhat = (r: HistoryRow) => (r.target === "runner" ? "Runners, all companies" : r.result === "rejected" && isReplaced(r.message) ? "Server: not sent, a newer update replaced it" : r.result === "replaced" ? `Server${r.changes ? `, ${plural(r.changes, "change", "changes")}` : ""}: replaced by a newer update${r.replacedBy ? ` (${r.replacedBy})` : ""}` : r.changes ? `Server, ${plural(r.changes, "change", "changes")}${r.shown !== undefined && r.shown < r.changes ? ` (showing ${r.shown} of ${r.changes})` : ""}` : "Server");
 
 /** The live state of one company's runner, leading the panel: connected or not, and since when. */
 export function LiveState({ r, progress }: { r: LiveRow; progress?: RunnerProgress | null }) {

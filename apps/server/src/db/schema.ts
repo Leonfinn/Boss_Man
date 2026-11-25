@@ -350,6 +350,20 @@ export const keyResults = pgTable("key_results", {
   checkSpec: jsonb("check_spec"),
 });
 
+/** Every value a key result has been given, with when and who (BOS-2458). byKind: owner, agent or check. */
+export const keyResultReadings = pgTable(
+  "key_result_readings",
+  {
+    id: id(),
+    keyResultId: uuid("key_result_id").notNull().references(() => keyResults.id, { onDelete: "cascade" }),
+    value: real("value").notNull(),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+    byKind: text("by_kind").notNull(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+  },
+  (t) => [index("key_result_readings_kr_at").on(t.keyResultId, t.at)],
+);
+
 export const roadmapHorizon = pgEnum("roadmap_horizon", ["now", "next", "later"]);
 
 export const milestones = pgTable("milestones", {
@@ -485,6 +499,8 @@ export const tickets = pgTable(
     ownerSetupDecisionId: uuid("owner_setup_decision_id").references((): AnyPgColumn => decisions.id, { onDelete: "set null" }),
     /** Owner-marked urgent work: it always passes the subscription quota hold (BOS-227). */
     urgent: boolean("urgent").notNull().default(false),
+    /** BOS-2485: a standing, repeated job that stays on the board for good; only a label, no behaviour. */
+    recurring: boolean("recurring").notNull().default(false),
     /** BOS-1516: the owner's "Priority 1" switch. It is the urgent mark plus this flag (set by the owner only); tiers read `urgent`, only the merge page reads this. */
     urgentByOwner: boolean("urgent_by_owner").notNull().default(false),
     /**
@@ -595,6 +611,18 @@ export const decisions = pgTable("decisions", {
   recheckNote: text("recheck_note"),
   /** How many times a re-check confirmed this card; a card confirmed twice and flagged again within a day goes straight to the CEO. */
   recheckCount: integer("recheck_count").notNull().default(0),
+  /**
+   * BOS-2555: the answer was information the card asked the owner for (a log, a screenshot, a value), so its
+   * outcome must be reported back to them. The words that marked it (kept so the card says why), and when the
+   * report was expected by; null for every other card. Cleared once the report reaches the owner's chat.
+   */
+  infoAskWhy: text("info_ask_why"),
+  infoAskDueAt: timestamp("info_ask_due_at", { withTimezone: true }),
+  /**
+   * BOS-2555 stage 2: the time the owner was told nobody has reported back yet. The raiser still has the first window to
+   * report; the CEO is woken at this deadline if the report never came.
+   */
+  infoAskNaggedAt: timestamp("info_ask_nagged_at", { withTimezone: true }),
 },
   // The open queue is read on the dashboard, brief and ladder, and the notifications sweep scans status (BOS-407).
   // Every hot read also names the company, so the two go together (BOS-546); status alone still serves the sweeps that cross companies.
@@ -888,6 +916,39 @@ export const providerQuotaWarnings = pgTable(
   (t) => [primaryKey({ columns: [t.fundingSourceId, t.period, t.threshold] })],
 );
 
+/**
+ * One row per funding source, usage window and reset: the highest use seen in that window and its limit.
+ * Kept past the 30-day pruning of raw readings, for the "Last 8 weeks" fold on Settings → Funding.
+ * `resets_at` is the reset that ends the window, rounded to the hour so a few seconds' jitter in
+ * the reported time is one window.
+ */
+export const fundingWindowSummaries = pgTable(
+  "funding_window_summaries",
+  {
+    fundingSourceId: uuid("funding_source_id").notNull().references(() => fundingSources.id, { onDelete: "cascade" }),
+    window: text("window").notNull(),
+    resetsAt: timestamp("resets_at", { withTimezone: true }).notNull(),
+    /** Highest share used, 0 to 1 and over. */
+    peakUtilization: real("peak_utilization").notNull(),
+    /** The provider's own limit when it states one (Synthetic); null for windows reported as a share only. */
+    limitValue: integer("limit_value"),
+  },
+  (t) => [primaryKey({ columns: [t.fundingSourceId, t.window, t.resetsAt] })],
+);
+
+/** A stretch when new work was held because this source's usage limit was nearly used up. endedAt null: still held. */
+export const fundingQuotaHolds = pgTable(
+  "funding_quota_holds",
+  {
+    id: id(),
+    fundingSourceId: uuid("funding_source_id").notNull().references(() => fundingSources.id, { onDelete: "cascade" }),
+    window: text("window").notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+  },
+  (t) => [index("funding_quota_holds_source_time").on(t.fundingSourceId, t.startedAt)],
+);
+
 /** "instance" covers every company (R53); its scope_id is the nil UUID. */
 export const budgetScope = pgEnum("budget_scope", ["company", "project", "agent", "instance"]);
 export const budgetWindow = pgEnum("budget_window", ["lifetime", "calendar_month", "billing_cycle", "rolling_days"]);
@@ -962,6 +1023,8 @@ export const deploys = pgTable("deploys", {
   tagAt: timestamp("tag_at", { withTimezone: true }),
   /** "pending", "moved", "unchanged", or "skipped: <why>" / "failed: <git's text>". Null: the target has no tag, or the deploy hasn't finished. */
   tagResult: text("tag_result"),
+  /** BOS-2329: set when the owner asked to ship an earlier successful deploy's commit again; points at that deploy. Null for every ordinary deploy. */
+  redeployOf: uuid("redeploy_of").references((): AnyPgColumn => deploys.id, { onDelete: "set null" }),
   createdAt: createdAt(),
   finishedAt: timestamp("finished_at", { withTimezone: true }),
 });
@@ -1498,6 +1561,8 @@ export const ownerChatMessages = pgTable(
     text: text("text").notNull(),
     /** The run that answered (assistant) or was asked (owner). */
     runId: uuid("run_id").references(() => runs.id, { onDelete: "set null" }),
+    /** BOS-2555: the information-request card this system line reports the result of, so each card gets one line. */
+    infoAskCardId: uuid("info_ask_card_id"),
     createdAt: createdAt(),
   },
   (t) => [index("owner_chat_company_time").on(t.companyId, t.createdAt), index("owner_chat_agent_time").on(t.agentId, t.createdAt)],
@@ -2302,4 +2367,84 @@ export const deviceProfiles = pgTable(
     reportedAt: timestamp("reported_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex("device_profiles_owner_fingerprint").on(t.ownerId, t.fingerprint), index("device_profiles_owner").on(t.ownerId)],
+);
+
+/** One row per runner-update hold (BOS-2408): what it was, each swap try, notable moments, and how it ended. Kept after the hold's settings row is gone, so a restart can't erase why an update waited. */
+export const updateHolds = pgTable(
+  "update_holds",
+  {
+    id: id(),
+    /** The hold's own `since`: one hold, one row. */
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    kind: text("kind").notNull(),
+    reason: text("reason").notNull(),
+    deadline: timestamp("deadline", { withTimezone: true }),
+    minutes: integer("minutes"),
+    /** Each swap attempt: runner slug, try number, when, the error, and the outcome. */
+    swapTries: jsonb("swap_tries").$type<{ slug: string; n: number; at: string; outcome: string; error?: string }[]>().notNull().default(sql`'[]'::jsonb`),
+    /** Short timestamped moments (at most 200): wait on nothing nameable, owner answers, force, cap. */
+    events: jsonb("events").$type<{ at: string; text: string }[]>().notNull().default(sql`'[]'::jsonb`),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    endOk: boolean("end_ok"),
+    endTitle: text("end_title"),
+    endBody: text("end_body"),
+    /** The hold's swapped and failed maps as they stood at the end. */
+    finalState: jsonb("final_state").$type<{ swapped?: Record<string, string>; failed?: Record<string, string> }>(),
+  },
+  (t) => [uniqueIndex("update_holds_started").on(t.startedAt)],
+);
+
+/**
+ * DR-076 A (BOS-2554): a system offer held while an owner ask about the same action is open. Boss Man opens one when a
+ * server or runner update ends failed, half-done or switched back; while it holds, no card for that update is put on
+ * the owner's queue. Released by an agent (`retry_safe` or `do_not_retry`, with text for the owner) or, past
+ * `releaseBy`, as `unknown`. Ended by a later successful update of the same subject, or a newer hold. Rows are kept.
+ */
+export const ownerHolds = pgTable(
+  "owner_holds",
+  {
+    id: id(),
+    /** "server_deploy" | "runner_update". */
+    subject: text("subject").notNull(),
+    /** The host's own words for the failure. */
+    reason: text("reason").notNull(),
+    /** The commit the failed update was for, and how it ended ("failed", "partial", "rolled_back"). */
+    commit: text("commit").notNull(),
+    result: text("result").notNull(),
+    /** The ticket diagnosing it and an agent card linked to it (DR-076 B), when known. */
+    ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "set null" }),
+    decisionId: uuid("decision_id").references(() => decisions.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    releaseBy: timestamp("release_by", { withTimezone: true }).notNull(),
+    releasedAt: timestamp("released_at", { withTimezone: true }),
+    /** An agent's name, or "timeout". */
+    releasedBy: text("released_by"),
+    /** "retry_safe" | "do_not_retry" | "unknown". */
+    outcome: text("outcome"),
+    ownerText: text("owner_text"),
+    /** A later successful update of this subject, or a newer hold, ended it. */
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+  },
+  (t) => [uniqueIndex("owner_holds_one_current").on(t.subject).where(sql`${t.endedAt} is null`)],
+);
+
+/** BOS-2380: one reading of the database's size per day (UTC), so the 7-day growth in the server health box survives a restart. */
+export const serverSizeReadings = pgTable("server_size_readings", {
+  day: text("day").primaryKey(),
+  dbBytes: bigint("db_bytes", { mode: "number" }).notNull(),
+  recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** BOS-2459: each time a runner's socket was up. droppedAt is null while it is up; endedHow says why it ended. Pruned after 30 days. */
+export const runnerConnections = pgTable(
+  "runner_connections",
+  {
+    id: id(),
+    runnerId: uuid("runner_id").notNull().references(() => runners.id, { onDelete: "cascade" }),
+    connectedAt: timestamp("connected_at", { withTimezone: true }).notNull().defaultNow(),
+    droppedAt: timestamp("dropped_at", { withTimezone: true }),
+    /** "dropped" | "stopped" (the owner stopped it) | "server restart"; null while connected. */
+    endedHow: text("ended_how"),
+  },
+  (t) => [index("runner_connections_runner_connected").on(t.runnerId, t.connectedAt)],
 );

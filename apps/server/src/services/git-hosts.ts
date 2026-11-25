@@ -513,9 +513,9 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
      * nightly schedule alike. GitHub only: returns [] elsewhere, so a watcher can say plainly that
      * there is nothing to read.
      */
-    async workflowRuns(cfg: GitHostConfig, token: string, branch: string, limit = 30): Promise<WorkflowRun[]> {
+    async workflowRuns(cfg: GitHostConfig, token: string, branch: string, limit = 30, page = 1): Promise<WorkflowRun[]> {
       if (cfg.kind !== "github") return [];
-      const res = await call(cfg, token, "GET", `/actions/runs?branch=${encodeURIComponent(branch)}&per_page=${Math.max(1, Math.min(100, limit))}`);
+      const res = await call(cfg, token, "GET", `/actions/runs?branch=${encodeURIComponent(branch)}&per_page=${Math.max(1, Math.min(100, limit))}${page > 1 ? `&page=${page}` : ""}`);
       const body = res.json && !Array.isArray(res.json) ? res.json : null;
       const rows = body?.workflow_runs as Array<Record<string, unknown>> | undefined;
       if (!res.ok || !Array.isArray(rows)) throw new GitHostError(res.status, `Couldn't read the workflow runs on ${branch}: ${messageOf(res.json, res.status)}`);
@@ -728,6 +728,14 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
       if (res.json.truncated === true) throw new GitHostError(res.status, `GitHub cut the tree at ${sha.slice(0, 8)} short`);
       const rows = Array.isArray(res.json.tree) ? (res.json.tree as Array<Record<string, unknown>>) : [];
       return rows.filter((r) => r.type === "blob" && typeof r.path === "string").map((r) => String(r.path));
+    },
+
+    /** BOS-2438: the text of one file at a ref (a branch or sha), or null when it can't be read (missing, too big, refused). */
+    async fileText(cfg: GitHostConfig, token: string, path: string, ref: string): Promise<string | null> {
+      if (cfg.kind !== "github") return null;
+      const res = await call(cfg, token, "GET", `/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(ref)}`).catch(() => null);
+      if (!res?.ok || !res.json || Array.isArray(res.json) || res.json.encoding !== "base64" || typeof res.json.content !== "string") return null;
+      return Buffer.from(res.json.content, "base64").toString("utf8");
     },
 
     async get(cfg: GitHostConfig, token: string, number: number): Promise<PullRequest> {

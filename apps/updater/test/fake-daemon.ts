@@ -41,6 +41,16 @@ export function swapConfig(over: Record<string, string> = {}) {
   });
 }
 
+/** 941c: the settings that switch the launcher move and first start on (the swap tests of 941b leave them off). */
+export const HELPER_CFG = {
+  UPDATER_LAUNCHER_MOUNTS: "test_data:/data\ntest_launcher-key:/run/launcher\ntest_updater-state:/run/release:ro",
+  UPDATER_LAUNCHER_ENV: "BOSSMAN_DATA=/data\nBOSSMAN_DATA_HOST=auto\nBOSSMAN_RUNNER_NETWORK=test_default",
+  UPDATER_FIRST_SERVER_DIGEST: `sha256:${"7".repeat(64)}`,
+  UPDATER_FIRST_LAUNCHER_DIGEST: `sha256:${"b".repeat(64)}`,
+  UPDATER_FIRST_RUNNER_DIGEST: `sha256:${"c".repeat(64)}`,
+  UPDATER_FIRST_NETGUARD_DIGEST: `sha256:${"d".repeat(64)}`,
+};
+
 export class FakeDaemon {
   containers = new Map<string, Fc>();
   images = new Set<string>();
@@ -50,6 +60,8 @@ export class FakeDaemon {
   /** Test hooks. */
   execExit = 0;
   migrateExit = 0;
+  guardExit = 0;
+  imageDeletes: string[] = [];
   /** A colour started from a new image answers ready at this commit. */
   newBootsHealthy = true;
   /** Called with the container name when it starts. */
@@ -82,6 +94,15 @@ export class FakeDaemon {
     return c;
   }
 
+  /** The launcher of an earlier release, running, with the images it was given (so the move can name what to remove). */
+  addLauncher(release: string, c = "a") {
+    const ref = (n: string) => `ghcr.io/leonfinn/boss-man-${n}@sha256:${c.repeat(64)}`;
+    const f = this.addPlain("launcher", { [LABEL]: "test", "com.bossman.helper": "launcher", "com.bossman.release": release }, ref("launcher"));
+    f.env = [`BOSSMAN_RUNNER_IMAGE=${ref("runner")}`, `BOSSMAN_NETGUARD_IMAGE=${ref("netguard")}`];
+    f.networks = { test_launcher: ["launcher"] };
+    return f;
+  }
+
   addPlain(name: string, labels: Record<string, string> = { [LABEL]: "test" }, image = "x") {
     const c: Fc = { id: `id${this.nextId++}`.padEnd(12, "0"), name, image, labels, env: [], running: true, exitCode: 0, role: "leader", commit: "", healthy: true, networks: {}, restart: "unless-stopped", created: this.nextId };
     this.containers.set(name, c);
@@ -98,8 +119,8 @@ export class FakeDaemon {
       Id: c.id,
       Name: `/${c.name}`,
       Image: c.image,
-      Config: { Labels: c.labels, Image: c.image },
-      State: { Running: c.running, Status: c.running ? "running" : "exited", ExitCode: c.exitCode },
+      Config: { Labels: c.labels, Image: c.image, Env: c.env },
+      State: { Running: c.running, Status: c.running ? "running" : "exited", ExitCode: c.exitCode, ...("com.bossman.helper" in c.labels ? { Health: { Status: c.running ? (c.healthy ? "healthy" : "unhealthy") : "none" } } : {}) },
       NetworkSettings: { Networks: Object.fromEntries(Object.entries(c.networks).map(([n, a]) => [n, { Aliases: a }])) },
     };
   }
@@ -163,6 +184,10 @@ export class FakeDaemon {
         c.exitCode = this.migrateExit;
       }
       if (c.name.endsWith("-pack")) c.running = false;
+      if (c.name.endsWith("-guardcheck")) {
+        c.running = false;
+        c.exitCode = this.guardExit;
+      }
       this.onStart?.(c.name);
       return empty(204);
     }
@@ -231,7 +256,14 @@ export class FakeDaemon {
       const ref = decodeURIComponent(path.slice("/images/".length, -"/json".length));
       return this.images.has(ref) ? j(200, { Id: "sha256:i", Architecture: "arm64", RepoDigests: [ref] }) : j(404, { message: "no such image" });
     }
-    if (method === "DELETE" && path.startsWith("/images/")) return j(200, []);
+    if (method === "DELETE" && path.startsWith("/images/")) {
+      const ref = decodeURIComponent(path.slice("/images/".length));
+      this.imageDeletes.push(ref);
+      // Docker refuses to delete an image any container (running or not) was made from.
+      if ([...this.containers.values()].some((c) => c.image === ref)) return j(409, { message: "image is being used by container" });
+      this.images.delete(ref);
+      return j(200, []);
+    }
     return j(404, { message: "no such thing" });
   };
 }

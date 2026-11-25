@@ -10,13 +10,15 @@ import { Loader } from "../components/Loader";
 import { LoadError } from "../components/LoadError";
 import { RowMenu } from "../components/RowMenu";
 import { SaveButton, useSaveState } from "../components/SaveButton";
-import { usePoll } from "../hooks";
+import { hashQuery, usePoll } from "../hooks";
 import { when } from "./Runs";
+import { span } from "./Workflow";
 import { buildCsv, download } from "../csv";
 import { clearDraft, saveDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
 import { MoreAbout } from "../components/MoreAbout";
 
+type AgentRecord = { days: number; finished: number; runs: number; failedRuns: number; passedFirstTime: number; sendBacks: number; medianMergeMs: number | null; costPerFinishedMicros: number | null; recent: Array<{ id: string; ref: string | null; title: string; size: number | null; finishedAt: string; sendBacks: number; costMicros: number }> };
 type Template = { id: string; title: string; role: "manager" | "worker"; modelTier: string; summary: string; instructions: string };
 export type AgentRow = {
   id: string;
@@ -213,6 +215,120 @@ const isHours = (v: unknown): v is Hours => !!v && typeof v === "object" && Arra
 export const hoursText = (h: Hours) => `${h.days.map((d) => DAY_NAMES[d]).join(", ")}, ${h.start} to ${h.end} (${h.timeZone})`;
 const show = (v: unknown, sources: FundingSource[]) =>
   isHours(v) ? hoursText(v) : v === null || v === undefined || v === "" ? "none" : typeof v === "boolean" ? (v ? "yes" : "no") : typeof v === "string" ? (sources.find((s) => s.id === v)?.name ?? v) : JSON.stringify(v);
+
+/** "N runs · M failed (P%)" for the record line (BOS-2465). "M failed" links to the Runs page's failed filter. */
+export function RecordRuns({ runs, failedRuns }: { runs: number; failedRuns: number }) {
+  const pct = runs > 0 ? Math.round((failedRuns / runs) * 100) : 0;
+  return (
+    <span data-testid="record-runs">
+      {runs} {runs === 1 ? "run" : "runs"} ·{" "}
+      {failedRuns > 0 ? <a href="#/runs?result=failed">{failedRuns} failed</a> : "0 failed"} ({pct}%)
+    </span>
+  );
+}
+
+export type TeamRecordRow = { agentId: string; name: string; finished: number; runs: number; failedRuns: number; passedFirstTime: number; sendBacks: number; medianMergeMs: number | null; costPerFinishedMicros: number | null };
+export const TEAM_SORTS = [
+  { id: "name", label: "Agent" },
+  { id: "finished", label: "Finished" },
+  { id: "runs", label: "Runs" },
+  { id: "failedShare", label: "Failed" },
+  { id: "passedFirstTime", label: "Passed first time" },
+  { id: "sendBacks", label: "Send-backs" },
+  { id: "medianMergeMs", label: "Median to merge" },
+  { id: "costPerFinished", label: "Cost per finished ticket" },
+] as const;
+export type TeamSort = (typeof TEAM_SORTS)[number]["id"];
+
+/** `?recordSort=failedShare&recordDir=asc`; no sort in the link is the server's name order. Numbers start highest first, names A to Z. */
+export function readTeamSort(q: URLSearchParams): { sort: TeamSort; asc: boolean } {
+  const sort = TEAM_SORTS.find((s) => s.id === q.get("recordSort"))?.id ?? "name";
+  const dir = q.get("recordDir");
+  return { sort, asc: dir === "asc" || (sort === "name" && dir !== "desc") };
+}
+
+const teamKey = (r: TeamRecordRow, sort: TeamSort): number | string | null => {
+  if (sort === "name") return r.name.toLowerCase();
+  if (sort === "failedShare") return r.runs > 0 ? r.failedRuns / r.runs : null;
+  if (sort === "costPerFinished") return r.costPerFinishedMicros;
+  return r[sort];
+};
+
+/** An agent with no figure for the column (no runs, no merge, no cost) goes last whichever way it is sorted. */
+export function sortTeamRecords(list: TeamRecordRow[], sort: TeamSort, asc: boolean): TeamRecordRow[] {
+  return [...list].sort((a, b) => {
+    const x = teamKey(a, sort);
+    const y = teamKey(b, sort);
+    if (x === null || y === null) return x === y ? 0 : x === null ? 1 : -1;
+    const c = typeof x === "string" ? x.localeCompare(y as string) : x - (y as number);
+    return asc ? c : -c;
+  });
+}
+
+function TeamRecord({ companyId }: { companyId: string }) {
+  const initial = readTeamSort(hashQuery());
+  const [opened, setOpened] = useState(hashQuery().has("recordSort"));
+  const [view, setView] = useState(initial);
+  const data = usePoll((signal) => (opened ? api<{ agents: TeamRecordRow[] }>(`/api/companies/${companyId}/agent-records`, { signal }) : Promise.resolve(null)), 120_000, `team-record-${companyId}-${opened}`);
+  const choose = (s: TeamSort) => {
+    const next = s === view.sort ? { sort: s, asc: !view.asc } : { sort: s, asc: s === "name" };
+    setView(next);
+    // In the link without a history entry or a re-route, as Projects does, so a reload or a shared link keeps the order.
+    const q = hashQuery();
+    q.set("recordSort", next.sort);
+    q.set("recordDir", next.asc ? "asc" : "desc");
+    const base = window.location.hash.split("?")[0] || "#/agents";
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${base}?${q.toString()}`);
+  };
+  const rows = data.data ? sortTeamRecords(data.data.agents, view.sort, view.asc) : [];
+  return (
+    <details open={opened || undefined} onToggle={(e) => (e.currentTarget as HTMLDetailsElement).open && setOpened(true)}>
+      <summary className="section-label">Team record, last 30 days</summary>
+      {!opened ? null : data.data ? (
+        rows.length === 0 ? (
+          <p className="muted">No agents yet.</p>
+        ) : (
+          <div className="table-wrap">
+            <table data-testid="team-record">
+              <thead>
+                <tr>
+                  {TEAM_SORTS.map((s) => (
+                    <th key={s.id} aria-sort={view.sort === s.id ? (view.asc ? "ascending" : "descending") : "none"}>
+                      <button type="button" className="linkish" onClick={() => choose(s.id)}>
+                        {s.label}
+                        {view.sort === s.id ? (view.asc ? " ▲" : " ▼") : ""}
+                      </button>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.agentId}>
+                    <td>
+                      <a href={`#/agents/${r.agentId}`}>{r.name}</a>
+                    </td>
+                    <td>{r.finished}</td>
+                    <td>{r.runs}</td>
+                    <td>{r.failedRuns > 0 ? <a href="#/runs?result=failed">{r.failedRuns} failed</a> : "0 failed"} ({r.runs > 0 ? Math.round((r.failedRuns / r.runs) * 100) : 0}%)</td>
+                    <td>{r.passedFirstTime}</td>
+                    <td>{r.sendBacks}</td>
+                    <td>{span(r.medianMergeMs)}</td>
+                    <td>{r.costPerFinishedMicros === null ? "–" : usd(r.costPerFinishedMicros)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )
+      ) : data.error ? (
+        <LoadError what="the team record" message={data.error.message} onRetry={data.reload} />
+      ) : (
+        <Loader label="Loading team record" size={16} />
+      )}
+    </details>
+  );
+}
 
 /** The listed agents as a spreadsheet: funding source by name only, working hours as days, times and zone. */
 export function agentsToCsv(rows: AgentRow[]): string {
@@ -433,6 +549,7 @@ function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: Ag
   // The instructions box is kept in this browser as it is typed (DR-045); it goes once saved.
   const instructionsKey = `agent-instructions/${a.id}`;
   const history = usePoll((signal) => api<Change[]>(`/api/agents/${a.id}/history`, { signal }), 60_000, `history-${a.id}`);
+  const record = usePoll((signal) => api<AgentRecord>(`/api/agents/${a.id}/record`, { signal }), 60_000, `record-${a.id}`);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const sv = useSaveState(form);
   const [busy, setBusy] = useState(false);
@@ -534,6 +651,55 @@ function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: Ag
           {note.text}
         </p>
       )}
+      <details>
+        <summary className="section-label">Record (last 30 days)</summary>
+        {record.data ? (
+          record.data.finished === 0 ? (
+            <>
+              <p className="muted">Nothing finished in the last 30 days</p>
+              <p>
+                <RecordRuns runs={record.data.runs ?? 0} failedRuns={record.data.failedRuns ?? 0} />
+              </p>
+            </>
+          ) : (
+            <>
+              <p>
+                {record.data.finished} finished · <RecordRuns runs={record.data.runs} failedRuns={record.data.failedRuns} /> · {record.data.passedFirstTime} passed review first time · {record.data.sendBacks} send-backs · median {span(record.data.medianMergeMs)} to merge · {usd(record.data.costPerFinishedMicros ?? 0)} per finished ticket
+              </p>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Ticket</th>
+                    <th>Title</th>
+                    <th>Size</th>
+                    <th>Finished</th>
+                    <th>Send-backs</th>
+                    <th>Cost</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {record.data.recent.map((t) => (
+                    <tr key={t.id}>
+                      <td>
+                        <a href={`#/tickets/${t.id}`}>{t.ref ?? "a task"}</a>
+                      </td>
+                      <td>{t.title}</td>
+                      <td>{t.size ?? "–"}</td>
+                      <td>{when(t.finishedAt)}</td>
+                      <td>{t.sendBacks}</td>
+                      <td>{usd(t.costMicros)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          )
+        ) : record.error ? (
+          <LoadError what="the record" message={record.error.message} onRetry={record.reload} />
+        ) : (
+          <Loader label="Loading record" size={16} />
+        )}
+      </details>
       <h3 className="section-label">History</h3>
       {history.data?.length ? (
         <ol className="history">
@@ -1010,6 +1176,7 @@ export function Agents({ company, agentId, onChanged }: { company: Company | und
           </button>
         </p>
       )}
+      {list.data && list.data.length > 0 && <TeamRecord companyId={company.id} />}
       {list.data && <ul className="agent-list">{active.map(row)}</ul>}
       {retired.length > 0 && (
         <details>

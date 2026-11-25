@@ -10,6 +10,8 @@ import { Loader } from "../components/Loader";
 import { LoadError } from "../components/LoadError";
 import { useOlder, usePoll } from "../hooks";
 import { ShowOlder } from "../components/ShowOlder";
+import { diffLines } from "../line-diff";
+import { buildCsv, download } from "../csv";
 import { away } from "../server-watch";
 import { when } from "./Runs";
 import { SaveButton } from "../components/SaveButton";
@@ -444,7 +446,55 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
           </ul>
         </section>
       )}
+      <SkillHistory companyId={company.id} id={id} />
     </article>
+  );
+}
+
+type HistoryEntry = { id: string; at: string; what: string; who: string; summary: string; change: { before: string; after: string } | null };
+const DIFF_MARK = { add: "+", del: "−", same: " " } as const;
+
+// What changed in this skill and when (BOS-2376); an edit or revert folds out a line diff of SKILL.md.
+function SkillHistory({ companyId, id }: { companyId: string; id: string }) {
+  const history = usePoll((signal) => api<HistoryEntry[]>(`/api/companies/${companyId}/skills/${id}/history`, { signal }), 60_000, id);
+  return (
+    <section aria-labelledby="skill-history-h">
+      <h3 id="skill-history-h" style={{ fontWeight: 600, marginBottom: 6 }}>
+        History
+      </h3>
+      {history.error ? (
+        <LoadError what="the history" message={history.error.message} onRetry={history.reload} />
+      ) : !history.data ? (
+        <Loader />
+      ) : history.data.length === 0 ? (
+        <p className="muted">No changes recorded for this skill yet.</p>
+      ) : (
+        <ul className="link-list">
+          {history.data.map((h) => (
+            <li key={h.id} style={{ flexDirection: "column", alignItems: "stretch" }}>
+              <span>
+                <strong>{h.what}</strong> · {h.who} · <small className="muted">{when(h.at)}</small>
+              </span>
+              <small className="muted">{h.summary}</small>
+              {h.change && (
+                <details>
+                  <summary>What changed</summary>
+                  <div style={{ fontFamily: "var(--mono)", fontSize: 13, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+                    {diffLines(h.change.before, h.change.after).map((l, i) => (
+                      <div key={i} style={l.kind === "add" ? { background: "var(--green-soft)", color: "var(--green-ink)" } : l.kind === "del" ? { background: "var(--red-soft)", color: "var(--red-ink)" } : undefined}>
+                        <span aria-hidden="true">{DIFF_MARK[l.kind]} </span>
+                        {l.kind !== "same" && <span className="sr-only">{l.kind === "add" ? "Added: " : "Removed: "}</span>}
+                        {l.text || " "}
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -597,7 +647,83 @@ function Proposals({ companyId }: { companyId: string }) {
   );
 }
 
+type Upstream = { status: "current" | "unchecked" } | { status: "newer"; commit: string; date: string | null } | { status: "error"; reason: string };
+
+/** Why a skill needs a look (BOS-2518), from what the page already loads; the first one found names its row tag. */
+type Attention = "unreadable" | "no-instructions" | "newer" | "unchecked" | "nobody" | "unloadable" | "healthy";
+const needsAttention = (s: SkillRow, u: Upstream | undefined, whatHarness: (agentId: string) => string): Attention | null => {
+  if (s.instructionsUnreadable) return "unreadable";
+  if (s.hasInstructions === false) return "no-instructions";
+  if (u?.status === "newer") return "newer";
+  if (u?.status === "error") return "unchecked";
+  if (s.agents.length === 0) return "nobody";
+  if (s.agents.every((a) => !harnessLoadsSkills(whatHarness(a.id)))) return "unloadable";
+  return null;
+};
+/** The words BOS-2518's row tags use for each reason, so the CSV's "needs attention" column reads the same as the list. */
+export const ATTENTION_WORDS: Record<Attention, string> = {
+  unreadable: "Instructions unreadable",
+  "no-instructions": "No instructions",
+  newer: "Newer version available",
+  unchecked: "Couldn't check for updates",
+  nobody: "Nobody has it",
+  unloadable: "Only agents that can't load skills",
+  healthy: "",
+};
+
+/** Every reason a shown skill needs attention, in the order the row tag picks its first one (BOS-2518); empty when none. */
+export function attentionReasons(s: SkillRow, u: Upstream | undefined, whatHarness: (agentId: string) => string): string[] {
+  const out: string[] = [];
+  if (s.instructionsUnreadable) out.push(ATTENTION_WORDS.unreadable);
+  if (s.hasInstructions === false) out.push(ATTENTION_WORDS["no-instructions"]);
+  if (u?.status === "newer") out.push(u.date ? `${ATTENTION_WORDS.newer} (${u.date.slice(0, 10)})` : ATTENTION_WORDS.newer);
+  if (u?.status === "error") out.push(ATTENTION_WORDS.unchecked);
+  if (s.agents.length === 0) out.push(ATTENTION_WORDS.nobody);
+  else if (s.agents.every((a) => !harnessLoadsSkills(whatHarness(a.id)))) out.push(ATTENTION_WORDS.unloadable);
+  return out;
+}
+
+export const SKILLS_CSV_HEAD = ["Name", "Description", "Where from", "Source link", "Pack", "Files", "Size", "Updated", "Agents", "Needs attention"];
+
+/** One row per skill shown, in the order the list shows them (a pack's name, then its skills), from what the page already loads. */
+export function skillsToCsv(shown: SkillRow[], u: Record<string, Upstream>, whatHarness: (agentId: string) => string): string {
+  return buildCsv(
+    SKILLS_CSV_HEAD,
+    shown.map((s) => [
+      s.name,
+      s.description ?? "",
+      SOURCE[s.source],
+      s.sourceUrl ?? "",
+      s.pack ?? "",
+      s.fileCount,
+      kb(s.sizeBytes),
+      s.updatedAt.slice(0, 10),
+      s.agents.map((a) => a.name).join("; "),
+      attentionReasons(s, u[s.id], whatHarness).join("; "),
+    ]),
+  );
+}
+
+/** The tag on a row that needs attention; 1 and 2 keep the tags they already had. */
+function AttentionTag({ why }: { why: Attention }) {
+  if (why === "unreadable") return <span className="tag red" title="The SKILL.md isn't text, so its instructions can't be shown.">Instructions unreadable</span>;
+  if (why === "no-instructions") return <span className="tag red" title="No instructions: this skill does nothing when loaded.">No instructions</span>;
+  if (why === "nobody") return <span className="tag amber" title="Nobody has it: give it to the agents whose work calls for it.">Nobody has it</span>;
+  if (why === "unloadable") return <span className="tag red" title="Everyone who has it runs on a harness that can't load skills, so it does nothing.">Only agents that can't load skills</span>;
+  return null;
+}
+
+/** A text tag (no button): the Refresh button stays the only way to take a newer version. */
+function UpstreamTag({ u }: { u: Upstream | undefined }) {
+  if (u?.status === "newer") return <span className="tag amber">Newer version available{u.date ? ` (${u.date.slice(0, 10)})` : ""}</span>;
+  if (u?.status === "error") return <span className="tag" title={u.reason}>Couldn't check for updates: {u.reason}</span>;
+  return null;
+}
+
 export function Skills({ company, skillId }: { company: Company | undefined; skillId?: string }) {
+  // The server keeps each source's answer for 6 hours, so asking now and then costs GitHub nothing extra.
+  const updates = usePoll((signal) => (company ? api<Record<string, Upstream>>(`/api/companies/${company.id}/skills/updates`, { signal }) : Promise.resolve({})), 600_000, company?.id ?? "none");
+  const upstream: Record<string, Upstream> = updates.data ?? {};
   const list = usePoll((signal) => (company ? api<SkillRow[]>(`/api/companies/${company.id}/skills`, { signal }) : Promise.resolve([])), 30_000, company?.id ?? "none");
   // #/skills/<id> (the search box, BOS-2347) shows that skill, its pack folded open. App remounts the page on every
   // address change, so the first value is enough. On a phone the view sits under the list, so it is scrolled to.
@@ -609,34 +735,45 @@ export function Skills({ company, skillId }: { company: Company | undefined; ski
   const [adding, setAdding] = useState(false);
   const [added, setAdded] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
+  // "Needs attention only" (BOS-2518): gathers the problem tags the page already shows into one switch and count.
+  const [attentionOnly, setAttentionOnly] = useState(false);
   if (!company) return <NoCompany />;
   const rows = list.data ?? [];
   const needle = filter.trim().toLowerCase();
   const hits = (s: SkillRow) => s.name.toLowerCase().includes(needle) || (s.description ?? "").toLowerCase().includes(needle);
+  const whatHarness = (agentId: string) => company.agents.find((c) => c.id === agentId)?.agentKind ?? "";
+  const why = (s: SkillRow) => needsAttention(s, upstream[s.id], whatHarness);
+  const needing = rows.filter((r) => why(r) !== null).length;
+  const wanted = (s: SkillRow) => !attentionOnly || why(s) !== null;
   const allPacks = [...new Set(rows.map((r) => r.pack).filter((p): p is string => !!p))].sort();
-  // A pack whose name matches shows all its skills; otherwise only the matching ones.
+  // A pack whose name matches shows all its skills; otherwise only the matching ones. A pack with none
+  // needing attention is hidden under the switch (it shows when any of its skills needs attention).
   const packRows = (p: string) => {
     const all = rows.filter((r) => r.pack === p);
-    return !needle || p.toLowerCase().includes(needle) ? all : all.filter(hits);
+    const named = !needle || p.toLowerCase().includes(needle) ? all : all.filter(hits);
+    return named.filter(wanted);
   };
   const packs = allPacks.filter((p) => packRows(p).length > 0);
-  const loose = rows.filter((r) => !r.pack && (!needle || hits(r)));
+  const loose = rows.filter((r) => !r.pack && (!needle || hits(r)) && wanted(r));
+  // The skills the list shows, in its order (each pack's matching skills, then the loose ones), for the Download CSV.
+  const shown = [...packs.flatMap((p) => packRows(p)), ...loose];
   const pick = (id: string) => (setPicked(id), setPickedPack(null), setAdding(false));
-  const item = (s: SkillRow) => (
+  const item = (s: SkillRow) => {
+    const why1 = why(s);
+    return (
     <li key={s.id}>
       <a href="#/skills" aria-current={s.id === picked && !adding ? "page" : undefined} onClick={(e) => (e.preventDefault(), pick(s.id))}>
         <span className="mono">{s.name}</span>
-        {s.instructionsUnreadable ? (
-          <span className="tag red" title="The SKILL.md isn't text, so its instructions can't be shown.">Instructions unreadable</span>
-        ) : s.hasInstructions === false ? (
-          <span className="tag red" title="No instructions: this skill does nothing when loaded.">No instructions</span>
-        ) : null}
+        <AttentionTag why={why1 ?? "healthy"} />
+        {/* A pack shows "newer" once, on the pack; its skills show only their own read errors. */}
+        <UpstreamTag u={s.pack && upstream[s.id]?.status === "newer" ? undefined : upstream[s.id]} />
         <small>
           {SOURCE[s.source]}{s.addedByOwner && s.source !== "written" ? " · added by the owner, not security-reviewed" : ""} · {s.agents.length ? s.agents.map((a) => (company.agents.find((c) => c.id === a.id) && !harnessLoadsSkills(company.agents.find((c) => c.id === a.id)!.agentKind) ? `${a.name} (can't load skills)` : a.name)).join(", ") : "nobody yet"}
         </small>
       </a>
     </li>
-  );
+    );
+  };
   return (
     <>
       <header className="page-head">
@@ -659,12 +796,26 @@ export function Skills({ company, skillId }: { company: Company | undefined; ski
         <nav className="card wiki-list" aria-label="Skills">
           {list.data && rows.length === 0 && <p className="muted">No skills yet.</p>}
           {rows.length > 0 && (
-            <div className="field">
-              <label htmlFor="skills-filter">Filter</label>
-              <input id="skills-filter" type="search" value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Name or description" />
-            </div>
+            <>
+              <div className="field">
+                <label htmlFor="skills-filter">Filter</label>
+                <input id="skills-filter" type="search" value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Name or description" />
+              </div>
+              <div className="skills-attention">
+                <span className="skills-attention-count" id="skills-attention-count">
+                  {`${needing} ${needing === 1 ? "needs" : "need"} attention`}
+                </span>
+                <button type="button" role="switch" aria-checked={attentionOnly} aria-label="Needs attention only" className={`switch${attentionOnly ? " on" : ""}`} onClick={() => setAttentionOnly(!attentionOnly)}>
+                  <span className="switch-knob" aria-hidden="true" />
+                </button>
+                <span className="muted" aria-hidden="true">Needs attention only</span>
+                <button type="button" className="btn small" disabled={shown.length === 0} onClick={() => download(`skills-${new Date().toISOString().slice(0, 10)}.csv`, skillsToCsv(shown, upstream, whatHarness))}>
+                  Download CSV
+                </button>
+              </div>
+            </>
           )}
-          {needle && packs.length === 0 && loose.length === 0 && <p className="muted">No skills match.</p>}
+          {(needle || attentionOnly) && packs.length === 0 && loose.length === 0 && <p className="muted">{attentionOnly ? "Nothing needs attention." : "No skills match."}</p>}
           <ul>
             {packs.map((p) => {
               const inPack = packRows(p);
@@ -676,6 +827,7 @@ export function Skills({ company, skillId }: { company: Company | undefined; ski
                         {p}
                       </button>{" "}
                       <span className="muted">({inPack.length})</span>
+                      {rows.some((r) => r.pack === p && upstream[r.id]?.status === "newer") && <span className="tag amber">Newer version available</span>}
                     </summary>
                     <ul>{inPack.map(item)}</ul>
                   </details>

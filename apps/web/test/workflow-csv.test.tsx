@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
 import { csvName, featuresCsv, handoffsCsv, rolesCsv, sizesCsv, Workflow } from "../src/pages/Workflow";
+import { stubFetchByUrl } from "./stub-fetch";
 
 afterEach(() => {
   cleanup();
@@ -43,13 +44,11 @@ describe("workflow CSV", () => {
 describe("Workflow load error", () => {
   it("offers Retry that loads again", async () => {
     let calls = 0;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => {
-        calls++;
-        return new Response(JSON.stringify({ error: "boom" }), { status: 500, headers: { "content-type": "application/json" } });
-      }),
-    );
+    const boom = () => {
+      calls++;
+      return new Response(JSON.stringify({ error: "boom" }), { status: 500, headers: { "content-type": "application/json" } });
+    };
+    stubFetchByUrl({ "/api/companies/c1/workflow": boom, "/api/companies/c1/retros/latest": boom });
     render(<Workflow company={{ id: "c1", name: "Acme" } as Company} />);
     const retry = await screen.findByRole("button", { name: "Retry" });
     const before = calls;

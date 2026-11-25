@@ -23,7 +23,7 @@ type CarriedHold = { ticketId: string | null; ref: string | null; title: string 
 type HoldingCard = { id: string; kind: "sign_off" | "hold" | "merge"; question: string; raisedBy: string | null; raisedAt: string; staleHint: string | null };
 type WaitingRow = { ticketId: string; ref: string | null; title: string; minutes: number; state: WaitingState; label: string; stuck: boolean; next: string | null; actor: "agent" | "ceo" | "owner" | "system" | null; decisionId: string | null; risk: string; urgent: boolean; failedCheck: boolean; carried?: CarriedHold[]; card?: HoldingCard | null; signedOffAt?: string | null; place?: number | null; why?: string | null; ranOn?: string | null; statusLine?: StatusLine };
 type RecentRow = { ticketId: string; ref: string | null; title: string; result: "merged" | "check_failed"; detail: string; at: string; stageLine?: string };
-type MergeQueueData = { companyId: string; mode: "legacy" | "server"; slots: number; serverHost?: string | null; slotSplit?: Array<{ ranOn: string; slots: number }>; running: RunningNow[]; waiting: WaitingRow[]; recent: RecentRow[]; waitingCount: number; lineCount?: number; line?: MergeLine; landingTurns?: LandingTurn[] };
+type MergeQueueData = { companyId: string; mode: "legacy" | "server"; slots: number; serverHost?: string | null; slotSplit?: Array<{ ranOn: string; slots: number }>; running: RunningNow[]; waiting: WaitingRow[]; recent: RecentRow[]; waitingCount: number; lineCount?: number; line?: MergeLine; clearAt?: string | null; landingTurns?: LandingTurn[] };
 
 const PHASE: Record<Phase, string> = { queued: "about to start the check", checking: "running the check", merging: "merging", waiting_to_retry: "trying again after the runner restarted", retrying_git: "retrying after a push/fetch failure to the git host" };
 const ACTOR: Record<NonNullable<WaitingRow["actor"]>, string> = { agent: "the agent", ceo: "the CEO", owner: "you", system: "Boss Man" };
@@ -281,7 +281,8 @@ function MoveToFront({ companyId, row, onMoved }: { companyId: string; row: Wait
   );
 }
 
-export function Waiting({ rows, companyId, onMoved, serverHost }: { rows: WaitingRow[]; companyId?: string; onMoved?: () => void; serverHost?: string | null }) {
+/** `firstNumber` (BOS-2508): the running rows above are unnumbered, so the first waiting merge is (running shown + 1) and the last number equals the tab's count. */
+export function Waiting({ rows, companyId, onMoved, serverHost, firstNumber = 1 }: { rows: WaitingRow[]; companyId?: string; onMoved?: () => void; serverHost?: string | null; firstNumber?: number }) {
   const firstFailed = rows.findIndex((r) => r.actor !== "owner" && r.state === "check_failed_retrying");
   const firstStuck = rows.findIndex((r) => r.actor !== "owner" && r.state !== "check_failed_retrying" && r.stuck);
   return (
@@ -298,7 +299,7 @@ export function Waiting({ rows, companyId, onMoved, serverHost }: { rows: Waitin
               <article key={r.ticketId} id={i === firstFailed ? "mq-first-failed" : i === firstStuck ? "mq-first-stuck" : undefined} tabIndex={i === firstFailed || i === firstStuck ? -1 : undefined} className={`card mq-item${edge}`} data-stuck={r.stuck ? "true" : undefined} data-state-word={s.word}>
                 <div className="mq-head">
                   <span className="mq-title">
-                    <span className="mq-pos">{i + 1}</span>
+                    <span className="mq-pos">{firstNumber + i}</span>
                     <TicketLink id={r.ticketId} ref={r.ref} title={r.title} />
                   </span>
                   <span className="mq-wait">waiting {waited(r.minutes)}</span>
@@ -423,14 +424,27 @@ function MainRedBanner({ held, rows, heldBehind }: { held: number; rows: CheckRo
 /** BOS-1800: the checks the Quick checks tab lists and counts: everything in the check queue except merge checks (the Merges tab's). */
 export const quickChecksOf = (rows: CheckRow[]): CheckRow[] => rows.filter((r) => r.kind !== "merge");
 
+/**
+ * BOS-2507: the number on a waiting check = its place in the line shown, so the last one equals the tab count. The server's
+ * `position` counts every waiting check, merge checks too (which this tab leaves out), so it cannot be shown as it is.
+ * Running checks stay unnumbered; held ones (no position) too.
+ */
+export const quickCheckPlaces = (rows: CheckRow[]): Map<string, number> => {
+  let n = rows.filter((r) => r.state === "running").length;
+  const places = new Map<string, number>();
+  for (const r of rows) if (r.state === "waiting" && r.position) places.set(r.id, ++n);
+  return places;
+};
+
 /** The "Quick checks" tab (BOS-1174, BOS-1800): every non-merge check running or waiting in the server's check queue. Read-only. */
 export function QueuedChecks({ data, heldBehind, paused }: { data: CheckQueueData; heldBehind?: HeldSummary | null; paused?: PausedSummary | null }) {
   const held = data.rows.filter((r) => r.heldByMain).length;
   const free = Math.max(0, data.slots - data.running);
   const rows = quickChecksOf(data.rows);
+  const places = quickCheckPlaces(rows);
   return (
     <section>
-      <SectionHead title="Quick checks" fact={`${data.running} of ${data.slots} check ${data.slots === 1 ? "slot" : "slots"} busy, shared with merge checks · running first, then in start order`} />
+      <SectionHead title="Quick checks" fact={`${data.running} of ${data.slots} check ${data.slots === 1 ? "slot" : "slots"} busy, shared with merge checks · running first, then in line order (Background lane after ordinary work)`} />
       {data.mode === "legacy" && <p className="muted" style={{ fontSize: 14 }}>The server-owned check queue is switched off, so only checks it already knows about are listed.</p>}
       {(held > 0 || heldBehind) && <MainRedBanner held={held} rows={data.rows} heldBehind={heldBehind} />}
       {paused && (
@@ -453,7 +467,7 @@ export function QueuedChecks({ data, heldBehind, paused }: { data: CheckQueueDat
             <article key={r.id} className="card mq-item" data-check-state={r.state}>
               <div className="mq-head">
                 <span className="mq-title">
-                  {r.position ? <span className="mq-pos">{r.position}</span> : null}
+                  {places.has(r.id) ? <span className="mq-pos">{places.get(r.id)}</span> : null}
                   <TicketLink id={r.ticketId} ref={r.ref} title={r.title} />
                 </span>
                 <span className="mq-wait">for {waited(r.minutes)}</span>
@@ -558,7 +572,7 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
       <header className="page-head">
         <div>
           <h1>Merge queue</h1>
-          {company && <p className="sub">{company.name}: approved work on its way to merge.</p>}
+          {company && <p className="sub">{company.name}: approved work on its way to merge. <a href="#/merge-history">Merge history</a></p>}
         </div>
       </header>
       {data &&
@@ -596,6 +610,9 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
                 </div>
               )}
               <NeedsYou rows={needsYou} />
+              {data.clearAt && !pausedLine ? (
+                <p className="muted" data-clear-at={data.clearAt}>Everything in the line is expected to have landed by about {clockText(data.clearAt)} (from the usual check time and GitHub wait).</p>
+              ) : null}
               {pausedLine && (
                 <p className="mq-held-fix" role="status" data-merge-paused="true"><strong>{pausedText(pausedLine)}</strong> {pausedWaitText(pausedLine)}</p>
               )}
@@ -603,7 +620,7 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
                 <p key={t.projectId} className="mq-held-fix" role="status" data-landing-turn="true">{landingTurnText(t)}</p>
               ))}
               <Running rows={data.running} slots={data.slots} paused={pausedLine} serverHost={data.serverHost} slotSplit={data.slotSplit} />
-              <Waiting serverHost={data.serverHost} rows={data.waiting} companyId={companyId} onMoved={() => { mq.reload(); cqPoll.reload(); }} />
+              <Waiting serverHost={data.serverHost} firstNumber={data.running.length + 1} rows={data.waiting} companyId={companyId} onMoved={() => { mq.reload(); cqPoll.reload(); }} />
               <Recent rows={data.recent} />
             </>
           ) : null}

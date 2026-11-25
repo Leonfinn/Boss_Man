@@ -21,19 +21,72 @@ export type SpendRow = {
   tickets: number;
   micros: number;
 };
-export type SpendData = { timeZone: string; days: string[]; rows: SpendRow[]; totalMicros: number };
-export type Split = "agent" | "feature" | "project";
+export type SpendTopTicket = {
+  ticketId: string | null;
+  ref: string | null;
+  title: string;
+  state: string | null;
+  feature: string | null;
+  micros: number;
+  runs: number;
+};
+/** One model's use (BOS-2401): plan use is list price of subscription runs, kept apart from pay-as-you-go. `date` is "" in the period totals. */
+export type SpendModelRow = {
+  date: string;
+  model: string;
+  micros: number;
+  planMicros: number;
+  payMicros: number;
+  runs: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+};
+/** One name's money in the previous period of the same length (BOS-2432). */
+export type PreviousItem = { key: string; name: string; micros: number };
+export type SpendPrevious = { days: number; totalMicros: number; agents: PreviousItem[]; features: PreviousItem[]; projects: PreviousItem[]; models: PreviousItem[] };
+export type SpendData = {
+  previous?: SpendPrevious;
+  timeZone: string;
+  days: string[];
+  rows: SpendRow[];
+  totalMicros: number;
+  topTickets?: SpendTopTicket[];
+  models?: SpendModelRow[];
+  modelDays?: SpendModelRow[];
+};
+export type Split = "agent" | "feature" | "project" | "model";
 
 const PERIODS = [7, 30, 90] as const;
 const SPLITS: Array<{ id: Split; label: string }> = [
   { id: "agent", label: "By agent" },
   { id: "feature", label: "By feature" },
   { id: "project", label: "By project" },
+  { id: "model", label: "By model" },
 ];
+
+/** The chart's data for a split: the model split charts the per-day model rows (plan and pay-as-you-go together), the rest the money rows. */
+export function chartData(data: SpendData, by: Split): SpendData {
+  if (by !== "model") return data;
+  const rows: SpendRow[] = (data.modelDays ?? []).map((m) => ({
+    date: m.date,
+    agentId: null,
+    agent: m.model,
+    featureId: null,
+    feature: m.model,
+    projectId: m.model,
+    project: m.model,
+    tickets: 0,
+    micros: m.micros,
+  }));
+  return { ...data, rows, totalMicros: rows.reduce((n, r) => n + r.micros, 0) };
+}
 const TONES = ["blue", "green", "amber", "purple", "teal"];
 const TOP = TONES.length;
 
-const nameOf = (r: SpendRow, by: Split) => r[by];
+// The model split's rows come from chartData, which puts the model name in the project fields.
+const nameOf = (r: SpendRow, by: Split) => r[by === "model" ? "project" : by];
 const keyOf = (r: SpendRow, by: Split) => (by === "agent" ? r.agentId : by === "feature" ? r.featureId : r.projectId) ?? `none:${nameOf(r, by)}`;
 
 export type Total = { key: string; name: string; micros: number; share: number; tone: string };
@@ -73,15 +126,62 @@ export function stacksBy(data: SpendData, by: Split) {
   });
 }
 
-/** One row per day per agent (and feature and project), the same figures as the page; cost in dollars to four places. */
-export function toCsv(rows: SpendRow[]): string {
+const sumPrev = (items: PreviousItem[] | undefined, key: string) => items?.find((i) => i.key === key)?.micros ?? 0;
+
+/**
+ * One row per day per agent (and feature and project), the same figures as the page; cost in dollars to four places.
+ * With `previous` (BOS-2432) a last column, `previous_period_cost_usd`, gives the previous period's whole cost of the
+ * row's agent, feature or project (the split picked on the page), repeated on each of that name's day rows.
+ */
+export function toCsv(rows: SpendRow[], previous?: SpendPrevious, by: Exclude<Split, "model"> = "agent"): string {
+  const prev = (r: SpendRow) => {
+    if (!previous) return [];
+    const list = by === "agent" ? previous.agents : by === "feature" ? previous.features : previous.projects;
+    return [(sumPrev(list, keyOf(r, by)) / 1e6).toFixed(4)];
+  };
   return buildCsv(
-    ["date", "agent", "feature", "project", "tickets", "cost_usd"],
-    rows.map((r) => [r.date, r.agent, r.feature, r.project, r.tickets, (r.micros / 1e6).toFixed(4)]),
+    ["date", "agent", "feature", "project", "tickets", "cost_usd", ...(previous ? ["previous_period_cost_usd"] : [])],
+    rows.map((r) => [r.date, r.agent, r.feature, r.project, r.tickets, (r.micros / 1e6).toFixed(4), ...prev(r)]),
   );
 }
 
-const dayLabel = (d: string) => `${Number(d.slice(8, 10))}/${Number(d.slice(5, 7))}`;
+/** One row per day per model, with runs, tokens, and plan use apart from pay-as-you-go; cost in dollars to four places. */
+export function toModelCsv(rows: SpendModelRow[], previous?: SpendPrevious): string {
+  return buildCsv(
+    ["date", "model", "runs", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "plan_usd", "pay_as_you_go_usd", "cost_usd", ...(previous ? ["previous_period_cost_usd"] : [])],
+    rows.map((r) => [r.date, r.model, r.runs, r.inputTokens, r.outputTokens, r.cacheReadTokens, r.cacheWriteTokens, (r.planMicros / 1e6).toFixed(4), (r.payMicros / 1e6).toFixed(4), (r.micros / 1e6).toFixed(4), ...(previous ? [(sumPrev(previous.models, r.model) / 1e6).toFixed(4)] : [])]),
+  );
+}
+
+const signed = (micros: number) => `${micros < 0 ? "−" : "+"}$${(Math.abs(micros) / 1e6).toFixed(2)}`;
+
+/** A row's change against the previous period in words and sign: "+$3.20 (+23%)", "new" when nothing was spent before, "no change". */
+export function changeText(now: number, before: number): string {
+  if (before === 0) return now === 0 ? "no change" : "new";
+  const diff = now - before;
+  if (Math.round(diff / 1e4) === 0) return "no change";
+  const p = Math.round((diff / before) * 100);
+  return `${signed(diff)} (${p < 0 ? "−" : "+"}${Math.abs(p)}%)`;
+}
+
+/** The headline sentence: "Up 23% on the previous 30 days", "Down $4.10 on the previous 7 days", or "Nothing spent in the previous 7 days". */
+export function headlineText(now: number, previous: SpendPrevious): string {
+  const n = previous.days;
+  if (previous.totalMicros === 0) return `Nothing spent in the previous ${n} days`;
+  const diff = now - previous.totalMicros;
+  if (Math.round(diff / 1e4) === 0) return `Same as the previous ${n} days`;
+  return diff > 0 ? `Up ${Math.round((diff / previous.totalMicros) * 100)}% on the previous ${n} days` : `Down ${usd(-diff)} on the previous ${n} days`;
+}
+
+/** The current totals plus rows only in the previous period (shown at $0 now), each with its previous money. */
+export function withPrevious<T extends { key: string; name: string; micros: number }>(current: T[], previous: PreviousItem[] | undefined): Array<T & { before: number; gone?: boolean }> {
+  const seen = new Set(current.map((c) => c.key));
+  const out: Array<T & { before: number; gone?: boolean }> = current.map((c) => ({ ...c, before: sumPrev(previous, c.key) }));
+  for (const p of previous ?? []) if (!seen.has(p.key) && p.micros > 0) out.push({ key: p.key, name: p.name, micros: 0, before: p.micros, gone: true } as T & { before: number; gone?: boolean });
+  return out;
+}
+
+const dayLabel =(d: string) => `${Number(d.slice(8, 10))}/${Number(d.slice(5, 7))}`;
 const pct = (share: number) => (share > 0 && share < 0.01 ? "<1%" : `${Math.round(share * 100)}%`);
 
 export function SpendChart({ data, by }: { data: SpendData; by: Split }) {
@@ -126,6 +226,9 @@ export function SpendChart({ data, by }: { data: SpendData; by: Split }) {
 export function SpendTable({ data, by }: { data: SpendData; by: Split }) {
   const totals = totalsBy(data.rows, by);
   const heading = SPLITS.find((s) => s.id === by)!.label.replace("By ", "");
+  const prev = data.previous;
+  const list = prev ? (by === "agent" ? prev.agents : by === "feature" ? prev.features : by === "project" ? prev.projects : prev.models) : undefined;
+  const lines = prev ? withPrevious(totals, list) : totals.map((t) => ({ ...t, before: 0, gone: false }));
   return (
     <div className="table-wrap">
       <table style={{ minWidth: 0 }}>
@@ -134,26 +237,140 @@ export function SpendTable({ data, by }: { data: SpendData; by: Split }) {
             <th style={{ textTransform: "capitalize" }}>{heading}</th>
             <th style={{ textAlign: "right" }}>Spend</th>
             <th style={{ textAlign: "right" }}>Share</th>
+            {prev ? <th style={{ textAlign: "right" }}>Previous {prev.days} days</th> : null}
+            {prev ? <th style={{ textAlign: "right" }}>vs previous</th> : null}
           </tr>
         </thead>
         <tbody>
-          {totals.map((t) => (
+          {lines.map((t) => (
             <tr key={t.key}>
               <td>
-                <span className={`swatch ${t.tone}`} aria-hidden="true" /> {t.name}
+                <span className={`swatch ${"gone" in t && t.gone ? "grey" : (t as Total).tone}`} aria-hidden="true" /> {t.name}
               </td>
               <td className="mono" style={{ textAlign: "right" }}>{usd(t.micros)}</td>
-              <td className="mono" style={{ textAlign: "right" }}>{pct(t.share)}</td>
+              <td className="mono" style={{ textAlign: "right" }}>{pct("share" in t ? (t as Total).share : 0)}</td>
+              {prev ? <td className="mono" style={{ textAlign: "right" }}>{usd(t.before)}</td> : null}
+              {prev ? <td className="mono" style={{ textAlign: "right" }}>{changeText(t.micros, t.before)}</td> : null}
             </tr>
           ))}
           <tr>
             <th scope="row">Total</th>
             <td className="mono" style={{ textAlign: "right", fontWeight: 600 }}>{usd(data.totalMicros)}</td>
             <td />
+            {prev ? <td className="mono" style={{ textAlign: "right" }}>{usd(prev.totalMicros)}</td> : null}
+            {prev ? <td className="mono" style={{ textAlign: "right" }}>{changeText(data.totalMicros, prev.totalMicros)}</td> : null}
           </tr>
         </tbody>
       </table>
     </div>
+  );
+}
+
+const num = (n: number) => n.toLocaleString("en-US");
+
+/** The model split's table (BOS-2401): spend, runs, tokens, share, and plan use apart from pay-as-you-go. */
+export function ModelTable({ models, previous }: { models: SpendModelRow[]; previous?: SpendPrevious }) {
+  const all = models.reduce((n, m) => n + m.micros, 0);
+  const right = { textAlign: "right" } as const;
+  const lines = previous
+    ? withPrevious(models.map((m) => ({ key: m.model, name: m.model, micros: m.micros, m })), previous.models)
+    : models.map((m) => ({ key: m.model, name: m.model, micros: m.micros, m, before: 0, gone: false }));
+  const prevAll = previous?.models.reduce((n, m) => n + m.micros, 0) ?? 0;
+  return (
+    <div className="table-wrap">
+      <table style={{ minWidth: 0 }}>
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th style={right}>Spend</th>
+            <th style={right}>Share</th>
+            {previous ? <th style={right}>Previous {previous.days} days</th> : null}
+            {previous ? <th style={right}>vs previous</th> : null}
+            <th style={right}>Plan use</th>
+            <th style={right}>Pay-as-you-go</th>
+            <th style={right}>Runs</th>
+            <th style={right}>Tokens in</th>
+            <th style={right}>Tokens out</th>
+            <th style={right}>Cache read</th>
+            <th style={right}>Cache write</th>
+          </tr>
+        </thead>
+        <tbody>
+          {lines.map((l) => {
+            const m: SpendModelRow = ("m" in l && l.m) || { date: "", model: l.name, micros: 0, planMicros: 0, payMicros: 0, runs: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+            return (
+            <tr key={m.model}>
+              <td>{m.model}</td>
+              <td className="mono" style={right}>{usd(m.micros)}</td>
+              <td className="mono" style={right}>{pct(all ? m.micros / all : 0)}</td>
+              {previous ? <td className="mono" style={right}>{usd(l.before)}</td> : null}
+              {previous ? <td className="mono" style={right}>{changeText(m.micros, l.before)}</td> : null}
+              <td className="mono" style={right}>{usd(m.planMicros)}</td>
+              <td className="mono" style={right}>{usd(m.payMicros)}</td>
+              <td className="mono" style={right}>{num(m.runs)}</td>
+              <td className="mono" style={right}>{num(m.inputTokens)}</td>
+              <td className="mono" style={right}>{num(m.outputTokens)}</td>
+              <td className="mono" style={right}>{num(m.cacheReadTokens)}</td>
+              <td className="mono" style={right}>{num(m.cacheWriteTokens)}</td>
+            </tr>
+            );
+          })}
+          <tr>
+            <th scope="row">Total</th>
+            <td className="mono" style={{ ...right, fontWeight: 600 }}>{usd(all)}</td>
+            <td />
+            {previous ? <td className="mono" style={right}>{usd(prevAll)}</td> : null}
+            {previous ? <td className="mono" style={right}>{changeText(all, prevAll)}</td> : null}
+            <td colSpan={7} />
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** The period's costliest tickets (BOS-2370), each title a link to its ticket, with its share of the period's total. */
+export function TopTicketsTable({ data }: { data: SpendData }) {
+  const list = data.topTickets ?? [];
+  if (list.length === 0) return null;
+  return (
+    <section>
+      <h2>Costliest tickets</h2>
+      <div className="table-wrap">
+        <table style={{ minWidth: 0 }}>
+          <thead>
+            <tr>
+              <th>Ticket</th>
+              <th>State</th>
+              <th>Feature</th>
+              <th style={{ textAlign: "right" }}>Runs</th>
+              <th style={{ textAlign: "right" }}>Spend</th>
+              <th style={{ textAlign: "right" }}>Share</th>
+            </tr>
+          </thead>
+          <tbody>
+            {list.map((t) => (
+              <tr key={t.ticketId ?? "none"}>
+                <td>
+                  {t.ticketId ? (
+                    <>
+                      {t.ref ? <span className="mono">{t.ref}</span> : null} <a href={`#/tickets/${t.ticketId}`}>{t.title}</a>
+                    </>
+                  ) : (
+                    t.title
+                  )}
+                </td>
+                <td>{t.state ? t.state.replace(/_/g, " ") : ""}</td>
+                <td>{t.feature ?? ""}</td>
+                <td className="mono" style={{ textAlign: "right" }}>{t.runs}</td>
+                <td className="mono" style={{ textAlign: "right" }}>{usd(t.micros)}</td>
+                <td className="mono" style={{ textAlign: "right" }}>{pct(data.totalMicros ? t.micros / data.totalMicros : 0)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }
 
@@ -176,12 +393,12 @@ export function SpendReport({ company }: { company: Company | undefined }) {
           <p className="label">{company.name}</p>
           <h1>Spend</h1>
         </div>
-        <button type="button" disabled={!data || data.rows.length === 0} onClick={() => data && download(`spend-${company.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}-${data.days.at(-1)}-last-${days}-days.csv`, toCsv(data.rows))}>
+        <button type="button" disabled={!data || (by === "model" ? (data.modelDays ?? []).length === 0 : data.rows.length === 0)} onClick={() => data && download(`spend-${company.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}-${data.days.at(-1)}-last-${days}-days.csv`, (by === "model" ? toModelCsv(data.modelDays ?? [], data.previous) : toCsv(data.rows, data.previous, by)))}>
           Download CSV
         </button>
       </header>
       <p className="muted" style={{ fontSize: 14, margin: 0 }}>
-        What API and credit use cost, as list-price estimates, not a bill. Runs paid from a subscription are not money and are left out; the Dashboard counts them in tokens.
+        What API and credit use cost, as list-price estimates, not a bill. Runs paid from a subscription are not money and are left out; the Dashboard counts them in tokens. "By model" is the exception: it also shows plan use at list price, apart from pay-as-you-go.
       </p>
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "center" }}>
         <div className="segmented" role="group" aria-label="Period">
@@ -204,8 +421,22 @@ export function SpendReport({ company }: { company: Company | undefined }) {
         report.error ? null : <Loader label="Loading the spend" />
       ) : (
         <>
-          <SpendChart data={data} by={by} />
-          {data.rows.length === 0 ? <p className="muted">No spend in the last {days} days.</p> : <SpendTable data={data} by={by} />}
+          {data.previous ? (
+            <p style={{ margin: 0 }} data-testid="spend-headline">
+              <strong>{usd(data.totalMicros)}</strong> of real spend in the last {days} days.{" "}
+              {headlineText(data.totalMicros, data.previous)}
+              {data.previous.totalMicros > 0 ? ` (${usd(data.previous.totalMicros)})` : ""}.
+            </p>
+          ) : null}
+          <SpendChart data={chartData(data, by)} by={by} />
+          {by === "model" ? (
+            (data.models ?? []).length === 0 ? <p className="muted">No model use in the last {days} days.</p> : <ModelTable models={data.models ?? []} previous={data.previous} />
+          ) : data.rows.length === 0 ? (
+            <p className="muted">No spend in the last {days} days.</p>
+          ) : (
+            <SpendTable data={data} by={by} />
+          )}
+          <TopTicketsTable data={data} />
         </>
       )}
     </>

@@ -4,6 +4,7 @@
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, companies, costEvents, fundingSources, runnerEvents, runners, runs, tickets, wakes } from "../db/schema.js";
+import { record } from "./activity.js";
 import type { runnersService } from "./runners.js";
 
 /**
@@ -45,7 +46,7 @@ export async function liveRuns(db: Db, companyId: string) {
 /** The Runs page's result filter. The same split as its Failed / Interrupted / Finished tags (Runs.tsx outcomeTag). */
 export type RunResult = "finished" | "failed" | "interrupted";
 
-function resultWhere(result: RunResult) {
+export function resultWhere(result: RunResult) {
   const failed = sql`${runs.outcome} like 'error%'`;
   if (result === "failed") return failed;
   if (result === "interrupted") return eq(runs.outcome, "interrupted");
@@ -70,6 +71,16 @@ export const CANCEL_GUARD_MS = 60_000;
 export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersService>; now?: () => Date; log?: (msg: string) => void }) {
   let wake: WakeHook | null = null;
   const now = deps.now ?? (() => new Date());
+
+  /** A queued or deferred wake of this company that has not started; else 404 (another company's wake looks missing). */
+  async function waitingWake(companyId: string, wakeId: string) {
+    const [w] = await db
+      .select({ id: wakes.id, agentId: wakes.agentId, ticketId: wakes.ticketId, reason: wakes.reason })
+      .from(wakes)
+      .where(and(eq(wakes.id, wakeId), eq(wakes.companyId, companyId), inArray(wakes.status, ["queued", "deferred"]), isNull(wakes.runId)));
+    if (!w) throw new RunError(404, "That agent is not waiting to start any more.");
+    return w;
+  }
 
   async function load(runId: string, companyId?: string) {
     const [r] = await db.select().from(runs).where(eq(runs.id, runId));
@@ -109,8 +120,58 @@ export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersSe
         .orderBy(desc(wakes.priority), asc(wakes.createdAt));
     },
 
+    /**
+     * Start a waiting wake now (BOS-2328): clears its not-before time and deferral so the scheduler's next
+     * pass considers it. It changes no limit: the scheduler still applies run slots and company limits and
+     * may defer it again with its reason. The owner's reason goes to the activity log.
+     */
+    async startWaiting(companyId: string, wakeId: string, reason?: string) {
+      const w = await waitingWake(companyId, wakeId);
+      await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(eq(wakes.id, w.id));
+      await record(db, { companyId, kind: "wake_start_now", agentId: null, ticketId: w.ticketId, summary: `The owner started a waiting wake now${reason ? `: ${reason}` : ""}`, detail: { actor: "owner", wakeId: w.id, wakeAgentId: w.agentId, wakeReason: w.reason, why: reason ?? null } });
+      return { id: w.id };
+    },
+
+    /** Remove a waiting wake that is no longer wanted (BOS-2328), with the owner's reason in the activity log. */
+    async cancelWaiting(companyId: string, wakeId: string, reason?: string) {
+      const w = await waitingWake(companyId, wakeId);
+      await db.delete(wakes).where(eq(wakes.id, w.id));
+      await record(db, { companyId, kind: "wake_cancelled", agentId: null, ticketId: w.ticketId, summary: `The owner cancelled a waiting wake${reason ? `: ${reason}` : ""}`, detail: { actor: "owner", wakeId: w.id, wakeAgentId: w.agentId, wakeReason: w.reason, why: reason ?? null } });
+      return { id: w.id };
+    },
+
+    /** Where a waiting wake stands now, for the row after "Start now": still waiting, with why, or started. */
+    async wakeState(companyId: string, wakeId: string) {
+      const [w] = await db.select({ status: wakes.status, statusReason: wakes.statusReason, runId: wakes.runId }).from(wakes).where(and(eq(wakes.id, wakeId), eq(wakes.companyId, companyId)));
+      return w ?? null;
+    },
+
     /** Runs that have finished, newest first, with what they cost. */
-    async recent(limit = 50, companyId?: string, filter: { agentId?: string; result?: RunResult; before?: Date; q?: string } = {}) {
+    /** Why runs that ended in the last `days` days started: per wake reason, runs and cost, largest first (BOS-2437). */
+    async reasonSummary(companyId?: string, days = 7, now = new Date()) {
+      const since = new Date(now.getTime() - days * 86_400_000);
+      const where = and(isNotNull(runs.endedAt), gt(runs.endedAt, since), companyId ? eq(runs.companyId, companyId) : undefined);
+      const counts = await db
+        .select({ reason: wakes.reason, runs: sql<number>`count(distinct ${runs.id})::int` })
+        .from(runs)
+        .leftJoin(wakes, eq(wakes.runId, runs.id))
+        .where(where)
+        .groupBy(wakes.reason);
+      const costs = await db
+        .select({ reason: wakes.reason, micros: sql<string>`coalesce(sum(${costEvents.costMicros}), 0)` })
+        .from(runs)
+        .leftJoin(wakes, eq(wakes.runId, runs.id))
+        .innerJoin(costEvents, eq(costEvents.runId, runs.id))
+        .where(where)
+        .groupBy(wakes.reason);
+      const costOf = new Map(costs.map((c) => [c.reason, Number(c.micros)]));
+      const total = counts.reduce((n, r) => n + r.runs, 0);
+      return counts
+        .map((r) => ({ reason: r.reason, runs: r.runs, costMicros: costOf.get(r.reason) ?? 0, share: total ? r.runs / total : 0 }))
+        .sort((a, b) => b.runs - a.runs || b.costMicros - a.costMicros);
+    },
+
+    async recent(limit = 50, companyId?: string, filter: { agentId?: string; result?: RunResult; before?: Date; q?: string; reason?: string } = {}) {
       // "BOS-2250" (any case) finds the runs on that ticket by its ref; other text matches the ticket title.
       const text = filter.q?.trim();
       const ref = text ? /^([a-z][a-z0-9]*)-(\d+)$/i.exec(text) : null;
@@ -135,6 +196,7 @@ export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersSe
             filter.before ? lt(runs.endedAt, filter.before) : undefined,
             filter.result ? resultWhere(filter.result) : undefined,
             byTicket,
+            filter.reason ? eq(wakes.reason, filter.reason) : undefined,
           ),
         )
         .orderBy(desc(runs.endedAt))

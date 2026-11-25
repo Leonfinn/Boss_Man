@@ -2,6 +2,7 @@ import { useRef, useState, type FormEvent } from "react";
 import { SCRATCH_RULE } from "@boss-man/shared";
 import { api, type Agent, type Company } from "../api";
 import { usePoll } from "../hooks";
+import { buildCsv, download } from "../csv";
 import { clearDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
 import { LoadError } from "../components/LoadError";
@@ -132,7 +133,76 @@ function RuleEditForm({ rule, onSave, onCancel }: { rule: Rule; onSave: (patch: 
   );
 }
 
-type RuleFilter = { text: string; outcome: Outcome | "" };
+type UseCounts = { allow: number; ceo: number; owner: number; deny: number };
+type Usage = Record<string, { week: UseCounts; month: UseCounts; lastAt: string }>;
+const total = (c: UseCounts) => c.allow + c.ceo + c.owner + c.deny;
+const split = (c: UseCounts) => `${c.allow} allowed, ${c.ceo} sent to the CEO, ${c.owner} sent to you, ${c.deny} refused`;
+
+/** "3 days ago" / "today" for when a rule last matched. */
+export function agoText(iso: string, now: Date = new Date()): string {
+  const days = Math.floor((now.getTime() - new Date(iso).getTime()) / 86_400_000);
+  return days <= 0 ? "today" : days === 1 ? "yesterday" : `${days} days ago`;
+}
+
+/** "12 this week · 40 in 30 days · last matched 2 days ago", or a "Not used in 30 days" tag (BOS-2372). Nothing until the usage has loaded. */
+export function RuleUsageLine({ name, usage }: { name: string; usage: Usage | undefined }) {
+  if (!usage) return null;
+  const u = usage[name];
+  if (!u || total(u.month) === 0) return <p style={{ fontSize: 12.5 }}><span className="tag">Not used in 30 days</span></p>;
+  return (
+    <p className="muted" style={{ fontSize: 12.5 }} title={`This week: ${split(u.week)}. Last 30 days: ${split(u.month)}.`}>
+      {total(u.week)} this week · {total(u.month)} in 30 days · last matched {agoText(u.lastAt)}
+      <br />
+      30 days: {split(u.month)}
+    </p>
+  );
+}
+
+export type AskedCard = { kind: string | null; title: string; asked: number; toOwner: number; toCeo: number; allowed: number; refused: number; open: number; lastAt: string };
+
+/** A title as a regex that matches exactly that text (BOS-2418). */
+export const literalTitlePattern = (title: string): string => `^${title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`;
+
+const answeredText = (c: AskedCard) => {
+  const parts = [c.allowed && `${c.allowed} allowed`, c.refused && `${c.refused} refused`, c.open && `${c.open} still open`].filter(Boolean);
+  return parts.length ? parts.join(", ") : "not answered by a person";
+};
+
+/** The 10 kinds of request that reached the owner or the CEO most in 30 days, each with "Make a rule" (BOS-2418). */
+export function MostAskedCards({ cards, error, onRetry, onMake }: { cards: AskedCard[] | undefined; error: Error | null; onRetry: () => void; onMake: (c: AskedCard) => void }) {
+  return (
+    <details className="card">
+      <summary style={{ fontSize: 17, fontWeight: 600 }}>Most-asked cards (last 30 days)</summary>
+      {error && !cards && <LoadError what="the most-asked cards" message={error.message} onRetry={onRetry} />}
+      {!error && !cards && <p className="muted">Loading the cards…</p>}
+      {cards && cards.length === 0 && <p className="muted">No cards reached you in the last 30 days.</p>}
+      {cards && cards.length > 0 && (
+        <div style={{ overflowX: "auto" }}>
+          <table>
+            <thead>
+              <tr><th>Kind</th><th>Title</th><th>Asked you</th><th>Sent to the CEO</th><th>How you answered</th><th>Last asked</th><th /></tr>
+            </thead>
+            <tbody>
+              {cards.map((c) => (
+                <tr key={`${c.kind ?? ""}\u0000${c.title}`}>
+                  <td>{c.kind ?? "other"}</td>
+                  <td className="mono" style={{ overflowWrap: "anywhere" }}>{c.title || "(no title)"}</td>
+                  <td>{c.toOwner}</td>
+                  <td>{c.toCeo}</td>
+                  <td>{answeredText(c)}</td>
+                  <td>{agoText(c.lastAt)}</td>
+                  <td>{c.title && <button type="button" className="btn" onClick={() => onMake(c)}>Make a rule</button>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </details>
+  );
+}
+
+type RuleFilter ={ text: string; outcome: Outcome | "" };
 const filterOn = (f: RuleFilter) => Boolean(f.text.trim() || f.outcome);
 
 /** View-only filter (BOS-2323): case-insensitive substring over name, command pattern, title pattern and the names of the agents a rule applies to; plus an outcome. */
@@ -143,6 +213,35 @@ export function ruleMatchesFilter(r: { name: string; match: Match; outcome: Outc
   const agentNames = (r.match.agentIds ?? []).map((id) => agents.find((a) => a.id === id)?.name ?? "");
   return [r.name, r.match.commandPattern ?? "", r.match.titlePattern ?? "", ...agentNames].some((s) => s.toLowerCase().includes(q));
 }
+
+/** One CSV row per rule, in the order given. Usage columns are blank until the usage has loaded; a rule with no use in 30 days then shows 0 and no last-matched time. */
+export function rulesCsv(rules: Rule[], agents: Agent[], usage: Usage | undefined): string {
+  const head = ["name", "command_pattern", "title_pattern", "outcome", "applies_to", "kinds", "expires_at", "uses_7_days", "uses_30_days", "last_matched_at"];
+  return buildCsv(
+    head,
+    rules.map((r) => {
+      const ids = r.match.agentIds ?? [];
+      const who = ids.length ? ids.map((id) => agents.find((a) => a.id === id)?.name ?? id).join("; ") : "everyone";
+      const u = usage ? usage[r.name] : undefined;
+      const used = u && total(u.month) > 0;
+      return [
+        r.name,
+        r.match.commandPattern ?? "",
+        r.match.titlePattern ?? "",
+        r.outcome,
+        who,
+        (r.match.kinds ?? []).join("; "),
+        r.expiresAt ?? "",
+        usage ? (used ? total(u.week) : 0) : "",
+        usage ? (used ? total(u.month) : 0) : "",
+        used ? u.lastAt : "",
+      ];
+    }),
+  );
+}
+
+/** "permission-rules-<scope>-2026-11-24.csv": the scope is the company's name or "all". */
+export const rulesCsvName = (scope: string, now: Date = new Date()) => `permission-rules-${scope.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "all"}-${now.toISOString().slice(0, 10)}.csv`;
 
 /** "3 of 20 rules shown" while a filter is on; nothing otherwise. */
 function FilterCount({ shown, total, f }: { shown: number; total: number; f: RuleFilter }) {
@@ -155,7 +254,7 @@ function FilterCount({ shown, total, f }: { shown: number; total: number; f: Rul
   );
 }
 
-function RuleRows({ rules, all = rules, filtered = false, agents, shadowed, editingId, onEdit, onSave, onMove, onChange, onDelete }: { rules: Rule[]; all?: Rule[]; filtered?: boolean; agents: Agent[]; shadowed: string[]; editingId: string | null; onEdit: (id: string | null) => void; onSave: (r: Rule, patch: { name: string; match: Match; outcome: Outcome }) => Promise<void>; onMove: (i: number, d: -1 | 1) => void; onChange: (r: Rule, o: Outcome) => void; onDelete: (r: Rule) => void }) {
+function RuleRows({ rules, all = rules, filtered = false, usage, agents, shadowed, editingId, onEdit, onSave, onMove, onChange, onDelete }: { rules: Rule[]; all?: Rule[]; filtered?: boolean; usage?: Usage; agents: Agent[]; shadowed: string[]; editingId: string | null; onEdit: (id: string | null) => void; onSave: (r: Rule, patch: { name: string; match: Match; outcome: Outcome }) => Promise<void>; onMove: (i: number, d: -1 | 1) => void; onChange: (r: Rule, o: Outcome) => void; onDelete: (r: Rule) => void }) {
   if (!all.length) return <p className="muted">None yet.</p>;
   if (!rules.length) return null;
   return (
@@ -181,6 +280,7 @@ function RuleRows({ rules, all = rules, filtered = false, agents, shadowed, edit
             <p className="mono muted" style={{ fontSize: 12.5, overflowWrap: "anywhere" }}>
               When {describeMatch(r.match, agents)}
             </p>
+            <RuleUsageLine name={r.name} usage={usage} />
             {r.createdBy && (
               <p className="muted" style={{ fontSize: 12.5 }}>
                 Made by {r.createdBy}{r.createdAt ? ` on ${new Date(r.createdAt).toLocaleString()}` : ""}{r.sourceDecisionId ? " from a decision card (see Decisions, answered)" : ""}. Remove it with the button on this row.
@@ -227,6 +327,12 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
   const company = companies.find((c) => c.id === scopeId);
   const allAgents = (scopeId ? company?.agents : companies.flatMap((c) => c.agents)) ?? [];
   const list = usePoll((signal) => api<RuleList>(`/api/policy-rules${scopeId ? `?companyId=${scopeId}` : ""}`, { signal }), 60_000, scopeId ?? "all");
+  // Usage is a nice-to-have: a failed or odd reply just hides the lines (a rule with no usage shown is not marked unused).
+  const usageList = usePoll((signal) => api<{ rules?: Usage }>(`/api/policy-rules/usage${scopeId ? `?companyId=${scopeId}` : ""}`, { signal }), 300_000, `usage-${scopeId ?? "all"}`);
+  const usage = usageList.data?.rules && typeof usageList.data.rules === "object" ? usageList.data.rules : undefined;
+  const askedList = usePoll((signal) => api<{ cards?: AskedCard[] }>(`/api/policy-rules/most-asked${scopeId ? `?companyId=${scopeId}` : ""}`, { signal }), 300_000, `asked-${scopeId ?? "all"}`);
+  const asked = Array.isArray(askedList.data?.cards) ? askedList.data!.cards : undefined;
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState({ name: "", kinds: [] as string[], commandPattern: "", titlePattern: "", outcome: "owner" as Outcome });
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -329,6 +435,18 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
         </p>
       )}
 
+      <MostAskedCards
+        cards={asked}
+        error={askedList.error}
+        onRetry={askedList.reload}
+        onMake={(c) => {
+          // Fills the form only; nothing is saved until the owner saves it. The outcome stays as it was for them to pick.
+          setForm({ name: "", kinds: c.kind ? [c.kind] : [], commandPattern: "", titlePattern: literalTitlePattern(c.title), outcome: "owner" });
+          setAdvancedOpen(true);
+          setTimeout(() => document.getElementById("rule-name")?.focus(), 0);
+        }}
+      />
+
       <section className="card" aria-labelledby="rules-h" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <h2 id="rules-h" style={{ fontSize: 17, fontWeight: 600 }}>
           {company ? `${company.name}'s rules` : "Rules for every company"}
@@ -352,13 +470,20 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
                 ))}
               </select>
             </div>
+            <div className="field">
+              <button type="button" className="btn" disabled={shownRules.length === 0} onClick={() => download(rulesCsvName(company?.name ?? "all"), rulesCsv(shownRules, allAgents, usage))}>
+                Download CSV
+              </button>
+            </div>
           </div>
         )}
+        {list.data && usageList.error && <LoadError what="how often each rule matched" message={usageList.error.message} onRetry={usageList.reload} />}
         {list.data && <FilterCount shown={shownRules.length} total={rules.length} f={filter} />}
         {list.data && <RuleRows
           rules={shownRules}
           all={rules}
           filtered={filterOn(filter)}
+          usage={usage}
           agents={allAgents}
           shadowed={list.data?.shadowedIds ?? []}
           editingId={editingId}
@@ -409,7 +534,7 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
             {sentTo && <p role="status">Sent to {sentTo}. Their proposal will appear in your Decisions queue.</p>}
           </form>
         )}
-        <details style={scopeId ? { paddingTop: 12, borderTop: "1px solid var(--line)" } : undefined}>
+        <details open={advancedOpen} onToggle={(e) => setAdvancedOpen(e.currentTarget.open)} style={scopeId ? { paddingTop: 12, borderTop: "1px solid var(--line)" } : undefined}>
           <summary>Advanced: write the rule yourself</summary>
         <form onSubmit={add} style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", alignItems: "end", paddingTop: 12 }}>
           <div className="field" style={{ gridColumn: "1 / -1" }}>
@@ -502,6 +627,7 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
                 <p className="mono muted" style={{ fontSize: 12.5, overflowWrap: "anywhere" }}>
                   When {describeMatch(r.match)}
                 </p>
+                <RuleUsageLine name={r.name} usage={usage} />
               </div>
               {outcomeTag(r.outcome)}
             </li>

@@ -83,7 +83,7 @@ describe.skipIf(!can)("Board Filter button (BOS-1194)", () => {
       const dialog = page.getByRole("dialog", { name: "Filter tasks" });
       expect(await dialog.count()).toBe(1);
       expect(await dialog.getAttribute("aria-modal")).toBeNull();
-      await dialog.getByRole("switch").click();
+      await dialog.getByRole("switch", { name: /^Working now/ }).click();
       // The button now carries a count and the board shows a chip.
       expect(await page.locator(".filter-count").innerText()).toBe("1");
       expect(await page.locator(".filter-chip").count()).toBe(1);
@@ -123,7 +123,7 @@ describe.skipIf(!can)("Board Filter button (BOS-1194)", () => {
       const page = await open(size);
       await page.getByRole("button", { name: /^Filter/ }).click();
       // Turn Working now on: the button counts it, wide screens show a chip, and columns leave only working cards.
-      await page.getByRole("switch").click();
+      await page.getByRole("switch", { name: /^Working now/ }).click();
       await page.waitForTimeout(300);
       // Close the panel (wide: Escape; phone: Show N tasks) so the bar and columns show with the filter on.
       if (size.width <= 640) await page.getByRole("button", { name: /Show \d+ tasks?/ }).click();

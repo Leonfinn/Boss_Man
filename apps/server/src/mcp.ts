@@ -4,12 +4,14 @@
 // to use each tool so Claude Code's tool search finds them.
 import { checkRequestService, CheckRequestError } from "./services/check-request.js";
 import { checkQueue } from "./services/check-queue.js";
+import { setKeyResultValue } from "./services/key-result-readings.js";
 import { failedChecksText } from "./services/check-failures.js";
 import { FULL_LOG_RETENTION_DAYS, PLAN_REAL_USE_REFUSAL, realUseWalkthrough, usabilityGated } from "@boss-man/shared";
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { and, asc, desc, eq, gt, ilike, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { OTHER_CARD_HELD, otherTicketCardsNamed, ticketHasOpenCard } from "./services/owner-todo.js";
+import { noteResultReported } from "./services/owner-result.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -39,6 +41,7 @@ import { clearsWhenToConditions, type ClearWhen } from "./services/alert-clearin
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { PAGE_DEFAULT } from "./services/list-page.js";
 import { DeployError, liveTagOf, type deploysService } from "./services/deploys.js";
+import { linkHold, releaseHold } from "./services/owner-holds.js";
 import { RunError, runOriginQuery, type runsService } from "./services/runs.js";
 import { holdView } from "./services/review-holds.js";
 import { cardIdInput, resolveCardId, resolveReplacedBy } from "./services/card-id.js";
@@ -261,6 +264,15 @@ function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, 
 }
 
 /**
+ * BOS-2555: this agent raised a card that asked the owner for information, and it is still owed the result because the owner
+ * has answered. Posts the reply into the owner's chat too, so a status-only result reaches them there, not only on the ticket.
+ */
+async function reportInfoResult(db: Db, notes: Services["notes"], scope: Scope, ticketId: string, text: string): Promise<void> {
+  if (!scope.agentId) return;
+  await noteResultReported(db, { companyId: scope.companyId, ticketId, agentId: scope.agentId, text }, { notify: (n) => notes.notify(n) }).catch(() => false);
+}
+
+/**
  * The tools a ticket run has beyond the shared reads and the board (which both a run and the
  * owner chat register): handing out and moving tickets, decisions, engagements, deploys, runs,
  * notifications, review and the rest. Both buildServer and buildChatServer call it, so the CEO
@@ -372,6 +384,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       // A watcher's report reads as a status update (R80).
       const title = t?.watcher && t.watcher === scope.agentId ? `Status: "${t.title}"` : `Reply on "${t?.title ?? "a ticket"}"`;
       await notes.notify({ companyId: scope.companyId, agentId: scope.agentId, level: "note", title, body, link: `#/tickets/${ticketId}` });
+      // BOS-2555: a status-only reply that is the result of a card asking the owner for information goes into their chat too.
+      if (notAnAsk) await reportInfoResult(db, notes, scope, ticketId, body);
       // A reply that asks the owner to act doesn't reach their queue (BOS-122). Say so in the result so the
       // agent's next turn raises a decision; the reply still posts, so a status update isn't blocked.
       // (Held above for agents; this is only the raised-sign-off-card message, or the owner's own reply.)
@@ -683,7 +697,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         .innerJoin(objectives, eq(objectives.id, keyResults.objectiveId))
         .where(and(eq(keyResults.id, keyResultId), eq(objectives.companyId, scope.companyId)));
       if (!kr) return fail("No key result with that ID in your company.");
-      await db.update(keyResults).set({ current: value }).where(eq(keyResults.id, keyResultId));
+      await setKeyResultValue(db, keyResultId, value, { kind: "agent", agentId: scope.agentId ?? null });
       return text(`Key result ${keyResultId} is now ${value}.`);
     },
   );
@@ -771,15 +785,18 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     "deploy",
     {
       description:
-        "Ship work to one of your company's deploy targets. action: targets (list them, each with its deploy tag if it has one and its last successful deploy: commit, time and tag result, so you can say what is live), request (target, ref, optional notes and ticketId; Boss Man records the commit the ref names and the approval names it; production targets wait for the owner, and you're woken in a run that holds the target's secrets once approved), report (deployId and outcome, from that run, when the deploy is done). Deploy scripts must not push git tags themselves (agents have no git login): when a target has a deploy tag, Boss Man moves it to the deployed commit after you report success. A target called staging (listed only when the host's staging lane is on) is different: request it with a ref that names a merged commit (main or a sha on main) and no approval is needed; the host deploys it, runs its smoke checks and you're woken with the result, and you do not report it. server_status shows staging's commit, runner image and each check. Staging has an empty database and no real integrations, so check there only what needs the code alone; anything needing real accounts, production data, the edge or timing is checked live.",
+        "Ship work to one of your company's deploy targets. action: targets (list them, each with its deploy tag if it has one and its last successful deploy: commit, time and tag result, so you can say what is live), request (target, ref, optional notes and ticketId; Boss Man records the commit the ref names and the approval names it; production targets wait for the owner, and you're woken in a run that holds the target's secrets once approved), report (deployId and outcome, from that run, when the deploy is done), history (target by name or id, optional limit, default 10, at most 50: that target's recent deploys newest first, failed and refused ones too, one line each with deploy id, requested time, ref and commit, who asked, ticket and status; use it to answer why a deploy didn't go out, or what was live before). Deploy scripts must not push git tags themselves (agents have no git login): when a target has a deploy tag, Boss Man moves it to the deployed commit after you report success. A target called staging (listed only when the host's staging lane is on) is different: request it with a ref that names a merged commit (main or a sha on main) and no approval is needed; the host deploys it, runs its smoke checks and you're woken with the result, and you do not report it. server_status shows staging's commit, runner image and each check. Staging has an empty database and no real integrations, so check there only what needs the code alone; anything needing real accounts, production data, the edge or timing is checked live. release_hold (Boss Man's own company only; the CEO, or the assignee of the ticket the CEO linked with link_hold; outcome retry_safe or do_not_retry, ownerText, optional subject server_deploy or runner_update when both are held): after a Boss Man server or runner update fails, half-finishes or is switched back, the next card for it is held off the owner's queue while the failure is diagnosed (the CEO is woken about it). link_hold (CEO only; ticketId, optional subject) names the ticket diagnosing it, so its assignee may release it. Call release_hold once you know what to do: retry_safe offers the same version again, do_not_retry only a newer one. ownerText (plain words: what was wrong and why the next step is safe) goes on the owner's card, which then recommends going ahead. Unreleased within 2 hours, the card goes to the owner saying the cause is unknown, with Not now recommended; you can still release it after that.",
       inputSchema: {
-        action: z.enum(["targets", "request", "report"]),
+        action: z.enum(["targets", "request", "report", "history", "release_hold", "link_hold"]),
         target: z.string().optional(),
+        limit: z.number().int().min(1).max(50).optional(),
         ref: z.string().min(1).max(200).optional(),
         notes: z.string().max(2000).optional(),
         ticketId: z.string().uuid().optional(),
         deployId: z.string().uuid().optional(),
-        outcome: z.enum(["succeeded", "failed"]).optional(),
+        outcome: z.enum(["succeeded", "failed", "retry_safe", "do_not_retry"]).optional(),
+        subject: z.enum(["server_deploy", "runner_update"]).optional(),
+        ownerText: z.string().max(500).optional(),
       },
     },
     async (input) => {
@@ -802,12 +819,49 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
             ),
           );
         }
+        if (input.action === "history") {
+          if (!input.target) return fail("Give the target (name or id).");
+          const all = await deploys.listTargets(scope.companyId);
+          const t = all.find((x) => x.id === input.target || x.name.toLowerCase() === input.target!.toLowerCase());
+          if (!t) return fail(all.length ? `No deploy target called "${input.target}". Targets: ${all.map((x) => x.name).join(", ")}.` : "Your company has no deploy targets.");
+          const rows = await deploys.list(scope.companyId, { targetId: t.id, limit: input.limit ?? 10 });
+          if (!rows.length) return text(`No deploys of ${t.name} yet.`);
+          return text(
+            rows
+              .map((r) => {
+                const d = r.deploy;
+                const sha = d.commit ? ` (${d.commit.slice(0, 7)})` : "";
+                const tag = d.tagName ? `, tag ${d.tagName}: ${d.tagResult ?? "none"}` : "";
+                return `${d.id} | ${d.createdAt.toISOString().slice(0, 16).replace("T", " ")} UTC | ${d.ref}${sha} | by ${r.agentName ?? "the owner"} | ${r.ticketRef ?? "no ticket"} | ${d.status}${tag}`;
+              })
+              .join("\n"),
+          );
+        }
+        if (input.action === "release_hold" || input.action === "link_hold") {
+          // BOS-2554 (DR-076 A): the self-deploy cards belong to Boss Man's home company (the oldest), as in self-deploy.ts.
+          // The CEO links the hold to the diagnosing ticket; the CEO or that ticket's assignee releases it (owner-holds.ts).
+          const [home] = await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1);
+          if (home?.id !== scope.companyId) return fail("Only Boss Man's own company holds its update cards.");
+          const [me] = scope.agentId ? await db.select({ name: agents.name, role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+          const isCeo = me?.role === "ceo";
+          if (input.action === "link_hold") {
+            if (!isCeo) return fail("Only the CEO links a held update to the ticket diagnosing it.");
+            if (!input.ticketId) return fail("Give ticketId: the ticket diagnosing the failure.");
+            const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, input.ticketId), eq(tickets.companyId, scope.companyId)));
+            if (!t) return fail("No such ticket in your company.");
+            const r = await linkHold(db, { subject: input.subject, ticketId: t.id });
+            return r.ok ? text("Linked. That ticket's assignee can now release the hold (deploy release_hold); so can you.") : fail(r.text);
+          }
+          if (input.outcome !== "retry_safe" && input.outcome !== "do_not_retry") return fail("Give outcome retry_safe (the same version can go out again) or do_not_retry (only a newer one).");
+          const r = await releaseHold(db, { subject: input.subject, by: me?.name ?? "an agent", agentId: scope.agentId, isCeo, outcome: input.outcome, ownerText: input.ownerText ?? "" });
+          return r.ok ? text(r.text) : fail(r.text);
+        }
         if (input.action === "request") {
           if (!input.target || !input.ref) return fail("Give the target and the ref to deploy.");
           const r = await deploys.request({ companyId: scope.companyId, agentId: scope.agentId, runId: scope.runId }, { target: input.target, ref: input.ref, notes: input.notes, ticketId: input.ticketId });
           return text(`Deploy ${r.deploy.id}: ${r.note}`);
         }
-        if (!input.deployId || !input.outcome) return fail("Give the deployId and the outcome.");
+        if (!input.deployId || (input.outcome !== "succeeded" && input.outcome !== "failed")) return fail("Give the deployId and the outcome (succeeded or failed).");
         const d = await deploys.report({ companyId: scope.companyId, runId: scope.runId }, { deployId: input.deployId, outcome: input.outcome, notes: input.notes });
         const tag = d.tagResult === "pending" ? ` Boss Man is moving the tag ${d.tagName} to ${d.commit?.slice(0, 7)}; the result goes on the ticket.` : "";
         return text(`Deploy ${d.id} recorded as ${d.status}. The target's secrets are no longer available.${tag}`);
@@ -1192,7 +1246,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       "server_status",
       {
         description:
-          "A read-only view of the server, for when you or the owner need to know what is actually running. Say Boss Man is up only when the stack field says healthy: one server answering is not enough. stack is healthy, degraded or down, and stackWhy gives the reasons (for example a failed or partial last deploy, which stays degraded until a later deploy result replaces it). Also shown: both blue/green colours (colours), when the database last started (database.startedAt), the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, recent server errors with secrets redacted, server freezes over 1 s with memory, GC time and requests in flight (stalls), and the Synthetic plan's quota (syntheticUsage: which measure it is, used of the limit (the plan's weekly credits, which regenerate 2% at a time, or else the old request window), when it renews, how old the reading is, recent readings this period and which of your company's agents are paid from it, with the number of other companies' agents on the same plan but not their names). Also runLimits: the all-companies and per-company run limits in force, with how many work runs each has going (counts only); limit is the number in force and saved the owner's saved number; when allCompanies or background is lower than saved, because says why (a server update's hold), since since when and until the latest it lifts, and mergeChecks.paused says new merge checks wait for the same hold, so never ask the owner whether they meant a lower number; a waiting wake held 'at a concurrency limit: all companies' waits for the first, 'this company' for the second, and 'this agent is busy' for the agent's own run. Also mergeFailures: failed merge attempts in the last hour, with a count per reason (check_failed, landing_refused, main_moved, conflict, lock_timeout, restart, gate_fault). Also mergeTrain: per project, the merge train's seats, who is seated and who waits, tickets held to land on main alone (who they clashed with, the files, and whether they hold the line), and since when a seat has stood empty or nothing has landed (empty on a server that isn't in charge). Also landingTurns: per project, the ticket holding the landing turn (since, capMin, capEndsAt), the line waiting for it in order, and merges whose check passed and whose push waits for it (pushWaiting); each waiter's label is the same line its ticket and the Merges tab show, e.g. 'waiting for BOS-12 to land, then re-checks'. Also addons: ntfy, Tailscale and Penpot, each with state (not_set_up, stopped, needs_login, running or unknown), since and source. Never tell the owner an add-on carries over, is back up or works unless its state is running; unknown means Boss Man can't see it, so say so. For ntfy, running means only that ntfy accepted the last push, not that the phone got it: say a push reached the phone only when ntfy.phone.confirmedAt (the owner's tap on Got it on a test notification) is later than the push, or the owner says so. ntfy.phoneType is the owner's phone (android, iphone, both or unknown): when unknown, ask the owner rather than guessing a phone. It changes nothing and shows no other company's tickets, runs or errors.",
+          "A read-only view of the server, for when you or the owner need to know what is actually running. Say Boss Man is up only when the stack field says healthy: one server answering is not enough. stack is healthy, degraded or down, and stackWhy gives the reasons (for example a failed or partial last deploy, which stays degraded until a later deploy result replaces it). Also shown: both blue/green colours (colours), when the database last started (database.startedAt), the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, recent server errors with secrets redacted, server freezes over 1 s with memory, GC time and requests in flight (stalls), and the Synthetic plan's quota (syntheticUsage: which measure it is, used of the limit (the plan's weekly credits, which regenerate 2% at a time, or else the old request window), when it renews, how old the reading is, recent readings this period and which of your company's agents are paid from it, with the number of other companies' agents on the same plan but not their names). Also runLimits: the all-companies and per-company run limits in force, with how many work runs each has going (counts only); limit is the number in force and saved the owner's saved number; when allCompanies or background is lower than saved, because says why (a server update's hold), since since when and until the latest it lifts, and mergeChecks.paused says new merge checks wait for the same hold, so never ask the owner whether they meant a lower number; a waiting wake held 'at a concurrency limit: all companies' waits for the first, 'this company' for the second, and 'this agent is busy' for the agent's own run. Also mergeFailures: failed merge attempts in the last hour, with a count per reason (check_failed, landing_refused, main_moved, conflict, lock_timeout, restart, gate_fault). Also mergeTrain: per project, the merge train's seats, who is seated and who waits, tickets held to land on main alone (who they clashed with, the files, and whether they hold the line), and since when a seat has stood empty or nothing has landed (empty on a server that isn't in charge), and mergeTrainOn: whether the owner's merge train switch is on. Also landingTurns: per project, the ticket holding the landing turn (since, capMin, capEndsAt, and phase: what its merge is doing now, e.g. waiting for GitHub CI since 14:05 UTC; a turn past its cap is released when you read this), the line waiting for it in order, and merges whose check passed and whose push waits for it (pushWaiting); each waiter's label is the same line its ticket and the Merges tab show, e.g. 'waiting for BOS-12 to land, then re-checks'. Also addons: ntfy, Tailscale and Penpot, each with state (not_set_up, stopped, needs_login, running or unknown), since and source. Never tell the owner an add-on carries over, is back up or works unless its state is running; unknown means Boss Man can't see it, so say so. For ntfy, running means only that ntfy accepted the last push, not that the phone got it: say a push reached the phone only when ntfy.phone.confirmedAt (the owner's tap on Got it on a test notification) is later than the push, or the owner says so. ntfy.phoneType is the owner's phone (android, iphone, both or unknown): when unknown, ask the owner rather than guessing a phone. It changes nothing and shows no other company's tickets, runs or errors.",
         inputSchema: {},
       },
       async () => text(JSON.stringify(await serverStatus.status(scope.companyId))),
@@ -1318,7 +1372,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
         }
         const start = offset ?? 0;
         const rows = await db
-          .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, version: tickets.version, outcome: tickets.outcome, assignee: agents.name, createdAt: tickets.createdAt, finishedAt: sql<Date | null>`case when ${tickets.systemState} = 'done' then ${finishedAtSql} end`, featureId: tickets.featureId, featureTitle: features.title, lastActivityAt: tickets.lastActivityAt, stateNote: tickets.stateNote, stateNoteAt: tickets.stateNoteAt, stateNoteStaleAt: tickets.stateNoteStaleAt, stateNoteStaleReason: tickets.stateNoteStaleReason })
+          .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, version: tickets.version, outcome: tickets.outcome, assignee: agents.name, createdAt: tickets.createdAt, finishedAt: sql<Date | null>`case when ${tickets.systemState} = 'done' then ${finishedAtSql} end`, featureId: tickets.featureId, featureTitle: features.title, recurring: tickets.recurring, urgent: tickets.urgent, lastActivityAt: tickets.lastActivityAt, stateNote: tickets.stateNote, stateNoteAt: tickets.stateNoteAt, stateNoteStaleAt: tickets.stateNoteStaleAt, stateNoteStaleReason: tickets.stateNoteStaleReason })
           .from(tickets)
           .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
           .leftJoin(features, eq(features.id, tickets.featureId))
@@ -1327,11 +1381,11 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
           .limit(40)
           .offset(start);
         const json = JSON.stringify(
-          rows.map(({ featureId, featureTitle, finishedAt, ...r }) => {
+          rows.map(({ featureId, featureTitle, finishedAt, recurring, urgent, ...r }) => {
             const out = withNote(ref(r));
             const fin = finishedAt ? new Date(finishedAt) : null;
             const madeSince = sinceAt ? [...(r.createdAt >= sinceAt ? ["created"] : []), ...(fin && fin >= sinceAt ? ["finished"] : [])] : undefined;
-            return { ...out, feature: featureId ? { id: featureId, title: featureTitle } : null, ...(madeSince ? { since: madeSince } : {}) };
+            return { ...out, feature: featureId ? { id: featureId, title: featureTitle } : null, ...(recurring ? { recurring: true } : {}), ...(urgent ? { urgent: true } : {}), ...(madeSince ? { since: madeSince } : {}) };
           }),
         );
         const [{ n: total } = { n: 0 }] = await db.select({ n: sql<number>`count(*)::int` }).from(tickets).leftJoin(agents, eq(agents.id, tickets.assigneeAgentId)).where(where);
@@ -1364,7 +1418,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
       // followed rather than cut; the whole text is paged by offset, and a long line is split and continued.
       const head = [
         `# ${t.title}`,
-        `Ticket ${ref(t).ref ?? ""} (id ${t.id}) in project "${row.project}". State: ${t.systemState}${t.outcome ? ` (${t.outcome})` : ""}. Version: ${t.version}. Assigned to: ${row.assignee ?? (t.assignedToOwner ? "the owner" : "nobody")}. Risk: ${t.risk ?? "medium"}.`,
+        `Ticket ${ref(t).ref ?? ""} (id ${t.id}) in project "${row.project}". State: ${t.systemState}${t.outcome ? ` (${t.outcome})` : ""}. Version: ${t.version}. Assigned to: ${row.assignee ?? (t.assignedToOwner ? "the owner" : "nobody")}. Risk: ${t.risk ?? "medium"}.${t.recurring ? " Recurring: yes." : ""}${t.urgent ? " Urgent: yes." : ""}`,
         ...(note ? [note] : []),
         ...(signoff ? [signoff] : []),
         ...(signoffLog ? [signoffLog] : []),

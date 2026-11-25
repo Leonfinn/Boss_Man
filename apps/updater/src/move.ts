@@ -4,6 +4,7 @@
 // comes from the verified release.json, never the request.
 import { UpdaterError, type Config } from "./config.js";
 import type { Docker } from "./docker.js";
+import { moveHelpers } from "./helpers.js";
 import { installPack, type PackOptions } from "./pack.js";
 import { imageRef, pullByDigest, type PullOptions } from "./pull.js";
 import { getVerifiedRelease, type ReleaseDeps } from "./release.js";
@@ -24,6 +25,8 @@ export type MoveDeps = {
   clock?: Clock;
   probe?: Probe;
   gate?: HandoverGate;
+  /** Tests: whether the launcher reports a run starting (GET /busy). */
+  launcherBusy?: () => Promise<boolean>;
 };
 
 /** The release the install runs now: the live colour's label once a swap has run, else what was last recorded, else the setting. */
@@ -84,7 +87,12 @@ export async function runMove(deps: MoveDeps, ins: Instruction): Promise<void> {
     }
     state.update({ restore });
     await runSwap(deps, release, ins, restore);
-    if (state.get().stage === "done" && !restore) await selfUpdate(deps, release, null);
+    // BOS-1227: the whole release moves once the server is done and soaked. A rolled-back or restore move never writes release-current.
+    if (state.get().stage === "done" && !restore) {
+      const moved = await moveHelpers(deps, release);
+      if (moved === "pending") state.update({ report: { level: "problem", text: `Updated to ${ins.version}. ${state.get().helpers.note ?? ""}`.trim(), at: new Date().toISOString(), acknowledged: false } });
+      await selfUpdate(deps, release, null);
+    }
   } catch (e) {
     const err = e instanceof UpdaterError ? e : new UpdaterError("move_failed", "The update stopped because of an unexpected problem. The version that was serving keeps serving.");
     state.fail(err);

@@ -12,6 +12,7 @@ import { costEvents, decisions, runs, tickets, wakes } from "../src/db/schema.js
 import { reasonsOfClass, WAKE_CLASS, wakeClass } from "../src/services/wake-classes.js";
 import type { Limits } from "../src/services/scheduler.js";
 import { HELD_COMPANY } from "../src/services/fair-share.js";
+import { NOT_WAKE_CODES, wakeReasonsIn } from "../src/services/guard-scan.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -101,15 +102,13 @@ describe("wake classes: the table", () => {
   it("classifies every reason the server uses to wake an agent", () => {
     const found = new Map<string, string>();
     for (const file of walk(SRC)) {
-      const text = readFileSync(file, "utf8");
-      for (const m of text.matchAll(/export const \w*REASON = "([^"]+)"/g)) found.set(m[1]!, file);
-      // Plain lower-case words only: the sentences after `reason:` elsewhere are refusals shown to people.
-      for (const m of text.matchAll(/\breason: "([a-z_][a-z_ -]*)"/g)) found.set(m[1]!, file);
+      // The patterns are wakeReasonsIn (src/services/guard-scan.ts), shared with the move-to-review check (BOS-2522).
+      for (const r of wakeReasonsIn(readFileSync(file, "utf8"))) found.set(r, file);
     }
     // "update pending" is the maintenance hold's label; no_wrapup and too_early are the refusal codes of the
     // stop-stragglers endpoint (BOS-1238). None is a wake.
     // no_update, agents_running and no_checks are the refusal codes of the update-now endpoint (BOS-1600).
-    for (const r of ["update pending", "no_wrapup", "too_early", "no_update", "agents_running", "no_checks"]) found.delete(r); // the maintenance hold's label, not a wake
+    for (const r of NOT_WAKE_CODES) found.delete(r);
     for (const r of NOT_WAKE_REASONS) found.delete(r);
     const missing = [...found].filter(([r]) => !(r in WAKE_CLASS));
     const unclassified = missing.map(([r, f]) => `${r} (${path.relative(SRC, f)})`);
@@ -386,6 +385,7 @@ describe("wake classes: callers of wake() and notify()", () => {
     "services/check-idle.ts": NEVER_DROPPED + " (idle check slot is a waiting reason; deps.notify is the owner's notification, not a wake)",
     "services/watchdog.ts": CHECKS_OUTCOME + " (a dropped wake is reported, not counted as sent)",
     "services/secret-scan.ts": NEVER_DROPPED + " (secret scan is scheduled; the match's ticket stays assigned, so a missed wake is picked up by the idle sweeps)",
+    "services/owner-result.ts": NEVER_DROPPED + " (a result for the owner is a waiting reason: the CEO posting an unanswered result is never dropped)",
   };
 
   it("lists every file that wakes an agent, so a new caller has to say how it handles a drop", () => {

@@ -8,7 +8,7 @@ import { openPglite } from "../src/db/client.js";
 import { agents, companies, decisions, projects, reviewRequests, tickets } from "../src/db/schema.js";
 import { alertClearing, clearWhenOf } from "../src/services/alert-clearing.js";
 import { kindCeiling } from "../src/services/alert-kinds.js";
-import { landingEtas, landingTurnAlertKey, landingTurnAlertSweep, median, turnOverdue, usualCiWait } from "../src/services/landing-turn-eta.js";
+import { landingEtas, landingTurnAlertKey, landingTurnAlertSweep, lineClearAt, median, turnOverdue, usualCiWait } from "../src/services/landing-turn-eta.js";
 import { lineEvent } from "../src/services/merge-line.js";
 import { mergeQueueService } from "../src/services/merge-queue.js";
 
@@ -117,6 +117,24 @@ describe("the Merges tab", () => {
     expect(view.waiting.find((w) => w.ticketId === next.id)?.statusLine?.landsAt).toBe(at(38).toISOString());
   });
 
+  it("BOS-2505: the view carries the one figure for when the line clears, with no landing turns (the train runs), and none without usual times", async () => {
+    for (const m of [22, 24, 23]) await ciWait(m);
+    const a = await inReview("In its GitHub wait", 2501);
+    const deps = {
+      runningMerges: () => [{ ticketId: a.id, startedAt: at(-10).toISOString(), startedBy: "gate", ci: { since: at(-8).toISOString(), waiting: ["check"] } }],
+      limit: async () => 2,
+      runningChecks: async () => [],
+      queueStatus: async () => ({ mode: "server" as const, slots: 2, running: 0, waiting: 0 }),
+      usualCiWait: (id: string) => usualCiWait(db, id, T0),
+      now: () => T0,
+    };
+    // No landingTurns dep at all: the estimate must not need them.
+    const withCheck = mergeQueueService(db, { ...deps, usualMergeCheck: async () => ({ ms: 20 * 60_000, samples: 5 }) });
+    expect((await withCheck.get(companyId)).clearAt).toBe(at(15).toISOString());
+    const without = mergeQueueService(db, { ...deps, usualMergeCheck: async () => null });
+    expect((await without.get(companyId)).clearAt).toBeNull();
+  });
+
   it("shows the holder with no estimate, and no overdue flag, while there are too few landings to call a wait usual", async () => {
     const holder = await inReview("Holder change", 2337);
     const svc = mergeQueueService(db, {
@@ -131,6 +149,48 @@ describe("the Merges tab", () => {
     const turn = (await svc.get(companyId)).landingTurns![0]!;
     expect(turn.holder).toMatchObject({ landsAt: null, overdue: false });
     expect(turn.usualWaitMin).toBeNull();
+  });
+});
+
+// BOS-2505: when the last ticket of the merge line lands (the banner's figure).
+describe("lineClearAt", () => {
+  const MIN = 60_000;
+  const NOW0 = Date.UTC(2026, 10, 24, 13, 25);
+  const base = { nowMs: NOW0, usualCheckMs: 20 * MIN, usualCiMs: 20 * MIN, slots: 3, ciOnlySinceMs: [] as number[] };
+
+  it("says nothing without a usual check time and a usual GitHub wait", () => {
+    expect(lineClearAt({ ...base, usualCheckMs: null, running: [], queued: 1 })).toBeNull();
+    expect(lineClearAt({ ...base, usualCiMs: null, running: [], queued: 1 })).toBeNull();
+    expect(lineClearAt({ ...base, running: [], queued: 0 })).toBeNull(); // an empty line has no last landing
+  });
+
+  it("counts the tickets ahead of the waiting ones: checks 23, 12, 3 min in, one in its GitHub wait, two queued", () => {
+    const running = [23, 12, 3].map((m) => ({ startedMs: NOW0 - m * MIN, ciSinceMs: null }));
+    const at = lineClearAt({ ...base, running, ciOnlySinceMs: [NOW0 - 5 * MIN], queued: 2 })!;
+    // The queued ones take the slots as they free (+1 and +8 min) and each needs 20 min: the last is ready at +28 min.
+    expect((at - NOW0) / MIN).toBe(28);
+    // Without the queued two, the last of the five is the check 3 min in (+17 min): the tickets behind do add time.
+    expect((lineClearAt({ ...base, running, ciOnlySinceMs: [NOW0 - 5 * MIN], queued: 0 })! - NOW0) / MIN).toBe(17);
+  });
+
+  it("a ticket past its check, in its GitHub wait, lands one usual wait after the run began", () => {
+    expect(lineClearAt({ ...base, running: [], ciOnlySinceMs: [NOW0 - 5 * MIN], queued: 0 })).toBe(NOW0 + 15 * MIN);
+  });
+
+  it("the check and the GitHub run go side by side: a ticket lands when both are done, not after one then the other", () => {
+    // Check 5 min in (15 left), GitHub run began 12 min ago (8 left): ready at +15, not +15 + 20.
+    expect(lineClearAt({ ...base, running: [{ startedMs: NOW0 - 5 * MIN, ciSinceMs: NOW0 - 12 * MIN }], queued: 0 })).toBe(NOW0 + 15 * MIN);
+  });
+
+  it("tickets that finish together land together: more of them do not push the last landing out", () => {
+    const a = { startedMs: NOW0 - 10 * MIN, ciSinceMs: null };
+    const b = { startedMs: NOW0 - 12 * MIN, ciSinceMs: null };
+    expect(lineClearAt({ ...base, running: [a, b], queued: 0 })).toBe(NOW0 + 10 * MIN);
+    expect(lineClearAt({ ...base, running: [a], queued: 0 })).toBe(NOW0 + 10 * MIN);
+  });
+
+  it("a check past the usual time counts one more minute, not zero or negative", () => {
+    expect(lineClearAt({ ...base, running: [{ startedMs: NOW0 - 90 * MIN, ciSinceMs: null }], queued: 0 })).toBe(NOW0 + MIN);
   });
 });
 

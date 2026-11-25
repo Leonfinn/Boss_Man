@@ -7,10 +7,12 @@ import { CHECK_PEAK_MB, checkMemoryWarning } from "@boss-man/shared";
 const MEMORY_GUIDE = "https://github.com/Leonfinn/Boss_Man/blob/main/docs/34-check-workers.md#changing-the-memory-on-any-docker-host";
 import { api, type Company } from "../../api";
 import { copyMessage, copyText } from "../../clipboard";
+import { buildCsv, download } from "../../csv";
 import { usePoll } from "../../hooks";
 import { when } from "../Runs";
 import type { HostFactsView } from "../../host-facts-display";
 import { workerAddressChoices, workerComposeFile, workerSocketUrl } from "./check-worker-compose";
+import { LoadError } from "../../components/LoadError";
 import { SaveButton } from "../../components/SaveButton";
 import { useAction } from "./shared";
 import { DEFAULT_POLICY, policyLine, policyValid, SlotSplitFields, type MachineTakes, type SlotPolicy } from "./SlotSplit";
@@ -38,6 +40,189 @@ export type CheckWorkerView = {
   companies: { id: string; name: string; ready: boolean; reason: string | null }[];
   reason: string | null;
 };
+
+/** BOS-2373: one machine's last 7 days, from GET /api/settings/check-workers/stats. */
+export type MachineStatsView = {
+  machine: string;
+  total: number;
+  passed: number;
+  failed: number;
+  stuck: number;
+  medianSeconds: number | null;
+  longestSeconds: number | null;
+  recent: { id: string; ticketId: string; ref: string | null; title: string; kind: string; scope: string; result: string; seconds: number | null; endedAt: string | null }[];
+};
+
+const lengthText = (s: number | null) => (s === null ? "" : s < 90 ? `${s} s` : `${Math.round(s / 60)} min`);
+
+/** The 7-day line and the "Last 10 checks" fold for one machine. */
+export function MachineRecord({ stats }: { stats: MachineStatsView | undefined }) {
+  if (!stats || stats.total === 0) {
+    return (
+      <p className="muted" style={{ fontSize: 14, margin: 0 }} data-testid="machine-record">
+        No checks in the last 7 days
+      </p>
+    );
+  }
+  return (
+    <>
+      <p style={{ fontSize: 14, margin: 0 }} data-testid="machine-record">
+        {`7 days: ${stats.total} check${stats.total === 1 ? "" : "s"} · ${stats.passed} passed · ${stats.failed} failed · ${stats.stuck} stuck`}
+        {stats.medianSeconds !== null ? ` · median ${lengthText(stats.medianSeconds)}` : ""}
+        {stats.longestSeconds !== null ? ` · longest ${lengthText(stats.longestSeconds)}` : ""}
+      </p>
+      <details>
+        <summary style={{ fontSize: 14 }}>Last {Math.min(10, stats.recent.length)} checks</summary>
+        <table style={{ fontSize: 14 }}>
+          <thead>
+            <tr>
+              <th>Ticket</th>
+              <th>Kind</th>
+              <th>Scope</th>
+              <th>Result</th>
+              <th>Length</th>
+              <th>Ended</th>
+            </tr>
+          </thead>
+          <tbody>
+            {stats.recent.map((c) => (
+              <tr key={c.id}>
+                <td>
+                  <a href={`#/tickets/${c.ticketId}`}>{c.ref ?? "ticket"}</a> {c.title}
+                </td>
+                <td>{c.kind}</td>
+                <td>{c.scope}</td>
+                <td>{c.result}</td>
+                <td>{lengthText(c.seconds)}</td>
+                <td>{when(c.endedAt)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </details>
+    </>
+  );
+}
+
+/** BOS-2436: the check line over 7 days, all machines together, from GET /api/settings/check-workers/line. */
+export type CheckLineView = {
+  days: { date: string; quick: number; full: number; merge: number }[];
+  kinds: { kind: "quick" | "full" | "merge"; total: number; cancelled: number; medianWaitSeconds: number | null; longestWaitSeconds: number | null; medianRunSeconds: number | null }[];
+  busiestHours: { hour: number; checks: number }[];
+  waitingNow: number;
+  oldestWaitSeconds: number | null;
+  timeZone: string;
+};
+
+export const MACHINES_CSV_HEAD = ["machine", "connected", "checks", "passed", "failed", "stuck", "median_seconds", "longest_seconds"];
+const emptyIfNone = (n: number | null | undefined): number | string => (n === null || n === undefined ? "" : n);
+
+/** One row per machine: the company runner first, then each worker. A figure the machine has no value for is an empty cell. */
+export function machinesToCsvRows(machines: { name: string; connected: boolean; stats: MachineStatsView | undefined }[]): Array<Array<string | number>> {
+  return machines.map((m) => [m.name, m.connected ? "yes" : "no", m.stats?.total ?? 0, m.stats?.passed ?? 0, m.stats?.failed ?? 0, m.stats?.stuck ?? 0, emptyIfNone(m.stats?.medianSeconds), emptyIfNone(m.stats?.longestSeconds)]);
+}
+
+export const LINE_DAYS_CSV_HEAD = ["date", "quick", "full", "merge", "total"];
+export const LINE_KINDS_CSV_HEAD = ["kind", "checks", "cancelled", "median_wait_seconds", "longest_wait_seconds", "median_run_seconds"];
+
+/** The days, a blank line, then the kinds, each part with its own header row. */
+export function lineToCsv(line: CheckLineView): string {
+  const days = buildCsv(LINE_DAYS_CSV_HEAD, line.days.map((d) => [d.date, d.quick, d.full, d.merge, d.quick + d.full + d.merge]));
+  const kinds = buildCsv(LINE_KINDS_CSV_HEAD, line.kinds.map((k) => [k.kind, k.total, k.cancelled, emptyIfNone(k.medianWaitSeconds), emptyIfNone(k.longestWaitSeconds), emptyIfNone(k.medianRunSeconds)]));
+  return `${days}\r\n${kinds}`;
+}
+
+export const csvDay = (now = new Date()) => now.toISOString().slice(0, 10);
+
+const KIND_NAMES = { quick: "Quick", full: "Full", merge: "Merge" } as const;
+const hourText = (h: number) => `${String(h).padStart(2, "0")}:00–${String((h + 1) % 24).padStart(2, "0")}:00`;
+const dayText = (date: string) => new Date(`${date}T12:00:00Z`).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
+
+/** The "Check line, last 7 days" fold: how many checks came in, how long they waited for a machine, and when it is busiest. */
+export function CheckLine({ line }: { line: CheckLineView }) {
+  const ran = line.kinds.reduce((t, k) => t + k.total, 0);
+  const cancelled = line.kinds.reduce((t, k) => t + k.cancelled, 0);
+  const waiting =
+    line.waitingNow === 0 ? "Nothing waiting now." : `Waiting now: ${line.waitingNow} check${line.waitingNow === 1 ? "" : "s"}, the oldest for ${lengthText(line.oldestWaitSeconds ?? 0)}.`;
+  return (
+    <details className="card" style={{ padding: 8 }} data-testid="check-line">
+      <summary>
+        <strong>Check line, last 7 days</strong>
+      </summary>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6, fontSize: 14 }}>
+        <p style={{ margin: 0 }} data-testid="check-line-now">
+          {waiting}
+        </p>
+        {ran === 0 && cancelled === 0 ? (
+          <p className="muted" style={{ margin: 0 }} data-testid="check-line-empty">
+            No checks in the last 7 days
+          </p>
+        ) : (
+          <>
+            <table data-testid="check-line-kinds">
+              <thead>
+                <tr>
+                  <th>Kind</th>
+                  <th>Checks</th>
+                  <th>Median wait to start</th>
+                  <th>Longest wait</th>
+                  <th>Median run time</th>
+                  <th>Cancelled</th>
+                </tr>
+              </thead>
+              <tbody>
+                {line.kinds.map((k) => (
+                  <tr key={k.kind}>
+                    <td>{KIND_NAMES[k.kind]}</td>
+                    <td>{k.total}</td>
+                    <td>{lengthText(k.medianWaitSeconds)}</td>
+                    <td>{lengthText(k.longestWaitSeconds)}</td>
+                    <td>{lengthText(k.medianRunSeconds)}</td>
+                    <td>{k.cancelled}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <table data-testid="check-line-days">
+              <thead>
+                <tr>
+                  <th>Day</th>
+                  <th>Quick</th>
+                  <th>Full</th>
+                  <th>Merge</th>
+                </tr>
+              </thead>
+              <tbody>
+                {line.days.map((d) => (
+                  <tr key={d.date}>
+                    <td>{dayText(d.date)}</td>
+                    <td>{d.quick}</td>
+                    <td>{d.full}</td>
+                    <td>{d.merge}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {line.busiestHours.length > 0 && (
+              <p style={{ margin: 0 }} data-testid="check-line-hours">
+                {`Busiest hours (checks queued, ${line.timeZone} time): `}
+                {line.busiestHours.map((h) => `${hourText(h.hour)} (${h.checks})`).join(" · ")}
+              </p>
+            )}
+            <div>
+              <button type="button" className="btn" onClick={() => download(`check-line-7-days-${csvDay()}.csv`, lineToCsv(line))}>
+                Download CSV
+              </button>
+            </div>
+            <p className="muted" style={{ margin: 0 }}>
+              Wait is from a check joining the line to a machine starting it. Checks still waiting count above, not in the medians; cancelled checks are counted apart.
+            </p>
+          </>
+        )}
+      </div>
+    </details>
+  );
+}
 
 type Draft = { name: string; companyIds: string[]; slots: string; threads: string; memoryGb: string; policy: SlotPolicy };
 const blank: Draft = { name: "", companyIds: [], slots: "1", threads: "", memoryGb: "", policy: DEFAULT_POLICY };
@@ -111,7 +296,7 @@ function WorkerForm({ draft, setDraft, companies, maxSlots, idPrefix, machineMb 
   );
 }
 
-export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWorkerView[]; maxSlots: number; reload: () => void }) {
+export function CheckWorkers({ workers, maxSlots, reload, companyId }: { workers: CheckWorkerView[]; maxSlots: number; reload: () => void; companyId?: string }) {
   const companies = usePoll((signal) => api<Company[]>("/api/companies", { signal }), 60_000, "companies");
   const act = useAction();
   const [adding, setAdding] = useState<Draft | null>(null);
@@ -124,6 +309,14 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
   const choice = choices.find((c) => c.url === picked) ?? choices[0];
   const workerUrl = choice?.url ?? workerSocketUrl(window.location.origin);
   const list = companies.data ?? [];
+  const statsPoll = usePoll((signal) => api<MachineStatsView[]>(`/api/settings/check-workers/stats${companyId ? `?companyId=${companyId}` : ""}`, { signal }), 60_000, `check-worker-stats-${companyId ?? ""}`);
+  const statsOf = (machine: string) => (Array.isArray(statsPoll.data) ? statsPoll.data.find((s) => s.machine === machine) : undefined);
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const linePoll = usePoll(
+    (signal) => api<CheckLineView>(`/api/settings/check-workers/line?tz=${encodeURIComponent(zone)}${companyId ? `&companyId=${companyId}` : ""}`, { signal }),
+    60_000,
+    `check-line-${companyId ?? ""}`,
+  );
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }} data-testid="check-workers">
@@ -131,7 +324,30 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
       <p className="muted" style={{ fontSize: 14 }}>
         Other machines that take checks when the runner's slots are full. A check worker runs checks only: merge checks (the full test run before a ticket lands) and quick checks (before review). It gets no secrets and runs no agents, and code only ever goes onto main from your main Boss Man server, never from a worker. It takes checks when its tools (Node, pnpm, git and so on) match the company's runner, so an ordinary runner update does not stop it. If the tools ever differ, this page says which one and you press Redeploy on that machine.
       </p>
+      {linePoll.data && Array.isArray(linePoll.data.kinds) && <CheckLine line={linePoll.data} />}
+      {linePoll.error && linePoll.data === null && <LoadError what="the check line's last 7 days" message={linePoll.error.message} onRetry={linePoll.reload} />}
+      <div className="card" style={{ padding: 8, display: "flex", flexDirection: "column", gap: 4 }} data-testid="check-runner-record">
+        <strong>Company runner</strong>
+        <MachineRecord stats={statsOf("runner")} />
+      </div>
+      {statsPoll.error && statsPoll.data === null && <LoadError what="the machines' last 7 days" message={statsPoll.error.message} onRetry={statsPoll.reload} />}
       {workers.length === 0 && <p className="muted" style={{ fontSize: 14 }}>No check workers yet.</p>}
+      {Array.isArray(statsPoll.data) && (
+        <div>
+          <button
+            type="button"
+            className="btn"
+            onClick={() =>
+              download(
+                `check-workers-7-days-${csvDay()}.csv`,
+                buildCsv(MACHINES_CSV_HEAD, machinesToCsvRows([{ name: "Company runner", connected: true, stats: statsOf("runner") }, ...workers.map((w) => ({ name: w.name, connected: w.connected, stats: statsOf(w.id) }))])),
+              )
+            }
+          >
+            Download CSV
+          </button>
+        </div>
+      )}
       {workers.map((w) => (
         <div key={w.id} className="card" style={{ padding: 8, display: "flex", flexDirection: "column", gap: 4 }} data-testid="check-worker">
           <div style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
@@ -144,6 +360,7 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
               {w.toolchain?.node ? ` · Node ${w.toolchain.node}` : w.imageCommit ? ` · version ${w.imageCommit.slice(0, 7)}` : ""}
             </span>
           </div>
+          <MachineRecord stats={statsOf(w.id)} />
           {w.memoryWarning && (
             <p style={{ fontSize: 14, margin: 0 }} className="tag red" data-testid="check-worker-memory-card-warning">
               Memory: {w.memoryWarning}

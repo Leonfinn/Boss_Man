@@ -158,6 +158,32 @@ describe("related tickets", () => {
   });
 });
 
+describe("feature forecast (BOS-2396)", () => {
+  it("5+3 done, 8+2 open, one unsized, at 20 points a week: 8 done, 10 left, 1 unsized, finish 4 days out", () => {
+    const rows = [{ size: 5, done: true }, { size: 3, done: true }, { size: 8, done: false }, { size: 2, done: false }, { size: null, done: false }];
+    expect(forecastMilestone(rows, 20, null, "2026-11-23")).toMatchObject({ pointsDone: 8, pointsLeft: 10, unsized: 1, expectedFinish: "2026-11-27" });
+  });
+
+  it("shows points done/left, unsized tasks and a finish on the detail, points on the list, and none for released", async () => {
+    const c = await setup();
+    const feat = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Big one", status: "in_progress" })).json();
+    const done = await c.ticket("Done 5", { featureId: feat.id, state: "done" });
+    const open = await c.ticket("Open 8", { featureId: feat.id, state: "in_progress" });
+    await c.ticket("Open unsized", { featureId: feat.id, state: "in_progress" });
+    const gone = await c.ticket("Cancelled 5", { featureId: feat.id, state: "done", outcome: "cancelled" });
+    await c.db.update(tickets).set({ size: 5 }).where(eq(tickets.id, done.id));
+    await c.db.update(tickets).set({ size: 8 }).where(eq(tickets.id, open.id));
+    await c.db.update(tickets).set({ size: 5 }).where(eq(tickets.id, gone.id));
+    const detail = (await c.req("GET", `/api/features/${feat.id}`)).json();
+    expect(detail.forecast).toMatchObject({ pointsDone: 5, pointsLeft: 8, unsized: 1, pace: 1.25 });
+    expect(detail.forecast.expectedFinish).toBeTruthy();
+    const list = (await c.req("GET", `/api/companies/${c.company.id}/features`)).json();
+    expect(list.features.find((f: { id: string }) => f.id === feat.id)).toMatchObject({ pointsDone: 5, pointsTotal: 13 });
+    await c.req("PATCH", `/api/features/${feat.id}`, { status: "released" });
+    expect((await c.req("GET", `/api/features/${feat.id}`)).json().forecast).toBeNull();
+  });
+});
+
 describe("milestone forecast (points and pace)", () => {
   it("splits points, reports unsized separately, and forecasts from the last 28 days", async () => {
     const c = await setup();
@@ -176,14 +202,82 @@ describe("milestone forecast (points and pace)", () => {
     expect(f.daysLate).toBeGreaterThan(0);
   });
 
+  it("serves an 8-week burn-up on each milestone (BOS-2397), leaving cancelled work out", async () => {
+    const c = await setup();
+    const obj = (await c.req("POST", `/api/companies/${c.company.id}/objectives`, { title: "Launch", priority: 1 })).json();
+    const ms = (await c.req("POST", `/api/objectives/${obj.id}/milestones`, { title: "Beta" })).json();
+    const a = await c.ticket("Done 5", { milestoneId: ms.id, state: "done" });
+    const b = await c.ticket("Open 8", { milestoneId: ms.id, state: "in_progress" });
+    const x = await c.ticket("Dropped 20", { milestoneId: ms.id, state: "done", outcome: "cancelled" });
+    for (const [t, size] of [[a, 5], [b, 8], [x, 3]] as const) await c.db.update(tickets).set({ size }).where(eq(tickets.id, t.id));
+    const today = new Date().toISOString().slice(0, 10);
+    const burnup = (await c.req("GET", `/api/roadmap?today=${today}`)).json()[0].objectives[0].milestones[0].burnup;
+    expect(burnup).toHaveLength(8);
+    expect(burnup.at(-1)).toMatchObject({ weekEnd: today, done: 5, total: 13 });
+    expect(burnup[0]).toMatchObject({ done: 0, total: 0 });
+  });
+
   it("sums 5+3 done, 8+2 left, ignores unsized points, and finishes two weeks out at 20 points per 28 days", () => {
     const rows = [{ size: 5, done: true }, { size: 3, done: true }, { size: 8, done: false }, { size: 2, done: false }, { size: null, done: false }];
     expect(forecastMilestone(rows, 20 / 4, "2026-12-30", "2026-11-23")).toMatchObject({ pointsDone: 8, pointsLeft: 10, unsized: 1, expectedFinish: "2026-12-07" });
+  });
+
+  // BOS-2532 (G2): on 24 Nov the owner's "N of M points done" left a sized task's points out of M. A task whose size
+  // reads 0 is not on the point scale (the size is refused now), so it counts as unsized, never as "sized, worth nothing".
+  it("BOS-2532: a task whose size reads 0 counts as unsized, so M is the whole of what is sized", () => {
+    const rows = [{ size: 3, done: true }, { size: 0, done: false }, { size: 5, done: false }];
+    expect(forecastMilestone(rows, 20, null, "2026-11-23")).toMatchObject({ pointsDone: 3, pointsLeft: 5, unsized: 1 });
+    // 3 of 8 points done, and the list under it shows two sized tasks: the two numbers now agree.
+    expect(rows.filter((r) => (r.size ?? 0) >= 1).length).toBe(2);
   });
 
   it("has no finish date without pace, and none is late without a target", () => {
     expect(forecastMilestone([{ size: 3, done: false }], 0, "2026-12-01", "2026-11-23")).toMatchObject({ pointsLeft: 3, expectedFinish: null, daysLate: 0 });
     expect(forecastMilestone([{ size: 7, done: false }], 7, null, "2026-11-23")).toMatchObject({ expectedFinish: "2026-11-30", daysLate: 0 });
     expect(forecastMilestone([{ size: 7, done: false }], 7, "2026-11-25", "2026-11-23")).toMatchObject({ daysLate: 5 });
+  });
+});
+
+describe("one ticket set per milestone (BOS-2560)", () => {
+  it("a milestone fed only through a feature has the same done/total, status, forecast and ticket list everywhere", async () => {
+    const c = await setup();
+    const obj = (await c.req("POST", `/api/companies/${c.company.id}/objectives`, { title: "Launch", priority: 1 })).json();
+    const today = new Date().toISOString().slice(0, 10);
+    const due = new Date(Date.now() + 40 * 86_400_000).toISOString().slice(0, 10);
+    const ms = (await c.req("POST", `/api/objectives/${obj.id}/milestones`, { title: "Beta", targetDate: due })).json();
+    const [feat] = await c.db.insert(features).values({ companyId: c.company.id, title: "Sign-in", milestoneId: ms.id }).returning();
+    const a = await c.ticket("Done 5", { state: "done" });
+    const b = await c.ticket("Open 8", { state: "in_progress" });
+    const x = await c.ticket("Dropped", { state: "done", outcome: "cancelled" });
+    for (const [t, size] of [[a, 5], [b, 8], [x, 3]] as const) await c.db.update(tickets).set({ size, featureId: feat!.id }).where(eq(tickets.id, t.id));
+
+    const m = (await c.req("GET", `/api/roadmap?today=${today}`)).json()[0].objectives[0].milestones[0];
+    // The counts, the forecast, the burn-up and the ticket list all read the same two tickets (the cancelled one is out).
+    expect([m.done, m.total]).toEqual([1, 2]);
+    expect(m.forecast).toMatchObject({ pointsDone: 5, pointsLeft: 8 });
+    expect(m.burnup.at(-1)).toMatchObject({ done: 5, total: 13 });
+    // 5 points finished in 4 weeks is its own pace, 1.25 a week: 8 left finishes in 45 days, after the date 40 days out.
+    expect(m.forecast.pace).toBe(1.25);
+    expect(m.status).toBe("at_risk");
+    expect(m.forecast.daysLate).toBeGreaterThan(0);
+    const listed = (await c.req("GET", `/api/milestones/${ms.id}/tickets`)).json();
+    expect(listed.map((r: { title: string }) => r.title).sort()).toEqual(["Done 5", "Dropped", "Open 8"]);
+    expect(listed.filter((r: { outcome: string | null }) => r.outcome !== "cancelled")).toHaveLength(m.total);
+  });
+
+  it("uses the milestone's own pace, not the company's: another milestone's finished work doesn't speed it up", async () => {
+    const c = await setup();
+    const obj = (await c.req("POST", `/api/companies/${c.company.id}/objectives`, { title: "Launch", priority: 1 })).json();
+    const today = new Date().toISOString().slice(0, 10);
+    const due = new Date(Date.now() + 40 * 86_400_000).toISOString().slice(0, 10);
+    const busy = (await c.req("POST", `/api/objectives/${obj.id}/milestones`, { title: "Busy", targetDate: due })).json();
+    const idle = (await c.req("POST", `/api/objectives/${obj.id}/milestones`, { title: "Idle", targetDate: due })).json();
+    const d = await c.ticket("Done 8", { milestoneId: busy.id, state: "done" });
+    const o1 = await c.ticket("Open 3", { milestoneId: idle.id, state: "in_progress" });
+    for (const [t, size] of [[d, 8], [o1, 3]] as const) await c.db.update(tickets).set({ size }).where(eq(tickets.id, t.id));
+    const ms = (await c.req("GET", `/api/roadmap?today=${today}`)).json()[0].objectives[0].milestones as Array<{ title: string; status: string; forecast: { pace: number; expectedFinish: string | null } }>;
+    const idleM = ms.find((x) => x.title === "Idle")!;
+    expect(idleM.forecast).toMatchObject({ pace: 0, expectedFinish: null });
+    expect(idleM.status).toBe("on_track"); // nothing finished in 4 weeks, but it is due in 40 days
   });
 });

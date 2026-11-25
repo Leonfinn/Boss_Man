@@ -9,6 +9,7 @@ import {
   FENCE_DENIED_PATTERN,
   OriginRef,
   Toolchain,
+  ciBranchFor,
   platformFingerprint,
   toolchainDifferences,
   toolchainMissing,
@@ -182,5 +183,22 @@ describe("deploy ref and fence denial patterns", () => {
     for (const line of ["content written", "EACCESIBLE", "no error here"]) {
       expect(FENCE_DENIED_PATTERN.test(line), line).toBe(false);
     }
+  });
+});
+
+describe("ciBranchFor (BOS-2354)", () => {
+  const ticketId = "50c5a589-8144-4018-90e3-70d49382cf25";
+
+  it("puts the ticket id under the bossman-ci prefix, keeping it verbatim", () => {
+    expect(ciBranchFor(ticketId)).toBe(`bossman-ci/${ticketId}`);
+  });
+
+  it("is not the ticket's own bossman/<ticket> branch, which means something else in the agents' view", () => {
+    expect(ciBranchFor(ticketId)).not.toBe(`bossman/${ticketId}`);
+    expect(ciBranchFor(ticketId).startsWith("bossman-ci/")).toBe(true);
+  });
+
+  it("gives each ticket its own CI branch", () => {
+    expect(ciBranchFor("ticket-a")).not.toBe(ciBranchFor("ticket-b"));
   });
 });

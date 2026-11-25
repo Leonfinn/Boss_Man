@@ -446,6 +446,61 @@ rm -f "$t/marks"/*; run 0 "full check next runs no shell tests" env BOSSMAN_MERG
 [ -z "$(marks)" ] || fail "full check next ran shell tests: $(marks)"
 g checkout -q -B feature origin/main
 
+# BOS-2386: a test in any package that names a string the branch removed or renamed runs, with the string in the log. BOS-2326
+# renamed the Ctrl+K box's aria-label, and web's keyboard-shortcuts test (no import of the changed file) failed first at the merge.
+g checkout -q main
+wr apps/web/src/Box.tsx 'export const Box = () => <input aria-label="Search tickets, wiki and chats" title="Kept label here" />;
+export const Help = () => <dd>Old help line text</dd>;'
+wr apps/web/src/routes.ts 'export const NOTICES = "#/settings/old-path";
+export const KEY = "x";'
+wr apps/web/test/shortcuts.test.tsx 'it("x", () => screen.findByRole("combobox", { name: "Search tickets, wiki and chats" }));'
+wr apps/web/test/help.test.tsx 'it("x", () => screen.getByText("Old help line text"));'
+wr apps/server/test/screen-path.test.ts 'it("x", () => expect(r8("Open #/settings/old-path")).toEqual([]));'
+wr apps/server/test/kept.test.ts 'it("x", () => expect("Kept label here").toBeTruthy());'
+for i in 1 2 3; do wr "apps/launcher/test/common$i.test.ts" 'it("x", () => "Common label text");'; done
+wr apps/web/src/common.ts 'export const C = "Common label text";'
+g add -A; g commit -q -m "labels"; g update-ref refs/remotes/origin/main HEAD
+g checkout -q -B rn1 origin/main
+wr apps/web/src/Box.tsx 'export const Box = () => <input aria-label="Search tickets, wiki, chats and runs" title="Kept label here" />;
+export const Help = () => <dd>New help line text</dd>;'
+wr apps/web/src/routes.ts 'export const NOTICES = "#/settings/new-path";
+export const KEY = "y";'
+wr apps/web/src/common.ts 'export const C = "Other label text";'
+g add -A; g commit -q -m rename
+run 0 "a web rename runs the tests that name the old strings, in any package" env
+grep -q "^INFO  tests that name a string the branch removed or renamed: 6 to run" "$t/out" || fail "removed strings: no INFO line: $(cat "$t/out")"
+grep -qF 'apps/web/test/shortcuts.test.tsx  ("Search tickets, wiki and chats")' "$t/out" || fail "removed strings: string not named: $(cat "$t/out")"
+grep -qF 'apps/server/test/screen-path.test.ts  ("#/settings/old-path")' "$t/out" || fail "removed strings: path not named: $(cat "$t/out")"
+logged "pnpm --filter @boss-man/web exec vitest run test/help.test.tsx test/shortcuts.test.tsx" "web tests naming removed strings (JSX text too)"
+# The server is untouched (no typecheck), but its test naming the old Settings path runs.
+logged "pnpm --filter @boss-man/server exec vitest run test/screen-path.test.ts" "an untouched package's test"
+notlogged "@boss-man/server typecheck" "server untouched"
+notlogged "kept.test.ts" "a string the diff keeps on the edited line"
+logged "exec vitest run test/common1.test.ts test/common2.test.ts test/common3.test.ts" "a string in 3 test files is under the default limit"
+# A string in more test files than CHECK_QUICK_REMOVED_COMMON is left out, and the log says so.
+run 0 "a common string" env CHECK_QUICK_REMOVED_COMMON=2
+grep -qF 'left out as too common: "Common label text" (in 3 test files)' "$t/out" || fail "common string: no note: $(cat "$t/out")"
+notlogged "common1.test.ts" "common string left out"
+# The cap keeps the files naming the most strings first, then by path, and says it cut some.
+run 0 "the cap" env CHECK_QUICK_REMOVED_COMMON=2 CHECK_QUICK_REMOVED_MAX=1
+grep -qF "cap hit: 3 test files name a removed string, running the first 1 (CHECK_QUICK_REMOVED_MAX)" "$t/out" || fail "cap: no note: $(cat "$t/out")"
+logged "pnpm --filter @boss-man/server exec vitest run test/screen-path.test.ts" "cap keeps the first by path"
+notlogged "shortcuts.test.tsx" "cap cut the rest"
+# A failing picked test fails the check, at the gate too.
+run 1 "a failing test naming a removed string" env BOSSMAN_MERGE_CHECK=1 FAIL_ON=shortcuts.test
+grep -q "^FAIL  tests naming a string the branch removed (apps/web, 2 files)" "$t/out" || fail "removed strings: no FAIL line: $(cat "$t/out")"
+# A test the branch changes itself is already in the related run: not picked twice.
+wr apps/web/test/shortcuts.test.tsx 'it("x", () => screen.findByRole("combobox", { name: "Search tickets, wiki and chats" })); // still old'
+g add -A; g commit -q -m "touch test"
+run 0 "a changed test is not picked twice" env
+logged "pnpm --filter @boss-man/web exec vitest run test/help.test.tsx" "the other web pick stays"
+! grep -qF "exec vitest run test/help.test.tsx test/shortcuts.test.tsx" "$LOG" || fail "changed test picked twice: $(cat "$LOG")"
+logged "vitest related --run src/Box.tsx src/common.ts src/routes.ts test/shortcuts.test.tsx" "the changed test runs in the related run"
+# The full check that runs next runs everything: no pick, no line.
+run 0 "full check next" env BOSSMAN_MERGE_CHECK=1 BOSSMAN_FULL_CHECK_NEXT=1
+! grep -q "^INFO  tests that name a string" "$t/out" || fail "full check next listed removed-string tests: $(cat "$t/out")"
+g checkout -q -B feature origin/main
+
 # A broad related-test list is skipped (exit 0), typecheck still runs; CHECK_QUICK_FORCE_RELATED=1 runs it.
 g checkout -q -B broad origin/main; commit apps/server/src/mcp.ts
 run 0 "mcp.ts is broad" env
@@ -653,5 +708,62 @@ mig mine2 "$start" mine2 "my line"
 run 1 "real clash" env REBASE_RC=1 REBASE_OUT="refused: real code conflicts too: README"
 grep -q "^FAIL  merge with origin/main is clean" "$t/out" || fail "real clash: merge step not FAIL: $(cat "$t/out")"
 grep -q "refused: real code conflicts too" "$t/out" || fail "real clash: refusal reason not shown: $(cat "$t/out")"
+
+# BOS-2484: the report-only squeeze. A fresh repo with a stub scripts/squeeze-test.sh that logs its file and answers by name.
+repo="$t/sq"; mkdir -p "$repo/scripts"
+cp "$here/check-quick.sh" "$here/check-all.sh" "$here/check-slot.sh" "$here/check-guards.sh" "$here/install-packages.sh" "$here/test-shell.sh" "$here/squeeze-skip.txt" "$repo/scripts/"
+cp "$t/repo/scripts/check-shell.sh" "$repo/scripts/"
+cat >"$repo/scripts/squeeze-test.sh" <<'S'
+#!/usr/bin/env bash
+echo "squeeze $1" >>"$LOG"
+case "$1" in
+  *fails*) echo "run 1/2: FAIL (exit 1, 3 s)"; echo "AssertionError: too slow"; exit 1 ;;
+  *hangs*) echo "run 1/2: no answer (over 200 s)"; exit 3 ;;
+  *errors*) echo "run 1/2: ERROR, every test was skipped"; exit 2 ;;
+esac
+exit 0
+S
+chmod +x "$repo/scripts/squeeze-test.sh"
+g init -q -b main; echo a >"$repo/README"; g add -A; g commit -q -m init
+g update-ref refs/remotes/origin/main HEAD
+g checkout -q -b feature
+# No test file changed: a note saying so, and no squeeze run.
+commit apps/server/src/a.ts
+run 0 "squeeze: no test file" env
+grep -q "^check-quick: squeeze (report only): no new or changed test file to run" "$t/out" || fail "squeeze none: $(cat "$t/out")"
+notlogged "squeeze " "squeeze none"
+# Passing files; the runner's tests and the skip list's file are left out; a failing file is a report line, the run still exits 0.
+skipped_file="$(sed -e 's/[[:space:]]*#.*//' -e '/^[[:space:]]*$/d' "$here/squeeze-skip.txt" | head -n 1)"
+[ -n "$skipped_file" ] || fail "squeeze-skip.txt lists no file"
+commit apps/server/test/ok.test.ts apps/server/test/fails.test.ts apps/runner/test/r.test.ts "$skipped_file"
+run 0 "squeeze: report only" env
+logged "squeeze apps/server/test/ok.test.ts" "squeeze"
+logged "squeeze apps/server/test/fails.test.ts" "squeeze"
+notlogged "squeeze apps/runner/test/r.test.ts" "squeeze runner"
+notlogged "squeeze $skipped_file" "squeeze skip list"
+grep -q "^SQUEEZE  pass: apps/server/test/ok.test.ts" "$t/out" || fail "squeeze pass line: $(cat "$t/out")"
+grep -q "^SQUEEZE  FAILED on a slow, busy CPU (report only, does not fail this check): apps/server/test/fails.test.ts" "$t/out" || fail "squeeze fail line: $(cat "$t/out")"
+grep -q "AssertionError: too slow" "$t/out" || fail "squeeze fail output not shown"
+grep -q "^check-quick: all steps passed" "$t/out" || fail "squeeze fail changed the verdict"
+grep -q "^check-quick: squeeze (report only): 2 of 2 test files run on a slow CPU, 1 failed, 0 no answer, 0 could not run, 0 left out" "$t/out" || fail "squeeze note: $(cat "$t/out")"
+# No answer and a run that could not start are named as such, not as findings; more than 3 files: 3 run and the rest are counted.
+commit apps/web/src/hangs.test.ts apps/web/src/errors.test.ts apps/launcher/test/l.test.ts
+run 0 "squeeze: cap" env
+[ "$(grep -c '^squeeze ' "$LOG")" -eq 3 ] || fail "squeeze cap: $(cat "$LOG")"
+grep -q "^SQUEEZE  [0-9]* more changed test file(s) were not squeezed (at most 3 a check)" "$t/out" || fail "squeeze left-out line: $(cat "$t/out")"
+grep -q "left out$" "$t/out" || fail "squeeze left-out count: $(cat "$t/out")"
+# A failed step means no squeeze; CHECK_QUICK_SQUEEZE=0 switches it off.
+run 1 "squeeze: failed step" env FAIL_ON=typecheck
+notlogged "squeeze " "squeeze after a failed step"
+run 0 "squeeze: off" env CHECK_QUICK_SQUEEZE=0
+notlogged "squeeze " "squeeze off"
+! grep -q "squeeze (report only)" "$t/out" || fail "squeeze note shown while off"
+# A hang and an error are reported without failing (own run: only those two files).
+g reset -q --hard origin/main
+commit apps/web/src/hangs.test.ts apps/web/src/errors.test.ts
+run 0 "squeeze: no answer and error" env
+grep -q "^SQUEEZE  no answer (stopped before it finished; neither pass nor fail): apps/web/src/hangs.test.ts" "$t/out" || fail "squeeze no-answer line: $(cat "$t/out")"
+grep -q "^SQUEEZE  could not run (exit 2; not a finding): apps/web/src/errors.test.ts" "$t/out" || fail "squeeze error line: $(cat "$t/out")"
+grep -q "0 failed, 1 no answer, 1 could not run" "$t/out" || fail "squeeze counts: $(cat "$t/out")"
 
 echo "check-quick.test.sh: ok"

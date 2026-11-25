@@ -244,6 +244,11 @@ if [[ $1 == inspect && $2 == -f && $3 == '{{.HostConfig.RestartPolicy.Name}}' ]]
   esac
   exit 0
 fi
+if [[ $1 == inspect && $2 == -f && $3 == *StartPeriod* ]]; then
+  # BOS-2481: FAKE_STARTED_AGO=<seconds> says the container started that long ago, with a 60 s start period.
+  [[ -n ${FAKE_STARTED_AGO:-} ]] && echo "$(date -u -d "-${FAKE_STARTED_AGO} seconds" +%Y-%m-%dT%H:%M:%SZ)|60000000000"
+  exit 0
+fi
 if [[ $1 == ps && $2 == -aq ]]; then exit 0; fi
 exit 0
 FAKE
@@ -269,6 +274,14 @@ node -e 'const c=require(process.argv[1]).checks.container_status;if(!c.stopped.
 # A running container that is failing its health check counts as unhealthy (Rod's point 2).
 FAKE_STATUS="Up 3 minutes (unhealthy)" "$T/fd/hd.sh" >"$T/out" 2>&1 || fail "host-deployer (unhealthy running) exited non-zero"
 node -e 'const c=require(process.argv[1]).checks.container_status;if(c.unhealthy!==2)process.exit(1)' "$D/outbox/host.json" || fail "a running (unhealthy) container must count"
+# BOS-2481: the report names them, by service name only.
+node -e 'const c=require(process.argv[1]).checks.container_status;if(c.unhealthyNames!=="srv; cache")process.exit(1)' "$D/outbox/host.json" || fail "unhealthy containers must be named by service: $(cat "$D/outbox/host.json")"
+# BOS-2481: inside its health-check start period it is settling, not unhealthy (the restarting one still counts).
+FAKE_STATUS="Up 20 seconds (unhealthy)" FAKE_STARTED_AGO=20 "$T/fd/hd.sh" >"$T/out" 2>&1 || fail "host-deployer (start period) exited non-zero"
+node -e 'const c=require(process.argv[1]).checks.container_status;if(c.unhealthy!==1||c.unhealthyNames!=="cache")process.exit(1)' "$D/outbox/host.json" || fail "a container inside its start period must not count: $(cat "$D/outbox/host.json")"
+# Past the start period it counts again.
+FAKE_STATUS="Up 5 minutes (unhealthy)" FAKE_STARTED_AGO=300 "$T/fd/hd.sh" >"$T/out" 2>&1 || fail "host-deployer (after start period) exited non-zero"
+node -e 'const c=require(process.argv[1]).checks.container_status;if(c.unhealthy!==2)process.exit(1)' "$D/outbox/host.json" || fail "a container past its start period must count"
 # A one-shot that failed (non-zero exit) is a real failure, not "meant to stop".
 FAKE_EXIT=1 "$T/fd/hd.sh" >"$T/out" 2>&1 || fail "host-deployer (failed one-shot) exited non-zero"
 node -e 'const s=require(process.argv[1]).checks.container_status.stopped.map(x=>x.name+":"+x.exit);process.stdout.write(s.sort().join(","))' "$D/outbox/host.json" >"$T/names" || true
@@ -720,7 +733,7 @@ case "$a" in
   "exec -T db pg_dump"*) echo dump ;;
   "up -d --no-deps backup") # BOS-2176; BOS-2221: the daily folder must already exist (made by the host user, not by Docker)
     [[ -d $BOSSMAN_BACKUP_DIR/daily ]] && echo "daily folder ready" >>"$DL"; echo "ensure backup service" >>"$DL" ;;
-  "build server-"*) c=${a#build server-}; [[ -z ${FAKE_BUILD_FAIL:-} ]] || exit 1; [[ -z ${FAKE_BUILD_HANG:-} ]] || exec sleep 30; echo "$BOSSMAN_COMMIT" >"$W/built.$c"; echo "build $c commit=$BOSSMAN_COMMIT" >>"$DL" ;;
+  "build server-"*) c=${a#build server-}; [[ -z ${FAKE_BUILD_FAIL:-} ]] || exit 1; if [[ -n ${FAKE_BUILD_NET_ONCE:-} && ! -e $W/net-failed ]]; then : >"$W/net-failed"; echo "ERROR: failed to fetch anonymous token: Get https://auth.docker.io/token: dial tcp: connect: network is unreachable" >&2; exit 1; fi; [[ -z ${FAKE_BUILD_NET_ALWAYS:-} ]] || { echo "ERROR: failed to fetch anonymous token: network is unreachable" >&2; exit 1; }; [[ -z ${FAKE_BUILD_CODE_ERR:-} ]] || { echo "ERROR: process did not complete successfully: exit code: 2 (tsc error TS2304)" >&2; echo "build-attempt" >>"$W/code-attempts"; exit 1; };[[ -z ${FAKE_BUILD_HANG:-} ]] || exec sleep 30; echo "$BOSSMAN_COMMIT" >"$W/built.$c"; echo "build $c commit=$BOSSMAN_COMMIT" >>"$DL" ;;
   "run --rm --no-deps migrate") echo "migrate tag=$BOSSMAN_MIGRATE_TAG" >>"$DL"; exit "${FAKE_MIGRATE_RC:-0}" ;;
   "up -d --no-deps --force-recreate server-"*) c=${a##*server-}; touch "$W/running.$c"; cp "$W/built.$c" "$W/commit.$c"; echo standby >"$W/role.$c" ;;
   "up -d --no-deps server-"*) c=${a##*server-}; touch "$W/running.$c"; echo standby >"$W/role.$c" ;;
@@ -940,6 +953,23 @@ FAKE_BUILD_HANG=1 BG_BUILD_SECONDS=1 bg
 has "$D/outbox/status.json" "did not finish within"
 hasnt "$DL" "migrate"; hasnt "$DL" "up -d --no-deps server"; hasnt "$DL" "signal"; live_is blue
 [[ $(git -C "$T/src" rev-parse HEAD) == "$P" ]] || fail "hung build: checkout not put back"
+# BOS-2552: a build that fails once on a registry/network error is retried once, and the first error is kept in the log.
+reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"; bgreq "$b4"
+FAKE_BUILD_NET_ONCE=1 BG_BUILD_RETRY_PAUSE=0 bg
+[[ $(status result) == deployed ]] || fail "network error then pass: $(cat "$D/outbox/status.json")"
+has "$D/deployer.log" "registry or network error"; has "$D/deployer.log" "network is unreachable"
+[[ $(grep -c '^build green' "$DL") == 1 ]] || fail "retry: expected one finished build"
+# Both attempts hit the network error: one retry only, then the update fails and says why.
+reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"; bgreq "$b4"
+FAKE_BUILD_NET_ALWAYS=1 BG_BUILD_RETRY_PAUSE=0 bg
+[[ $(status result) == failed ]] || fail "network error twice: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "retry failed too"; hasnt "$DL" "up -d --no-deps server"; live_is blue
+# A real build error is not retried.
+reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"; bgreq "$b4"
+FAKE_BUILD_CODE_ERR=1 BG_BUILD_RETRY_PAUSE=0 bg
+[[ $(status result) == failed ]] || fail "code error: $(cat "$D/outbox/status.json")"
+[[ $(wc -l <"$W/code-attempts") == 1 ]] || fail "code error was retried"
+hasnt "$D/deployer.log" "Trying once more"
 # A proxy that is not running changes nothing.
 reset_world blue "$cur"; rm "$W/running.proxy"; bgreq "$b4"; bg
 has "$D/outbox/status.json" "proxy container is not running"; hasnt "$DL" "pg_dump"

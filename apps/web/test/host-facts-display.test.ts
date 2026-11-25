@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { STOPPED_CONTAINERS_KEY, failingCheckText, problemText, stoppedContainerNames, type HostFactsView } from "../src/host-facts-display";
+import { NORMALLY_EMPTY_FACTS, STOPPED_CONTAINERS_KEY, UNHEALTHY_CONTAINERS_KEY, failingCheckText, problemText, stoppedContainerNames, type HostFactsView } from "../src/host-facts-display";
 
 // BOS-986: the "This host" panel says in plain words what is missing and what failed, rather than the raw
 // dotted key ("check.container_status.notRunning" told the owner nothing). These tests pin the wording the
@@ -102,10 +102,26 @@ describe("failingCheckText: what a failing check says (BOS-986)", () => {
 
   it("counts restarting or unhealthy containers in the singular and the plural", () => {
     const one = failingCheckText("check.container_status.unhealthy", view({ "check.container_status.unhealthy": "1" }), [], "");
-    expect(one.what).toBe("1 container is restarting or unhealthy");
+    expect(one.what).toBe("1 container is restarting or unhealthy (this host's deployer is too old to name them)");
     expect(one.fix).toContain("failing its own health check");
     const several = failingCheckText("check.container_status.unhealthy", view({ "check.container_status.unhealthy": "3" }), [], "");
-    expect(several.what).toBe("3 containers are restarting or unhealthy");
+    expect(several.what).toContain("3 containers are restarting or unhealthy");
+  });
+
+  it("names the unhealthy containers the host reported (BOS-2481)", () => {
+    const d = view({ "check.container_status.unhealthy": "2", [UNHEALTHY_CONTAINERS_KEY]: "runner; worker" });
+    expect(failingCheckText("check.container_status.unhealthy", d, [], "").what).toBe("2 containers are restarting or unhealthy: runner, worker");
+  });
+
+  it("never shows a blank check name: an empty or unknown fact is named by its key (BOS-2481)", () => {
+    const empty = problemText("check.something.new", view({ "check.something.new": "" }), [], "");
+    expect(empty).toContain('"check.something.new"');
+    expect(empty.startsWith(".")).toBe(false);
+    expect(failingCheckText("check.something.new", view({ "check.something.new": "weird" }), [], "").what).toBe('The check "check.something.new" reports "weird"');
+  });
+
+  it("does not count a fact the host leaves empty when all is well as missing (BOS-2481)", () => {
+    expect([...NORMALLY_EMPTY_FACTS].sort()).toEqual(["compose.liveColour", "repo.probeWhy"]);
   });
 
   it("quotes the code host's own reason when there is one, and omits the colon when there is not", () => {
@@ -134,7 +150,7 @@ describe("failingCheckText: what a failing check says (BOS-986)", () => {
 
   it("falls back to the raw value and a generic line for a check it does not know", () => {
     const t = failingCheckText("check.something.new", view({ "check.something.new": "weird" }), [], "");
-    expect(t.what).toBe("weird");
+    expect(t.what).toBe('The check "check.something.new" reports "weird"');
     expect(t.fix).toBe("this is a check the host runs about itself; its log on the host says more.");
   });
 

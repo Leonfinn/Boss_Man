@@ -15,7 +15,7 @@ const card = (n: number, extra: Partial<Decision> = {}): Decision =>
 const view = (extra: Partial<MergeHealthView> = {}): MergeHealthView => ({ waitingCount: 0, stuckCount: 0, ...extra });
 // The server's verdicts (merge-line-health.ts, BOS-1594): the banner only draws them.
 const stuckLine: MergeLine = { state: "stuck", cause: "gate_fault", title: "FERN-10 has waited 16 h to merge", reason: "Waiting: no runner is connected", fix: "Start the runner container on your host", others: 2 };
-const slowLine: MergeLine = { state: "over_capacity", waiting: 17, etaMinutes: 255, lastLandedAt: "2026-11-15T19:03:00.000Z", advice: null };
+const slowLine: MergeLine = { state: "over_capacity", waiting: 17, etaMinutes: 255, etaAt: "2026-11-15T23:25:00.000Z", lastLandedAt: "2026-11-15T19:03:00.000Z", advice: null };
 
 describe("Needs you", () => {
   it("shows the 5 oldest with their own button, then the shared count and Open Decisions", () => {
@@ -112,6 +112,28 @@ describe("Right now", () => {
     const lines = healthLines({ health: { ...ok, runner: { registered: false, connected: false, lastSeenAt: null } }, merges: view(), stuck: null, running: 0, companyId: "c1" });
     expect(lines[0]!.state).toBe("No runner set up");
   });
+
+  // BOS-2538: Merges is read from the merge-queue poll every 20 s while the other three come from the dashboard poll
+  // every 10 s, so each line states its own interval and the heading states none.
+  it("names each line's own poll interval: 20 s for Merges, 10 s for the rest", () => {
+    const lines = healthLines({ health: ok, merges: view(), stuck: null, running: 0, companyId: "c1" });
+    expect(lines.map((l) => l.refresh)).toEqual(["Updates every 10 s.", "Updates every 20 s.", "Updates every 10 s.", "Updates every 10 s."]);
+  });
+
+  it("shows each interval under its own line and keeps the single heading interval out", () => {
+    const lines = healthLines({ health: ok, merges: view(), stuck: null, running: 0, companyId: "c1" });
+    const { container } = render(<RightNow lines={lines} paused={false} companyId="c1" />);
+    const rows = [...container.querySelectorAll(".dash-line")];
+    expect(rows).toHaveLength(4);
+    expect(rows.map((r) => r.querySelector(".dash-refresh")?.textContent)).toEqual(["Updates every 10 s.", "Updates every 20 s.", "Updates every 10 s.", "Updates every 10 s."]);
+    expect(screen.getByRole("heading", { name: /Right now/ }).textContent).not.toMatch(/every 10 s/);
+  });
+
+  it("states each interval while the first read is still loading", () => {
+    const { container } = render(<RightNow lines={null} paused={false} companyId="c1" />);
+    expect(container.querySelectorAll(".dash-refresh")).toHaveLength(4);
+    expect(screen.getAllByText("Updates every 20 s.")).toHaveLength(1);
+  });
 });
 
 describe("Stuck-merges banner", () => {
@@ -140,15 +162,16 @@ describe("Stuck-merges banner", () => {
     const text = screen.getByRole("status").textContent ?? "";
     // The sidebar badge shows lineCount (31); the banner names the same 31 under the same label, and its own count under another (R43).
     expect(text).toContain(`21 for Boss Man to merge (${v.lineCount} in the merge line; the rest are merging now or with an agent or you)`);
-    expect(text).toContain("estimating the time to clear…");
-    expect(text).not.toMatch(/about .* to clear/);
+    expect(text).toContain("no estimate yet");
+    expect(text).not.toMatch(/expected by/);
   });
 
   it("over capacity: says merging slowly in a calm style, never 'stuck'", () => {
     expect(stuckSummary(view({ line: slowLine }))).toBeNull();
     render(<MergesStuckBanner stuck={null} slow={slowSummary(view({ line: slowLine }))} companyId="c1" />);
     const banner = screen.getByRole("status");
-    expect(banner.textContent).toContain("Merging, but slowly: 17 for Boss Man to merge, about 4 h 15 min to clear at the current rate, last landed");
+    expect(banner.textContent).toContain("Merging, but slowly: 17 for Boss Man to merge, the last one expected by about");
+    expect(banner.textContent).toContain("last landed");
     expect(banner.textContent).not.toMatch(/stuck/i);
     expect(banner.className).toContain("merges-banner-slow");
   });

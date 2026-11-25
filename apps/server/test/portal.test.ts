@@ -89,8 +89,10 @@ describe("feedback portal", () => {
     expect(xml.match(/<entry>/g)?.length).toBe(2);
     expect(xml).toContain("<title>Faster &lt;boards&gt;</title>");
     // Valid Atom shape: every entry has a date and a link, and entries are newest first.
-    const dates = [...xml.matchAll(/<entry>.*?<updated>(.*?)<\/updated><link rel="alternate" type="text\/html" href="[^"]+\/portal\.html"\/>/g)].map((m) => m[1]!);
+    const dates = [...xml.matchAll(/<entry>.*?<updated>(.*?)<\/updated><link rel="alternate" type="text\/html" href="[^"]+\/portal\.html#feature-[0-9a-f-]{36}"\/>/g)].map((m) => m[1]!);
     expect(dates.length).toBe(2);
+    // BOS-2391: the entry id is the same per-feature link, not the bare page.
+    expect([...xml.matchAll(/<entry><title>[^<]*<\/title><id>([^<]+)<\/id>/g)].every((m) => /\/portal\.html#feature-[0-9a-f-]{36}$/.test(m[1]!))).toBe(true);
     expect(dates).toEqual([...dates].sort().reverse());
     expect(xml.startsWith('<?xml version="1.0" encoding="utf-8"?>\n<feed xmlns="http://www.w3.org/2005/Atom">')).toBe(true);
     expect(xml).toContain("Boards load in a blink.");

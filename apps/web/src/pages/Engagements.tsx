@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, type EngagementRow, type EngagementView } from "../api";
+import { api, type EngagementRow, type EngagementSummary, type EngagementView } from "../api";
 import { useOlder, usePoll } from "../hooks";
 
 const PAGE = 50;
@@ -9,6 +9,7 @@ import { NotFoundBlock } from "../components/NotFoundBlock";
 import { Loader } from "../components/Loader";
 import { LoadError } from "../components/LoadError";
 import { ShowOlder } from "../components/ShowOlder";
+import { buildCsv, download } from "../csv";
 
 const STATUS: Record<string, { label: string; tone: string }> = {
   requested: { label: "Requested", tone: "blue" },
@@ -24,7 +25,74 @@ const statusTag = (s: string) => <span className={`tag ${STATUS[s]?.tone ?? ""}`
 const STEPS = ["requested", "accepted", "in_progress", "delivered", "signed_off"] as const;
 const STEP_LABEL: Record<(typeof STEPS)[number], string> = { requested: "Requested", accepted: "Accepted", in_progress: "In progress", delivered: "Delivered", signed_off: "Signed off" };
 
-const SHOW_KEY = "bm.engagements.show";
+const DAY = 86_400_000;
+/** Who an open engagement waits on, in words for the row (BOS-2427). */
+const WAITING_LABEL: Record<string, string> = { requested: "waiting on provider", accepted: "waiting on provider", in_progress: "waiting on provider", countered: "waiting on requester", delivered: "waiting on requester" };
+
+/** "waiting on provider 3 d" for an open engagement; a finished one just says how long ago. `stale` after 3 days. */
+export function stateAge(status: string, since: string | undefined, now = Date.now()) {
+  if (!since) return null;
+  const days = Math.max(0, Math.floor((now - new Date(since).getTime()) / DAY));
+  const open = status in WAITING_LABEL;
+  const label = open ? WAITING_LABEL[status]! : (STATUS[status]?.label ?? status).toLowerCase();
+  return { text: `${label} ${days} d`, stale: open && days >= 3 };
+}
+
+/** The strip above the list (BOS-2427). */
+export function EngagementSummaryStrip({ s }: { s: EngagementSummary }) {
+  const open = Object.entries(s.openByState).reduce((n, [, c]) => n + c, 0);
+  const states = ["requested", "countered", "accepted", "in_progress", "delivered"].filter((k) => s.openByState[k]).map((k) => `${s.openByState[k]} ${STATUS[k]!.label.toLowerCase()}`);
+  return (
+    <section aria-label="Engagements at a glance" className="card" style={{ display: "flex", flexWrap: "wrap", gap: 24, marginBottom: 12, padding: "12px 16px" }}>
+      <div>
+        <p className="label">Open</p>
+        <p><strong>{open}</strong>{states.length ? <span className="muted" style={{ fontSize: 13 }}> · {states.join(", ")}</span> : null}</p>
+      </div>
+      <div>
+        <p className="label">Waiting on</p>
+        <p>
+          <strong>{s.waitingOnRequester}</strong> requester, <strong>{s.waitingOnProvider}</strong> provider
+          {s.waitingOnOther > 0 ? <span className="muted" style={{ fontSize: 13 }}>, {s.waitingOnOther} counted as other (state not on either side)</span> : null}
+        </p>
+      </div>
+      <div>
+        <p className="label">Spend, last 30 days</p>
+        <p>
+          <strong>${s.spend30dPayAsYouGoUsd.toFixed(2)}</strong> pay-as-you-go · <strong>${s.spend30dPlanUseUsd.toFixed(2)}</strong> plan use (list price)
+        </p>
+      </div>
+      <div>
+        <p className="label">Median time to finish, last 90 days</p>
+        <p>{s.medianDaysToFinish == null ? <span className="muted">No finished engagements yet</span> : <strong>{s.medianDaysToFinish.toFixed(1)} days</strong>}</p>
+      </div>
+    </section>
+  );
+}
+
+/** A finished engagement's state never changes again, so the start of that state is when it finished. */
+const FINISHED = new Set(["signed_off", "rejected"]);
+
+/**
+ * (BOS-2492) The rows shown as CSV. Only fields the list rows already carry: the owner's list spans every company, so
+ * requester and provider stand in for "other company" and "direction", and the rows have no opened date or spend
+ * (those live on the detail view), so the cap is the money column.
+ */
+export function engagementsToCsv(rows: EngagementRow[]): string {
+  return buildCsv(
+    ["Title", "Requester (asked)", "Provider (did the work)", "State", "In this state since", "Finished", "Cap (USD)"],
+    rows.map((e) => [
+      e.title,
+      e.requester,
+      e.provider,
+      STATUS[e.status]?.label ?? e.status,
+      e.stateSince ?? "",
+      FINISHED.has(e.status) ? (e.stateSince ?? "") : "",
+      e.budgetCapUsd != null ? e.budgetCapUsd.toFixed(2) : "",
+    ]),
+  );
+}
+
+const SHOW_KEY ="bm.engagements.show";
 
 /** The owner's last choice, so a reload keeps it. Anything unknown falls back to Open. */
 function savedShow(): string {
@@ -58,7 +126,8 @@ export function Engagements() {
   const list = usePoll((signal) => api<EngagementRow[]>(`/api/engagements?limit=${PAGE}${filter}`, { signal }), 15_000, `engagements:${show}:${term}`);
   const older = useOlder(list.data, PAGE, (before) => api<EngagementRow[]>(`/api/engagements?limit=${PAGE}${filter}&before=${before}`), `engagements:${show}:${term}`);
   const rows = older.rows ?? [];
-  const none = term ? `No engagements match "${term}".` : null;
+  const summary = list.data?.[0]?.summary ?? null;
+  const none = term ?`No engagements match "${term}".` : null;
   return (
     <>
       <header className="page-head">
@@ -67,6 +136,7 @@ export function Engagements() {
           <p className="sub">Work one company does for another, with agreed terms and a cost cap charged to the requester.</p>
         </div>
       </header>
+      {summary && <EngagementSummaryStrip s={summary} />}
       <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap", marginBottom: 12 }}>
         <label className="label" style={{ display: "flex", alignItems: "center", gap: 8, margin: 0 }}>
           Show
@@ -84,6 +154,15 @@ export function Engagements() {
           Search engagements
           <input type="search" maxLength={200} placeholder="Title or company" value={typed} onChange={(e) => setTyped(e.target.value)} />
         </label>
+        <button
+          type="button"
+          className="btn small"
+          disabled={rows.length === 0}
+          title="Downloads the rows shown: this filter and search, and only the pages already loaded"
+          onClick={() => download(`engagements-${new Date().toISOString().slice(0, 10)}.csv`, engagementsToCsv(rows))}
+        >
+          Download CSV
+        </button>
       </div>
       {!list.data ? (
         list.error && !away(list.error) ? (
@@ -119,7 +198,13 @@ export function Engagements() {
                   <td>
                     {e.requester} → {e.provider}
                   </td>
-                  <td>{statusTag(e.status)}</td>
+                  <td>
+                    {statusTag(e.status)}
+                    {(() => {
+                      const a = stateAge(e.status, e.stateSince);
+                      return a ? <small className={a.stale ? "" : "muted"} style={{ display: "block", ...(a.stale ? { color: "var(--amber-ink, #92400e)", fontWeight: 600 } : {}) }}>{a.text}{a.stale ? " (over 3 days)" : ""}</small> : null;
+                    })()}
+                  </td>
                   <td className="mono" style={{ textAlign: "right" }}>
                     {e.budgetCapUsd != null ? `$${e.budgetCapUsd.toFixed(2)}` : "None"}
                   </td>
@@ -213,7 +298,47 @@ export function Engagement({ id }: { id: string }) {
           </p>
         </section>
 
-        <section aria-labelledby="thread-h" style={{ flex: "2 1 420px", minWidth: 0, display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ flex: "2 1 420px", minWidth: 0, display: "flex", flexDirection: "column", gap: 20 }}>
+        {e.tickets && e.tickets.length > 0 && (
+          <section aria-labelledby="work-h" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <h2 id="work-h" style={{ fontSize: 16, fontWeight: 600 }}>
+              Work
+            </h2>
+            <p className="muted" style={{ fontSize: 13 }}>
+              {e.tickets.filter((t) => t.state === "done").length} of {e.tickets.length} done
+            </p>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Ticket</th>
+                    <th scope="col">State</th>
+                    <th scope="col">Assignee</th>
+                    <th scope="col" style={{ textAlign: "right" }}>Spent</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {e.tickets.map((t) => (
+                    <tr key={t.id}>
+                      <td>
+                        <a href={`#/tickets/${t.id}`}>
+                          {t.ref ? <span className="mono">{t.ref} </span> : null}
+                          {t.title}
+                        </a>
+                      </td>
+                      <td>{t.state.replace(/_/g, " ")}</td>
+                      <td>{t.assignee ?? "Unassigned"}</td>
+                      <td className="mono" style={{ textAlign: "right" }}>
+                        ${t.spentUsd.toFixed(2)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
+        <section aria-labelledby="thread-h" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <h2 id="thread-h" style={{ fontSize: 16, fontWeight: 600 }}>
             Thread
           </h2>
@@ -233,6 +358,7 @@ export function Engagement({ id }: { id: string }) {
             </article>
           ))}
         </section>
+        </div>
       </div>
     </>
   );

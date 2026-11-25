@@ -15,11 +15,6 @@ export const NO_LANDING_MIN = 45;
 export const EMPTY_SEAT_MIN = 3;
 /** Over capacity when the queue would take longer than this to clear at the current rate, or something has waited this long. */
 export const SLOW_AFTER_MIN = 60;
-/** The landing rate is read from merges within this window. */
-const RATE_WINDOW_MIN = 6 * 60;
-/** BOS-1715: no time to clear is told from fewer than this many landings, or landings spread over less than this (just after a restart or a lull). */
-export const RATE_MIN_LANDINGS = 3;
-export const RATE_MIN_SPAN_MIN = 30;
 
 export type StuckCause = "check_too_long" | "gate_fault" | "empty_seat" | "no_landing" | "fix_stalled";
 
@@ -69,6 +64,8 @@ export type SlowLine = {
   inQueue?: number;
   /** Minutes to clear the queue at the current landing rate; null when the rate can't be told yet (too few recent landings over too short a time). */
   etaMinutes: number | null;
+  /** BOS-2505: the same estimate as a time (ISO): when the last one is expected to land. Null with etaMinutes. */
+  etaAt?: string | null;
   lastLandedAt: string | null;
   /** What adds capacity, or null when nothing would (every slot is in use, or the install can't tell). */
   advice: string | null;
@@ -104,6 +101,8 @@ export type HealthOpts = {
   heldBehindFix?: HeldBehindFix | null;
   /** R44: a deliberate pause on new checks. While it lasts the verdict is "paused": no stuck, slow or jam verdict. */
   pause?: LinePause | null;
+  /** BOS-2505: when the last ticket of the line is expected to land (epoch ms, from lineClearAt); null/absent when it can't be told yet. */
+  clearAt?: number | null;
 };
 
 const fixName = (f: HeldFix) => f.ref ?? `"${f.title}"`;
@@ -173,15 +172,20 @@ export function mergeLineHealth(view: HealthInput, opts: HealthOpts): MergeLineH
     };
   }
   // Nothing landed for a long time while mergeable work has waited as long. A fresh approval after a quiet night is not stuck.
-  const quietMin = sinceLandingMin ?? oldestWait;
-  if (mergeable.length && quietMin >= NO_LANDING_MIN && oldestWait >= NO_LANDING_MIN) {
+  // BOS-2361: merges waiting for another ticket's landing turn count here too: a turn held long with nothing landing is
+  // this stall (they were left out, so a line where every merge waited on the holder read healthy).
+  const turnWaiting = waiting.filter((w) => w.actor === "system" && !w.decisionId && w.state === "waiting_for_turn");
+  const stalled = mergeable.length + turnWaiting.length;
+  const stalledOldest = Math.max(oldestWait, ...turnWaiting.map((w) => w.minutes));
+  const quietMin = sinceLandingMin ?? stalledOldest;
+  if (stalled && quietMin >= NO_LANDING_MIN && stalledOldest >= NO_LANDING_MIN) {
     return {
       state: "stuck",
       cause: "no_landing",
-      title: sinceLandingMin === null ? `Nothing has merged lately, with ${figureText("mergeQueue.forBossMan", mergeable.length)}` : `Nothing has merged for ${waitedText(sinceLandingMin)}`,
-      reason: `${figureText("mergeQueue.forBossMan", mergeable.length)}, and none has landed in that time${running.length ? "; the running check is not finishing" : "; no check is running"}`,
-      fix: "The CEO looks at the line (seats, running checks, runner) and gets it moving.",
-      others: mergeable.length - 1,
+      title: sinceLandingMin === null ? `Nothing has merged lately, with ${figureText("mergeQueue.forBossMan", stalled)}` : `Nothing has merged for ${waitedText(sinceLandingMin)}`,
+      reason: `${figureText("mergeQueue.forBossMan", stalled)}, and none has landed in that time${running.length ? "; the running check is not finishing" : "; no check is running"}${turnWaiting.length ? `; ${turnWaiting.length} wait${turnWaiting.length === 1 ? "s" : ""} for another ticket's landing turn` : ""}`,
+      fix: "The CEO looks at the line (seats, running checks, runner, the landing turn's holder) and gets it moving.",
+      others: stalled - 1,
     };
   }
 
@@ -203,17 +207,17 @@ export function mergeLineHealth(view: HealthInput, opts: HealthOpts): MergeLineH
   }
 
   // Not stuck. Over capacity: landing, but the queue is long.
-  const inWindow = merged.filter((t) => nowMs - t <= RATE_WINDOW_MIN * 60_000);
-  const spanMin = inWindow.length >= 2 ? (inWindow[0]! - inWindow[inWindow.length - 1]!) / 60_000 : 0;
-  const gap = inWindow.length >= RATE_MIN_LANDINGS && spanMin >= RATE_MIN_SPAN_MIN ? spanMin / (inWindow.length - 1) : null;
-  const eta = gap === null ? null : Math.round(mergeable.length * gap);
+  // BOS-2505: when the last one lands comes from the line's own times (lineClearAt: checks left, GitHub waits, the train),
+  // not a landing rate, which a burst of landings made far too fast. Null when the usual times are not known yet.
+  const clearAt = opts.clearAt ?? null;
+  const eta = clearAt === null ? null : Math.max(0, Math.round((clearAt - nowMs) / 60_000));
   if (mergeable.length && ((eta !== null && eta > SLOW_AFTER_MIN) || oldestWait >= SLOW_AFTER_MIN)) {
     // Capacity is only advised when it would add something: a check worker, on an install with none connected.
     const advice = opts.workerReady === false ? "A check worker would add check slots: Settings → Server and runner → Limits and checks → Check workers." : null;
     // inQueue: the sidebar badge's figure, mergeQueue.inLine (R43: everything on the Merges tab, waiting or running);
     // `waiting` is mergeQueue.forBossMan, only those Boss Man itself has to move.
     const inLine = waiting.length + (view.running ?? []).length;
-    return { state: "over_capacity", waiting: mergeable.length, ...(inLine !== mergeable.length ? { inQueue: inLine } : {}), etaMinutes: eta, lastLandedAt: lastLanded === null ? null : new Date(lastLanded).toISOString(), advice };
+    return { state: "over_capacity", waiting: mergeable.length, ...(inLine !== mergeable.length ? { inQueue: inLine } : {}), etaMinutes: eta, etaAt: clearAt === null ? null : new Date(clearAt).toISOString(), lastLandedAt: lastLanded === null ? null : new Date(lastLanded).toISOString(), advice };
   }
   return { state: "healthy" };
 }
@@ -253,7 +257,7 @@ export function startBrakeText(b: StartBrakeOff): string {
 
 /** "Merging, but slowly: ..." as one plain sentence; `clock` turns the last landing into HH:MM (the server uses UTC). */
 export function slowText(s: SlowLine, clock: (iso: string) => string): string {
-  const eta = s.etaMinutes === null ? ", estimating the time to clear…" : `, about ${waitedText(s.etaMinutes)} to clear at the current rate`;
+  const eta = s.etaAt ? `, the last one expected by about ${clock(s.etaAt)}` : ", no estimate yet";
   const last = s.lastLandedAt ? `, last landed ${clock(s.lastLandedAt)}` : "";
   // R43: the counts in the shared words the web's banner also uses.
   return `Merging, but slowly: ${slowLineCounts(s)}${eta}${last}.${s.advice ? ` ${s.advice}` : ""}`;

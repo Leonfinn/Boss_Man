@@ -10,7 +10,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { decisions, notifications, secrets } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
-import { appUrl, fitBytes } from "../src/services/notifications.js";
+import { alertKindOfCard, appUrl, fitBytes } from "../src/services/notifications.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
 afterEach(async () => {
@@ -471,5 +471,23 @@ describe("appUrl: a link in the app as the phone opens it", () => {
   it("with no base set falls back to a root-relative link", () => {
     expect(appUrl("", "#/notifications")).toBe("/#/notifications");
     expect(appUrl("", "settings/updates")).toBe("/settings/updates");
+  });
+});
+
+describe("alertKindOfCard: which alert kind an owner card is found from its type (BOS-2199)", () => {
+  it("words a stalled or over-time run as run_failed, a budget card as spend_alert and a stuck check as merge_stuck", () => {
+    expect(alertKindOfCard({ type: "stalled_run" })).toBe("run_failed");
+    expect(alertKindOfCard({ type: "run_time_limit" })).toBe("run_failed");
+    expect(alertKindOfCard({ type: "budget_limit" })).toBe("spend_alert");
+    expect(alertKindOfCard({ type: "check_stuck" })).toBe("merge_stuck");
+  });
+
+  it("is decision_waiting for every other card: a plain question, a plan, a hire, an unknown type, an empty context or no context", () => {
+    expect(alertKindOfCard({ type: "question" })).toBe("decision_waiting");
+    expect(alertKindOfCard({ type: "self_deploy" })).toBe("decision_waiting");
+    expect(alertKindOfCard({ type: "hire" })).toBe("decision_waiting");
+    expect(alertKindOfCard({ type: "something_new" })).toBe("decision_waiting");
+    expect(alertKindOfCard({})).toBe("decision_waiting");
+    expect(alertKindOfCard(null)).toBe("decision_waiting");
   });
 });

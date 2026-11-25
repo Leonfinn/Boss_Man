@@ -7,7 +7,7 @@ import { and, eq, inArray, isNotNull, isNull } from "drizzle-orm";
 import { isGateMergeOf, MAIN_LOG_MAX, mergeMessageTicket, wakeCeoIfLiveUnplaced } from "./missed-merges.js";
 import { deploysNothing, touchesRunnerCode, touchesRunnerUpdate } from "@boss-man/shared";
 import { MERGE_MISSED_AFTER_MS, parseRepoUrl, renderTemplate, ticketRef, type GitHostKind, type MainLogResult, type MergeLineConflictsResult } from "@boss-man/shared";
-import { agents, checkJobs, checkResults, companies, projects, runners, settings, tickets } from "../db/schema.js";
+import { agents, checkResults, companies, projects, runners, settings, tickets } from "../db/schema.js";
 import { CI_BRANCH_PREFIX, GitHostError, type CommitChecks } from "./git-hosts.js";
 import { clearMergeCards } from "./decisions.js";
 import { record } from "./activity.js";
@@ -15,46 +15,51 @@ import { mergeLineApproved } from "./merge-line-conflicts.js";
 import { CHECK_MERGED_KEY, MERGE_CARRY_KEY, MERGE_RETARGET_KEY, MERGE_TURN_KEY, MERGE_TURN_MAX_MIN, ReviewError, WAIT_FOR_CI_KEY, type GitTemplates, type LandingView } from "./review-common.js";
 import type { ReviewCtx } from "./review-ctx.js";
 import type { ReviewSelf } from "./review.js";
-import { landingsThatCount } from "./update-waits.js";
+import { LANDING_END_MS, landingsThatCount } from "./update-waits.js";
 import { landingTurns } from "./landing-turn.js";
 import { turnWaitWords, type TurnWait } from "./merge-queue.js";
 
-function landingStartMs(ctx: ReviewCtx, id: string): number {
-  const l = ctx.landings.get(id);
-  return l?.state === "running" ? Date.parse(l.startedAt) : NaN;
+/** BOS-2479: when the landing's push call began (merge-rounds.ts whilePushing); undefined when it isn't pushing. */
+function pushStartMs(ctx: Pick<ReviewCtx, "landings" | "pushing">, id: string): number | undefined {
+  return ctx.landings.get(id)?.state === "running" ? ctx.pushing.get(id) : undefined;
 }
 
-/** BOS-1951: the tickets whose merge a runner swap waits on, so the banner can name them (see landingMergesByCompany). */
-export async function landingMergeIds(this: ReviewSelf, ctx: ReviewCtx): Promise<string[]> {
-  const { db, landings, phases, ciWaits, landingStale } = ctx;
-  let ids = [...landings.entries()].filter(([id, l]) => l.state === "running" && phases.get(id) === "merging").map(([id]) => id);
-  if (!ids.length) return [];
-  // BOS-2058: a wait counts live work only (landingsThatCount). The 20 Nov 11:44 hold was BOS-1991 waiting for GitHub CI
-  // on its merge copy: it had pushed nothing to main, and ciPublishAndWait keeps the beat fresh while it polls, so only
-  // the ciWaits test catches it (its check passed 11:47:23, the CI wait ended 11:53:10, the runner swapped 11:53:19).
-  // ciWaits is cleared (ci-publish.ts `finally`) before the push, so the push itself is still waited for. A landing past
-  // its own end, or whose ticket stopped beating, no longer holds the swap either: DR-014, a restart fails an in-flight
-  // merge at once and the gate retries it.
+/**
+ * BOS-1951: the tickets whose merge a runner swap waits on, so the banner can name them (see landingMergesByCompany).
+ * BOS-2479: only a merge whose push to main is going (landingsThatCount). The "merging" phase is set at the start of every
+ * merge round, long before the push, so counting it held the swap for merges waiting on a train seat, a check or GitHub CI,
+ * which the swap's own hold stalls (history in landingsThatCount). A landing whose ticket stopped beating is dropped as well
+ * (BOS-2058): DR-014, a restart fails an in-flight merge at once and the gate retries it.
+ */
+export async function landingMergeIds(this: ReviewSelf, ctx: Pick<ReviewCtx, "landings" | "pushing" | "landingStale">): Promise<string[]> {
+  const { landings, landingStale } = ctx;
+  const running = [...landings.entries()].filter(([, l]) => l.state === "running").map(([id]) => id);
   const live: string[] = [];
-  for (const id of landingsThatCount(ids, { ciWaiting: (id) => ciWaits.has(id), startedMs: (id) => landingStartMs(ctx, id), now: Date.now() })) {
+  for (const id of landingsThatCount(running, { pushingSince: (id) => pushStartMs(ctx, id), now: Date.now() })) {
     if (await landingStale(id)) continue;
     live.push(id);
   }
-  ids = live;
-  if (!ids.length) return [];
-  // BOS-1954: a merge whose check job is still queued has not pushed anything: the phase is "merging" from before its
-  // prepare, but its check can't start while the update holds new checks, so counting it made the swap wait for a merge
-  // that waited for the swap (a deadlock only a server restart cleared). Once the job runs it counts as a running check
-  // (runner-busy.ts); once it has passed, the push is what is counted here.
-  const waitingOnCheck = new Set((await db.select({ ticketId: checkJobs.ticketId }).from(checkJobs).where(and(inArray(checkJobs.ticketId, ids), eq(checkJobs.kind, "merge"), eq(checkJobs.state, "queued")))).map((r) => r.ticketId));
-  return ids.filter((id) => !waitingOnCheck.has(id));
+  return live;
 }
 
-/** BOS-2058: the live landings the swap waits on with when the oldest began, for the one list of waits (update-waits.ts). */
-export async function landingWaitFacts(this: ReviewSelf, ctx: ReviewCtx): Promise<{ since: string | null; ids: string[] }> {
+/**
+ * BOS-2058: the live landings the swap waits on with when the oldest push began, for the one list of waits (update-waits.ts).
+ * BOS-2479: named by ticket reference (BOS-2408), not by id, so server_status reads like the banner.
+ */
+export async function landingWaitFacts(this: ReviewSelf, ctx: ReviewCtx): Promise<{ since: string | null; ids: string[]; names: string[]; endsAt: string | null }> {
   const ids = await this.landingMergeIds();
-  const starts = ids.map((id) => landingStartMs(ctx, id)).filter((n) => Number.isFinite(n));
-  return { since: starts.length ? new Date(Math.min(...starts)).toISOString() : null, ids };
+  const starts = ids.map((id) => pushStartMs(ctx, id)).filter((n): n is number => n !== undefined);
+  const named = ids.length ? await ctx.namedTickets(ids) : [];
+  const names = ids.map((id) => named.find((n) => n.ticketId === id)?.ref ?? id.slice(0, 8));
+  // When the last counted push stops holding the swap at the latest (landingsThatCount's cap), for the banner's go-ahead time.
+  const endsAt = starts.length ? new Date(Math.max(...starts) + LANDING_END_MS).toISOString() : null;
+  return { since: starts.length ? new Date(Math.min(...starts)).toISOString() : null, ids, names, endsAt };
+}
+
+/** BOS-2479: when each counted push began, for the Merges tab's "Running now" and the banner's go-ahead time. */
+export function pushingSince(ctx: Pick<ReviewCtx, "landings" | "pushing">, ticketId: string): string | null {
+  const ms = pushStartMs(ctx, ticketId);
+  return ms === undefined ? null : new Date(ms).toISOString();
 }
 
 /**
@@ -134,14 +139,37 @@ export async function branchChecksLine(this: ReviewSelf, ctx: ReviewCtx, ticketI
 }
 
 /** Every merge this process has running, with its phase, for the merge queue screen (BOS-587). */
-export function runningMerges(this: ReviewSelf, ctx: ReviewCtx): Array<{ ticketId: string; startedAt: string; startedBy: string; phase?: "queued" | "checking" | "merging" | "waiting_to_retry" | "retrying_git"; ci?: { since: string; waiting: string[] }; turn?: TurnWait }> {
+export function runningMerges(this: ReviewSelf, ctx: ReviewCtx): Array<{ ticketId: string; startedAt: string; startedBy: string; phase?: "queued" | "checking" | "merging" | "waiting_to_retry" | "retrying_git"; ci?: { since: string; waiting: string[] }; turn?: TurnWait; pushingSince?: string }> {
   const { landings, phases, ciWaits, turnWaits } = ctx;
   return [...landings.entries()].flatMap(([ticketId, l]) => {
     if (l.state !== "running") return [];
     const ci = ciWaits.get(ticketId);
     const turn = turnWaits.get(ticketId);
-    return [{ ticketId, startedAt: l.startedAt, startedBy: l.startedBy, phase: phases.get(ticketId) ?? ("checking" as const), ...(ci ? { ci: { since: new Date(ci.since).toISOString(), waiting: ci.waiting } } : {}), ...(turn ? { turn } : {}) }];
+    // BOS-2479: a push to main under way, the one merge state a runner swap waits for; the Merges tab shows it in Running now.
+    const push = pushingSince(ctx, ticketId);
+    return [{ ticketId, startedAt: l.startedAt, startedBy: l.startedBy, phase: phases.get(ticketId) ?? ("checking" as const), ...(ci ? { ci: { since: new Date(ci.since).toISOString(), waiting: ci.waiting } } : {}), ...(turn ? { turn } : {}), ...(push ? { pushingSince: push } : {}) }];
   });
+}
+
+/**
+ * BOS-2361: what the turn holder's merge is doing now, in words: waiting for GitHub CI since HH:MM (UTC), running its check,
+ * building the merge copy or pushing ("merging" covers both: one phase marks the start of a landing and its push), waiting
+ * for another ticket's turn, or "no merge running" when it has none on this server (it will start again, DR-026).
+ */
+export function holderPhase(ctx: Pick<ReviewCtx, "landings" | "phases" | "ciWaits" | "turnWaits">, ticketId: string): string {
+  const ci = ctx.ciWaits.get(ticketId);
+  if (ci) return `waiting for GitHub CI since ${new Date(ci.since).toISOString().slice(11, 16)} UTC`;
+  if (ctx.turnWaits.has(ticketId)) return "waiting for another ticket's landing turn";
+  if (ctx.landings.get(ticketId)?.state !== "running") return "no merge running";
+  const phase = ctx.phases.get(ticketId) ?? "checking";
+  const words: Record<string, string> = {
+    queued: "waiting for a check slot",
+    checking: "merge check",
+    merging: "building the merge copy or pushing",
+    waiting_to_retry: "trying again after the runner restarted",
+    retrying_git: "retrying a push or fetch to the git host",
+  };
+  return words[phase] ?? phase;
 }
 
 /**
@@ -167,7 +195,7 @@ export async function landingTurnStatus(this: ReviewSelf, ctx: ReviewCtx, compan
     };
     out.push({
       projectId: s.projectId,
-      holder: s.holder ? { ...who(s.holder.ticketId), since: new Date(s.holder.since).toISOString(), capMin: Math.round(s.holder.capMs / 60_000), capEndsAt: new Date(s.holder.since + s.holder.capMs).toISOString() } : null,
+      holder: s.holder ? { ...who(s.holder.ticketId), phase: holderPhase(ctx, s.holder.ticketId), since: new Date(s.holder.since).toISOString(), capMin: Math.round(s.holder.capMs / 60_000), capEndsAt: new Date(s.holder.since + s.holder.capMs).toISOString() } : null,
       line: await Promise.all(s.line.map(async (id) => (await waiting(id)) ?? { ...who(id), label: null })),
       // Merges whose check passed and whose push waits for this holder (not in the line: they earned no turn).
       pushWaiting: (await Promise.all([...turnWaits].filter(([id, w]) => w.then === "push" && w.holderId === s.holder?.ticketId && !s.line.includes(id)).map(([id]) => waiting(id)))).filter((x) => x !== null),

@@ -57,7 +57,18 @@ export function fillOwnerSetup(steps: readonly string[], values: Readonly<Record
 }
 
 /** `company` (DR-057): other companies' records for `{{company.…}}` tokens, branches and R18b (company-facts.ts). */
-export type OwnerSetupFacts = { values?: Record<string, string>; serverHost?: string | null; hosts?: HostFacts[]; company?: CompanyFacts; /** BOS-1650: settled `[when <fact>]` values (owner-setup-when.ts); read at raise time only. */ when?: WhenFacts };
+export type OwnerSetupFacts = { values?: Record<string, string>; serverHost?: string | null; hosts?: HostFacts[]; company?: CompanyFacts; /** BOS-1650: settled `[when <fact>]` values (owner-setup-when.ts); read at raise time only. */ when?: WhenFacts;
+  /** BOS-2336: a to-do card (raiseOwnerTodo) gives its own options, so R19 and R19c check the stop it offers; a ticket's setup steps give none. */ options?: readonly string[];
+  /** BOS-2336: ticket image id → created-at, for R19's 30-day rule. */ images?: Record<string, string>;
+  /** BOS-2336: sites whose docs misled the owner lately (outside-site-mismatch.ts), for R19b. */ mismatchedSites?: Record<string, string>;
+  /** The clock for R19; tests set it. */ now?: Date;
+  /**
+   * BOS-2336: set for a Boss Man-written to-do (raiseOwnerTodo). Its R20 (a prose branch) and R21 (every step names a
+   * place) are not applied: they exist so a ticket author's setup steps read as one flat list with a "Where" line, but
+   * Boss Man's own hand-apply and service cards carry informational lines and "if it says standby, run this next"
+   * branches by design. R19, R19b, R19c, the host fences (R6, R31) and every other rule still run.
+   */
+  todo?: boolean };
 
 /** The one-line limit for the "why" and "if skipped" fields of a ticket's owner setup (BOS-1650). */
 export const SETUP_LINE_MAX = 240;
@@ -117,7 +128,7 @@ export function checkOwnerSetup(steps: readonly string[], facts: OwnerSetupFacts
   const filled = fillOwnerSetup(company.steps, facts.values ?? {});
   const shown = fillServerHost(filled.steps, facts.serverHost);
   const compose = composeFactsFrom(facts.values);
-  const lint = lintOwnerSteps(shown, { ...(compose ? { compose } : {}), ...(facts.hosts ? { hosts: facts.hosts } : {}), ...(facts.serverHost ? { serverHost: facts.serverHost } : {}) });
+  const lint = lintOwnerSteps(shown, { ...(compose ? { compose } : {}), ...(facts.hosts ? { hosts: facts.hosts } : {}), ...(facts.serverHost ? { serverHost: facts.serverHost } : {}), ...(facts.options ? { options: facts.options } : {}), ...(facts.images ? { images: facts.images } : {}), ...(facts.mismatchedSites ? { mismatchedSites: facts.mismatchedSites } : {}), ...(facts.now ? { now: facts.now } : {}) });
   // R20 (BOS-1650) runs on the steps as the owner will read them, after every marker is settled.
   // BOS-1880: the same place check a card gets (BOS-1660), on the steps as the owner reads them, so a go-live card
   // can't send the owner to "the card" for a place. Its Where lines go on the card.
@@ -127,7 +138,7 @@ export function checkOwnerSetup(steps: readonly string[], facts: OwnerSetupFacts
   // When written, a company token may have no record yet (the other company adds its target before go-live); a
   // known host fact may be unreported. At go-live both stay, and the steps go to the CEO.
   const knownGap = (f: LintFinding) => f.rule === "R4" && (Object.hasOwn(HOST_FACT_LABELS, /^has \{\{host\.([A-Za-z0-9_.]+)\}\}/.exec(f.problem)?.[1] ?? "") || /^has \{\{company\.[a-z0-9-]+\.deployTarget\.(?:name|kind|address|tagName)\}\}/.test(f.problem));
-  const kept = refuse.filter((f) => f.rule !== "R11" && !(mode === "write" && knownGap(f)));
+  const kept = refuse.filter((f) => f.rule !== "R11" && !(mode === "write" && knownGap(f)) && !(facts.todo && (f.rule === "R20" || f.rule === "R21")));
   return { steps: shown, generic: filled.generic, where: place.where, hard: kept.filter((f) => NOT_OVERRIDABLE.has(f.rule)), soft: kept.filter((f) => !NOT_OVERRIDABLE.has(f.rule)), warn, dropped: settled.dropped };
 }
 

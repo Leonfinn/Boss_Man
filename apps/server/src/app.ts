@@ -25,12 +25,14 @@ import { gitHostService } from "./services/git-hosts.js";
 import { setupService } from "./services/setup.js";
 import { secretGrants, secrets as secretsTable, watchdogActions, checkWorkers } from "./db/schema.js";
 import { runnersService } from "./services/runners.js";
+import { connectionSummary } from "./services/runner-connections.js";
 import { allowsPrivate, type HostLookup, LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
-import { AnswerError, clearOwnerTodo, decisionsService, setDecisionSettledListener } from "./services/decisions.js";
+import { watchCiTokenGrant } from "./services/ci-identity-card.js";
+import { AnswerError, clearOwnerTodo, decisionsService, setDecisionSettledListener, setOwnerTodoFacts } from "./services/decisions.js";
 import { githubWatchService, WATCH_TOKEN_ENV } from "./services/github-watch.js";
 import { markOwnerOpened, recentClosedNotices } from "./services/closed-notice.js";
 import { getHold, holdBlocksStarts, maintenanceService, runnerCardHold } from "./services/maintenance.js";
-import { serverWaitChecks, updateWaitCountsRun } from "./services/runner-busy.js";
+import { runnerBusy, runnerChecks, serverWaitChecks, updateWaitCountsRun, workerChecks } from "./services/runner-busy.js";
 import { activeWaits, runnerHoldWait } from "./services/update-waits.js";
 import { runnerWatchService } from "./services/runner-watch.js";
 import { runnerReportService } from "./services/runner-report.js";
@@ -74,6 +76,7 @@ import { listReviews } from "./services/review-kinds.js";
 import { openSignoffCard, signoffState } from "./services/signoff.js";
 import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
 import { limitRequeue } from "./services/limit-requeue.js";
+import { runErrorRetry } from "./services/run-error-retry.js";
 import { record } from "./services/activity.js";
 import { branchOverlapView } from "./services/branch-overlaps.js";
 import { chooseFence, chooseGuard, closeFenceCard, closeFenceUnavailableCard, featureStates } from "./services/fence-default.js";
@@ -99,7 +102,7 @@ import { secretScanService } from "./services/secret-scan.js";
 import { PRIORITY_WATCH_REASON, priorityWatchService } from "./services/priority-watch.js";
 import { checkIdleService, IDLE_CHECK_SLOT_REASON, idleView } from "./services/check-idle.js";
 import { MERGE_STALL_REASON, mergeStallService, mergeTrainStatus } from "./services/merge-stall.js";
-import { landingTurnAlertSweep, usualCiWait } from "./services/landing-turn-eta.js";
+import { landingTurnAlertSweep, usualCiWait, usualMergeCheck } from "./services/landing-turn-eta.js";
 import { softHold } from "./services/deploy-wait-hold.js";
 import { checkGate } from "./services/check-gate.js";
 import { RetroError, retroService } from "./services/retro.js";
@@ -131,7 +134,7 @@ import { CheckBundleInfo, type GoLiveWait } from "@boss-man/shared";
 import { goLiveNote, openUpdateCards } from "./services/go-live-note.js";
 import { checkRequestService } from "./services/check-request.js";
 import { checkQueue, type CheckQueueMode } from "./services/check-queue.js";
-import { retierWaiting } from "./services/merge-train.js";
+import { retierWaiting, trainFacts } from "./services/merge-train.js";
 import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.js";
 import { serverAdminRoutes } from "./routes/server-admin.js";
 import { settingsLimitsRoutes } from "./routes/settings-limits.js";
@@ -362,6 +365,8 @@ export async function buildApp(opts: AppOptions) {
   secretsSvc.onGrantChange(({ companyId, envName }) => {
     if (envName === PENPOT_ENV.url) void launch.syncAllow(companyId);
   });
+  // BOS-2335: the second-account card closes when GIT_CI_TOKEN is granted, not at the next merge.
+  watchCiTokenGrant(secretsSvc, db);
   const rules = policyRulesService(db);
   const notes = notificationsService(db, { reveal: (id) => secretsSvc.reveal(id), now: opts.now, fetch: opts.fetch, log: (m) => app.log.warn(m) });
   setDecisionSettledListener((decisionId) => notes.clearPush(decisionId));
@@ -464,6 +469,8 @@ export async function buildApp(opts: AppOptions) {
   });
   // What each host says about itself (BOS-427), for the owner-card lint's R6 and the hand-apply cards' host line.
   const hostFacts = hostFactsService({ dir: opts.deployerDir, db, now: opts.now, log: (m) => app.log.warn(m) });
+  // BOS-2336: Boss Man's own owner cards (raiseOwnerTodo) are checked against this host's reported facts before they go out.
+  setOwnerTodoFacts(() => ownerSetupFacts(hostFacts));
   const deviceProfiles = deviceProfilesService(db);
   const selfDeploy = selfDeployService(db, { dir: opts.deployerDir, notify: (n) => notes.notify(n), releaseLog, hosts: () => hostFacts.hosts(), deployerScript: () => hostFacts.deployerScript(), facts: async () => Object.fromEntries(Object.entries((await hostFacts.sync()).facts).map(([k, f]) => [k, f.value])), log: (m) => app.log.warn(m),
     // BOS-1648: the CEO is woken once when Boss Man can't tell whether a runner update is needed.
@@ -534,6 +541,7 @@ export async function buildApp(opts: AppOptions) {
     // BOS-2116: lazy, because the semantic service is made further down.
     meaning: (companyId, ownerText) => meaningBriefLines(db, companyId, ownerText, { embedder: (c) => semantic.ticketEmbedder(c), wiki: (c, q) => semantic.similar(c, q) }),
     named: { addons: () => addonFacts(), serverHost: () => hostFacts.serverHost(), gitTokenProbe: (companyId) => gitTokenProbe(companyId), limits: async () => { const l = await scheduler.limitsInForce(); return { allCompanies: l.allCompanies, background: l.background }; }, now: opts.now },
+    now: opts.now,
   });
   const pa =paService(db, {
     notify: (agentId, input) => scheduler.notify(agentId, input),
@@ -551,7 +559,6 @@ export async function buildApp(opts: AppOptions) {
     limits: opts.limits,
     workspaceRoot: opts.workspaceRoot,
     now: opts.now,
-    landingMergeIds: () => review.landingMergeIds(), // `review` is built further down; this only runs during a drain
     quietHours: async () => (await notes.getSettings()).quietHours,
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     tickOnWake: opts.tickOnWake,
@@ -580,6 +587,7 @@ export async function buildApp(opts: AppOptions) {
     // BOS-1645: `review` is built further down; this only runs during a drain pass.
     landingMerges: () => review.landingMergesByCompany(),
     landingMergeIds: () => review.landingMergeIds(),
+    landingEndsAt: async () => (await review.landingWaitFacts()).endsAt,
     // BOS-2058: the owner's wrap-up pressed while a server update waits for a quiet machine belongs to it and lifts with it.
     serverUpdateWaiting: async () => (await deployWait.get())?.phase === "waiting", // `deployWait` is built further down; this only runs on a pass
     tick: () => scheduler.tick(),
@@ -854,6 +862,8 @@ export async function buildApp(opts: AppOptions) {
           }
         })
         .then(() => limitRequeues.releaseReady())
+        // A passing error resumes the run by itself, twice an hour per ticket at most; any other error is a CEO card now (BOS-2357).
+        .then(() => (event.interrupted || !event.error ? null : runErrorRetries.afterRun(event.runId)))
         // A run that took the owner's message and ended without an answer wakes its agent again (BOS-425).
         .then(() => ownerReplies.afterRunEnded(event.runId))
         .then(() => (event.interrupted ? null : scheduler.afterTicketRun(event.runId)))
@@ -902,6 +912,8 @@ export async function buildApp(opts: AppOptions) {
   const sweeps = sweepService(db, {
     // BOS-2160: a background step that throws is logged (the error buffer reads app.log.error) and, if it keeps failing, raises one owner card.
     log: (message) => app.log.error(message),
+    // BOS-2555: the owner's feed flag when a card answer's result never reached them.
+    notify: (n) => notes.notify(n),
     homeCompany: async () => (await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1))[0]?.id ?? null,
     // The merge line jam alert (BOS-766) reads the same view the Merge queue screen does; `mergeQueue` is
     // built below, so this resolves it per pass.
@@ -1026,6 +1038,7 @@ export async function buildApp(opts: AppOptions) {
   // A limit or auth failure closes into one card per account (DR-017 B, BOS-469 point 3): the agent's own
   // funding source, or the one the run used when it says so.
   const limitRequeues = limitRequeue(db, { now: opts.now ?? (() => new Date()) });
+  const runErrorRetries = runErrorRetry(db, { now: opts.now ?? (() => new Date()), resume: (runId) => recovery.onInterrupted(runId), alert: (input) => alerts.raise(input) });
   const loops = loopGuards(db, {
     limits: opts.loopLimits,
     now: opts.now,
@@ -1219,6 +1232,12 @@ export async function buildApp(opts: AppOptions) {
     },
     // BOS-1803: seat waiters (no check-queue place yet) come along too, for their train-seat place and lane.
     places: async (companyId) => new Map((await checkQueueSvc.list(companyId)).rows.filter((r) => r.kind === "merge" && r.state === "waiting" && (r.position || r.heldBySeat)).map((r) => [r.ticketId, { place: r.position, why: r.why, seatPlace: r.seatPlace, lane: r.lane }])),
+    // BOS-2508: the train's own list of tickets waiting for a seat (a member that is not seated has no check job yet).
+    seatPlaces: async (companyId) => {
+      const out = new Map<string, number>();
+      for (const p of await db.select({ id: projects.id }).from(projects).where(eq(projects.companyId, companyId))) (trainFacts(p.id)?.waiting ?? []).forEach((id, i) => out.set(id, i + 1));
+      return out;
+    },
     // BOS-1486: the live reasons a merge waits, so the screen never says "waiting for a slot" for another cause.
     runnerConnected: async (companyId) => {
       const [r] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, companyId));
@@ -1232,6 +1251,8 @@ export async function buildApp(opts: AppOptions) {
     // BOS-2359: the landing turns and the usual GitHub wait, for the holder's line and the estimates.
     landingTurns: (companyId) => review.landingTurnStatus(companyId),
     usualCiWait: (companyId) => usualCiWait(db, companyId, (opts.now ?? (() => new Date()))()),
+    // BOS-2505: the banner's "last one expected by" uses the usual check time with the same GitHub wait.
+    usualMergeCheck: (companyId) => usualMergeCheck(db, companyId, (opts.now ?? (() => new Date()))()),
     // BOS-1594: the stuck/over-capacity verdict's two live facts: an empty train seat (the restart seed wait excluded), and a check worker.
     emptySeatSince: async (companyId) => {
       const since = (await mergeTrainStatus(db, companyId).catch(() => [])).filter((p) => !p.seeding && p.emptySeatSince).map((p) => new Date(p.emptySeatSince!).getTime());
@@ -1265,8 +1286,14 @@ export async function buildApp(opts: AppOptions) {
   });
   // BOS-2058: every update wait that is on, for the owner's screens and the CEO's server_status (one list, update-waits.ts).
   const currentUpdateWaits = async () => {
-    const landing = await review.landingWaitFacts().catch(() => ({ since: null, ids: [] as string[] }));
-    return activeWaits(db, { landingSince: landing.since, landingNames: landing.ids.map((id) => id.slice(0, 8)) });
+    const landing = await review.landingWaitFacts().catch(() => ({ since: null, ids: [] as string[], names: [] as string[], endsAt: null }));
+    // BOS-2479: what the drain still waits on, from the same reads as the drain (runner checks only), and the worker's
+    // checks it lets run and does not wait for. A failed read leaves the line as it was (no counts), never a wrong count.
+    const at = new Date();
+    const drain = await Promise.all([runnerBusy(db, true, at), runnerChecks(db, at), workerChecks(db)])
+      .then(([busy, onRunner, onWorker]) => ({ runs: busy.runsTotal, runnerChecks: onRunner, workerChecks: onWorker }))
+      .catch(() => undefined);
+    return activeWaits(db, { landingSince: landing.since, landingNames: landing.names, ...(drain ? { drain } : {}) });
   };
   // An approved server update waits for a quiet machine (BOS-420): enough free memory, no merge check in flight,
   // few runs. Its soft hold parks new checks and caps runs until the standby window ends. main.ts steps it.
@@ -1398,7 +1425,9 @@ export async function buildApp(opts: AppOptions) {
         if (t) await decisionsSvc.raise({ companyId: t.companyId, agentId: null, question: `"${t.title}" couldn't be merged: ${(err as Error).message} Approve it again from the ticket once that's fixed.`, options: ["Got it"], recommended: "Got it", steps: ["Fix what stopped the merge, then open the ticket and approve the merge again."] });
       }),
     stopTicket: async (ticketId) => {
-      await db.update(wakes).set({ status: "dropped", statusReason: "work stopped by the owner" }).where(and(eq(wakes.ticketId, ticketId), inArray(wakes.status, ["queued", "deferred"])));
+      const stopped = await db.update(wakes).set({ status: "dropped", statusReason: "work stopped by the owner" }).where(and(eq(wakes.ticketId, ticketId), inArray(wakes.status, ["queued", "deferred"]))).returning({ id: wakes.id });
+      // BOS-2356: a nudge dropped here is never silent: its sender is told.
+      await scheduler.nudgesDropped(stopped.map((w) => w.id), "the owner stopped work on the ticket it was about");
       await work.updateTicket(ticketId, { state: "done", outcome: "cancelled", overLimit: true });
     },
     moveAfterMerge: (ticketId, criteria) => review.moveAfterMerge(ticketId, criteria),
@@ -1879,7 +1908,8 @@ export async function buildApp(opts: AppOptions) {
       // One entry per safety feature for Settings' cards (DR-049 point 1): proven, or the owner chose to run without it on this platform.
       const [co] = await db.select().from(companies).where(eq(companies.id, id));
       const safety = co ? featureStates(co, r.sandbox) : null;
-      return { registered: true, runnerId: r.id, connected: runners.isConnected(r.id), lastSeenAt: r.lastSeenAt, imageVersion: r.imageVersion, diskUsedBytes: r.diskUsedBytes, diskCheckedAt: r.diskCheckedAt, addons: r.addons, sandbox: r.sandbox, sandboxCheckedAt: r.sandboxCheckedAt, safety, launcher, report, memoryLine: memory };
+      const connection = await connectionSummary(db, r.id);
+      return { registered: true, runnerId: r.id, connected: runners.isConnected(r.id), connection, lastSeenAt: r.lastSeenAt, imageVersion: r.imageVersion, diskUsedBytes: r.diskUsedBytes, diskCheckedAt: r.diskCheckedAt, addons: r.addons, sandbox: r.sandbox, sandboxCheckedAt: r.sandboxCheckedAt, safety, launcher, report, memoryLine: memory };
     });
 
     // Settings → Server and runner: the two buttons on a safety-feature card (DR-049 point 1). "run" is "Run agents without ...";
@@ -2142,6 +2172,7 @@ export async function buildApp(opts: AppOptions) {
       ownerSetupIfSkipped: z.string().max(240).nullable(),
       noCode: z.boolean(),
       urgent: z.boolean(),
+      recurring: z.boolean(),
       risk: z.enum(RISK_TIERS).nullable(),
       size: z.number().refine(isTaskSize, `Size is one of ${SIZE_SCALE}.`).nullable(),
       planFirst: z.boolean(),
@@ -2168,7 +2199,7 @@ export async function buildApp(opts: AppOptions) {
     // The Spend page's read (BOS-2194): routes/spend-report.ts.
     spendReportRoutes(owner, db, { now: opts.now });
 
-    owner.get("/api/projects/:id/board", async (req) => work.board(IdParam.parse(req.params).id, { doneAll: (req.query as { done?: string }).done === "all" }));
+    owner.get("/api/projects/:id/board", async (req) => work.board(IdParam.parse(req.params).id, { doneAll: (req.query as { done?: string }).done === "all", withText: (req.query as { text?: string }).text === "1" }));
 
     owner.post("/api/projects/:id/tickets", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
@@ -2480,8 +2511,11 @@ export async function buildApp(opts: AppOptions) {
     // What follows an owner's hand move, for the single route and the bulk one (BOS-2193).
     const afterOwnerMove = async (id: string, state: string, label: string, moved: { assigneeAgentId: string | null }) => {
       // Nobody should start work on a ticket the owner has parked or closed.
-      if (state === "done" || state === "backlog" || state === "blocked")
-        await db.update(wakes).set({ status: "dropped", statusReason: `The owner moved the ticket to ${label}.` }).where(and(eq(wakes.ticketId, id), inArray(wakes.status, ["queued", "deferred"])));
+      if (state === "done" || state === "backlog" || state === "blocked") {
+        const dropped = await db.update(wakes).set({ status: "dropped", statusReason: `The owner moved the ticket to ${label}.` }).where(and(eq(wakes.ticketId, id), inArray(wakes.status, ["queued", "deferred"]))).returning({ id: wakes.id });
+        // BOS-2356: a nudge dropped here is never silent: its sender is told.
+        await scheduler.nudgesDropped(dropped.map((w) => w.id), `the owner moved the ticket it was about to ${label}`);
+      }
       if ((state === "in_progress" || state === "ready") && moved.assigneeAgentId) await scheduler.notify(moved.assigneeAgentId, { ticketId: id, reason: "woken by owner", note: `The owner moved this ticket to ${label}.` });
     };
 
@@ -2709,9 +2743,9 @@ export async function buildApp(opts: AppOptions) {
     // (BOS-2187) Past answers, newest first, 50 at a time: pass the last page's `next` as `cursor`.
     owner.get("/api/decisions/answered", async (req) => {
       const q = z
-        .object({ cursor: z.string().max(100).optional(), q: z.string().max(200).optional(), limit: z.coerce.number().int().min(1).max(100).optional(), companyId: z.string().uuid().optional(), id: z.string().uuid().optional() })
+        .object({ cursor: z.string().max(100).optional(), q: z.string().max(200).optional(), limit: z.coerce.number().int().min(1).max(100).optional(), companyId: z.string().uuid().optional(), id: z.string().uuid().optional(), by: z.enum(["owner", "ceo", "auto", "withdrawn"]).optional(), kind: z.string().max(60).optional(), weeks: z.coerce.number().int().min(1).max(8).optional() })
         .parse(req.query ?? {});
-      return decisionsSvc.answeredList({ ...(q.cursor ? { cursor: q.cursor } : {}), ...(q.q ? { q: q.q } : {}), ...(q.limit ? { limit: q.limit } : {}), ...(q.companyId ? { companyId: q.companyId } : {}), ...(q.id ? { id: q.id } : {}) });
+      return decisionsSvc.answeredList({ ...(q.by ? { by: q.by } : {}), ...(q.kind ? { kind: q.kind } : {}), ...(q.weeks ? { weeks: q.weeks } : {}), ...(q.cursor ? { cursor: q.cursor } : {}), ...(q.q ? { q: q.q } : {}), ...(q.limit ? { limit: q.limit } : {}), ...(q.companyId ? { companyId: q.companyId } : {}), ...(q.id ? { id: q.id } : {}) });
     });
 
     // "Ask the CEO for advice": the decision stays open while the CEO looks at it (it returns to the owner after the company's time limit).

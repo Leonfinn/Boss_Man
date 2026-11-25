@@ -3,8 +3,20 @@ import { and, asc, desc, eq, exists, inArray, isNull, or, ne, sql, type SQL } fr
 
 /** BOS-2166: how many of the newest done tickets the board sends unless it asks for all of them. */
 export const BOARD_DONE_LIMIT = 50;
+
+/**
+ * BOS-2497: the ticket fields a board card sends, the ones the page reads (web `BoardTicket`). The whole row was about
+ * 2.8 KB a card (about 100 columns, half of it the description), so 1 MB a refresh, every 10 s. A field the board starts
+ * to show is added here and to the web type; the page's typecheck catches a read of one that isn't sent.
+ * columnId stays: the server places each card in its column with it.
+ */
+export function boardCardFields(t: typeof tickets.$inferSelect) {
+  const { id, number, title, systemState, outcome, columnId, assigneeAgentId, assignedToOwner, branch, risk, size, planFirst, planApprovedAt, featureId, lastActivityAt, stateChangedAt, urgent, urgentByOwner, recurring, watchingFor, watchUntil, mergeCommit } = t;
+  return { id, number, title, systemState, outcome, columnId, assigneeAgentId, assignedToOwner, branch, risk, size, planFirst, planApprovedAt, featureId, lastActivityAt, stateChangedAt, urgent, urgentByOwner, recurring, watchingFor, watchUntil, mergeCommit };
+}
 import { addsUsabilityCriterion, watchEndsAt, withUsabilityCriterion,columnProblems, DEFAULT_COLUMNS, type GoLiveWait, effectiveDueDate, planFirstByDefault, readCriteria, type ColumnSpec, type RiskTier, type Criterion, type SystemState, type TaskSize } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
+import { boardBuildsFor, type BoardBuild } from "./board-build.js";
 import { record } from "./activity.js";
 import { liveRuns } from "./runs.js";
 import { passedReviewTickets, REVIEW_REASON, reviewWaits } from "./review-kinds.js";
@@ -96,6 +108,8 @@ type TicketPatch = {
   fixesLive?: string | null;
   /** Owner-marked urgent: always passes the subscription quota hold (BOS-227). */
   urgent?: boolean;
+  /** BOS-2485: a standing, repeated job; shown as a "Recurring" label. */
+  recurring?: boolean;
   /** BOS-1516: the urgent mark was set by the owner ("Priority 1"). Only the owner's routes pass it; clearing urgent clears it too. */
   urgentByOwner?: boolean;
   /** Move past a full column anyway. */
@@ -294,7 +308,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       return columnsOf(projectId);
     },
 
-    async board(projectId: string, opts: { doneAll?: boolean } = {}) {
+    async board(projectId: string, opts: { doneAll?: boolean; withText?: boolean } = {}) {
       const p = await project(projectId);
       const cols = await columnsOf(projectId);
       const boardRows = (where: SQL | undefined) =>
@@ -447,6 +461,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         const v = await holdView(db, id);
         if (v) holds.set(id, v);
       }
+      const builds = await boardBuildsFor(db)(rows.filter((r) => r.t.systemState === "review" && r.t.branch && !r.t.mergeCommit).map((r) => ({ id: r.t.id, activityKey: r.t.lastActivityAt.toISOString() }))).catch(() => new Map<string, BoardBuild>());
       const merging = new Map((hooks.runningMerges?.() ?? []).map((m) => [m.ticketId, m.phase ?? "checking"] as const));
       const mergeNote = (t: typeof tickets.$inferSelect) => {
         const phase = merging.get(t.id);
@@ -480,7 +495,10 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         const hold = t.systemState === "review" ? (holds.get(t.id) ?? null) : null;
         const reviewStage = t.systemState !== "review" || waitingOnOwner ? null : beingChecked.has(t.id) ? ("checking" as const) : hold ? ("held" as const) : passed.has(t.id) || withPr.has(t.id) || merging.has(t.id) ? ("merging" as const) : ("awaiting_review" as const);
         return {
-        ...t,
+        ...boardCardFields(t),
+        // The description only for the search box, which asks for it while it has words (BOS-2497).
+        ...(opts.withText ? { body: t.body } : {}),
+        hasPlan: !!t.plan,
         waitingOnOwner,
         reviewStage,
         checkLine: reviewStage === "checking" ? (checkLines.get(t.id) ?? "waiting for its check") : null,
@@ -492,6 +510,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         // The agent re-checking a card this ticket waits on (BOS-1193): the board says so instead of asking the owner to answer it.
         recheckingBy: [...rechecking].find(([cardId]) => deps.some((d) => d.blockedTicketId === t.id && d.blockerDecisionId === cardId))?.[1] ?? null,
         noReviewer: unreviewed.has(t.id),
+        build: t.systemState === "review" ? (builds.get(t.id) ?? null) : null,
         reviewWait: waits.get(t.id) ?? null,
         waitingDecisionId,
         approvedBy: waitingDecisionId ? signoffs.get(waitingDecisionId) ?? null : (signoffWaiting.get(t.id) ?? null),
@@ -521,7 +540,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         // BOS-1907: a split-out check ticket joins the "Merged, watching" lane through its parent's merge; the card shows the watch.
         checksParentMerged: (() => {
           const parent = t.checksTicketId ? byId.get(t.checksTicketId) : undefined;
-          return !!parent?.mergeCommit && parent.systemState !== "done";
+          // BOS-2417: a parent closed at go-live leaves its check here; a cancelled parent takes it out.
+          return !!parent?.mergeCommit && !(parent.systemState === "done" && parent.outcome === "cancelled");
         })(),
         watchEndsAt: t.mergeCommit ? (watchEndsAt(t)?.toISOString() ?? null) : null,
         // BOS-1910: null for Being checked, Merged watching (before its date) and Next up, whatever the watchdog holds.

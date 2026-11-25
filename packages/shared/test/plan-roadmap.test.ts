@@ -44,14 +44,16 @@ describe("layoutPlan", () => {
 describe("milestoneStatus", () => {
   const today = "2026-10-16";
   it("works out a milestone's status from its tickets and date", () => {
-    expect(milestoneStatus({ total: 0, done: 0, blocked: 0 }, "2026-09-01", today)).toBe("no_work");
-    expect(milestoneStatus({ total: 3, done: 3, blocked: 0 }, "2026-09-01", today)).toBe("done");
-    expect(milestoneStatus({ total: 3, done: 1, blocked: 0 }, "2026-10-15", today)).toBe("late");
-    expect(milestoneStatus({ total: 3, done: 1, blocked: 0 }, null, today)).toBe("unscheduled");
-    expect(milestoneStatus({ total: 4, done: 1, blocked: 0 }, "2026-10-30", today)).toBe("at_risk");
-    expect(milestoneStatus({ total: 4, done: 3, blocked: 1 }, "2026-10-16", today)).toBe("at_risk");
-    expect(milestoneStatus({ total: 4, done: 3, blocked: 0 }, "2026-10-30", today)).toBe("on_track");
-    expect(milestoneStatus({ total: 4, done: 0, blocked: 2 }, "2026-12-01", today)).toBe("on_track");
+    const ok = { daysLate: 0, noEstimate: false };
+    expect(milestoneStatus({ total: 0, done: 0, blocked: 0, ...ok }, "2026-09-01", today)).toBe("no_work");
+    expect(milestoneStatus({ total: 3, done: 3, blocked: 0, ...ok }, "2026-09-01", today)).toBe("done");
+    expect(milestoneStatus({ total: 3, done: 1, blocked: 0, ...ok }, "2026-10-15", today)).toBe("late");
+    expect(milestoneStatus({ total: 3, done: 1, blocked: 0, ...ok }, null, today)).toBe("no_date");
+    expect(milestoneStatus({ total: 4, done: 1, blocked: 0, daysLate: 3, noEstimate: false }, "2026-10-30", today)).toBe("at_risk");
+    expect(milestoneStatus({ total: 4, done: 3, blocked: 1, ...ok }, "2026-10-16", today)).toBe("at_risk");
+    expect(milestoneStatus({ total: 4, done: 3, blocked: 0, ...ok }, "2026-10-30", today)).toBe("on_track");
+    // A blocked ticket is worth knowing about at any distance.
+    expect(milestoneStatus({ total: 4, done: 0, blocked: 2, ...ok }, "2026-12-01", today)).toBe("at_risk");
   });
   it("reads today in the owner's time zone", () => {
     expect(dateIn(new Date("2026-10-16T23:30:00Z"), "Europe/London")).toBe("2026-10-17");

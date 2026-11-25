@@ -853,7 +853,20 @@ host_extra_facts() {
   # which. A running container that is failing its health check counts as unhealthy too.
   # Only fields `docker ps` really has are asked for here (`ExitCode` is not one of them, so it comes from inspect).
   local checks="" csep="" total=0 notrun=0 unhealthy=0 maxrestart=0 line r
-  local stopping="" ssep2="" seen_ids=""
+  local stopping="" ssep2="" seen_ids="" unh_names="" unh_sep=""
+  # BOS-2481: a container that is still inside its health-check start period (a runner just swapped onto a new image)
+  # is settling, not unhealthy. Docker's own "(health: starting)" already covers the normal case; this also covers a
+  # failing probe reported inside the window. Reads StartedAt and the configured StartPeriod (nanoseconds); anything
+  # unreadable (no health check, inspect denied) means "not in a start period", so a real fault is never hidden.
+  in_start_period() { # cid
+    local out started period start_s now_s
+    out="$(dk inspect -f '{{.State.StartedAt}}|{{if .Config.Healthcheck}}{{.Config.Healthcheck.StartPeriod}}{{end}}' "$1" 2>/dev/null || true)"
+    started="${out%%|*}"; period="${out#*|}"
+    [[ $out == *"|"* && $period =~ ^[0-9]+$ && $period -gt 0 && -n $started ]] || return 1
+    start_s="$(date -d "$started" +%s 2>/dev/null)" || return 1
+    now_s="$(date +%s)"
+    ((now_s - start_s < period / 1000000000))
+  }
   if have_docker; then
     local cid cname cstate_str cstatus csince csvc
     local -A exit_code=()
@@ -892,10 +905,16 @@ host_extra_facts() {
       total=$((total + 1))
       if [[ $cstate_str == running ]]; then
         # A container that is up but failing its health check ("Up 2 minutes (unhealthy)") is a problem too.
-        [[ $cstatus == *unhealthy* ]] && unhealthy=$((unhealthy + 1))
+        if [[ $cstatus == *unhealthy* ]] && ! in_start_period "$cid"; then
+          unhealthy=$((unhealthy + 1))
+          unh_names+="$unh_sep${csvc:-$cname}"; unh_sep="; "
+        fi
         continue
       fi
-      [[ $cstate_str == restarting ]] && unhealthy=$((unhealthy + 1))
+      if [[ $cstate_str == restarting ]]; then
+        unhealthy=$((unhealthy + 1))
+        unh_names+="$unh_sep${csvc:-$cname}"; unh_sep="; "
+      fi
       local cexit="${exit_code[$cid]:-}"
       # Meant to stop: a one-shot whose job is done. That means a migrate/netguard helper, or any service Compose
       # starts with `restart: "no"`, and only when it exited 0. A cleanly stopped server or database has a restart
@@ -923,7 +942,7 @@ host_extra_facts() {
       stopping+="$ssep2{\"name\": $(jstr "$cname"), \"status\": $(jstr "$cstate_str"), \"exit\": $(jstr "$cexit_s"), \"since\": $(jstr "$csince")}"; ssep2=", "
     done <"$listing"
     rm -f "$listing" 2>/dev/null || true
-    checks+="$csep\"container_status\": {\"total\": $total, \"notRunning\": $notrun, \"unhealthy\": $unhealthy, \"stopped\": [$stopping]}"; csep=", "
+    checks+="$csep\"container_status\": {\"total\": $total, \"notRunning\": $notrun, \"unhealthy\": $unhealthy, \"unhealthyNames\": $(jstr "$unh_names"), \"stopped\": [$stopping]}"; csep=", "
     maxrestart=0
     while read -r r; do [[ $r =~ ^[0-9]+$ ]] && ((r > maxrestart)) && maxrestart=$r; done < <(dk ps -aq --filter label=com.docker.compose.project | xargs -r docker inspect -f '{{.RestartCount}}' 2>/dev/null || true)
     checks+="$csep\"restart_counts\": {\"max\": $maxrestart}"; csep=", "
@@ -1352,10 +1371,22 @@ do_deploy_bluegreen() {
   mem_start before-build
   backup_database || { bg_fail failed "The backup failed. Nothing was changed."; return 1; }
   g merge --ff-only --quiet "$COMMIT" || { bg_fail failed "Could not move the checkout to ${COMMIT:0:8}."; return 1; }
-  local brc=0
-  (cd "$REPO" && BOSSMAN_DEPLOYER="$D" BOSSMAN_COMMIT="$COMMIT" timeout -k 30 "$BG_BUILD_SECONDS" docker compose build "server-$BG_IDLE") >>"$LOG" 2>&1 || brc=$?
+  local brc=0 bout bneterr="" bpause="${BG_BUILD_RETRY_PAUSE:-20}"
+  [[ $bpause =~ ^[0-9]{1,3}$ ]] || bpause=20
+  bout="$(mktemp "${TMPDIR:-/tmp}/bg-build.XXXXXX")"
+  bg_build() { : >"$bout"; brc=0; (cd "$REPO" && BOSSMAN_DEPLOYER="$D" BOSSMAN_COMMIT="$COMMIT" timeout -k 30 "$BG_BUILD_SECONDS" docker compose build "server-$BG_IDLE") >"$bout" 2>&1 || brc=$?; cat "$bout" >>"$LOG"; }
+  bg_build
+  # BOS-2552: one retry when the build only failed to reach a registry (a one-off network fault, BOS-2550). Never after a
+  # timeout (124, 137) or a real build error; the first error is kept and shown in the report.
+  if ((brc != 0 && brc != 124 && brc != 137)) && grep -qiE 'network is unreachable|failed to fetch anonymous token|TLS handshake timeout|i/o timeout|connection reset by peer|no such host|temporary failure in name resolution' "$bout"; then
+    bneterr="$(grep -iE 'network is unreachable|failed to fetch anonymous token|TLS handshake timeout|i/o timeout|connection reset by peer|no such host|temporary failure in name resolution' "$bout" | head -1 | cut -c1-300)"
+    log "Building $BG_IDLE failed on a registry or network error ($bneterr). Trying once more in ${bpause}s."
+    sleep "$bpause"
+    bg_build
+  fi
+  rm -f "$bout"
   if ((brc == 124 || brc == 137)); then pre_fail "Building $BG_IDLE did not finish within $((BG_BUILD_SECONDS / 60)) minutes, so it was stopped."; return 1; fi
-  ((brc == 0)) || { pre_fail "Building $BG_IDLE failed."; return 1; }
+  ((brc == 0)) || { pre_fail "Building $BG_IDLE failed.${bneterr:+ The first attempt failed on a registry or network error ($bneterr) and the retry failed too.}"; return 1; }
   mem_sample after-build
   # Expand-only migrations: the live colour keeps working on the new schema.
   BOSSMAN_MIGRATE_TAG="$BG_IDLE" compose run --rm --no-deps migrate >>"$LOG" 2>&1 || { pre_fail "The migration failed (the database rolled it back)."; return 1; }

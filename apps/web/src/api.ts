@@ -47,6 +47,37 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
 
 /** One request, no sharing: what `api` sends for a write, or a path nothing else should join. */
 export async function apiOnce<T>(path: string, init: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
+  // A read that never answers must fail like an error, so a poll waiting on it retries on its next tick
+  // instead of sitting on "Checking…" until the tab is reloaded (BOS-2559). Reads only: a write may be slow.
+  if (!readOnly(init)) return sendOnce<T>(path, init);
+  const guard = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    guard.abort();
+  }, READ_TIMEOUT_MS);
+  const forward = () => guard.abort();
+  if (init.signal?.aborted) guard.abort();
+  else init.signal?.addEventListener("abort", forward, { once: true });
+  try {
+    return await sendOnce<T>(path, { ...init, signal: guard.signal });
+  } catch (err) {
+    if (timedOut && (err as Error).name === "AbortError") {
+      const slow = new ApiError(0, "Boss Man took too long to answer. It will try again shortly.");
+      reportFailure(slow);
+      throw slow;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    init.signal?.removeEventListener("abort", forward);
+  }
+}
+
+/** How long a read may wait for its answer (the whole body included). Under the shared-read hold of 60 s (shared-get.ts). */
+export const READ_TIMEOUT_MS = 30_000;
+
+async function sendOnce<T>(path: string, init: { method?: string; body?: unknown; signal?: AbortSignal }): Promise<T> {
   let res: Response;
   // How long the server took, so a stall that still answers shows the banner (BOS-637).
   const started = Date.now();
@@ -277,15 +308,19 @@ export type Ticket = {
   /** The feature it delivers and the task it is a sub-task of, by title, on a board card. */
   featureId?: string | null;
   featureTitle?: string | null;
-  /** The description; board cards carry it for the search box. */
+  /** The description; board cards carry it only when the search box asks (`?text=1`, BOS-2497). */
   body?: string | null;
   parentTitle?: string | null;
   lastActivityAt?: string;
+  /** BOS-2400: when the ticket last changed state (the board sends the whole ticket row). */
+  stateChangedAt?: string;
   /** In review with an owner sign-off decision still open (the "Your review" lane). */
   waitingOnOwner?: boolean;
   waitingDecisionId?: string | null;
   /** Owner-marked urgent: always passes the subscription quota hold. */
   urgent?: boolean;
+  /** BOS-2485: a standing, repeated job; shown with a "Recurring" label. */
+  recurring?: boolean;
   /** BOS-1516: the urgent mark is the owner's "Priority 1" switch. */
   urgentByOwner?: boolean;
   /** A held wake's reset time and why, when routine work is paused by the quota hold. */
@@ -312,6 +347,8 @@ export type Ticket = {
   reviewStage?: "awaiting_review" | "merging" | "held" | "checking" | null;
   /** BOS-1906: with reviewStage "checking", where its quick check stands ("running now", "no. 3 in line"). */
   checkLine?: string | null;
+  /** BOS-2435: the git host's build result for a card in Review; null with no git host or no branch. */
+  build?: { state: "passed" | "failed" | "running" | "none" | "unavailable"; failing: string[] } | null;
   /** A reviewer passed it but holds the merge (BOS-808). */
   hold?: ReviewHold | null;
   /** Where an approved ticket's merge is, in plain words ("Waiting for a check slot."). */
@@ -333,7 +370,9 @@ export type UnticketedRun = { id: string; agent: string | null; ticketId: string
 /** `workingAgents` is the number of agents with a run going, the Dashboard's figure. */
 /** A run going now on a ticket in another project of the company. */
 export type OtherProjectRun = { id: string; agent: string | null; purpose: string | null; startedAt: string; ticketId: string; ticketNumber: number | null; ticketTitle: string; projectId: string; projectName: string };
-export type Board = { project: Project; workingAgents: number; withoutTicket: UnticketedRun[]; otherProjects?: OtherProjectRun[]; /** All done tickets in the project; the board sends only the newest unless asked for all. */ doneTotal?: number; columns: Array<{ id: string; name: string; systemState: string; wipLimit: number | null; tickets: Ticket[] }> };
+/** BOS-2497: a board card leaves out the ticket's long text. The plan comes only as yes/no; the description only with `?text=1` (the search box asks for it). */
+export type BoardTicket = Omit<Ticket, "plan"> & { hasPlan: boolean };
+export type Board = { project: Project; workingAgents: number; withoutTicket: UnticketedRun[]; otherProjects?: OtherProjectRun[]; /** All done tickets in the project; the board sends only the newest unless asked for all. */ doneTotal?: number; columns: Array<{ id: string; name: string; systemState: string; wipLimit: number | null; tickets: BoardTicket[] }> };
 
 export type FundingSource = { id: string; name: string; kind: string; provider: string; monthlyGrantMicros: number | null; cycleAnchor?: string | null; quotaHoldAt?: number; quotaOverage?: "pause" | "urgent" | "all"; quotaDisabledWindows?: string[]; secretId?: string | null; fallbackRank?: number | null };
 export type FundingStatus = {
@@ -364,6 +403,24 @@ export type FundingStatus = {
   daily: Array<{ day: string; runs: number; inputTokens: number; outputTokens: number; costMicros: number }>;
   /** The last 7 days per company, biggest first. */
   byCompany?: Array<{ companyId: string; name: string; runs: number; tokens: number; costMicros: number }>;
+  /** The last 7 days by agent and by project: plan tokens, pay-as-you-go spend and share of the source's total. */
+  whoUsedIt?: {
+    days: number;
+    totalTokens: number;
+    totalMicros: number;
+    agents: Array<{ id: string | null; name: string; tokens: number; costMicros: number; share: number; engagement: boolean }>;
+    agentsOthers?: { tokens: number; costMicros: number; share: number; count: number } | null;
+    projects: Array<{ id: string | null; name: string; company: string | null; tokens: number; costMicros: number; share: number; engagement: boolean }>;
+    projectsOthers?: { tokens: number; costMicros: number; share: number; count: number } | null;
+  };
+  /** The last 8 weeks, newest first: plan use at each reset, spend and the times work was held for this source's quota. */
+  weeks?: Array<{
+    start: string;
+    end: string;
+    plans: Array<{ window: string; resets: number; peak: number; limit: number | null }>;
+    spendMicros: number;
+    holds: Array<{ window: string; startedAt: string; endedAt: string | null; ms: number }>;
+  }>;
   totalSpentMicros: number;
   coverage: string;
 };
@@ -415,12 +472,25 @@ export type RunRow = {
 export type TranscriptItem = { seq: number; type: string; at: string; event: Record<string, unknown> & { update?: Record<string, unknown> } };
 export type Transcript = { run: RunRow & { endedAt: string | null; outcome: string | null; costMicros: number }; items: TranscriptItem[]; next: number; more: boolean };
 
-export type EngagementRow = { id: string; title: string; status: string; requester: string; provider: string; budgetCapUsd: number | null };
+export type EngagementSummary = {
+  openByState: Record<string, number>;
+  waitingOnRequester: number;
+  waitingOnProvider: number;
+  waitingOnOther: number;
+  spend30dPlanUseUsd: number;
+  spend30dPayAsYouGoUsd: number;
+  medianDaysToFinish: number | null;
+  finishedCount: number;
+};
+/** `summary` rides on the first row of the owner's first page only (BOS-2427). */
+export type EngagementRow = { id: string; title: string; status: string; requester: string; provider: string; budgetCapUsd: number | null; stateSince?: string; summary?: EngagementSummary | null };
 export type EngagementView = EngagementRow & {
   scope: string;
   deliverables: string | null;
   acceptanceCriteria: string[];
   spentUsd: number;
+  /** The provider's tickets doing the work; absent in the requester's view. */
+  tickets?: Array<{ id: string; ref: string | null; title: string; state: string; assignee: string | null; spentUsd: number }>;
   counterTerms: unknown;
   delivery: { summary?: string; refs?: string[] } | null;
   thread: Array<{ from: string; fromCompanyId: string; kind: string; body: string; at: string }>;
@@ -471,16 +541,17 @@ export type NotifySettings = {
   phoneTest?: { sentAt: string; confirmedAt: string | null } | null;
 };
 
-export type MilestoneStatus = "done" | "late" | "at_risk" | "on_track" | "no_work" | "unscheduled";
+export type MilestoneStatus = "done" | "late" | "at_risk" | "on_track" | "no_work" | "no_date";
 export type Horizon = "now" | "next" | "later";
-export type RoadmapMilestone = { id: string; title: string; targetDate: string | null; total: number; done: number; blocked: number; active: number; status: MilestoneStatus; horizon: Horizon; pinned: Horizon | null; forecast: MilestoneForecast };
+export type RoadmapMilestone = { id: string; title: string; targetDate: string | null; total: number; done: number; blocked: number; active: number; status: MilestoneStatus; horizon: Horizon; pinned: Horizon | null; forecast: MilestoneForecast; /** When its last ticket was finished; null until it is done (BOS-2560). */ finishedAt?: string | null; /** 8 weekly points, oldest first (BOS-2397). */ burnup?: BurnupPoint[] };
+export type BurnupPoint = { weekEnd: string; done: number; total: number };
 export type MilestoneForecast = { pointsDone: number; pointsLeft: number; unsized: number; pace: number; expectedFinish: string | null; daysLate: number };
 export type RoadmapObjective = {
   id: string;
   title: string;
   priority: number;
   status: "active" | "done" | "dropped";
-  keyResults: Array<{ id: string; title: string; current: number | null; target: number | null; unit: string | null; progress: number | null }>;
+  keyResults: Array<{ id: string; title: string; current: number | null; target: number | null; unit: string | null; progress: number | null; readings: Array<{ at: string; value: number; by: string }> }>;
   milestones: RoadmapMilestone[];
 };
 export type RoadmapCompany = { id: string; name: string; objectives: RoadmapObjective[] };
@@ -585,14 +656,16 @@ export type Feature = {
   value: number;
   demandPart: number;
   priority: number;
+  /** When its latest task last changed state (BOS-2454); null with no tasks. */
+  lastMovedAt?: string | null;
   tickets: { total: number; done: number; items: Array<{ id: string; title: string; state: string; outcome: string | null; assignee: string | null }> };
 };
 export type ScoredFeatures = { settings: { demandWeight: number; ceoTriage: boolean }; drivers: Driver[]; maxDemand: number; features: Feature[] };
 export type FeedbackSettingsView = { demandWeight: number; ceoTriage: boolean; portalEnabled: boolean; portalToken: string | null; portalTitle: string | null; portalIntro: string | null; portalBackUrl: string | null; portalBackText: string | null; hasLogo: boolean; portalUrl: string | null; confirmByEmail: boolean; confirmLinkHours: number; rememberAddressDays: number; portalAtBareAddress?: boolean; emailReady: boolean; drivers: Driver[]; areas: FeatureArea[] };
-export type NoteSummary = { id: string; companyId: string; title: string | null; text: string; source: string; state: "unprocessed" | "processed" | "archived"; untrusted: boolean; createdAt: string; customer: string | null; insightCount: number };
+export type NoteSummary = { id: string; companyId: string; title: string | null; text: string; source: string; state: "unprocessed" | "processed" | "archived"; untrusted: boolean; createdAt: string; customer: string | null; insightCount: number; features: Array<{ id: string; title: string; status: FeatureStatus }> };
 export type Insight = { id: string; noteId: string; featureId: string; importance: Importance; highlight: string | null; createdBy: string; createdAt: string };
 export type NoteDetail = {
-  note: Omit<NoteSummary, "customer" | "insightCount"> & { customerId: string | null; processedAt: string | null };
+  note: Omit<NoteSummary, "customer" | "insightCount" | "features"> & { customerId: string | null; processedAt: string | null };
   customer: { id: string; name: string; email: string | null; segment: string | null } | null;
   insights: Array<Insight & { feature: { id: string; title: string; status: FeatureStatus } }>;
   suggestions: Array<{ id: string; title: string; status: FeatureStatus; score: number; shared: string[] }>;

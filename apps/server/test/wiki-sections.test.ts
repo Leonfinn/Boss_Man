@@ -8,7 +8,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { runners, tickets } from "../src/db/schema.js";
 import { cut, issueRunToken } from "../src/mcp.js";
-import { findSection, splitSections } from "../src/services/wiki.js";
+import { findSection, headingsOf, lessonLine, normalizeLesson, serialiseWrite, splitSections } from "../src/services/wiki.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 const clients: Client[] = [];
@@ -146,6 +146,78 @@ describe("wiki by section", () => {
     expect(JSON.parse(textOf(await client.callTool({ name: "wiki", arguments: { action: "list", q: "robnic" } }))).map((p: { slug: string }) => p.slug)).toEqual(["misc"]);
     expect(JSON.stringify((await c.req("GET", `/api/companies/${c.company.id}/wiki?q=deploying`)).json())).toContain("handbook");
     expect(((await c.req("GET", `/api/companies/${c.company.id}/wiki?q=robnic`)).json() as Array<{ slug: string }>).map((p) => p.slug)).toEqual(["misc"]);
+  });
+});
+
+describe("headingsOf", () => {
+  it("lists headings at every level in order, without the intro", () => {
+    const body = "Intro text.\n# One\n## Two\n### Three\n#### Four\n##### Five\n###### Six\n";
+    expect(headingsOf(body).map((h) => [h.level, h.heading])).toEqual([
+      [1, "One"],
+      [2, "Two"],
+      [3, "Three"],
+      [4, "Four"],
+      [5, "Five"],
+      [6, "Six"],
+    ]);
+  });
+
+  it("ignores headings inside code fences and gives none for a page without headings", () => {
+    const body = ["```sh", "# not a heading", "```", "~~~", "## also not", "~~~", "# Real", "## Real too"].join("\n");
+    expect(headingsOf(body).map((h) => h.heading)).toEqual(["Real", "Real too"]);
+    expect(headingsOf("Just prose.\nNothing here.")).toEqual([]);
+  });
+});
+
+describe("lessonLine", () => {
+  it("puts the lesson's wording on one bullet line", () => {
+    expect(lessonLine("Read the config from the environment.")).toBe("- Read the config from the environment.");
+    expect(lessonLine(normalizeLesson("  Read\n the\tconfig  "))).toBe("- Read the config");
+  });
+
+  it("wraps the text as given and leaves folding and trimming to normalizeLesson", () => {
+    expect(lessonLine("Two\nlines")).toBe("- Two\nlines");
+    expect(lessonLine("")).toBe("- ");
+  });
+});
+
+describe("serialiseWrite", () => {
+  it("runs two writes one after the other", async () => {
+    const log: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const first = serialiseWrite(async () => {
+      log.push("first start");
+      await gate;
+      log.push("first end");
+      return 1;
+    });
+    const second = serialiseWrite(async () => {
+      log.push("second start");
+      log.push("second end");
+      return 2;
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(log).toEqual(["first start"]);
+    release();
+    await expect(first).resolves.toBe(1);
+    await expect(second).resolves.toBe(2);
+    expect(log).toEqual(["first start", "first end", "second start", "second end"]);
+  });
+
+  it("a failed write does not block the next one", async () => {
+    const bad = serialiseWrite(async () => {
+      throw new Error("save failed");
+    });
+    await expect(bad).rejects.toThrow("save failed");
+    const log: string[] = [];
+    await expect(
+      serialiseWrite(async () => {
+        log.push("ran");
+        return "ok";
+      }),
+    ).resolves.toBe("ok");
+    expect(log).toEqual(["ran"]);
   });
 });
 

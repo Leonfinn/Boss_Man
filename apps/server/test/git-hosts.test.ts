@@ -298,6 +298,51 @@ describe("CI on a commit for the merge gate (BOS-1070, read through Actions sinc
       expect(f.paths).toEqual(["apps/web/test/self-deploy-waiting-changes.test.tsx"]);
     });
 
+    describe("run 45323213260 (BOS-2393's chance failure, check-worker-image job, 24 Nov 04:25): BOS-2448", () => {
+      // GitHub's annotations for check run 138206495160, as the public API returned them (messages cut where marked).
+      const exit = { annotation_level: "failure", path: ".github", start_line: 5760, title: "", message: "Process completed with exit code 1." };
+      const failedTests = {
+        annotation_level: "failure",
+        path: ".github",
+        start_line: 5759,
+        title: "check worker image: failed tests",
+        message: " × gives up at the caller's own deadline and reports not-stopped 79ms| ✓ fits the popover on screen at the Brave 1667×724 fold 5008ms|",
+      };
+      const firstErrors = {
+        annotation_level: "failure",
+        path: ".github",
+        start_line: 5758,
+        title: "check worker image: first errors",
+        message:
+          " FAIL test/docker.test.ts > docker wait for the Claude pack installer (BOS-972) > gives up at the caller's own deadline and reports not-stopped|AssertionError: expected 1 to be greater than 1| ❯ test/docker.test.ts:229:23|…",
+      };
+      const vitestNote = (path: string) => ({
+        annotation_level: "failure",
+        path,
+        start_line: 229,
+        title: "test/docker.test.ts > docker wait for the Claude pack installer (BOS-972) > gives up at the caller's own deadline and reports not-stopped",
+        message: "AssertionError: expected 1 to be greater than 1\n ❯ test/docker.test.ts:229:23\n\n",
+      });
+      const read = async (rows: unknown[]) => (await github([], {}, { 5: rows }).host.failures(cfg("github"), "t", [{ id: 5, name: "check-worker-image", url: "" }]))[0]!;
+
+      it("as it ran: the two file-less summary notes at failure level still leave the job unnamed (why ci.yml changes too)", async () => {
+        const f = await read([exit, failedTests, firstErrors, vitestNote("/work/apps/launcher/test/docker.test.ts")]);
+        const named = namedTestFiles([{ job: "check-worker-image", paths: f.paths }]);
+        expect(named.files).toEqual(["apps/launcher/test/docker.test.ts"]);
+        expect(named.unnamed).toEqual(["check-worker-image"]);
+      });
+
+      it("the /work path is read as the repo file once the summaries are warnings (failed on the old code: path refused)", async () => {
+        const warn = (a: typeof failedTests) => ({ ...a, annotation_level: "warning" });
+        // /work: as vitest named it in this run. The other two: ci.yml now mounts at $GITHUB_WORKSPACE, which GitHub's runner
+        // makes repo-relative (or leaves under /home/runner/work); every form is read as the same file.
+        for (const path of ["/work/apps/launcher/test/docker.test.ts", "apps/launcher/test/docker.test.ts", "/home/runner/work/Boss_Man/Boss_Man/apps/launcher/test/docker.test.ts"]) {
+          const f = await read([exit, warn(failedTests), warn(firstErrors), vitestNote(path)]);
+          expect(namedTestFiles([{ job: "check-worker-image", paths: f.paths }])).toEqual({ files: ["apps/launcher/test/docker.test.ts"], unnamed: [], unsafe: [] });
+        }
+      });
+    });
+
     it("summaryCovered reads base names only from entry starts, and a cut entry is not covered", () => {
       const named = ["apps/runner/test/a.test.ts", "apps/runner/test/b.test.ts"];
       expect(summaryCovered("a.test.ts: waits: boom | b.test.ts: x: y", named)).toBe(true);
@@ -510,6 +555,14 @@ describe("reading a branch's Actions runs (BOS-1072)", () => {
       files: ["apps/server/test/a.test.ts", "new.ts", "old.ts"],
     });
     await expect(host(() => json(403, { message: "Resource not accessible" })).compareDetail(cfg("github"), "t", "a", "b")).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("asks for the page it is given (BOS-2468)", async () => {
+    const asked: string[] = [];
+    const h = host((p) => (asked.push(p), json(200, { workflow_runs: [] })));
+    await h.workflowRuns(cfg("github"), "t", "main", 100, 3);
+    await h.workflowRuns(cfg("github"), "t", "main");
+    expect(asked).toEqual(["/actions/runs?branch=main&per_page=100&page=3", "/actions/runs?branch=main&per_page=30"]);
   });
 
   it("throws a GitHostError when the token can't read the runs", async () => {

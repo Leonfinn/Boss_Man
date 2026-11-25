@@ -84,6 +84,7 @@ describe("opening a search result on the Agents and Skills pages (BOS-2347)", ()
         if (url.includes("agent-templates")) return json({ templates: [] });
         if (url.includes("/models")) return json({ runner: {}, api: [] });
         if (url.endsWith("/agents")) return json(agentRows);
+        if (url.endsWith("/record")) return json({ finished: 0, passedFirstTime: 0, sendBacks: 0, medianMergeMs: null, costPerFinishedMicros: null, recent: [] });
         return json([]);
       }),
     );
