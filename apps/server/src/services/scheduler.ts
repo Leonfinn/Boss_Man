@@ -45,6 +45,7 @@ import { briefSlug, findBrief, findWikiKeeper } from "./project-brief.js";
 import type { AlertInput } from "./alert-ladder.js";
 import type { ClearWhen } from "./alert-clearing.js";
 import { agedRank, duringUpdate, reasonsOfClass, wakeClass, type HoldTicketFacts, type WakeClass, type WakeOutcome } from "./wake-classes.js";
+import { FAILED_UPDATE_REASON } from "./owner-holds.js";
 export { WAKE_CLASS, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
 
 export type Limits = {
@@ -111,6 +112,9 @@ export const REPLY_PURPOSE = "reply";
 /** BOS-2088: the prompt line of a run an update hold let through because its ticket is urgent or fixes a live problem. */
 export const PASSED_UPDATE_HOLD_LINE =
   "This run started while an update holds other work, because the ticket is urgent or fixes a live problem. Commit and note your progress often: if the update goes ahead this run is stopped and picked up again after the swap.";
+/** BOS-2609: the line a run about a failed update (owner-holds.ts FAILED_UPDATE_REASON) gets when it started while an update or wrap-up holds other work. */
+export const PASSED_HOLD_FAILED_UPDATE_LINE =
+  "This run started while an update or wrap-up holds other work, because it is about a failed update: nobody else looks at it until you do. Commit and note your progress often: if an update goes ahead this run is stopped and picked up again after the swap.";
 /** BOS-1082: said to a run that starts with no ticket checkout, so the agent doesn't take its folder for a lost one. */
 export const noCheckoutNote = (folder: string) =>
   `\n\nThis run has no ticket checkout: it started in ${folder}, which is not a copy of the repo. Don't edit code, run checks or create a worktree here. To change code, work on a run woken on that ticket: it starts in the ticket's own checkout.`;
@@ -890,7 +894,7 @@ export function schedulerService(
         "",
         "This is a short run about an update that is waiting (it started while the update holds other work, so keep it short: the swap may happen while you work). Read server_status's updateWaits, decide whether anything needs doing (cancel or go ahead with the update, tell the owner, or nothing), do it, and stop. Don't start other work, edit files or run long commands.",
       );
-    if (passedHold.has(w.id)) lines.push("", PASSED_UPDATE_HOLD_LINE);
+    if (passedHold.has(w.id)) lines.push("", w.reason === FAILED_UPDATE_REASON ? PASSED_HOLD_FAILED_UPDATE_LINE : PASSED_UPDATE_HOLD_LINE);
     if (w.reason === CEO_REPLY_REASON)
       lines.push(
         "",
@@ -1945,7 +1949,8 @@ export function schedulerService(
           return busy && w.reason === CEO_REPLY_REASON;
         };
         const through = queue.filter(passes);
-        for (const w of through) if (passesByTicket(w)) passedHold.add(w.id);
+        // BOS-2609: a work run a listed reason let through ("failed update") is marked the same way, so the swap never waits for it.
+        for (const w of through) if (passesByTicket(w) || (w.reason !== CHAT_REASON && !isReplyLane(w.reason) && duringUpdate(w.reason) === "passes")) passedHold.add(w.id);
         pass = through;
         const held = queue.filter((w) => !through.includes(w));
         const label = holdReasonFor(hold);

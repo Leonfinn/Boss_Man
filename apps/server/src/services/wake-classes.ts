@@ -26,6 +26,9 @@ const WAKE_TABLE = {
   "ceo reply": "waiting",
   // BOS-2058: the CEO is told an update is late or gave up. Runs in the reply lane and passes the update's own hold.
   "update alert": "waiting",
+  // BOS-2609: a server or runner update failed: the diagnosis ticket's assignee and the CEO are woken, and the CEO again if
+  // nobody has started 15 minutes later. Passes every update and wrap-up hold, like the owner's chat (DR-074).
+  "failed update": "waiting",
   // Priority watch (BOS-1514): the CEO is told an urgent ticket has no next step under way. Never dropped.
   "priority watch": "waiting",
   // Merge stall (BOS-1515): the CEO is told the merge train has an empty seat or no landing while tickets wait. Never dropped.
@@ -122,8 +125,13 @@ export type WakeReason = keyof typeof WAKE_TABLE;
  * update-waits-guard.test.ts starts each of them while a hold is on. A run one of these starts is the "update alert"
  * class: no wait counts it, so it cannot hold the update it reports on. Since BOS-2088 a wake about an open, unmerged
  * urgent or fixes-live ticket passes as well, whatever its reason (`passesForTicket` below).
+ *
+ * BOS-2609: "failed update" (self-deploy.ts FAILED_UPDATE_REASON) is listed too: a wake about a failed update must never
+ * be held by the next update or wrap-up, or nobody looks at the failure until the owner asks (25 Nov 16:02). Unlike
+ * "update alert" it starts a work run (the diagnosis needs one); the scheduler marks that run `passed_update_hold`.
+ * Reasons listed here pass a wrap-up with no update behind it as well (scheduler.ts checks this list first).
  */
-export const PASSES_UPDATE_HOLD: ReadonlyArray<WakeReason> = ["update alert"];
+export const PASSES_UPDATE_HOLD: ReadonlyArray<WakeReason> = ["update alert", "failed update"];
 
 /** What duringUpdate needs to know about a wake's ticket (BOS-2088). */
 export type HoldTicketFacts = { urgent: boolean; fixesLive: string | null; systemState: string; mergeCommit: string | null };

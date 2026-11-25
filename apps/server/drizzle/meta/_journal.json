@@ -1289,6 +1289,13 @@
       "when": 1795618236357,
       "tag": "0202_milestone_ceo_manages_risk",
       "breakpoints": true
+    },
+    {
+      "idx": 203,
+      "version": "7",
+      "when": 1795630688621,
+      "tag": "0203_owner_hold_pickup",
+      "breakpoints": true
     }
   ]
 }

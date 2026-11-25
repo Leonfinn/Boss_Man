@@ -2432,6 +2432,9 @@ export const ownerHolds = pgTable(
     ownerText: text("owner_text"),
     /** A later successful update of this subject, or a newer hold, ended it. */
     endedAt: timestamp("ended_at", { withTimezone: true }),
+    /** BOS-2609: when Boss Man woke the diagnosis ticket's assignee (or the CEO, with no ticket), and when it woke the CEO again because no run had started 15 minutes later. */
+    wokenAt: timestamp("woken_at", { withTimezone: true }),
+    chasedAt: timestamp("chased_at", { withTimezone: true }),
   },
   (t) => [uniqueIndex("owner_holds_one_current").on(t.subject).where(sql`${t.endedAt} is null`)],
 );

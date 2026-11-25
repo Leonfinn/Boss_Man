@@ -14,9 +14,9 @@ const now = Date.parse("2026-10-27T10:00:00Z");
 const on = { settings: { enabled: true }, lastSweepAt: "2026-10-27T09:57:00Z", trippedAt: null, trippedReason: null, openFlags: 2 };
 
 describe("watchdog health line (BOS-60)", () => {
-  it("shows the last check and the issues being handled", () => {
-    expect(healthLine(on, now)).toEqual({ text: "Watchdog: last check 3 min ago · 2 issues being handled", tone: "green" });
-    expect(healthLine({ ...on, openFlags: 1 }, now).text).toContain("1 issue being handled");
+  it("shows the last check and the open issues, without claiming anyone is on them (BOS-2609)", () => {
+    expect(healthLine(on, now)).toEqual({ text: "Watchdog: last check 3 min ago · 2 open issues", tone: "green" });
+    expect(healthLine({ ...on, openFlags: 1 }, now).text).toContain("1 open issue");
     expect(healthLine({ ...on, openFlags: 0 }, now).text).toContain("no open issues");
   });
   it("says the last check in age.ts's words, floored like the rest of the page (BOS-888)", () => {
@@ -32,7 +32,7 @@ describe("watchdog health line (BOS-60)", () => {
   });
   it("says when it is only rehearsing (BOS-166)", () => {
     const line = healthLine({ ...on, settings: { enabled: true, recordOnly: true } }, now);
-    expect(line.text).toBe("Watchdog: record only (not acting) · last check 3 min ago · 2 issues being handled");
+    expect(line.text).toBe("Watchdog: record only (not acting) · last check 3 min ago · 2 open issues");
     expect(line.tone).toBe("");
   });
 });

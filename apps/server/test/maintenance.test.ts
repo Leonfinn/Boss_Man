@@ -10,6 +10,7 @@ import { openPglite } from "../src/db/client.js";
 import { checkJobs, checkWorkers, companies, decisions, notifications, projects, runners, runs, settings, tickets, updateHolds, wakes } from "../src/db/schema.js";
 import { BUILD_HOLD_MAX_MINUTES, DRAIN_GO_AHEAD_MINUTES, drainForecast, drainGoAheadAt, getHold, HOLD_CAP_MINUTES, HOLD_REASON, holdBlocksStarts, holdCapAt, holdEndsAt, SWAP_WHEN_DONE_CAP_MINUTES, WRAP_UP, WRAPUP_HOLD_REASON,WRAP_UP_ASKED, WRAP_UP_DURING_UPDATE, WRAP_UP_SETTINGS } from "../src/services/maintenance.js";
 import { CEO_REPLY_REASON, MISSED_REASON, UPDATE_ALERT_REASON } from "../src/services/scheduler.js";
+import { FAILED_UPDATE_REASON } from "../src/services/owner-holds.js";
 import { activeWaits, WAIT_RULES } from "../src/services/update-waits.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -1238,6 +1239,24 @@ describe("Ask agents to wrap up (BOS-929): a mode of the same hold", () => {
     expect(started.map((r) => [r.purpose, r.origin])).toEqual([["reply", UPDATE_ALERT_REASON]]);
     const held = await c.db.select().from(wakes).where(eq(wakes.status, "queued"));
     expect(held.map((w) => [w.reason, w.statusReason]).sort()).toEqual([[CEO_REPLY_REASON, HOLD_REASON], ["nudge", HOLD_REASON]]);
+  });
+
+  // BOS-2609 (25 Nov 16:02): the CEO's wake about a failed update, and Dougal's on its diagnosis ticket, sat "update pending"
+  // behind the 16:01 wrap-up, so nobody looked at the failure until the owner asked. A wake about a failed update passes
+  // every update and wrap-up hold, like the owner's chat (DR-074); its run is marked so the next swap doesn't wait for it.
+  it("BOS-2609: a failed-update wake starts under a wrap-up with no update behind it; a nudge stays held", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const b = await c.company("Other Co", "other-co");
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(await getHold(c.db)).toMatchObject({ kind: "wrapup", forUpdate: "none" });
+    await c.scheduler.wake({ agentId: b.ceo, reason: "nudge", note: "routine" });
+    await c.scheduler.notify(a.ceo, { reason: FAILED_UPDATE_REASON, ticketId: null, priority: 4, note: "A runner update ended \"failed\"." });
+    await c.scheduler.tick();
+    const started = await c.db.select().from(runs);
+    expect(started.map((r) => [r.agentId, r.origin, r.purpose, r.passedUpdateHold])).toEqual([[a.ceo, FAILED_UPDATE_REASON, null, true]]);
+    const held = await c.db.select().from(wakes).where(eq(wakes.status, "queued"));
+    expect(held.map((w) => [w.reason, w.statusReason])).toEqual([["nudge", WRAPUP_HOLD_REASON]]); // BOS-2610 names the wrap-up
   });
 
   it("BOS-2058: a wrap-up pressed while a server update waits belongs to it and lifts when that wait is over", async () => {
