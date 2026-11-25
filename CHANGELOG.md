@@ -38,6 +38,8 @@ Check before committing: pnpm --filter @boss-man/site build (it stops on a headi
 - The Roadmap's milestone timeline is redesigned: one row per milestone with one status, long titles that wrap without overlapping or being cut off, done milestones left out, and labelled charts. The timeline and the list now agree on each milestone's status and counts.
 - A page waiting on an answer that never comes no longer sits on "Checking…" until you reload. The read gives up after 30 seconds and tries again by itself.
 - When you answer a card that asked you for information, such as a log, a screenshot or a value, the result and next step now reach your chat and feed without you asking. If nothing arrives within 30 minutes, the CEO is asked to post it.
+- Opening a milestone on the Roadmap shows a "What's left" list: every unfinished ticket in it, grouped as Waiting for you, Held up, Needs a look, Running or Being built, with who has it and what it waits on. A ticket held only by one of your cards has an Open card button.
+- After you answer a card and get its result, later corrections and updates about it also reach your chat, flagged, for 24 hours or until the matter is closed. A "still checking" note stays on the ticket.
 
 ## 24 November 2026
 
