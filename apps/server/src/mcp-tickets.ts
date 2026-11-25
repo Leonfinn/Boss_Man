@@ -28,7 +28,7 @@ import { moveTicket } from "./services/ticket-moves.js";
 import { ceoMoveNote, ceoPlanText, IN_PROGRESS_BLOCKED_WARNING, leavesPlan, planHoldsAlerts, planMoveWarning, REVIEW_BLOCKED_REFUSAL, unexpiredPlan, urgentBackwards } from "./services/ceo-plan.js";
 import { conflictNote } from "./services/merge-line-conflicts.js";
 import { checkTicketDoneRefusal, closableChecks, moveWatchToChecks, tiedCriteria, unreportedUntied } from "./services/after-merge-check-tickets.js";
-import { CARD_CITE_REFUSAL, hostFactRefusal, namesOutsideService, outsideServiceEvidenceRefusal, pageShotRefusal, uncitedCardPasses } from "./services/host-fact-gate.js";
+import { CARD_CITE_REFUSAL, hostFactRefusal, namesOutsideService, noCriteriaOutsideServiceRefusal, outsideServiceEvidenceRefusal, ownSiteHosts, pageShotRefusal, uncitedCardPasses } from "./services/host-fact-gate.js";
 import { addTicketDependency, blockedHolds, openBlockers, openCardIds, openOwnerOnlyCard } from "./services/ticket-links.js";
 import { noteBlockedPark, refusalForNamedAgent, refusalForNamedTicket } from "./services/blocked-who-acts.js";
 import { githubOnlyMarkWarning } from "./services/line-holder.js";
@@ -746,9 +746,16 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
             if (refusal) return fail(refusal);
           }
           // BOS-2076: a pass on an outside-service criterion (Google, Bing, a sitemap...) must carry a link, a screenshot or a quoted reading.
-          if (withCriteria.criteria.some((c) => isAfterMerge(c) && namesOutsideService(criterionText(c)))) {
+          // BOS-2598: every ticket, before or after merge, with or without a branch; a no-branch ticket's "since" is its start.
+          const [own] = await db.select({ title: tickets.title, body: tickets.body, noCode: tickets.noCode, createdAt: tickets.createdAt }).from(tickets).where(eq(tickets.id, ticketId));
+          if (own) {
+            const none = noCriteriaOutsideServiceRefusal(own, withCriteria.criteria);
+            if (none) return fail(none);
+          }
+          if (withCriteria.criteria.some((c) => namesOutsideService(criterionText(c)))) {
             const shots = await db.select({ id: ticketImages.id, createdAt: ticketImages.createdAt }).from(ticketImages).where(eq(ticketImages.ticketId, ticketId));
-            const refusal = outsideServiceEvidenceRefusal(withCriteria.criteria, shots, live?.liveAt ?? live?.liveMarkedAt ?? live?.mergedAt ?? null, reported ?? "");
+            const since = live?.liveAt ?? live?.liveMarkedAt ?? live?.mergedAt ?? own?.createdAt ?? null;
+            const refusal = outsideServiceEvidenceRefusal(withCriteria.criteria, shots, since, reported ?? "", ownSiteHosts(own?.title, own?.body, criteriaText(withCriteria.criteria)));
             if (refusal) return fail(refusal);
           }
           // BOS-1867: a check ticket's result reaches its parent only through numbered verdicts on its own criteria.
