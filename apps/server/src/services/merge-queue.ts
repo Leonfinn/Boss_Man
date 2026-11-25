@@ -48,7 +48,7 @@ export async function endedMergePlaces(db: Db, companyId: string, ticketIds: str
 
 /** BOS-2605: when the latest ended merge check of each ticket finished (ms), for "its check passed at HH:MM". Missing: none ended yet, or a read error. */
 export async function endedMergeAt(db: Db, ticketIds: string[]): Promise<Map<string, number>> {
-  const out = new Map<string, number>();
+  const out = new Map<string, number>(); // not state: a per-call local result.
   if (!ticketIds.length) return out;
   try {
     const rows = await db
