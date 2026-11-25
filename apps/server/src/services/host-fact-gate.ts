@@ -157,9 +157,10 @@ export function noCriteriaOutsideServiceRefusal(ticket: { title: string; body: s
 
 /** Host names of links in the ticket's own text that are not outside services: the site the work is about. */
 export function ownSiteHosts(...texts: Array<string | null | undefined>): string[] {
-  const hosts = new Set<string>();
-  for (const t of texts) for (const m of (t ?? "").matchAll(/https?:\/\/([^\s/"”)]+)/gi)) if (!namesOutsideService(m[1]!)) hosts.add(m[1]!.toLowerCase().replace(/:\d+$/, ""));
-  return [...hosts];
+  const hosts = texts.flatMap((t) => [...(t ?? "").matchAll(/https?:\/\/([^\s/"”)]+)/gi)].map((m) => m[1]!))
+    .filter((h) => !namesOutsideService(h))
+    .map((h) => h.toLowerCase().replace(/:\d+$/, ""));
+  return hosts.filter((h, i) => hosts.indexOf(h) === i);
 }
 
 /** An id of an open card counts as cited when the note holds the whole id or its first 8 characters. */
