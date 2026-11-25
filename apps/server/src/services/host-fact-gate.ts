@@ -152,7 +152,7 @@ export function ownLine(note: string, n: number, text: string): string | null {
  */
 export function noCriteriaOutsideServiceRefusal(ticket: { title: string; body: string | null; noCode: boolean }, criteria: readonly Criterion[]): string | null {
   if (!ticket.noCode || criteria.length || !namesOutsideService(`${ticket.title}\n${ticket.body ?? ""}`)) return null;
-  return `This ticket's title or description names an outside service and it has no acceptance criteria, so nothing says what that service must show before it closes. Add the outcome as a criterion (update_ticket acceptanceCriteria, e.g. "Google Search Console shows the sitemap read with no errors"), then report it pass with the reading quoted on its own line, or fail. A reply like "submitted" or "204" is a receipt, not the outcome: ${RECEIPT_REFUSAL}`;
+  return `This ticket's title or description names an outside service and it has no acceptance criteria, so nothing says what that service must show before it closes: add the outcome as a criterion (update_ticket acceptanceCriteria, e.g. "Google Search Console shows the sitemap read with no errors"), then report it pass with the reading quoted on its own line, or fail. A reply like "submitted" or "204" is a receipt, not the outcome: ${RECEIPT_REFUSAL}`;
 }
 
 /** Host names of links in the ticket's own text that are not outside services: the site the work is about. */
