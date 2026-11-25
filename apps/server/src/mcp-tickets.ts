@@ -4,7 +4,7 @@
 import { and, asc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { addsUsabilityCriterion, holdEarlyAfterMergePasses, WATCH_DAILY_CHECKS, WATCH_TRIGGERS, WATCH_DEFAULT_DAYS, WATCH_MAX_DAYS, REAL_USE_ASK, USABILITY_ADDED_NOTE, withUsabilityCriterion, goLiveWaitWords, type GoLiveWait, acceptanceCriteriaSchema, criterionText, pageClauseRefusal, pageClauses, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, criteriaText, failedAfterMerge, isAfterMerge, isTaskSize, readCriteria, missingVerdicts, planFirstByDefault, RISK_TIERS, SIZE_SCALE, ticketRef } from "@boss-man/shared";
+import { carriedCriteria as criteriaToCarry, addsUsabilityCriterion, holdEarlyAfterMergePasses, WATCH_DAILY_CHECKS, WATCH_TRIGGERS, WATCH_DEFAULT_DAYS, WATCH_MAX_DAYS, REAL_USE_ASK, USABILITY_ADDED_NOTE, withUsabilityCriterion, goLiveWaitWords, type GoLiveWait, acceptanceCriteriaSchema, criterionText, pageClauseRefusal, pageClauses, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, criteriaText, failedAfterMerge, isAfterMerge, isTaskSize, readCriteria, missingVerdicts, planFirstByDefault, RISK_TIERS, SIZE_SCALE, ticketRef } from "@boss-man/shared";
 import type { Db } from "./db/client.js";
 import { agents, companies, decisions as decisionsTable, engagements as engagementsTable, features, projects, reviewRequests, runs as runsTable, ticketDependencies, ticketImages, tickets, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
@@ -16,7 +16,7 @@ import { HOST_TOKEN_HELP, type OwnerSetupFacts, SETUP_LINE_MAX, ownerSetupFacts,
 import { loadCompanyFacts } from "./services/company-facts.js";
 import { splitSteps } from "./services/runner-image.js";
 import { EngagementError } from "./services/engagements.js";
-import { FOLLOW_UP_HELP, followUpsSchema, handOffRefusal, openFollowUps, resolveFollowUpAssignees } from "./services/hand-offs.js";
+import { criterionCarryRefusal, FOLLOW_UP_HELP, followUpsSchema, handOffRefusal, openFollowUps, resolveFollowUpAssignees } from "./services/hand-offs.js";
 import { getHold, WRAP_UP } from "./services/maintenance.js";
 import { NOTHING_CHANGED, ReviewError } from "./services/review.js";
 import { NO_VISUAL_CHANGE_MAX, noVisualChangeProblem } from "./services/render-check-gate.js";
@@ -27,7 +27,7 @@ import { wipQueuedNote } from "./services/agent-wip.js";
 import { moveTicket } from "./services/ticket-moves.js";
 import { ceoMoveNote, ceoPlanText, IN_PROGRESS_BLOCKED_WARNING, leavesPlan, planHoldsAlerts, planMoveWarning, REVIEW_BLOCKED_REFUSAL, unexpiredPlan, urgentBackwards } from "./services/ceo-plan.js";
 import { conflictNote } from "./services/merge-line-conflicts.js";
-import { checkTicketDoneRefusal, closableChecks, moveWatchToChecks, tiedCriteria, unreportedUntied } from "./services/after-merge-check-tickets.js";
+import { checkTicketDoneRefusal, closableChecks, holdableUnreported, moveWatchToChecks, tiedCriteria, unreportedUntied } from "./services/after-merge-check-tickets.js";
 import { CARD_CITE_REFUSAL, hostFactRefusal, namesOutsideService, noCriteriaOutsideServiceRefusal, outsideServiceEvidenceRefusal, ownSiteHosts, pageShotRefusal, uncitedCardPasses } from "./services/host-fact-gate.js";
 import { addTicketDependency, blockedHolds, openBlockers, openCardIds, openOwnerOnlyCard } from "./services/ticket-links.js";
 import { noteBlockedPark, refusalForNamedAgent, refusalForNamedTicket } from "./services/blocked-who-acts.js";
@@ -656,6 +656,13 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         .select({ criteria: tickets.acceptanceCriteria, current: tickets.stateNote, prev: tickets.systemState, ceoPlan: tickets.ceoPlan, ceoPlanDeadline: tickets.ceoPlanDeadline, urgent: tickets.urgent, title: tickets.title, assigneeId: tickets.assigneeAgentId, featureId: tickets.featureId, ownerSetup: tickets.ownerSetup, noCode: tickets.noCode, checksTicketId: tickets.checksTicketId, checksCriterion: tickets.checksCriterion })
         .from(tickets)
         .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+      if (withCriteria) {
+        // BOS-2599: a follow-up that names a criterion has to name one that can be carried, refused before anything moves.
+        if (followUps?.length) {
+          const carryBad = criterionCarryRefusal(withCriteria.criteria, withCriteria.current, followUps);
+          if (carryBad) return fail(carryBad);
+        }
+      }
       if (!withCriteria) return fail("No ticket with that ID in your company.");
       if (watching_for?.trim()) {
         const [m] = await db.select({ mergeCommit: tickets.mergeCommit }).from(tickets).where(eq(tickets.id, ticketId));
@@ -767,11 +774,25 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
           if (uncited.length) return fail(CARD_CITE_REFUSAL(uncited));
         }
       }
-      const missing = state === "review" ? missingVerdicts(withCriteria.criteria, note, "before") : state === "done" ? unreportedUntied(withCriteria.criteria, reported, tied) : [];
+      // BOS-2599 (cock-ups G1): a ticket that never merged and has no changes of its own can't have shown a check on real
+      // work, so a pass or fail it never wrote would close it on nothing (BOS-2069 closed done with four "[not reported]").
+      // Every criterion is held there, after-merge ones included; see holdableUnreported.
+      let holdAll = false;
+      if (state === "done" && !sameState && (outcome ?? "completed") === "completed" && !(await managerIn(db, scope))) {
+        const [own] = await db.select({ mergeCommit: tickets.mergeCommit }).from(tickets).where(eq(tickets.id, ticketId));
+        holdAll = await holdableUnreported(db, { id: ticketId, mergeCommit: own?.mergeCommit ?? null, criteria: withCriteria.criteria, note: withCriteria.current }, await review.needsChanges(ticketId, scope.companyId).catch(() => false));
+      }
+      // G1: a done that hands a failed or not-reported criterion on closes the ticket and carries that criterion to the
+      // follow-up, so closing is the way to finish a ticket whose outcome can't be settled now (a receipt, an owner step).
+      const carried = state === "done" && !sameState && (outcome ?? "completed") === "completed" && followUps?.length ? criteriaToCarry(withCriteria.criteria, reported, followUps.flatMap((f) => (f.criterion !== undefined ? [f.criterion] : []))) : [];
+      const carriedTexts: Set<string> = new Set((carried ?? []).map(criterionText));
+      const missing = state === "review" ? missingVerdicts(withCriteria.criteria, note, "before") : state === "done" ? (holdAll ? missingVerdicts(withCriteria.criteria, reported).filter((m) => !carriedTexts.has(m)) : unreportedUntied(withCriteria.criteria, reported, tied).filter((m) => !carriedTexts.has(m))) : [];
       if (missing.length)
         return fail(
           state === "done"
-            ? `This ticket's work is merged, and its after-merge acceptance criteria aren't reported yet. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again. If one can only be checked by the owner, put a card in front of them (raise_decision with blocksTicketId set to this ticket, and criterion set to that check's number): their answer records the check's pass or fail, so you can close it once they have. If one needs a later event (a week of use, a future run), split it out to a check ticket (create_ticket checksCriterion): a criterion tied to an open check ticket doesn't hold the close, and the check reports here when it is done. A fail still closes this ticket: Boss Man opens the follow-up for it, assigned to this ticket's assignee.`
+            ? holdAll
+              ? `This ticket never merged and has no changes of its own, so none of its criteria can have been checked on real work, and it can't close with any of them not reported. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, with what you saw, then move it again. If one can't be checked yet (a service still processing it, or one only the owner can see), hand it on instead: move the ticket to done with followUps, and the follow-up gets the criterion as its own, so the outcome isn't lost.`
+              : `This ticket's work is merged, and its after-merge acceptance criteria aren't reported yet. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again. If one can only be checked by the owner, put a card in front of them (raise_decision with blocksTicketId set to this ticket, and criterion set to that check's number): their answer records the check's pass or fail, so you can close it once they have. If one needs a later event (a week of use, a future run), split it out to a check ticket (create_ticket checksCriterion): a criterion tied to an open check ticket doesn't hold the close, and the check reports here when it is done. A fail still closes this ticket: Boss Man opens the follow-up for it, assigned to this ticket's assignee.`
             : `This ticket has acceptance criteria to report before it merges, and the summary must give pass or fail for each of them. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again. Numbered verdicts in criteria order work too and are shorter, e.g. "1 pass; 2 pass; 3 fail: reason".${withCriteria.criteria.some(isAfterMerge) ? " The after-merge criteria don't need a verdict at review." : ""}${gateAdded ? ` The last one, "Usability gate", is built in for feature tickets and tickets with owner setup steps (criterion ${withCriteria.criteria.length}): ${REAL_USE_ASK}` : ""}`,
         );
       // A code ticket with nothing changed in the repository can't be reviewed; research and wiki
@@ -851,7 +872,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
           note: summary,
           blockedUntil: state === "blocked" ? until : undefined,
           blockedUntilReason: blocked_reason?.trim() || null,
-          fields: { ...(watching_for?.trim() ? { watchingFor: watching_for.trim(), watchUntil, watchTrigger: watch_trigger ?? null } : {}), ...(beingChecked.held ? { checkHoldAt: at } : {}), ...(gateAdded ? { acceptanceCriteria: withCriteria.criteria } : {}), ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at, stateNoteStaleAt: null, lastPostAt: at } : {}), ...(ownerSetup !== undefined ? { ownerSetup: ownerSetup.trim() || null, ownerSetupOverride: setup?.error === null && ownerSetup.trim() ? setup.override : null } : {}), ...(ownerSetupWhy !== undefined ? { ownerSetupWhy: ownerSetupWhy.trim() || null } : {}), ...(ownerSetupIfSkipped !== undefined ? { ownerSetupIfSkipped: ownerSetupIfSkipped.trim() || null } : {}), ...(fixesLive !== undefined ? { fixesLive: fixesLive.trim() || null } : {}) },
+          fields: { ...(watching_for?.trim() ? { watchingFor: watching_for.trim(), watchUntil, watchTrigger: watch_trigger ?? null } : {}), ...(beingChecked.held ? { checkHoldAt: at } : {}), ...(gateAdded ? { acceptanceCriteria: withCriteria.criteria } : {}), ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at, stateNoteStaleAt: null, lastPostAt: at } : {}), ...(carried?.length ? { stateNote: reported, stateNoteAt: at, stateNoteStaleAt: null } : {}), ...(ownerSetup !== undefined ? { ownerSetup: ownerSetup.trim() || null, ownerSetupOverride: setup?.error === null && ownerSetup.trim() ? setup.override : null } : {}), ...(ownerSetupWhy !== undefined ? { ownerSetupWhy: ownerSetupWhy.trim() || null } : {}), ...(ownerSetupIfSkipped !== undefined ? { ownerSetupIfSkipped: ownerSetupIfSkipped.trim() || null } : {}), ...(fixesLive !== undefined ? { fixesLive: fixesLive.trim() || null } : {}) },
           hooks: {
             onDone: () => hooks.onTicketDone?.(ticketId, scope.runId),
             onReview: beingChecked.held ? undefined : () => hooks.onTicketReview?.(ticketId, scope.agentId, scope.runId),
@@ -916,7 +937,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
           if (owed) await Promise.resolve(hooks.wake?.(owed.agentId, { reason: CHAT_REASON, note: "", priority: 4, causedByRunId: scope.runId })).catch(() => undefined);
         }
         followUp += opened
-          ? `\n\nBoss Man opened ${opened.length === 1 ? "the follow-up" : "the follow-ups"}: ${opened.map((o) => `${o.ref} (#/tickets/${o.id}) "${o.title}" for ${o.assignee}`).join("; ")}. Don't create them again.`
+          ? `\n\nBoss Man opened ${opened.length === 1 ? "the follow-up" : "the follow-ups"}: ${opened.map((o) => `${o.ref} (#/tickets/${o.id}) "${o.title}" for ${o.assignee}${o.carried.length ? `, carrying ${o.carried.length === 1 ? "this criterion" : `these ${o.carried.length} criteria`}: ${o.carried.map((c) => `"${c}"`).join(", ")}` : ""}`).join("; ")}. Don't create them again.`
           : `\n\nThe move worked, but Boss Man couldn't open the follow-ups. Create them with create_ticket.`;
       }
       // The check that counts is at the merge, but telling the agent now saves it waiting hours to
