@@ -11,7 +11,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agents, decisions, notifications, ownerChatMessages, runs, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
-import { infoAskOf, INFO_ASK_MINUTES, noteResultReported } from "../src/services/owner-result.js";
+import { infoAskOf, INFO_ASK_MINUTES, noteResultReported, ownContentOf } from "../src/services/owner-result.js";
 import { notificationsService } from "../src/services/notifications.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
@@ -69,6 +69,27 @@ describe("which cards ask the owner for information", () => {
   });
 });
 
+describe("BOS-2593: which answers carry the owner's own content", () => {
+  const pic = "![shot](/api/ticket-images/0b7e3f4a-1c2d-4e5f-8a9b-0c1d2e3f4a5b)";
+  const steps = { kind: "question" as const, raisedByAgentId: "a1", options: ["Done", "Not now"], context: { type: "question", ownerMustDo: true, steps: ["Open it", "Press Publish"] } };
+  it("a picture, a note, or words beyond the buttons count, on a steps card too", () => {
+    expect(ownContentOf(steps, `Done ${pic}`, { custom: true })).toContain("picture");
+    expect(ownContentOf(steps, "Done", { note: `see ${pic}` })).toContain("picture");
+    expect(ownContentOf(steps, "Done", { note: "step 4 showed an error" })).toContain("note");
+    expect(ownContentOf(steps, "I think step 4 failed", { custom: true })).toContain("own words");
+  });
+  it("a button press, a blank note, or a typed copy of an option does not", () => {
+    expect(ownContentOf(steps, "Done", {})).toBeNull();
+    expect(ownContentOf(steps, "Done", { note: "  \n " })).toBeNull();
+    expect(ownContentOf(steps, " Not now ", { custom: true })).toBeNull();
+  });
+  it("a permission card, a card Boss Man raised itself, or another card type is left out", () => {
+    expect(ownContentOf({ ...steps, kind: "permission", context: { type: "permission" } }, "Allow", { note: "only this once" })).toBeNull();
+    expect(ownContentOf({ ...steps, raisedByAgentId: null }, "Done", { note: "step 4 failed" })).toBeNull();
+    expect(ownContentOf({ ...steps, context: { type: "rule_proposal" } }, "Add it", { note: "but narrower" })).toBeNull();
+  });
+});
+
 describe("BOS-2555: an information answer reaches the owner", () => {
   it("puts a line and a flag in front of them at the answer, and wakes the raiser to report back", async () => {
     const c = await setup();
@@ -93,6 +114,42 @@ describe("BOS-2555: an information answer reaches the owner", () => {
     await c.req("POST", `/api/decisions/${d.id}/answer`, { answer: "Sent it" });
     expect(await c.dueCount(d.id)).toBeNull();
     expect((await c.chatLines()).filter((l) => l.text.includes("your answer to"))).toEqual([]);
+  });
+
+  // BOS-2593 (DR-076 B): the 25 Nov case. A release steps card answered "I think step 4 failed" with a screenshot got nothing back.
+  it("a steps card answered with a note and a picture starts the loop: line, flag, deadline and report-back note", async () => {
+    const c = await setup();
+    const t = await c.ticket("Release beta.2");
+    const [d] = await c.db
+      .insert(decisions)
+      .values({ companyId: c.company.id, kind: "question", question: "Release beta.2: follow the steps, then press Done.", options: ["Done", "Not now"], recommendedOption: "Done", raisedByAgentId: c.dev.id, tier: "owner", context: { type: "question", ticketId: t.id, ownerMustDo: true, steps: ["Open the Releases page", "Press Publish", "Wait for the build", "Check the download works"] } })
+      .returning();
+    // A plain Done first, on a twin card: no owed result, no line (no noise).
+    const [plain] = await c.db.insert(decisions).values({ ...d!, id: undefined, createdAt: undefined }).returning();
+    expect((await c.req("POST", `/api/decisions/${plain!.id}/answer`, { answer: "Done" })).statusCode).toBe(200);
+    expect(await c.dueCount(plain!.id)).toBeNull();
+    expect((await c.chatLines()).filter((l) => l.text.includes("your answer to"))).toEqual([]);
+    const answer = "I think step 4 failed ![screenshot](/api/ticket-images/0b7e3f4a-1c2d-4e5f-8a9b-0c1d2e3f4a5b)";
+    const res = await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Done", note: answer });
+    expect(res.statusCode).toBe(200);
+    const [after] = await c.db.select().from(decisions).where(eq(decisions.id, d!.id));
+    expect(after!.infoAskWhy).toContain("picture");
+    expect(after!.infoAskDueAt).not.toBeNull();
+    expect((await c.chatLines()).some((l) => l.role === "system" && l.text.includes("your answer to") && l.text.includes("Dougal"))).toBe(true);
+    expect((await c.flags()).some((n) => n.level === "flag" && n.title.includes("Dougal"))).toBe(true);
+    const w = await c.db.select().from(wakes).where(eq(wakes.agentId, c.dev.id));
+    expect(w.some((x) => x.reason === "decision answered" && x.note?.includes("report back") && x.note.includes("step 4 failed"))).toBe(true);
+  });
+
+  it("a note on an ordinary card starts the loop; a plain button press does not", async () => {
+    const c = await setup();
+    const t = await c.ticket("Pick a colour");
+    const noted = await c.card(t, "Which colour do you prefer: blue or green?");
+    await c.req("POST", `/api/decisions/${noted.id}/answer`, { answer: "Sent it", note: "Blue, but the header looked broken on my phone" });
+    expect(await c.dueCount(noted.id)).not.toBeNull();
+    const plain = await c.card(t, "Shall I deploy the fix now?");
+    await c.req("POST", `/api/decisions/${plain.id}/answer`, { answer: "Sent it", note: "   " });
+    expect(await c.dueCount(plain.id)).toBeNull();
   });
 
   it("the raiser's status-only reply on the ticket is posted into the owner's chat, and the deadline clears", async () => {

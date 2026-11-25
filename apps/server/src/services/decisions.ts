@@ -90,7 +90,7 @@ import type { ClearWhen } from "./alert-clearing.js";
 import { unlinkedWaiters } from "./owner-todo.js";
 import { openAlertsLine } from "./go-live-card.js";
 import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer, similarQuestion } from "./stale-requests.js";
-import { infoAskOf, reportBackNote, startedInfoAnswer } from "./owner-result.js";
+import { infoAskOf, ownContentOf, reportBackNote, startedInfoAnswer } from "./owner-result.js";
 import { openReviewProposal } from "./skill-proposals.js";
 import { lineEvent } from "./merge-line.js";
 import { mergeContext } from "./decision-context.js";
@@ -3477,8 +3477,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // shows it beside the answer. `settled` covers the CEO's note; this is the owner's, kept whole in the card.
       const ownerNote = !extra.settledBy && extra.note?.trim() ? extra.note.trim().slice(0, 4000) : null;
       // BOS-2555: a card whose purpose was to get information from the owner. Only their own answer counts (a CEO settling it
-      // is answering for them), and only a plain question card, so nothing else is turned into one.
-      const infoWhy = !extra.settledBy && extra.by !== "ceo" ? infoAskOf(d) : null;
+      // is answering for them), and only a plain question card, so nothing else is turned into one. BOS-2593 (DR-076 B): or
+      // their answer carries their own content (words, a note, a picture) on an agent's question card, steps cards included.
+      const infoWhy = !extra.settledBy && extra.by !== "ceo" ? (infoAskOf(d) ?? ownContentOf(d, answer, { custom: extra.custom, note: extra.note })) : null;
       const infoAsk = !!infoWhy;
       // Conditional on still being open (and, for the CEO, still asked) and still on the same tier it
       // was read on, so whoever closes it first wins and the loser changes nothing. The tier clause
