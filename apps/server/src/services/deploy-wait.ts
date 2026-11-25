@@ -18,6 +18,7 @@ import type { NotifyInput } from "./notifications.js";
 import type { Available, DeployStatus, Headroom } from "./self-deploy.js";
 import { DEPLOY_WAIT_KEY, quietRuns as envQuietRuns, softHold } from "./deploy-wait-hold.js";
 import { WAIT_RULES } from "./update-waits.js";
+import { stampCardEnd } from "./card-end.js";
 
 export { DEPLOY_WAIT_KEY, SOFT_HOLD_MAX_MS } from "./deploy-wait-hold.js";
 export const WAIT_MINUTES = 30;
@@ -272,6 +273,7 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
         if (have.phase === "waiting" && have.origin === "approve" && (input.origin ?? "approve") === "approve") {
           const next: DeployWait = { ...have, decisionId: input.decisionId, commit: input.commit, fromCommit: input.fromCommit, ...(have.thenRunners || input.thenRunners ? { thenRunners: true } : {}) };
           await save(next);
+          await stampCardEnd(db, have.decisionId, { result: "replaced", message: `Replaced by a newer approval for ${short(input.commit)}`, by: input.decisionId }, now());
           deps.log?.(`deploy wait: approval for ${short(input.commit)} replaces the waiting one for ${short(have.commit)}`);
           return next;
         }
@@ -341,6 +343,7 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
           // A request the host is still holding for memory is taken back too (Freddy): left in the inbox it would start
           // later on a busy machine, with no hold and no warning. One the host has already taken goes ahead as reported.
           const unsent = w.origin === "approve" && (w.phase === "waiting" || (w.phase === "sent" && (await deps.takeBack(w.decisionId))));
+          if (unsent) await stampCardEnd(db, w.decisionId, { result: "not_sent", message: `Not sent: the machine was short of memory after ${rule.endMin} minutes of waiting` }, t);
           await end(`${stage.kind} ended after ${rule.endMin} min`, {
             level: "page",
             title: `Update wait stopped after ${rule.endMin} minutes`,
@@ -461,6 +464,7 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
         await end("hand wait stopped by the owner", { level: "note", title: "Stopped making room for the update", body: `Merge checks and runs are back to normal. The to-do to apply the update to ${short(w.commit)} by hand is still on your queue.` });
         return { cancelled: true };
       }
+      await stampCardEnd(db, w.decisionId, { result: "cancelled", message: "Cancelled by the owner before it was sent" }, now());
       await end("cancelled by the owner", { level: "note", title: `Update to ${short(w.commit)} cancelled`, body: "Nothing was sent to the machine. Merge checks and runs are back to normal. The update is offered again in Settings → Server and runner → Updates." });
       return { cancelled: true };
     },

@@ -469,13 +469,16 @@ export function historyTag(r: HistoryRow, swap?: RunnerProgress | null): { tag: 
   if (r.result === "deployed" && r.target === "runner" && swap?.inProgress) return { tag: swap.total > 0 ? `Swapping (${swap.done} of ${plural(swap.total, "company", "companies")} done)` : "Swapping", tone: "amber" };
   if (r.result === "deployed") return { tag: r.target === "runner" ? "Done" : "Live", tone: "green" };
   if (r.result === "replaced") return { tag: "Replaced", tone: "grey" };
+  if (r.result === "cancelled") return { tag: "Cancelled", tone: "grey" };
+  if (r.result === "not_sent") return { tag: "Not sent", tone: "amber" };
+  if (r.result === "unknown") return { tag: "Unknown", tone: "grey" };
   if (r.result === "rolled_back") return { tag: "Switched back", tone: "red" };
   if (r.result === "failed") return { tag: "Failed", tone: "red" };
   if (r.result === "rejected") return isReplaced(r.message) ? { tag: "Replaced", tone: "grey" } : { tag: "Failed", tone: "red" };
   if (r.result === "nothing_new") return { tag: "Done", tone: "grey" };
   return { tag: "Waiting", tone: "amber" };
 }
-export const historyWhat = (r: HistoryRow) => (r.target === "runner" ? "Runners, all companies" : r.result === "rejected" && isReplaced(r.message) ? "Server: not sent, a newer update replaced it" : r.result === "replaced" ? `Server${r.changes ? `, ${plural(r.changes, "change", "changes")}` : ""}: replaced by a newer update${r.replacedBy ? ` (${r.replacedBy})` : ""}` : r.changes ? `Server, ${plural(r.changes, "change", "changes")}${r.shown !== undefined && r.shown < r.changes ? ` (showing ${r.shown} of ${r.changes})` : ""}` : "Server");
+export const historyWhat = (r: HistoryRow) => (r.target === "runner" ? "Runners, all companies" : r.result === "cancelled" ? "Server: cancelled, nothing was sent" : r.result === "not_sent" ? "Server: not sent, the machine was short of memory" : r.result === "unknown" ? "Server: no record of how this ended" : r.result === "rejected" && isReplaced(r.message) ? "Server: not sent, a newer update replaced it" : r.result === "replaced" ? `Server${r.changes ? `, ${plural(r.changes, "change", "changes")}` : ""}: replaced by a newer update${r.replacedBy ? ` (${r.replacedBy})` : ""}` : r.changes ? `Server, ${plural(r.changes, "change", "changes")}${r.shown !== undefined && r.shown < r.changes ? ` (showing ${r.shown} of ${r.changes})` : ""}` : "Server");
 
 /** The live state of one company's runner, leading the panel: connected or not, and since when. */
 export function LiveState({ r, progress }: { r: LiveRow; progress?: RunnerProgress | null }) {

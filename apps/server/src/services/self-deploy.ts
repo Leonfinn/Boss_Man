@@ -18,6 +18,8 @@ import { currentHold, endHold, heldFor, holdCardLead, holdMinutes, holdStamp, op
 import { leaveClosedNotice, liveNotice, newerNotice, replacedNotice, NOTICE_MS, type ClosedNotice } from "./closed-notice.js";
 import { sh, step, type HostFacts, type SelfDeployFacts } from "./steps.js";
 import { getHold, runnerCardHold } from "./maintenance.js";
+import { stampCardEnd } from "./card-end.js";
+import { DEPLOY_WAIT_KEY } from "./deploy-wait-hold.js";
 import { allMergeOrder, commitIsLive, liveServerRecord, serverContains, serverHas } from "./go-live-wait.js";
 import type { ReleaseHow, ReleaseLog } from "./release-log.js";
 import { runnerImageCommit, runnerOnlyTickets } from "./runner-image.js";
@@ -1936,6 +1938,8 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       // must never jump in front and restart the trial clock). It is kept here and sent by the pass once the runner
       // update has been handed to the host; a newer approval replaces it.
       if (ctx.target === "server" && (await runnerFirst())) {
+        const older = await getSetting<HeldServer>(HELD_SERVER);
+        if (older && older.id !== decisionId) await stampCardEnd(db, older.id, { result: "replaced", message: `Replaced by a newer approval for ${short(ctx.commit)}`, by: decisionId });
         await putSetting(HELD_SERVER, { id: decisionId, commit: ctx.commit, since: new Date().toISOString() } satisfies HeldServer);
         deps.log?.(`self-deploy: server update ${short(ctx.commit)} held behind the runner update`);
         return;
@@ -1970,20 +1974,39 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         .where(and(eq(decisions.status, "answered"), sql`${decisions.context}->>'type' = 'self_deploy'`, sql`${decisions.context}->>'target' = 'server'`))
         .orderBy(desc(when), desc(decisions.id))
         .limit(200);
+      // R59 (BOS-2571): "Waiting" (result null) is shown only while a live record names the card's id: the deploy wait,
+      // the update held behind a runner update, the request in the host's inbox, or the host's own running status.
+      // A card nothing names and nothing settles reads "unknown" (the web says so), never Waiting.
+      const liveIds = new Set<string>();
+      const waitRow = await getSetting<{ decisionId?: string }>(DEPLOY_WAIT_KEY);
+      if (waitRow?.decisionId) liveIds.add(waitRow.decisionId);
+      const heldRow = await getSetting<HeldServer>(HELD_SERVER);
+      if (heldRow?.id) liveIds.add(heldRow.id);
+      if (inboxFile) {
+        const inboxId = await readFile(inboxFile, "utf8").then((raw) => (JSON.parse(raw) as { id?: unknown }).id, () => undefined);
+        if (typeof inboxId === "string") liveIds.add(inboxId);
+      }
+      const hostNow = await status();
+      if (hostNow?.result === "running" && hostNow.id) liveIds.add(hostNow.id);
       const stamp = (w: unknown) => new Date(w as string | Date).getTime();
       return rows.map((r) => {
         const c = r.context as SelfDeployContext;
         const at = (r.answeredAt ?? r.createdAt).toISOString();
         let result: string | null = c.result?.result ?? null;
         let replacedBy: string | null = null;
+        if (result === "replaced" && c.result?.by) {
+          const next = (serverCards.find((o) => o.id === c.result!.by)?.context as SelfDeployContext | undefined)?.commit;
+          replacedBy = next ? next.slice(0, 8) : null;
+        }
         if (!result && c.target === "server") {
           const newer = serverCards.filter((o) => o.id !== r.id && stamp(o.when) >= stamp(at) && (stamp(o.when) > stamp(at) || o.id > r.id));
           if (liveCommit && c.commit === liveCommit) result = "deployed";
+          else if (liveIds.has(r.id)) result = null;
           else if (newer.length) {
             result = "replaced";
             const next = (newer.at(-1)!.context as SelfDeployContext).commit;
             replacedBy = next ? next.slice(0, 8) : null;
-          }
+          } else result = "unknown";
         }
         // The real number of changes: tickets named on the card plus those it only counted (`update.more`), not the capped commit list.
         const named = c.update ? c.update.changes.length : 0;
