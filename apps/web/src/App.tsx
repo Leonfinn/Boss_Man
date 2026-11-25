@@ -415,7 +415,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         <PageGuard key={route.join("/")}>
         <PageSuspense>
         {redirect ? null : page === "board" ? (
-          <Board companies={mine} projectId={route[1]} subpage={route[2]} go={go} onCompaniesChanged={companies.reload} />
+          <Board companies={mine} projectId={route[1]} subpage={route[2]} go={go} onCompaniesChanged={companies.reload} decisionsOpen={decisionsTally.data?.open} />
         ) : page === "chat" ? (
           <ChatPage companies={list} companyId={companyId} agentId={route[2]} messageId={route[3]} maintenance={maintenance.data} go={go} onChanged={companies.reload} />
         ) : page === "wiki" ? (
