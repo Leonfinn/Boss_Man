@@ -98,6 +98,11 @@ describe("the quota hold on a ticket (BOS-253, BOS-471)", () => {
     render(<Ticket id="t1" companies={[company]} />);
     fireEvent.click(await screen.findByRole("button", { name: "Run now" }));
     await waitFor(() => expect(ranNow).toHaveLength(1));
+    // Run now disables both buttons until its call and reload finish; a click on a disabled button does
+    // nothing, so wait for it to be enabled (on a slow runner the POST is recorded well before that).
+    // Run now disables both buttons until its call and reload finish; a click on a disabled button does
+    // nothing, so wait for it to be enabled (on a slow runner the POST is recorded well before that).
+    await waitFor(() => expect((screen.getByRole("button", { name: "Make Priority 1" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "Make Priority 1" }));
     await waitFor(() => expect(patched).toEqual([{ urgent: true }]));
   });
