@@ -158,6 +158,8 @@ describe("updateStatus: one row per state, first match wins", () => {
     expect(none.more).not.toContain("Nothing new starts until you press");
     expect(wrapUpBannerText({ runs: 1, wrapSince: iso(-20), wrapForUpdate: "none" })).toMatch(/^You asked agents to wrap up at .+ \(no update was waiting\)\./);
     expect(wrapUpBannerText({ runs: 0, wrapSince: iso(-20), wrapForUpdate: "server" })).toContain("Wrapping up for the server update");
+    // BOS-2610: a wrap-up tied to the runner update's build names it, never "no update was waiting".
+    expect(wrapUpBannerText({ runs: 0, wrapSince: iso(-20), wrapForUpdate: "runner" })).toMatch(/^Wrapping up for the runner update/);
   });
 
   it("2d. BOS-2056: every Waiting row in Recent updates says what it waits on", () => {

@@ -51,6 +51,8 @@ describe("wake classes: the table", () => {
     "the provider sent no vector",
     // The runner update's early hold (BOS-1955, maintenance.ts): a drain reason and hold note, not a wake's reason.
     "building",
+    // The wrap-up hold's label on a held wake (BOS-2610, maintenance.ts WRAPUP_HOLD_REASON), like "update pending": not a wake's reason.
+    "wrap-up pending",
     "building the new runner image",
     "not_found",
     // The nightly secrets pass's ticket-move reasons (BOS-1932, secret-scan.ts), not a wake's reason.
