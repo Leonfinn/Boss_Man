@@ -138,6 +138,28 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
         expect((await rowsOf(c)).find((r) => r.id === id)!.result).toBeNull();
       });
     }
+    // Table over every way a server update ends: what the card carries, and what its row must read (never Waiting).
+    // Each stored end is written by a path tested where it happens (deploy-wait.test.ts: cancel, take-back, unsent, replace in
+    // wait; here: replace while held); this table checks that Recent updates reads each one.
+    const endings: { name: string; result?: object; liveCommit?: boolean; want: string }[] = [
+      { name: "cancelled while waiting", result: { result: "cancelled", message: "m", at: "2026-10-05T00:00:00Z" }, want: "cancelled" },
+      { name: "request taken back after send", result: { result: "cancelled", message: "taken back", at: "2026-10-05T00:00:00Z" }, want: "cancelled" },
+      { name: "wait ended unsent", result: { result: "not_sent", message: "m", at: "2026-10-05T00:00:00Z" }, want: "not_sent" },
+      { name: "replaced in the wait", result: { result: "replaced", message: "m", at: "2026-10-05T00:00:00Z", by: "x" }, want: "replaced" },
+      { name: "replaced while held", result: { result: "replaced", message: "m", at: "2026-10-05T00:00:00Z", by: "x" }, want: "replaced" },
+      { name: "host deployed it", liveCommit: true, want: "deployed" },
+      { name: "nothing records an end", want: "unknown" },
+    ];
+    for (const e of endings) {
+      it(`ending '${e.name}' reads ${e.want}, never Waiting`, async () => {
+        const c = (ctx = await setup());
+        await c.available({});
+        if (e.want !== "unknown") await addCard(c, 9, B); // a newer card exists (the row is not the newest), except where the row must read unknown
+        const id = await addCard(c, 5, e.liveCommit ? A : C, e.result);
+        const row = (await rowsOf(c)).find((r) => r.id === id)!;
+        expect(row.result).toBe(e.want);
+      });
+    }
     it("a host status overwritten by another id (ack-/health-) does not keep a row Waiting", async () => {
       const c = (ctx = await setup());
       await c.available({});
@@ -2699,6 +2721,32 @@ describe("a queued runner update, its cancel and the deploys behind it (BOS-1086
     await c.selfDeploy.sync();
     expect(JSON.parse(await readFile(inbox(c), "utf8"))).toMatchObject({ id: server!.id, target: "server", commit: C });
     expect((await c.selfDeploy.overview()).heldDeploy).toBeNull();
+  });
+
+  it("R59 (BOS-2571): a newer approval overwriting the held deploy writes 'replaced' on the held card, and its row never reads Waiting", async () => {
+    const c = await queuedInTrial();
+    const D = "d".repeat(40);
+    await c.available({ deployed: B, tip: C, commits: [{ sha: C, subject: "Tidy" }] });
+    await hostTicks(c, "2026-11-10T17:02:00Z");
+    await c.selfDeploy.sync();
+    const serverCards = async () => (await c.open()).filter((d) => (d.context as { target: string }).target === "server");
+    const [first] = await serverCards();
+    expect((await c.req("POST", `/api/decisions/${first!.id}/answer`, { answer: "Deploy" })).statusCode).toBe(200);
+    expect((await c.selfDeploy.overview()).heldDeploy).toMatchObject({ id: first!.id });
+    // A newer approval for a later commit reaches send() while the first is still held (the card route refuses a second
+    // answer while one waits, so this is the service path itself), and overwrites the held record.
+    const [co] = await c.db.select().from(companies);
+    const [second] = await c.db
+      .insert(decisions)
+      .values({ companyId: co!.id, kind: "question", tier: "owner", question: "newer", options: ["Deploy"], recommendedOption: "Deploy", status: "answered", answeredAt: new Date("2026-11-10T17:03:00Z"), context: { type: "self_deploy", target: "server", commit: D, changes: [] } as never })
+      .returning();
+    await c.selfDeploy.send({ target: "server", commit: D }, second!.id);
+    expect((await c.selfDeploy.overview()).heldDeploy).toMatchObject({ id: second!.id, commit: D });
+    const [row] = await c.db.select().from(decisions).where(eq(decisions.id, first!.id));
+    expect((row!.context as { result?: unknown }).result).toMatchObject({ result: "replaced", by: second!.id });
+    const rows = (await c.req("GET", "/api/self-deploy/history?limit=10")).json() as { id: string; result: string | null }[];
+    expect(rows.find((r) => r.id === first!.id)!.result).toBe("replaced");
+    expect(rows.find((r) => r.id === second!.id)!.result).toBeNull(); // the held id is the live record naming it
   });
 });
 
