@@ -7,7 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { ticketMessages, tickets } from "../src/db/schema.js";
+import { projects, ticketMessages, tickets } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { handOffPhrase } from "../src/services/hand-offs.js";
 
@@ -206,5 +206,68 @@ describe("set_ticket_state done with hand-off wording", () => {
     const r = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "Wrote the page.", followUps: [{ title: "Do more", assignee: "Nobody", why: "x" }] } });
     expect((r as { isError?: boolean }).isError).toBe(true);
     expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).toBe("in_progress");
+  });
+
+  // BOS-2599 (cock-ups G1): the criterion a hand-on came from goes into the follow-up, so the outcome isn't lost.
+  describe("the follow-up carries the criterion it came from (BOS-2599)", () => {
+    const CRITERIA = ["Sitemap read with no errors", "Bing site verified", "Umami click events seen"];
+
+    it("a BOS-2069-shaped close carries the failed criterion's exact text", async () => {
+      // BOS-2069's own shape: a ticket that never merged and has no changes of its own, so every criterion not reported
+      // is held. Criterion 1 is reported fail, 2 not reported, 3 passes: both 1 and 2 have to be carried to close it.
+      const t = await ctx.ticket({ acceptanceCriteria: CRITERIA });
+      await ctx.db.update(tickets).set({ stateNote: "1 fail: Google has no sitemap and our login is read-only; 3 pass: clicks arrived on 19 Nov" }).where(eq(tickets.id, t.id));
+      const c = await ctx.agent(ctx.co.ceo.id);
+      const r = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "Checked; handing the rest on.", followUps: [{ title: "Submit the sitemap", assignee: "CEO", why: "Google needs Full access first." }] } });
+      expect((r as { isError?: boolean }).isError).toBeFalsy();
+      const made = (await ctx.db.select().from(tickets)).find((x) => x.title === "Submit the sitemap")!;
+      // Both left criteria, unchanged, in the order they are listed; the task wording stays in the description.
+      expect(made.acceptanceCriteria).toEqual([CRITERIA[0], CRITERIA[1]]);
+      expect(made.body).toContain("**Done when** (carried from");
+      expect(made.body).toContain(CRITERIA[0]);
+      expect(textOf(r)).toContain("carrying these 2 criteria");
+      expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).toBe("done");
+    });
+
+    // The merged-ticket path is left alone (it has its own follow-up for a failed after-merge check, DR-009 #5 and
+    // BOS-575): this tool's live diff can't be read here, so carrying there is `carriedCriteria`'s pure test.
+    it("a merged ticket stays on its own path", async () => {
+      const t = await ctx.ticket({ assigneeAgentId: ctx.co.ceo.id, acceptanceCriteria: CRITERIA });
+      await ctx.db.update(projects).set({ repoUrl: "https://github.com/Leonfinn/merged-ticket.git" }).where(eq(projects.id, ctx.project.id));
+      await ctx.db.update(tickets).set({ mergeCommit: "c".repeat(40), stateNote: "1 pass; 2 pass; 3 pass" }).where(eq(tickets.id, t.id));
+      const c = await ctx.agent(ctx.co.ceo.id);
+      const r = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "All good.", followUps: [{ title: "A small tidy-up", assignee: "CEO", why: "x" }] } });
+      // Whatever this tool does with a merged branch, the never-merged rule does not apply: the moved note is kept.
+      const after = (await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!;
+      if (!(r as { isError?: boolean }).isError) expect(after.stateNote).toContain("All good.");
+    });
+
+    it("a criterion number that isn't on the ticket refuses the move before anything changes", async () => {
+      const t = await ctx.ticket({ acceptanceCriteria: CRITERIA });
+      const c = await ctx.agent(ctx.dev.id);
+      const r = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "Wrote the page.", followUps: [{ title: "Wrong number", assignee: "CEO", why: "x", criterion: 9 }] } });
+      expect((r as { isError?: boolean }).isError).toBe(true);
+      expect(textOf(r)).toContain("names criterion 9");
+      expect((await ctx.db.select().from(tickets)).filter((x) => x.title === "Wrong number")).toEqual([]);
+      expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).toBe("in_progress");
+    });
+
+    // BOS-2069 closed done while all four criteria read "[not reported]": a ticket that never merged and has no changes
+    // of its own can't have checked anything on real work, so the done gate now holds every unreported criterion there.
+    it("a never-merged ticket can't close with all its criteria unreported", async () => {
+      const t = await ctx.ticket({ noCode: false, acceptanceCriteria: CRITERIA });
+      const c = await ctx.agent(ctx.dev.id);
+      const r = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "Checked. Follow-up opened for the rest." } });
+      expect((r as { isError?: boolean }).isError).toBe(true);
+      expect(textOf(r)).toContain("never merged");
+      expect(textOf(r)).toContain(CRITERIA[0]);
+      expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).toBe("in_progress");
+      // Handing them on is the way out: the close goes through and the follow-up carries them.
+      const ok = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "Checked. Handing the rest on.", followUps: [{ title: "The rest", assignee: "CEO", why: "x" }] } });
+      expect((ok as { isError?: boolean }).isError).toBeFalsy();
+      const made = (await ctx.db.select().from(tickets)).find((x) => x.title === "The rest")!;
+      expect(made.acceptanceCriteria).toEqual(CRITERIA);
+      expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).toBe("done");
+    });
   });
 });

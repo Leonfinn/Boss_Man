@@ -267,6 +267,23 @@ export const failedAfterMerge = (criteria: readonly Criterion[], note: string | 
     .map((r) => r.criterion);
 
 /**
+ * BOS-2599 (cock-ups G1): the criteria a hand-on (followUps) must carry into the follow-up ticket, unchanged. It is
+ * every criterion still without a verdict (failed, or never reported: the outcome was lost when it was handed on, not
+ * shown), as the stored form, so an after-merge mark goes with its text. `carry` lists the 1-based numbers a follow-up
+ * named; it returns exactly those, or null when one isn't a criterion on the ticket or was already reported pass.
+ */
+export function carriedCriteria(criteria: readonly Criterion[], note: string | null | undefined, carry?: readonly number[]): Criterion[] | null {
+  if (carry?.length) {
+    const kept = criteria.filter((_, i) => carry.includes(i + 1));
+    const reportedPass = readVerdicts(criteria, note).filter((r, i) => carry.includes(i + 1) && r.verdict === "pass").map((r) => `"${r.criterion}"`);
+    if (kept.length !== new Set(carry).size || reportedPass.length) return null;
+    return kept;
+  }
+  const verdicts = readVerdicts(criteria, note);
+  return criteria.filter((_, i) => verdicts[i]!.verdict !== "pass");
+}
+
+/**
  * At merge (BOS-575): nothing can have failed on the live work yet, so a criterion still at fail when the
  * branch lands hasn't been shown, it has been put off ("3 fail: measured after merge, owner accepted").
  * It is carried over: marked after merge, and its stale fail dropped from the note (a fail always wins

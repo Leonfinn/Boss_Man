@@ -6,7 +6,7 @@
 // guesses a follow-up from text and opens it itself.
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
-import { ticketRef } from "@boss-man/shared";
+import { carriedCriteria, criteriaText, criterionText, readCriteria, readVerdicts, ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, ticketMessages, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
@@ -37,10 +37,26 @@ export function handOffPhrase(...texts: (string | null | undefined)[]): { label:
   return null;
 }
 
-export const FOLLOW_UP_HELP = "followUps: work you are handing on, one entry each {title, assignee (an agent's name, or \"CEO\"), why}. Boss Man opens each as a ticket in the same project (and feature), linked to this one, and wakes the assignee. Only the CEO or a manager can assign a follow-up to a colleague; from anyone else a named colleague is kept as a suggested assignee and the ticket goes to the CEO. Opened only on a real change of state. Use it whenever the summary or a reply says someone else will do something next. noFollowUpReason: when nothing is handed on although the wording sounds like it (up to 240 characters).";
+export const FOLLOW_UP_HELP = "followUps: work you are handing on, one entry each {title, assignee (an agent's name, or \"CEO\"), why, criterion?}. Boss Man opens each as a ticket in the same project (and feature), linked to this one, and wakes the assignee. When this ticket's criteria leave one failed or not reported, the follow-up gets that criterion's text, unchanged, as its own acceptance criterion (all of them when the entry names no criterion): the new ticket then has to show the outcome, not just do the task. criterion names one, by its number, to carry exactly that one. Only the CEO or a manager can assign a follow-up to a colleague; from anyone else a named colleague is kept as a suggested assignee and the ticket goes to the CEO. Opened only on a real change of state. Use it whenever the summary or a reply says someone else will do something next. noFollowUpReason: when nothing is handed on although the wording sounds like it (up to 240 characters).";
 
-export const followUpsSchema = z.array(z.object({ title: z.string().trim().min(1).max(200), assignee: z.string().trim().min(1).max(100), why: z.string().trim().min(1).max(1500) })).max(20);
+export const followUpsSchema = z.array(z.object({ title: z.string().trim().min(1).max(200), assignee: z.string().trim().min(1).max(100), why: z.string().trim().min(1).max(1500), criterion: z.number().int().min(1).max(10).optional().describe("The number (1-based) of this ticket's criterion to carry into the follow-up, when only one applies. Left out, every failed or not-yet-reported criterion is carried.") })).max(20);
 export type FollowUpInput = z.infer<typeof followUpsSchema>[number];
+
+/**
+ * BOS-2599 (cock-ups G1): the refusal for a follow-up that names a criterion which can't be carried (no such criterion, or
+ * already reported pass); null when fine. Checked before the move so a wrong number refuses early, like a wrong assignee.
+ */
+export function criterionCarryRefusal(criteriaRaw: unknown, note: string | null | undefined, followUps: readonly FollowUpInput[]): string | null {
+  const criteria = readCriteria(criteriaRaw);
+  for (const f of followUps) {
+    if (f.criterion === undefined) continue;
+    const c = criteria[f.criterion - 1];
+    if (!c) return `follow-up "${f.title}" names criterion ${f.criterion}, but this ticket has ${criteria.length ? `only ${criteria.length}` : "no"} criteria. Number it from 1 in the order they are listed, or leave criterion out to carry every failed or not-yet-reported one.`;
+    const verdict = readVerdicts(criteria, note)[f.criterion - 1]?.verdict;
+    if (verdict === "pass") return `follow-up "${f.title}" names criterion ${f.criterion} ("${criterionText(c)}"), but it is already reported pass, so there is no lost outcome to carry. Drop the criterion, or name the one that failed or is not reported yet.`;
+  }
+  return null;
+}
 
 /** The refusal for a move to done that hands work on with no follow-up and no reason; null when fine. */
 export async function handOffRefusal(db: Db, ticketId: string, summary: string | undefined, given: { followUps?: unknown[]; noFollowUpReason?: string }): Promise<string | null> {
@@ -81,11 +97,18 @@ export async function openFollowUps(db: Db, work: Work, ticketId: string, follow
   if (!row) return [];
   const { t, prefix } = row;
   const ref = ticketRef(prefix, t.number) ?? `"${t.title}"`;
-  const opened: { id: string; ref: string; title: string; assignee: string }[] = [];
+  // BOS-2599 (cock-ups G1): the criterion the hand-on came from goes with it, so the follow-up has to show the outcome
+  // and not just do the task. Read here, after the move, so the note is the one this close stored.
+  const [fresh] = await db.select({ criteria: tickets.acceptanceCriteria, note: tickets.stateNote }).from(tickets).where(eq(tickets.id, ticketId));
+  const opened: { id: string; ref: string; title: string; assignee: string; carried: string[] }[] = [];
   for (const [i, f] of followUps.entries()) {
     const suggestion = opts.suggested[i] ? [`**Suggested assignee:** ${opts.suggested[i]} (named by the closing agent; the CEO decides).`, ""] : [];
-    const body = [`**Why:** ${f.why}`, "", ...suggestion, `Handed on by ${ref} ("${t.title}") when it closed: [${ref}](#/tickets/${t.id}).`, "", "Opened by Boss Man from the closing ticket's followUps (BOS-1361)."].join("\n");
-    const made = await work.createTicket(t.projectId, { title: f.title, body, risk: t.risk ?? "medium", state: "ready", overLimit: opts.isManager, assigneeAgentId: assigneeIds[i]!, featureId: t.featureId, createdByAgentId: byAgentId });
+    const carry = fresh ? carriedCriteria(readCriteria(fresh.criteria), fresh.note, f.criterion !== undefined ? [f.criterion] : undefined) ?? [] : [];
+    const carried = carry.length
+      ? [`**Done when** (carried from ${ref}, which left ${carry.length > 1 ? "these criteria" : "this criterion"} failed or not reported):`, ...carry.map((c) => `- ${criterionText(c)}`), "Not reported: say pass or fail for each before moving this ticket to review.", ""]
+      : [];
+    const body = [`**Why:** ${f.why}`, "", ...suggestion, ...carried, `Handed on by ${ref} ("${t.title}") when it closed: [${ref}](#/tickets/${t.id}).`, "", "Opened by Boss Man from the closing ticket's followUps (BOS-1361)."].join("\n");
+    const made = await work.createTicket(t.projectId, { title: f.title, body, risk: t.risk ?? "medium", state: "ready", overLimit: opts.isManager, assigneeAgentId: assigneeIds[i]!, featureId: t.featureId, createdByAgentId: byAgentId, ...(carry.length ? { acceptanceCriteria: carry } : {}) });
     const [numbered] = await db.select({ number: tickets.number }).from(tickets).where(eq(tickets.id, made.id));
     const newRef = ticketRef(prefix, numbered?.number) ?? `"${made.title}"`;
     const [who] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, assigneeIds[i]!));
@@ -93,7 +116,7 @@ export async function openFollowUps(db: Db, work: Work, ticketId: string, follow
     const [now] = await db.select({ note: tickets.stateNote }).from(tickets).where(eq(tickets.id, t.id));
     await db.update(tickets).set({ stateNote: `${(now?.note ?? "").trim()}${now?.note?.trim() ? " " : ""}${link}`.slice(0, 4000) }).where(eq(tickets.id, t.id));
     await record(db, { companyId: t.companyId, ticketId: t.id, agentId: byAgentId, kind: "follow_up", summary: link, detail: { followUpTicketId: made.id } });
-    opened.push({ id: made.id, ref: newRef, title: made.title, assignee: who?.name ?? "someone" });
+    opened.push({ id: made.id, ref: newRef, title: made.title, assignee: who?.name ?? "someone", carried: criteriaText(carry) });
   }
   return opened;
 }
