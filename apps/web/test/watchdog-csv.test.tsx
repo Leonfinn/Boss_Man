@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_WATCHDOG } from "@boss-man/shared";
 import type { Company } from "../src/api";
 import { Watchdog } from "../src/pages/Settings";
-import { flagsToCsv } from "../src/pages/settings/Watchdog";
+import { flagsToCsv, problemCounts } from "../src/pages/settings/Watchdog";
 
 // BOS-2541: "Download CSV" beside "Hide ones that cleared by themselves" saves the flags shown in the test result.
 
@@ -25,6 +25,26 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+});
+
+describe("problemCounts", () => {
+  it("counts flags and cleared ones per rule, and puts the rule with more flags first", () => {
+    const list = [
+      flag(1, { rule: "unassigned" }),
+      flag(2, { rule: "unassigned", verdict: "cleared within 30 min" }),
+      flag(3, { rule: "stale_review", verdict: "cleared within 30 min" }),
+      flag(4, { rule: "stale_review" }),
+      flag(5, { rule: "stale_review" }),
+    ];
+    expect(problemCounts(list as never)).toEqual([
+      { rule: "stale_review", flags: 3, cleared: 1 },
+      { rule: "unassigned", flags: 2, cleared: 1 },
+    ]);
+  });
+
+  it("gives an empty list when there are no flags at all", () => {
+    expect(problemCounts([])).toEqual([]);
+  });
 });
 
 describe("flagsToCsv", () => {
