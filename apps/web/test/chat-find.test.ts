@@ -1,5 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { countHits, dayStart, findSpots, firstOnOrAfter, spotIndex, splitHits, stepSpot } from "../src/chat-find";
+import { countHits, dayStart, findQuery, findSpots, firstOnOrAfter, spotIndex, splitHits, stepSpot } from "../src/chat-find";
+
+describe("findQuery", () => {
+  it("uses a normal query as it is typed", () => {
+    expect(findQuery("deploy")).toBe("deploy");
+  });
+
+  it("treats blank or space-only text as no search", () => {
+    expect(findQuery("")).toBe("");
+    expect(findQuery("   \t ")).toBe("");
+  });
+
+  it("strips the spaces around a query but keeps its case", () => {
+    expect(findQuery("  Deploy the script  ")).toBe("Deploy the script");
+  });
+});
 
 describe("chat find helper (BOS-2411)", () => {
   it("matches case-insensitively and splits text around each match", () => {
