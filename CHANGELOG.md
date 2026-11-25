@@ -5,8 +5,11 @@ The changes you will notice in Boss Man, newest first, in plain words. Boss Man 
 <!--
 Release step: adding to this file is part of every release (Release Manager, on the "Release log: record" wake).
 
-1. Read the release's "Things you'll notice" line in the release log.
-2. Add its changes under today's heading, "## 16 November 2026" (day, month in full, year). Make the heading if today has none.
+1. Start from what the live server runs, not from what reached main today: main moves faster than the deployer.
+   In the release log (the newest page in the wiki's Releases folder), find the newest entry that says the website was
+   "NOT republished". Cover every change from that entry's release (from its "was" commit) up to and including the newest
+   live commit, using each entry's "Things you'll notice" line. Skip any change that already has a line on this page.
+2. Add those changes under today's heading, "## 16 November 2026" (day, month in full, year). Make the heading if today has none.
    Newest day first. One heading per day: a second release that day adds to the same list.
 3. One line per change, written for an owner who is not a developer: what they will see or can now do, and "off by default"
    or "after you update the runners" when that applies. Leave out tests, CI, internal tooling, our own server's details,
@@ -41,6 +44,9 @@ Check before committing: pnpm --filter @boss-man/site build (it stops on a headi
 - Opening a milestone on the Roadmap shows a "What's left" list: every unfinished ticket in it, grouped as Waiting for you, Held up, Needs a look, Running or Being built, with who has it and what it waits on. A ticket held only by one of your cards has an Open card button.
 - Each milestone on the Roadmap has a "CEO manages At risk" button, off by default. Turn it on and, when that milestone turns At risk or Late, the CEO is woken once to plan a remedy. It is not woken again while the status stays the same. A milestone with it off never wakes the CEO. "CEO manages At risk for all" turns it on for every milestone at once, and tells you first that each remedy costs a CEO run.
 - After you answer a card and get its result, later corrections and updates about it also reach your chat, flagged, for 24 hours or until the matter is closed. A "still checking" note stays on the ticket.
+- On the Merge queue page, a change whose own check has passed and that is now waiting for GitHub's tests shows a blue "On GitHub" tag instead of a grey "Waiting", with how long it has been there. Its line says what time its check passed.
+- When a server or runner update fails, Boss Man opens an urgent ticket to find the cause, assigns it to your infrastructure engineer (or the CEO if you have none) and wakes them straight away. The Updates status says "Being looked into" only once their work has started. Until then it says "Not picked up yet" and who was woken when. If nobody starts within 15 minutes, the CEO is woken again. A second failure of the same update is added to the same ticket.
+- If you press "Ask agents to wrap up" while a runner update is being built, the wrap-up now belongs to that update. The banner says "Wrapping up for the runner update", and the wrap-up lifts by itself when the update goes in, fails or is cancelled. Work on an urgent ticket still starts during a wrap-up.
 
 ## 24 November 2026
 
