@@ -96,6 +96,41 @@ describe("milestone What's left (BOS-2580)", () => {
   });
 });
 
+describe("milestone badge, reason and What's left agree (BOS-2580)", () => {
+  it("the tickets a reason line names sit in the matching group, and Live, being checked leaves nothing unbuilt", async () => {
+    const c = await setup();
+    const obj = (await c.req("POST", `/api/companies/${c.company.id}/objectives`, { title: "Ship it", priority: 1 })).json();
+    const mkMs = async (title: string) => (await c.req("POST", `/api/objectives/${obj.id}/milestones`, { title, targetDate: "2099-01-01" })).json() as { id: string };
+    // 1. At risk because a ticket waits on the owner's card.
+    const risk = await mkMs("At risk one");
+    const waiting = await c.ticket("Waits on card", { milestoneId: risk.id, state: "blocked" });
+    await c.ticket("Plain work", { milestoneId: risk.id, state: "in_progress" });
+    const [d] = await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", question: "Which?", options: ["A", "B"], recommendedOption: "A", context: { type: "question" } }).returning();
+    await c.db.insert(ticketDependencies).values({ blockedTicketId: waiting.id, blockerDecisionId: d!.id });
+    // 2. Live, being checked: every unfinished ticket is merged and live.
+    const live = await mkMs("Live one");
+    const check = await c.ticket("Final check", { milestoneId: live.id, state: "blocked" });
+    await c.ticket("Done work", { milestoneId: live.id, state: "done" });
+    await c.db.update(tickets).set({ mergeCommit: "abc123", goLiveWait: null }).where(eq(tickets.id, check.id));
+
+    const ms = (await c.req("GET", "/api/roadmap?today=2026-10-16")).json()[0].objectives[0].milestones as Array<{ id: string; status: string; reason: string | null; reasonTickets: Array<{ id: string }> }>;
+    for (const m of ms) {
+      const list = (await c.req("GET", `/api/milestones/${m.id}/tickets`)).json() as Array<{ id: string; group: string | null }>;
+      const group = (id: string) => list.find((r) => r.id === id)?.group;
+      if (m.id === risk.id) {
+        expect(m.status).toBe("at_risk");
+        expect(m.reasonTickets.map((t) => t.id)).toEqual([waiting.id]);
+        for (const t of m.reasonTickets) expect(group(t.id)).toBe("owner");
+      } else {
+        expect(m.status).toBe("live_checked");
+        // Nothing unbuilt: no ticket is waiting, held or being built; the check is Running (or Needs a look once quiet).
+        expect(list.filter((r) => r.group && !["running", "look"].includes(r.group))).toEqual([]);
+        expect(group(check.id)).toMatch(/^(running|look)$/);
+      }
+    }
+  });
+});
+
 describe("roadmap", () => {
   it("groups milestones by objective and company with their progress and status", async () => {
     const c = await setup();
