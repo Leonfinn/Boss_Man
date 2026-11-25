@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { burnupWeeks } from "../src/services/roadmap-burnup.js";
+import { burnupWeeks, paceFromBurnup, type BurnupPoint } from "../src/services/roadmap-burnup.js";
 
 const d = (s: string) => new Date(`${s}T12:00:00Z`);
 
@@ -36,5 +36,22 @@ describe("roadmap burn-up (BOS-2397)", () => {
     expect(burnupWeeks([], "2026-11-23").every((p) => p.done === 0 && p.total === 0)).toBe(true);
     const w = burnupWeeks([{ size: 3, createdAt: d("2026-11-22"), doneAt: null }], "2026-11-23");
     expect(w.map((p) => p.total)).toEqual([0, 0, 0, 0, 0, 0, 0, 3]);
+  });
+});
+
+describe("paceFromBurnup", () => {
+  const points = (done: number[]): BurnupPoint[] =>
+    done.map((n, i) => ({ weekEnd: `2026-10-${String(i + 5).padStart(2, "0")}`, done: n, total: 100 }));
+
+  it("is the points finished in the last 4 weeks over 4, for steady progress", () => {
+    // 8 weekly points, done rising by 2 a week: the last 4 weeks (index 3 to 7) close 8 points, so 2 a week.
+    expect(paceFromBurnup(points([10, 12, 14, 16, 18, 20, 22, 24]))).toBe(2);
+  });
+
+  it("is zero with too few points or no progress, and never negative", () => {
+    expect(paceFromBurnup([])).toBe(0);
+    expect(paceFromBurnup(points([10, 12, 14, 16, 18, 20, 22]))).toBe(0); // 7 points: fewer than the 8 it needs
+    expect(paceFromBurnup(points([10, 10, 10, 10, 10, 10, 10, 10]))).toBe(0); // no progress
+    expect(paceFromBurnup(points([10, 10, 10, 20, 15, 15, 15, 15]))).toBe(0); // work reopened: done fell, clamped to 0
   });
 });
