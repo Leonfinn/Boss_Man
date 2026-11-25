@@ -110,9 +110,54 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     const newest = await add(3, "d".repeat(40));
     const rows = (await c.req("GET", "/api/self-deploy/history?limit=10")).json() as { id: string; result: string | null; changes: number; shown: number; replacedBy: string | null }[];
     const by = (id: string) => rows.find((r) => r.id === id)!;
-    expect(by(newest).result).toBeNull(); // the newest unfinished one may still wait
+    expect(by(newest).result).toBe("unknown"); // nothing live names it (R59), so it never reads Waiting
     expect(by(live)).toMatchObject({ result: "deployed", changes: 38, shown: 20 });
     expect(by(replaced)).toMatchObject({ result: "replaced", replacedBy: A.slice(0, 8), changes: 2, shown: 2 });
+  });
+
+  // R59 (BOS-2571), the agreement test: a server row reads Waiting (result null) exactly when a live record names its id.
+  describe("Recent updates: Waiting only while a live record names the row (R59)", () => {
+    type Row = { id: string; result: string | null; replacedBy: string | null };
+    const rowsOf = async (c: Awaited<ReturnType<typeof setup>>) => (await c.req("GET", "/api/self-deploy/history?limit=10")).json() as Row[];
+    const addCard = async (c: Awaited<ReturnType<typeof setup>>, day: number, commit: string, result?: object) => {
+      const [co] = await c.db.select().from(companies);
+      return (await c.db.insert(decisions).values({ companyId: co!.id, kind: "question", tier: "owner", question: `u${day}`, options: ["Done"], recommendedOption: "Done", status: "answered", answeredAt: new Date(Date.UTC(2026, 9, day)), context: { type: "self_deploy", target: "server", commit, changes: [], ...(result ? { result } : {}) } as never }).returning())[0]!.id;
+    };
+    const live = { deploy_wait: "wait row", held: "held row", inbox: "inbox request", host: "host status running" } as const;
+    // The newest card is the only one that can still be waiting; an older one with nothing live is settled, never Waiting.
+    for (const [kind, name] of Object.entries(live)) {
+      it(`${name} names the card: Waiting; the same card without it: unknown`, async () => {
+        const c = (ctx = await setup());
+        await c.available({});
+        const id = await addCard(c, 5, C);
+        expect((await rowsOf(c)).find((r) => r.id === id)!.result).toBe("unknown");
+        if (kind === "deploy_wait") await c.db.insert(settings).values({ key: "deploy_wait", value: { decisionId: id } });
+        if (kind === "held") await c.db.insert(settings).values({ key: "self_deploy_held_server", value: { id, commit: C, since: "2026-10-05T00:00:00Z" } });
+        if (kind === "inbox") await writeFile(path.join(c.dir, "inbox", "request.json"), JSON.stringify({ id, target: "server", commit: C }));
+        if (kind === "host") await c.status({ id, target: "server", result: "running", ended: "" });
+        expect((await rowsOf(c)).find((r) => r.id === id)!.result).toBeNull();
+      });
+    }
+    it("a host status overwritten by another id (ack-/health-) does not keep a row Waiting", async () => {
+      const c = (ctx = await setup());
+      await c.available({});
+      const id = await addCard(c, 5, C);
+      await c.status({ id: `ack-${id}`, target: "server", result: "running", ended: "" });
+      expect((await rowsOf(c)).find((r) => r.id === id)!.result).toBe("unknown");
+    });
+    it("stored ends win: cancelled, not sent and replaced read as such, and a replaced row names the newer commit", async () => {
+      const c = (ctx = await setup());
+      await c.available({});
+      const newer = await addCard(c, 9, B);
+      const cancelled = await addCard(c, 5, C, { result: "cancelled", message: "m", at: "2026-10-05T00:00:00Z" });
+      const notSent = await addCard(c, 6, C, { result: "not_sent", message: "m", at: "2026-10-06T00:00:00Z" });
+      const replaced = await addCard(c, 7, C, { result: "replaced", message: "m", at: "2026-10-07T00:00:00Z", by: newer });
+      const rows = await rowsOf(c);
+      const by = (id: string) => rows.find((r) => r.id === id)!;
+      expect(by(cancelled).result).toBe("cancelled");
+      expect(by(notSent).result).toBe("not_sent");
+      expect(by(replaced)).toMatchObject({ result: "replaced", replacedBy: B.slice(0, 8) });
+    });
   });
 
   it("refuses to save add-ons when self-deploy is not set up (BOS-1583)", async () => {

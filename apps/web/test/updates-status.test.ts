@@ -3,7 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { DEFAULT_REASON, PLAIN_REASONS, LiveState, historyTag, historyWaitingOn, wrapUpBannerText, plainReason, runnerProgress, updateStatus, updateWaitExtras, waitingFor, type HistoryRow, type LiveRow, type DeployWaitView, type MaintenanceView, type SelfDeployView } from "../src/pages/settings/updates";
+import { DEFAULT_REASON, PLAIN_REASONS, LiveState, historyTag, historyWhat, historyWaitingOn, wrapUpBannerText, plainReason, runnerProgress, updateStatus, updateWaitExtras, waitingFor, type HistoryRow, type LiveRow, type DeployWaitView, type MaintenanceView, type SelfDeployView } from "../src/pages/settings/updates";
 import { when } from "../src/pages/Runs";
 
 // The Updates panel's status box (BOS-1238, design BOS-1214): rows checked in the page's table order, first match wins.
@@ -169,6 +169,17 @@ describe("updateStatus: one row per state, first match wins", () => {
     expect(historyWaitingOn(row({ target: "runner" }), null, maintUpdate(), false)).toContain("the runner swap: waiting for 2 runs");
     expect(historyWaitingOn(row({ target: "runner" }), null, null, true)).toContain("in front of it");
     expect(historyWaitingOn(row({ result: "deployed" }), null, null, false)).toBeNull();
+  });
+
+  it("2e. R59 (BOS-2571): cancelled, not-sent and unknown server rows say so, never Waiting", () => {
+    const row = (over: Partial<HistoryRow>) => ({ id: "h1", at: iso(-5), target: "server", result: null, changes: 2, message: "", ...over }) as unknown as HistoryRow;
+    expect(historyTag(row({ result: "cancelled" })).tag).toBe("Cancelled");
+    expect(historyTag(row({ result: "not_sent" })).tag).toBe("Not sent");
+    expect(historyTag(row({ result: "unknown" })).tag).toBe("Unknown");
+    expect(historyWhat(row({ result: "cancelled" }))).toBe("Server: cancelled, nothing was sent");
+    expect(historyWhat(row({ result: "not_sent" }))).toBe("Server: not sent, the machine was short of memory");
+    expect(historyWhat(row({ result: "unknown" }))).toBe("Server: no record of how this ended");
+    for (const result of ["cancelled", "not_sent", "unknown"]) expect(historyWaitingOn(row({ result }), null, null, false)).toBeNull();
   });
 
   it("3. Approved, waiting for a quiet machine: no main button, a Cancel, BOS-420's line", () => {

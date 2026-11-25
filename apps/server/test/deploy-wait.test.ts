@@ -393,6 +393,63 @@ describe("deploy wait (BOS-420)", () => {
     expect(w.sent).toEqual([{ id: ID, override: false }]);
   });
 
+  describe("R59 (BOS-2571): every end without a host report is written onto the update's card", () => {
+    const ID2 = "22222222-2222-4222-8222-222222222222";
+    const seedCard = async (id: string) => {
+      const [co] = await db.select().from(companies);
+      await db.insert(decisions).values({ id, companyId: co!.id, kind: "question", tier: "owner", question: "u", options: ["Done"], recommendedOption: "Done", status: "answered", answeredAt: clock(), context: { type: "self_deploy", target: "server", commit: B, changes: [] } as never });
+    };
+    const endOf = async (id: string) => ((await db.select().from(decisions).where(eq(decisions.id, id)))[0]!.context as { result?: { result: string; message: string; by?: string } }).result;
+
+    it("cancel while waiting writes 'cancelled'", async () => {
+      const { w, deps } = world();
+      w.checks = 1;
+      await seedCard(ID);
+      const svc = deployWaitService(db, deps);
+      await svc.begin({ decisionId: ID, commit: B, fromCommit: A });
+      await svc.cancel();
+      expect(await endOf(ID)).toMatchObject({ result: "cancelled" });
+    });
+
+    it("cancel after send, once the request is taken back, writes 'cancelled'; too late writes nothing", async () => {
+      const { deps, host } = world();
+      await seedCard(ID);
+      await seedCard(ID2);
+      const svc = deployWaitService(db, deps);
+      await svc.begin({ decisionId: ID, commit: B, fromCommit: A }); // quiet: sent at once
+      await svc.cancel();
+      expect(await endOf(ID)).toMatchObject({ result: "cancelled" });
+      await svc.begin({ decisionId: ID2, commit: B, fromCommit: A });
+      host("running");
+      expect(await svc.cancel()).toMatchObject({ tooLate: true });
+      expect(await endOf(ID2)).toBeUndefined();
+    });
+
+    it("a wait that ends unsent (memory short) writes 'not_sent'", async () => {
+      const { w, deps } = world();
+      w.checks = 1;
+      w.headroom = { version: 1, writtenAt: "", availableMb: 2048, needMb: 4096 };
+      await seedCard(ID);
+      const svc = deployWaitService(db, deps);
+      await svc.begin({ decisionId: ID, commit: B, fromCommit: A });
+      offset += 61 * MIN;
+      await svc.step();
+      expect(await endOf(ID)).toMatchObject({ result: "not_sent" });
+    });
+
+    it("a newer approval replacing the waiting one writes 'replaced' with the new card's id; a host result is never overwritten", async () => {
+      const { w, deps } = world();
+      w.checks = 1;
+      await seedCard(ID);
+      await seedCard(ID2);
+      const svc = deployWaitService(db, deps);
+      await svc.begin({ decisionId: ID, commit: B, fromCommit: A });
+      await svc.begin({ decisionId: ID2, commit: C, fromCommit: A });
+      expect(await endOf(ID)).toMatchObject({ result: "replaced", by: ID2 });
+      expect(await endOf(ID2)).toBeUndefined();
+    });
+  });
+
   it("a second approval while one waits replaces it instead of being dropped (BOS-1805)", async () => {
     const { w, deps } = world();
     w.checks = 1;
