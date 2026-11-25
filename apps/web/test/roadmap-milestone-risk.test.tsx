@@ -63,7 +63,7 @@ describe("CEO manages at risk (BOS-2581)", () => {
     // The cost warning comes first; nothing is saved yet.
     expect(within(r).getByText(/costs a CEO run/)).toBeTruthy();
     expect(calls.filter((c) => c.method === "PATCH")).toEqual([]);
-    fireEvent.click(within(r).getByRole("button", { name: "Take it on" }));
+    fireEvent.click(within(r).getByRole("button", { name: "Turn it on" }));
     // The browser's own yes/no, too, before the CEO is committed to a run.
     expect(confirm).toHaveBeenCalled();
     const patch = calls.find((c) => c.method === "PATCH")!;
@@ -76,7 +76,7 @@ describe("CEO manages at risk (BOS-2581)", () => {
     render(<Roadmap companies={[company]} tab="timeline" go={() => {}} />);
     const on = await waitFor(() => row("Launch"));
     expect(within(on).getByText(/costs a CEO run/)).toBeTruthy();
-    fireEvent.click(within(on).getByRole("button", { name: "Turning it off" }));
+    fireEvent.click(within(on).getByRole("button", { name: "Turn it off" }));
     const patch = calls.find((c) => c.method === "PATCH")!;
     expect(patch.body).toEqual({ ceoManagesRisk: false });
 
