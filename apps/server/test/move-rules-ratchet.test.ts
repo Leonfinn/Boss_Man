@@ -19,7 +19,7 @@ const KNOWN_JOINS: Record<string, number> = {
   "mcp-tickets.ts": 1, // reads only the blockers' numbers for a title warning
   "services/brief.ts": 1, // uses ticketBlockerFinished
   "services/decisions.ts": 3, // unblockedNote text; dependent-chain ordering SQL (order only)
-  "services/planning.ts": 0,
+  "services/planning.ts": 1, // milestoneTickets "What's left" (BOS-2580): uses ticketBlockerFinished
   "services/priority-watch.ts": 1, // uses ticketBlockerFinished
   "services/scheduler.ts": 4, // stoppedTree uses ticketBlockerFinished; the watch report lines, fingerprint and parked-note time only describe
   "services/sweeps.ts": 4, // release sweep: two use ticketBlockerOpenSql (incl. the stranded-Blocked prefilter, blockedHolds judges), one reads the finish time; the nothing-startable blocker list (BOS-1662) uses ticketBlockerFinished
