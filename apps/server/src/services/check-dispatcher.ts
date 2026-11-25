@@ -15,6 +15,7 @@ export type IdleSlot = CheckDecline & { companyId: string; machineKey: string; m
 import type { Eligible } from "./check-workers.js";
 import { scanListReader, type ScanListWarning } from "./scan-list.js";
 import { blocksClass, type WaitKind } from "./update-waits.js";
+import { tellOnce } from "./tell-once.js";
 
 /** scripts/install-packages.sh (used by check-quick.sh and check-all.sh) prints this and exits 75 when the install stopped on a machine error. */
 export const MACHINE_FAULT_MARKER = "check-quick: install stopped on a machine fault";
@@ -26,6 +27,8 @@ export type CheckDispatcherDeps = {
   can: (runnerId: string) => boolean;
   /** Wake the agent that asked for the check, with the outcome. */
   wake?: (agentId: string, input: { ticketId: string; reason: string; note: string; priority?: number }) => Promise<unknown>;
+  /** Where a result wake that did not get through is logged (BOS-2632). */
+  log?: (message: string) => void;
   /** Called when a job ends in any way, e.g. so the merge gate or the main-red logic can react. */
   onEnded?: (job: CheckJob) => Promise<unknown> | unknown;
   /** The command a job runs when the request named none. */
@@ -170,7 +173,11 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
       const kept = job.state === "failed" ? await queue.logChars(job.id).catch(() => null) : null;
       const where = kept ? `\n\n${fullLogPointer(job.id, job.ticketId, kept)}` : "";
       const tail = (job.logTail ? `\n\nEnd of the log:\n${job.logTail.slice(-1500)}` : "") + where;
-      await Promise.resolve(deps.wake(job.requestedBy, { ticketId: job.ticketId, reason: "check_result", note: `${verdict(job)}${tail}`, priority: 2 })).catch(() => {});
+      // BOS-2632: a failed result wake is logged, not retried: the job keeps its result (check_log, the ticket's checks), a held
+      // ticket is settled by onEnded below, and an In progress ticket left without a run is the missed-work sweep's to wake.
+      const agentId = job.requestedBy;
+      const wake = deps.wake;
+      await tellOnce(`check result ${job.id}`, async () => wake(agentId, { ticketId: job.ticketId, reason: "check_result", note: `${verdict(job)}${tail}`, priority: 2 }), deps.log);
     }
     await Promise.resolve(deps.onEnded?.(job)).catch(() => {});
   }

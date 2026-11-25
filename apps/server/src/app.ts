@@ -100,8 +100,7 @@ import { checkHoldService } from "./services/check-hold.js";
 import { mainCiService } from "./services/main-ci.js";
 import { secretScanService } from "./services/secret-scan.js";
 import { PRIORITY_WATCH_REASON, priorityWatchService } from "./services/priority-watch.js";
-import { checkIdleService, IDLE_CHECK_SLOT_REASON, idleView } from "./services/check-idle.js";
-import { MERGE_STALL_REASON, mergeStallService, mergeTrainStatus } from "./services/merge-stall.js";
+import { checkIdleService, IDLE_CHECK_SLOT_REASON, idleView } from "./services/check-idle.js";import { MERGE_STALL_REASON, mergeStallService, mergeTrainStatus } from "./services/merge-stall.js";
 import { milestoneRiskService } from "./services/milestone-risk.js";
 import { landingTurnAlertSweep, usualCiWait, usualMergeCheck } from "./services/landing-turn-eta.js";
 import { softHold } from "./services/deploy-wait-hold.js";
@@ -429,7 +428,8 @@ export async function buildApp(opts: AppOptions) {
     send: (id, c) => runners.send(id, c),
     isConnected: (id) => runners.isConnected(id),
     can: (id) => runners.can(id, "check-jobs"),
-    wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve(),
+    wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve(null),
+    log: (m) => app.log.warn(m),
     onEnded: async (job) => {
       await ciPreflightLate?.onQuickEnded(job).catch(() => undefined);
       return checkHold?.onEnded(job);
@@ -732,6 +732,7 @@ export async function buildApp(opts: AppOptions) {
     notify: (agentId, w) => scheduler.notify(agentId, w),
     alert: (input) => alerts.raise(input),
     now: opts.now,
+    log: (m) => app.log.warn(m),
   });
   const ticketChat = ticketChatService(db, { runs: runsSvc, notify: (agentId, w) => scheduler.notify(agentId, w), replyLane: (agentId, w) => scheduler.replyLaneFor(agentId, { reason: "message", ...w }), replies: ownerReplies });
   const semantic = wikiSemanticService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, log: (m) => app.log.warn(m), debounceMs: opts.semanticDebounceMs });
@@ -1204,7 +1205,8 @@ export async function buildApp(opts: AppOptions) {
     openReviews: async (ticketId) => ((await review.keptRound(ticketId).catch(() => false)) ? undefined : scheduler.onTicketReview(ticketId, null)),
     wake: (agentId, w) => scheduler.notify(agentId, w),
     now: opts.now,
-    branchHead: opts.branchHead ?? ((ticketId) => review.diff(ticketId).then((d) => d.head)),
+    log: (m) => app.log.warn(m),
+    branchHead: opts.branchHead ??((ticketId) => review.diff(ticketId).then((d) => d.head)),
     // BOS-2303: a ticket approved while this check ran merges (or goes back) as soon as the check ends.
     releaseHolds: (ticketId) => review.releaseHolds(ticketId),
   });
@@ -1363,10 +1365,11 @@ export async function buildApp(opts: AppOptions) {
   const priorityWatch = priorityWatchService(db, {
     tellCeo: async ({ companyId, ticketId, note }) => {
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
-      if (ceo) await scheduler.notify(ceo.id, { reason: PRIORITY_WATCH_REASON, ticketId, priority: 2, note });
+      return ceo ? scheduler.notify(ceo.id, { reason: PRIORITY_WATCH_REASON, ticketId, priority: 2, note }) : null;
     },
     notify: (input) => notes.notify(input),
     now: opts.now,
+    log: (m) => app.log.warn(m),
   });
   // BOS-2359: one CEO alert when a landing turn has been held for over twice the usual GitHub wait; it closes itself when the turn ends.
   const landingTurnAlert = landingTurnAlertSweep({
@@ -1383,10 +1386,11 @@ export async function buildApp(opts: AppOptions) {
   const mergeStall = mergeStallService(db, {
     tellCeo: async ({ companyId, ticketId, note }) => {
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
-      if (ceo) await scheduler.notify(ceo.id, { reason: MERGE_STALL_REASON, ticketId, priority: 2, note });
+      return ceo ? scheduler.notify(ceo.id, { reason: MERGE_STALL_REASON, ticketId, priority: 2, note }) : null;
     },
     notify: (input) => notes.notify(input),
     now: opts.now,
+    log: (m) => app.log.warn(m),
     // BOS-1841: no empty-seat or no-landing alarm while new checks are paused on purpose for a server update.
     paused: async () => (await softHold(db, opts.now?.())).on,
   });
@@ -1400,10 +1404,11 @@ export async function buildApp(opts: AppOptions) {
     },
     tellCeo: async ({ companyId, ticketId, note }) => {
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
-      if (ceo) await scheduler.notify(ceo.id, { reason: IDLE_CHECK_SLOT_REASON, ticketId, priority: 2, note });
+      return ceo ? scheduler.notify(ceo.id, { reason: IDLE_CHECK_SLOT_REASON, ticketId, priority: 2, note }) : null;
     },
     notify: (input) => notes.notify(input),
     now: opts.now,
+    log: (m) => app.log.warn(m),
   });
   decisionsSvc.setLoopHooks({
     sendBack: (ticketId, text, reviewer) => review.sendBack(ticketId, text, reviewer),

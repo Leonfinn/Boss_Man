@@ -155,19 +155,51 @@ async function setup() {
   const ticket = async (title: string) => (await req("POST", `/api/projects/${project.id}/tickets`, { title })).json() as { id: string; number: number };
   const told: Array<{ ticketId: string; note: string }> = [];
   const sent: Array<{ id: string; title: string; body: string }> = [];
+  // BOS-2632: how many of the next CEO wakes / owner notifications fail (a throw, then a null), and what was logged.
+  const fail = { ceo: 0, owner: 0 };
+  const logs: string[] = [];
   const watch = priorityWatchService(db, {
-    tellCeo: async ({ ticketId, note }) => void told.push({ ticketId, note }),
+    tellCeo: async ({ ticketId, note }) => {
+      if (fail.ceo > 0 && fail.ceo--) throw new Error("wake insert failed");
+      return { id: String(told.push({ ticketId, note })) };
+    },
+    log: (m) => logs.push(m),
     notify: async (input) => {
+      if (fail.owner > 0 && fail.owner--) return null;
       const row = await built.notes.notify(input);
       if (row) sent.push({ id: row.id, title: input.title, body: input.body });
       return row;
     },
     now: clock,
   });
-  return { ...built, db, close, company, ticket, watch, told, sent, advance: (ms: number) => (offset += ms), clock };
+  return { ...built, db, close, company, ticket, watch, told, sent, fail, logs, advance: (ms: number) => (offset += ms), clock };
 }
 
 describe("priority watch: the sweep", () => {
+  it("BOS-2632: a CEO wake or owner notification that fails is logged and sent on the next pass, then never again", async () => {
+    ctx = await setup();
+    const t = await ctx.ticket("Docker check worker");
+    await ctx.db.update(tickets).set({ urgent: true, systemState: "in_progress", lastActivityAt: ago(10 * MIN) }).where(eq(tickets.id, t.id));
+    ctx.fail.ceo = 1;
+    expect(await ctx.watch.run(true)).toMatchObject({ told: 0 });
+    expect(ctx.logs.join("\n")).toContain("wake insert failed");
+    ctx.advance(5 * MIN);
+    expect(await ctx.watch.run(true)).toMatchObject({ told: 1 });
+    ctx.advance(5 * MIN);
+    expect(await ctx.watch.run(true)).toMatchObject({ told: 0 });
+    expect(ctx.told).toHaveLength(1);
+    ctx.fail.owner = 1;
+    ctx.advance(OWNER_AFTER_MS);
+    expect(await ctx.watch.run(true)).toMatchObject({ ownerTold: 0 });
+    expect(ctx.logs).toHaveLength(2);
+    ctx.advance(5 * MIN);
+    expect(await ctx.watch.run(true)).toMatchObject({ ownerTold: 1 });
+    ctx.advance(5 * MIN);
+    expect(await ctx.watch.run(true)).toMatchObject({ ownerTold: 0, told: 0 });
+    expect(ctx.sent).toHaveLength(1);
+    expect(ctx.told).toHaveLength(1);
+  });
+
   it("tells the CEO once for a stop, the owner once 15 minutes later, and clears the owner's card when it moves", async () => {
     ctx = await setup();
     const t = await ctx.ticket("Docker check worker");

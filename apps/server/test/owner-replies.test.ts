@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { and, eq, isNull } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
+import { ownerRepliesService } from "../src/services/owner-replies.js";
 import type { RunnerCommand } from "@boss-man/shared";
 import { DEFAULT_WATCHDOG } from "@boss-man/shared";
 import { agents, companies, decisions, ownerReplies, runs, tickets, wakes } from "../src/db/schema.js";
@@ -90,6 +91,28 @@ describe("an owner's message on a ticket waits for an answer (BOS-425)", () => {
     await c().ownerReplies.afterRunEnded(runId);
     expect(await wakesFor(c().worker.id, t.id)).toHaveLength(1);
     expect((await c().state(t.id))[0]!.replyReminders).toBe(1);
+  });
+
+  it("BOS-2632: a re-wake that fails is logged and its claim handed back, so it is sent later, once", async () => {
+    const { t, runId } = await liveRunWithOwnerMessage();
+    await c().db.update(runs).set({ endedAt: c().now() }).where(eq(runs.id, runId));
+    await c().db.delete(wakes);
+    const logs: string[] = [];
+    const failing = ownerRepliesService(c().db, {
+      notify: async () => {
+        throw new Error("wake insert failed");
+      },
+      alert: async () => null,
+      now: c().now,
+      log: (m) => logs.push(m),
+    });
+    expect(await failing.afterRunEnded(runId)).toBe(0);
+    expect(logs.join("\n")).toContain("wake insert failed");
+    expect((await c().state(t.id))[0]!.replyReminders).toBe(0);
+    // The claim is free again: the next try (here the same end reported again; otherwise the five-minute sweep) wakes, once.
+    expect(await c().ownerReplies.afterRunEnded(runId)).toBe(1);
+    expect(await c().ownerReplies.afterRunEnded(runId)).toBe(0);
+    expect(await wakesFor(c().worker.id, t.id)).toEqual([expect.objectContaining({ reason: "message", priority: 4 })]);
   });
 
   it("counts a run's closing message as the answer, so it is not re-woken for silence", async () => {
