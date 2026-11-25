@@ -186,6 +186,8 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
                     burnup: f.burnup,
                     pinned: m.horizon,
                     horizon: milestoneHorizon({ ...f.counts, active: f.active, targetDate: m.targetDate, horizon: m.horizon }, today),
+                    /** BOS-2581: the owner has asked the CEO to plan a remedy when this turns At risk or Late. Off unless turned on. */
+                    ceoManagesRisk: m.ceoManagesRisk,
                   };
                 }),
             })),
@@ -204,12 +206,24 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
       return o;
     },
 
-    async updateMilestone(id: string, patch: { title?: string; targetDate?: string | null; objectiveId?: string; horizon?: Horizon | null }) {
+    async updateMilestone(id: string, patch: { title?: string; targetDate?: string | null; objectiveId?: string; horizon?: Horizon | null; ceoManagesRisk?: boolean }) {
       const [m] = await db.select({ objectiveId: milestones.objectiveId }).from(milestones).where(eq(milestones.id, id));
       if (!m) throw new WorkError(404, "No such milestone.");
       if (patch.objectiveId && (await companyOfObjective(patch.objectiveId)) !== (await companyOfObjective(m.objectiveId))) throw new WorkError(422, "A milestone can only move to an objective of the same company.");
       const [u] = await db.update(milestones).set(patch).where(eq(milestones.id, id)).returning();
       return u!;
+    },
+
+    /**
+     * BOS-2581: turn "CEO manages at risk" on or off for every milestone of a company at once. Off first: turning them back
+     * on later starts each afresh, so one that is At risk now doesn't wake the CEO again. On leaves a milestone already on
+     * exactly as it is (same rule). The page warns that each managed milestone can cost a CEO run before this is pressed.
+     */
+    async setCeoManagesRiskForCompany(companyId: string, on: boolean) {
+      const objs = await db.select({ id: objectives.id }).from(objectives).where(eq(objectives.companyId, companyId));
+      if (!objs.length) return { changed: 0, on };
+      const rows = await db.update(milestones).set({ ceoManagesRisk: on }).where(inArray(milestones.objectiveId, objs.map((o) => o.id))).returning({ id: milestones.id });
+      return { changed: rows.length, on };
     },
 
     /** Deleting a milestone leaves its tickets in place, unscheduled. */

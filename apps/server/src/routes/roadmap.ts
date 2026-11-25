@@ -143,6 +143,13 @@ export function roadmapRoutes(
     const cos = await db.select({ id: companies.id, name: companies.name }).from(companies).orderBy(asc(companies.name));
     return Promise.all(cos.map(async (c) => ({ ...c, features: await feedback.roadmapFeatures(c.id) })));
   });
+  /** BOS-2581: turn "CEO manages at risk" on or off for every milestone of a company at once (the page warns about the extra CEO runs first). */
+  owner.post("/api/companies/:id/milestones/ceo-manages-risk", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    if (!(await companyExists(db, id))) return reply.code(404).send({ error: "not_found" });
+    const b = z.object({ on: z.boolean() }).parse(req.body);
+    return planning.setCeoManagesRiskForCompany(id, b.on);
+  });
   owner.patch("/api/objectives/:id", async (req) => {
     const { id } = IdParam.parse(req.params);
     const b = z.object({ title: z.string().trim().min(1).max(200), priority: z.number().int().min(1).max(5), status: z.enum(OBJECTIVE_STATUSES) }).partial().parse(req.body);
@@ -151,7 +158,7 @@ export function roadmapRoutes(
   owner.get("/api/milestones/:id/tickets", async (req) => planning.milestoneTickets(IdParam.parse(req.params).id));
   owner.patch("/api/milestones/:id", async (req) => {
     const { id } = IdParam.parse(req.params);
-    const b = z.object({ title: z.string().trim().min(1).max(200), targetDate: DateStr.nullable(), objectiveId: Uuid, horizon: z.enum(HORIZONS).nullable() }).partial().parse(req.body);
+    const b = z.object({ title: z.string().trim().min(1).max(200), targetDate: DateStr.nullable(), objectiveId: Uuid, horizon: z.enum(HORIZONS).nullable(), ceoManagesRisk: z.boolean() }).partial().parse(req.body);
     return planning.updateMilestone(id, b);
   });
   owner.delete("/api/milestones/:id", async (req, reply) => {

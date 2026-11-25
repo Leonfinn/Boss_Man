@@ -1,0 +1,1 @@
+ALTER TABLE "milestones" ADD COLUMN "ceo_manages_risk" boolean DEFAULT false NOT NULL;
