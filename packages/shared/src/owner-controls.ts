@@ -129,7 +129,7 @@ export const OWNER_CONTROLS = {
   Roadmap: [
     "Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "Add objective", "Milestones", "Change", "Download CSV",
     // BOS-2581: the "CEO manages at risk" switch on a milestone, and for all of a company's milestones.
-    "CEO manages At risk", "Take it on", "Keep it off", "Turning it off", "CEO manages At risk for all", "Turn it on for all", "Keep it as it is", "Turn it off for all", "Turn it off everywhere", "Keep it on",
+    "CEO manages At risk", "Turn it on", "Keep it off", "Turn it off", "CEO manages At risk for all", "Turn it on for all", "Keep it as it is", "Turn it off for all", "Turn it off everywhere", "Keep it on",
   ],
   Plan: [
     "Refresh",

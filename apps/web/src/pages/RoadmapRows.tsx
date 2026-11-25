@@ -217,7 +217,7 @@ const finishedOn = (m: RoadmapMilestone) => (m.finishedAt ? m.finishedAt.slice(0
 /**
  * BOS-2581: "CEO manages at risk" for one milestone, off by default. Off, the switch is a small tick under the reason
  * line; on, it shows a note that the CEO will plan a remedy (which costs a CEO run) when the milestone turns At risk or
- * Late. Turning it on takes a second press ("Take it on"), so nobody spends a CEO run by a stray click.
+ * Late. Turning it on takes a second press ("Turn it on"), so nobody spends a CEO run by a stray click.
  */
 export function MilestoneRiskSwitch({ m, onChanged }: { m: RoadmapMilestone; onChanged?: () => void }) {
   const [confirming, setConfirming] = useState(false);
@@ -238,7 +238,7 @@ export function MilestoneRiskSwitch({ m, onChanged }: { m: RoadmapMilestone; onC
         <>
           <span className="rm-risk-on">The CEO manages this: when it turns At risk or Late, they are woken to plan a remedy, which costs a CEO run.</span>
           <button type="button" className="btn small" disabled={saving} onClick={() => save(false)}>
-            Turning it off
+            Turn it off
           </button>
         </>
       ) : confirming ? (
@@ -254,7 +254,7 @@ export function MilestoneRiskSwitch({ m, onChanged }: { m: RoadmapMilestone; onC
               else setConfirming(false);
             }}
           >
-            Take it on
+            Turn it on
           </button>
           <button type="button" className="btn small" disabled={saving} onClick={() => setConfirming(false)}>
             Keep it off
