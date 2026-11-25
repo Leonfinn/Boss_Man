@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dateIn, dateInCacheSize, milestoneHorizon, milestoneStatus, nextMidnightIn, timeZoneOr } from "../src/index.js";
+import { dateIn, dateInCacheSize, milestoneHorizon, milestoneStatus, milestoneVerdict, nextMidnightIn, timeZoneOr } from "../src/index.js";
 
 // BOS-2188: "until midnight (server time)" for a timed permission rule.
 describe("nextMidnightIn", () => {
@@ -53,6 +53,85 @@ describe("milestoneStatus (BOS-2558: one rule, every row of the design's table)"
     expect(milestoneStatus({ total: 2, done: 1, ...ok, blocked: 1 }, "2026-10-01", today)).toBe("late");
     expect(milestoneStatus({ total: 0, done: 0, ...ok }, null, today)).toBe("no_work");
     expect(milestoneStatus({ total: 2, done: 1, ...ok }, null, today)).toBe("no_date");
+  });
+});
+
+describe("milestoneVerdict (BOS-2579: badge and reason from one function)", () => {
+  const base = { blocked: 0, daysLate: 0, noEstimate: false };
+  const t = (ref: string, why: "owner" | "stuck") => ({ ref, id: `id-${ref}`, why });
+  const check = (ref: string, quietDays: number | null) => ({ ref, id: `id-${ref}`, assignee: "Zippy", quietDays });
+
+  it("counts merged, live tickets as delivered: a milestone whose only open tickets are final checks is Live, being checked, never At risk or Late", () => {
+    const v = milestoneVerdict({ total: 5, done: 2, delivered: 3, ...base, blocked: 3, daysLate: 9, checks: [check("BOS-1", null), check("BOS-2", null), check("BOS-3", null)], lastCheckEnds: "2026-10-20" }, "2026-10-10", today);
+    expect(v.status).toBe("live_checked");
+    expect(v.reason).toContain("3 final checks running");
+    expect(v.reason).toContain("last check ends Tue 20 Oct");
+  });
+
+  it("names the quiet checks, and only those, in the reason", () => {
+    const v = milestoneVerdict({ total: 2, done: 0, delivered: 2, ...base, checks: [check("BOS-1703", 7), check("BOS-1964", null)] }, "2026-10-30", today);
+    expect(v.reason).toContain("1 has gone quiet: BOS-1703");
+    expect(v.reason).not.toContain("BOS-1964");
+    expect(v.tickets.map((x) => x.ref)).toEqual(["BOS-1703"]);
+  });
+
+  it("a blocked ticket alone is on track; one waiting on the owner's card is at risk and named", () => {
+    expect(milestoneVerdict({ total: 3, done: 1, ...base, blocked: 2 }, "2026-11-30", today)).toMatchObject({ status: "on_track", reason: null });
+    const v = milestoneVerdict({ total: 3, done: 1, ...base, blocked: 1, needsAction: [t("BOS-2541", "owner")] }, "2026-11-30", today);
+    expect(v.status).toBe("at_risk");
+    expect(v.reason).toBe("At risk: BOS-2541 waits on your card.");
+    expect(v.tickets.map((x) => x.ref)).toEqual(["BOS-2541"]);
+  });
+
+  it("puts the worst reason first: owner card, then the date, then stuck", () => {
+    const stuck = t("BOS-9", "stuck");
+    expect(milestoneVerdict({ total: 3, done: 1, ...base, daysLate: 4, needsAction: [stuck] }, "2026-11-30", today).reason).toContain("4 days after its date");
+    expect(milestoneVerdict({ total: 3, done: 1, ...base, needsAction: [stuck] }, "2026-11-30", today).reason).toBe("At risk: BOS-9 looks stuck.");
+  });
+
+  it("is Late with a reason when unbuilt work is left past the date, and has no reason when done or on track", () => {
+    expect(milestoneVerdict({ total: 3, done: 1, delivered: 1, ...base }, "2026-10-10", today).reason).toMatch(/^Late: its date passed 6 days ago and 1 ticket is not built/);
+    expect(milestoneVerdict({ total: 2, done: 2, ...base }, "2026-10-10", today)).toMatchObject({ status: "done", reason: null });
+  });
+
+  it("the owner's five 25 Nov milestones (22 blocked tickets, every one merged and live) read Live, being checked or On track, never At risk or Late", () => {
+    // Shape from the BOS-2573 design page: 5 milestones, 22 "blocked" tickets that are all built and live, with the
+    // pace estimate saying they run past their dates. Figures per milestone are made up to that shape.
+    const fiveMilestones = [
+      { done: 5, delivered: 4, date: "2026-11-30" },
+      { done: 2, delivered: 4, date: "2026-12-05" },
+      { done: 2, delivered: 6, date: "2026-12-12" },
+      { done: 1, delivered: 5, date: "2026-12-20" },
+      { done: 3, delivered: 3, date: "2026-12-31" },
+    ];
+    expect(fiveMilestones.reduce((n, m) => n + m.delivered, 0)).toBe(22);
+    for (const { date, ...m } of fiveMilestones) {
+      const total = m.done + m.delivered; // every unfinished ticket is built and live
+      const checks = Array.from({ length: m.delivered }, (_, i) => check(`BOS-${100 + i}`, null));
+      const v = milestoneVerdict({ ...base, ...m, total, blocked: m.delivered, daysLate: 12, checks }, date, today);
+      expect(["live_checked", "on_track"]).toContain(v.status);
+      expect(v.reason ?? "").not.toMatch(/^(At risk|Late)/);
+    }
+  });
+
+  it("the badge and the reason line always agree: the reason opens with the words of its badge, and only a badge with something to say has one", () => {
+    const opening: Record<string, RegExp | null> = { at_risk: /^At risk: /, late: /^Late: /, live_checked: /^All built and live\./, done: null, on_track: null, no_work: null, no_date: null };
+    const dates = [null, "2026-10-01", "2026-10-10", "2026-11-30"];
+    for (const date of dates) for (const done of [0, 2, 4]) for (const delivered of [0, 2]) for (const daysLate of [0, 5]) for (const owner of [false, true]) {
+      const total = 4 + (done === 4 ? 0 : delivered);
+      const needsAction = owner ? [t("BOS-7", "owner")] : [];
+      const input = { ...base, total, done, delivered: Math.min(delivered, total - done), daysLate, needsAction, checks: [] };
+      const v = milestoneVerdict(input, date, today);
+      expect(v.status).toBe(milestoneStatus(input, date, today));
+      const re = opening[v.status];
+      if (re) expect(v.reason ?? "").toMatch(re);
+      else expect(v.reason).toBeNull();
+    }
+  });
+
+  it("gives every status the same badge milestoneStatus does", () => {
+    const input = { total: 3, done: 1, ...base, needsAction: [t("BOS-5", "owner")] };
+    expect(milestoneStatus(input, "2026-11-30", today)).toBe(milestoneVerdict(input, "2026-11-30", today).status);
   });
 });
 

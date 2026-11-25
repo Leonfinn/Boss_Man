@@ -13,12 +13,13 @@ export const STATUS: Record<MilestoneStatus, { label: string; tone: string; icon
   late: { label: "Late", tone: "red", icon: "■", colour: "var(--red-ink)" },
   at_risk: { label: "At risk", tone: "amber", icon: "▲", colour: "var(--amber-ink)" },
   on_track: { label: "On track", tone: "blue", icon: "●", colour: "var(--link)" },
+  live_checked: { label: "Live, being checked", tone: "green", icon: "✓", colour: "var(--green-ink)" },
   no_work: { label: "No tickets", tone: "grey", icon: "○", colour: "var(--muted)" },
   no_date: { label: "No date", tone: "grey", icon: "○", colour: "var(--muted)" },
 };
 
 /** Worst first, the order the summary line counts in. */
-const SUMMARY_ORDER: MilestoneStatus[] = ["late", "at_risk", "on_track", "no_date", "no_work"];
+const SUMMARY_ORDER: MilestoneStatus[] = ["late", "at_risk", "live_checked", "on_track", "no_date", "no_work"];
 
 const daysBetween = (from: string, to: string) => Math.round((dayOf(to) - dayOf(from)) / DAY);
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
@@ -194,6 +195,22 @@ function MonthAxis({ range }: { range: DateRange }) {
   );
 }
 
+/** The reason line with each named ticket's reference turned into a link. It sits outside the row's button, so the links can be reached by keyboard. */
+export function ReasonText({ text, tickets }: { text: string; tickets: Array<{ ref: string; id: string }> }) {
+  if (!tickets.length) return <>{text}</>;
+  // Longest reference first and not inside a longer one, so BOS-12 never links inside BOS-123.
+  const refs = [...tickets].map((t) => t.ref).sort((a, b) => b.length - a.length);
+  const re = new RegExp(`(?<![\\w-])(${refs.map((r) => r.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?![\\w-])`, "g");
+  return (
+    <>
+      {text.split(re).map((part, i) => {
+        const t = tickets.find((x) => x.ref === part);
+        return t ? <a key={i} href={`#/tickets/${t.id}`}>{part}</a> : <span key={i}>{part}</span>;
+      })}
+    </>
+  );
+}
+
 const finishedOn = (m: RoadmapMilestone) => (m.finishedAt ? m.finishedAt.slice(0, 10) : null);
 
 /** The rows of one objective, the key, the rules and the folded Done group. */
@@ -225,6 +242,11 @@ export function MilestoneRows({ ms, range, now, selected, onSelect, detail }: { 
                     </span>
                     <Strip m={m} range={range} now={now} />
                   </button>
+                  {m.reason && (
+                    <p className={`rm-reason ${m.status}`} data-testid="rm-reason">
+                      <ReasonText text={m.reason} tickets={m.reasonTickets ?? []} />
+                    </p>
+                  )}
                   {isOpen && (
                     <div className="rm-open">
                       <h4>Progress over the last 8 weeks</h4>
@@ -253,9 +275,10 @@ export function MilestoneRows({ ms, range, now, selected, onSelect, detail }: { 
         <summary>How the status is worked out</summary>
         <ul>
           <li><b>✓ Done:</b> Every ticket in it is finished.</li>
-          <li><b>● On track:</b> At its pace it finishes by its date, and nothing in it is blocked.</li>
-          <li><b>▲ At risk:</b> At its pace it finishes after its date, or a ticket in it is blocked, or nothing in it was finished in the last 4 weeks.</li>
-          <li><b>■ Late:</b> Its date has passed and work is left.</li>
+          <li><b>✓ Live, being checked:</b> Everything is built and live; some final checks haven't reported yet. It turns Done when the last one passes.</li>
+          <li><b>● On track:</b> At its pace it finishes by its date. A merged, live ticket counts as built.</li>
+          <li><b>▲ At risk:</b> At its pace the unbuilt work finishes after its date; or nothing was finished in the last 4 weeks and its date is within 4 weeks; or an unbuilt ticket waits on your card or looks stuck. A blocked ticket alone does not make it at risk.</li>
+          <li><b>■ Late:</b> Its date has passed and work is not yet built and live. The date means built and live.</li>
           <li><b>Its pace:</b> Points of this milestone finished in the last 4 weeks, per week. Tickets of its features count too.</li>
         </ul>
       </details>

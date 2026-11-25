@@ -50,10 +50,12 @@ describe("milestoneStatus", () => {
     expect(milestoneStatus({ total: 3, done: 1, blocked: 0, ...ok }, "2026-10-15", today)).toBe("late");
     expect(milestoneStatus({ total: 3, done: 1, blocked: 0, ...ok }, null, today)).toBe("no_date");
     expect(milestoneStatus({ total: 4, done: 1, blocked: 0, daysLate: 3, noEstimate: false }, "2026-10-30", today)).toBe("at_risk");
-    expect(milestoneStatus({ total: 4, done: 3, blocked: 1, ...ok }, "2026-10-16", today)).toBe("at_risk");
+    // BOS-2579: a blocked ticket alone never turns the badge amber.
+    expect(milestoneStatus({ total: 4, done: 3, blocked: 1, ...ok }, "2026-10-16", today)).toBe("on_track");
     expect(milestoneStatus({ total: 4, done: 3, blocked: 0, ...ok }, "2026-10-30", today)).toBe("on_track");
-    // A blocked ticket is worth knowing about at any distance.
-    expect(milestoneStatus({ total: 4, done: 0, blocked: 2, ...ok }, "2026-12-01", today)).toBe("at_risk");
+    // A blocked ticket matters only when it waits on the owner, looks stuck or waits past the date (BOS-2579).
+    expect(milestoneStatus({ total: 4, done: 0, blocked: 2, ...ok }, "2026-12-01", today)).toBe("on_track");
+    expect(milestoneStatus({ total: 4, done: 0, blocked: 2, ...ok, needsAction: [{ ref: "BOS-1", id: "a", why: "owner" }] }, "2026-12-01", today)).toBe("at_risk");
   });
   it("reads today in the owner's time zone", () => {
     expect(dateIn(new Date("2026-10-16T23:30:00Z"), "Europe/London")).toBe("2026-10-17");

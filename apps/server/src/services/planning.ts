@@ -2,9 +2,9 @@
 // on a timeline; the plan is a company's tickets and what they wait on, as a graph with blocked
 // chains and their causes worked out on the server, so the browser only draws.
 import { and, asc, eq, gte, inArray, ne, or, sql } from "drizzle-orm";
-import { layoutPlan, milestoneHorizon, milestoneStatus, ticketRef, type Horizon, type MilestoneStatus } from "@boss-man/shared";
+import { layoutPlan, milestoneHorizon, milestoneVerdict, ticketRef, type Horizon, type MilestoneAction, type MilestoneStatus } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, companies, decisions, engagements, features, keyResults, milestones, objectives, projects, ticketDependencies, tickets } from "../db/schema.js";
+import { agents, companies, decisions, engagements, features, keyResults, milestones, objectives, projects, ticketDependencies, tickets, watchdogFlags } from "../db/schema.js";
 import { WorkError } from "./work.js";
 import { record } from "./activity.js";
 import { ticketBlockerFinished } from "./ticket-links.js";
@@ -110,16 +110,48 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
       // forecast and the burn-up are all worked out from it, so the timeline and the list can't disagree (BOS-2560).
       const ticketsOf = new Map<string, Awaited<ReturnType<typeof ticketsOfMilestones>>>();
       for (const t of await ticketsOfMilestones(db, msIds)) ticketsOf.set(t.milestoneId, [...(ticketsOf.get(t.milestoneId) ?? []), t]);
+      // BOS-2579: a merged ticket with no go-live wait left is live, so it counts as delivered, not blocked. Whether the
+      // unbuilt rest waits on the owner (an open card) or the watchdog flags it stuck is read once for every milestone.
+      const delivered = (t: { state: string; mergeCommit: string | null; goLiveWait: string | null }) => (t.state === "blocked" || t.state === "in_progress") && !!t.mergeCommit && !t.goLiveWait;
+      const unbuiltIds = [...ticketsOf.values()].flat().filter((t) => t.state !== "done" && !delivered(t)).map((t) => t.id);
+      const ownerWaiting = new Set<string>();
+      const stuckIds = new Set<string>();
+      if (unbuiltIds.length) {
+        for (const r of await db
+          .select({ id: ticketDependencies.blockedTicketId })
+          .from(ticketDependencies)
+          .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
+          .where(and(inArray(ticketDependencies.blockedTicketId, unbuiltIds), eq(decisions.status, "open")))) ownerWaiting.add(r.id);
+        for (const f of await db
+          .select({ id: watchdogFlags.ticketId })
+          .from(watchdogFlags)
+          .where(and(inArray(watchdogFlags.ticketId, unbuiltIds), eq(watchdogFlags.status, "open"), ne(watchdogFlags.rule, "owner_decision_waiting"), sql`${watchdogFlags.lastFlaggedAt} is not null`))) stuckIds.add(f.id);
+      }
+      const QUIET_DAYS = 3;
       const figures = (m: (typeof ms)[number]) => {
         const rows = ticketsOf.get(m.id) ?? [];
         const done = rows.filter((t) => t.state === "done");
+        const live = rows.filter(delivered);
         const burnup = burnupWeeks(rows.map((t) => ({ size: t.size, createdAt: t.createdAt, doneAt: t.state === "done" ? t.changedAt : null })), today);
-        // Its own pace: points of this milestone finished in the last 4 weeks, a week.
-        const forecast = forecastMilestone(rows.map((t) => ({ size: t.size, done: t.state === "done" })), paceFromBurnup(burnup), m.targetDate, today);
-        const counts = { total: rows.length, done: done.length, blocked: rows.filter((t) => t.state === "blocked").length };
+        // Its own pace: points of this milestone finished in the last 4 weeks, a week. Delivered tickets are built and live, so they count as done.
+        const forecast = forecastMilestone(rows.map((t) => ({ size: t.size, done: t.state === "done" || delivered(t) })), paceFromBurnup(burnup), m.targetDate, today);
+        const counts = { total: rows.length, done: done.length, blocked: rows.filter((t) => t.state === "blocked" && !delivered(t)).length };
         const finishedAt = rows.length > 0 && done.length === rows.length ? new Date(Math.max(...done.map((t) => t.changedAt.getTime()))).toISOString() : null;
-        const status = milestoneStatus({ ...counts, daysLate: forecast.daysLate, noEstimate: forecast.pointsLeft > 0 && forecast.expectedFinish === null }, m.targetDate, today) as MilestoneStatus;
-        return { counts, active: rows.filter((t) => t.state === "in_progress" || t.state === "review").length, burnup, forecast, finishedAt, status };
+        const nowMs = Date.parse(`${today}T00:00:00Z`);
+        const checks = live.map((t) => {
+          // Gone quiet: its watch date has passed with no report, or it has no date of its own and nobody touched it for 3 days.
+          const since = t.watchUntil ? t.watchUntil.getTime() : t.changedAt.getTime();
+          const idle = Math.floor((nowMs - since) / dayMs);
+          const quiet = t.watchUntil ? since < nowMs : idle >= QUIET_DAYS;
+          return { id: t.id, ref: t.ref, assignee: t.assignee, quietDays: quiet ? Math.max(0, idle) : null };
+        });
+        const ends = live.flatMap((t) => (t.watchUntil ? [t.watchUntil.toISOString().slice(0, 10)] : [])).sort().at(-1) ?? null;
+        const needsAction = rows
+          .filter((t) => t.state !== "done" && !delivered(t))
+          .flatMap((t): MilestoneAction[] => (ownerWaiting.has(t.id) ? [{ id: t.id, ref: t.ref, why: "owner" }] : stuckIds.has(t.id) ? [{ id: t.id, ref: t.ref, why: "stuck" }] : []));
+        // One function gives the badge and the line under it, worked out when the page is read, so they can't disagree (R59).
+        const verdict = milestoneVerdict({ ...counts, delivered: live.length, daysLate: forecast.daysLate, noEstimate: forecast.pointsLeft > 0 && forecast.expectedFinish === null, needsAction, checks, lastCheckEnds: ends, expectedFinish: forecast.expectedFinish }, m.targetDate, today);
+        return { counts, active: rows.filter((t) => t.state === "in_progress" || t.state === "review").length, burnup, forecast, finishedAt, status: verdict.status as MilestoneStatus, reason: verdict.reason, reasonTickets: verdict.tickets };
       };
       return cos
         .map((c) => ({
@@ -145,6 +177,8 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
                     ...f.counts,
                     active: f.active,
                     status: f.status,
+                    reason: f.reason,
+                    reasonTickets: f.reasonTickets,
                     forecast: f.forecast,
                     /** When the last of its tickets was finished (the burn-up's stand-in); null until it is done. */
                     finishedAt: f.finishedAt,
