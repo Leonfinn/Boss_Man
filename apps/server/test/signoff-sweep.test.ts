@@ -466,3 +466,93 @@ describe("a signed-off head may only sit in review (BOS-1879)", () => {
     expect((await c.row(unsigned.id)).systemState).toBe("in_progress");
   });
 });
+
+describe("a review no agent can take has a card too (BOS-2582, DR-021)", () => {
+  it("raises one card for a pending review with no reviewer, none for a ticket that already has one, and none twice", async () => {
+    const c = await setup();
+    const seed = await c.approvedHighRisk();
+    const projectId = (await c.row(seed.id)).projectId;
+    const mk = async (title: string) => ((await c.req("POST", `/api/projects/${projectId}/tickets`, { title, assigneeAgentId: c.worker.id, risk: "medium" })).json() as { id: string });
+    const orphan = await mk("Orphan review");
+    await c.db.update(tickets).set({ branch: `bossman/${orphan.id}`, systemState: "review" }).where(eq(tickets.id, orphan.id));
+    await c.db.insert(reviewRequests).values({ ticketId: orphan.id, kind: "code", reviewerAgentId: null, round: 1, seq: 0, status: "pending" });
+    // A second one that already has an open sign-off card (the sweep must add nothing for it).
+    const held = await mk("Has a card");
+    await c.db.update(tickets).set({ branch: `bossman/${held.id}`, systemState: "review" }).where(eq(tickets.id, held.id));
+    await c.db.insert(reviewRequests).values({ ticketId: held.id, kind: "code", reviewerAgentId: null, round: 1, seq: 0, status: "pending" });
+    const { raiseSignoffCard, sweepNoReviewerCards } = await import("../src/services/signoff.js");
+    const existing = await raiseSignoffCard(c.db, await c.row(held.id), { reviewer: "Sam", reviewerAgentId: c.senior.id });
+    expect((await c.boardCard(orphan.id)).waitingOnOwner).toBe(true);
+    expect((await c.boardCard(orphan.id)).waitingDecisionId).toBeNull();
+    expect(await sweepNoReviewerCards(c.db)).toBe(1);
+    expect(await sweepNoReviewerCards(c.db)).toBe(0);
+    const open = await c.cards(orphan.id, "open");
+    expect(open).toHaveLength(1);
+    expect((await c.boardCard(orphan.id)).waitingDecisionId).toBe(open[0]!.id);
+    const heldCards = await c.cards(held.id, "open");
+    expect(heldCards.map((d) => d.id)).toEqual([existing]);
+    // The card closes by itself: still open while nobody can review, closed once a reviewer holds the review.
+    const { alertClearing } = await import("../src/services/alert-clearing.js");
+    const closer = alertClearing(c.db, { isConnected: () => false, hasRoom: async () => true });
+    await closer.check();
+    expect(await c.cards(orphan.id, "open")).toHaveLength(1);
+    await c.db.update(reviewRequests).set({ reviewerAgentId: c.senior.id }).where(eq(reviewRequests.ticketId, orphan.id));
+    await closer.check();
+    expect(await c.cards(orphan.id, "open")).toHaveLength(0);
+    // And when the ticket leaves review.
+    await c.db.update(reviewRequests).set({ reviewerAgentId: null }).where(eq(reviewRequests.ticketId, orphan.id));
+    await sweepNoReviewerCards(c.db);
+    expect(await c.cards(orphan.id, "open")).toHaveLength(1);
+    await c.db.update(tickets).set({ systemState: "in_progress" }).where(eq(tickets.id, orphan.id));
+    await closer.check();
+    expect(await c.cards(orphan.id, "open")).toHaveLength(0);
+  });
+  it("both cardless sources end with exactly one card, each on its own, and the board points at it (derived sign-off, no reviewer)", async () => {
+    const c = await setup();
+    const derived = await c.approvedHighRisk(); // source 3: derived sign-off, no card
+    const projectId = (await c.row(derived.id)).projectId;
+    const orphan = (await c.req("POST", `/api/projects/${projectId}/tickets`, { title: "Orphan review", assigneeAgentId: c.worker.id, risk: "medium" })).json() as { id: string };
+    await c.db.update(tickets).set({ branch: `bossman/${orphan.id}`, systemState: "review" }).where(eq(tickets.id, orphan.id));
+    await c.db.insert(reviewRequests).values({ ticketId: orphan.id, kind: "code", reviewerAgentId: null, round: 1, seq: 0, status: "pending" }); // source 4
+    for (const id of [derived.id, orphan.id]) {
+      expect(await c.cards(id)).toHaveLength(0);
+      expect((await c.boardCard(id)).waitingOnOwner).toBe(true);
+    }
+    const { sweepMissingSignoffs, sweepNoReviewerCards } = await import("../src/services/signoff.js");
+    expect(await sweepMissingSignoffs(c.db)).toBe(1);
+    expect(await sweepNoReviewerCards(c.db, undefined, async () => "a".repeat(40))).toBe(1);
+    expect(await sweepMissingSignoffs(c.db)).toBe(0);
+    expect(await sweepNoReviewerCards(c.db)).toBe(0);
+    for (const id of [derived.id, orphan.id]) {
+      const open = await c.cards(id, "open");
+      expect(open).toHaveLength(1);
+      expect((await c.boardCard(id)).waitingDecisionId).toBe(open[0]!.id);
+    }
+    // The no-reviewer card is bound to the commit the owner looked at, so the head rules apply to it.
+    expect(((await c.cards(orphan.id, "open"))[0]!.context as { head?: string }).head).toBe("a".repeat(40));
+  });
+  it("adds no card for a ticket held by an open CEO-tier card (a review-loop hold)", async () => {
+    const c = await setup();
+    const seed = await c.approvedHighRisk();
+    const projectId = (await c.row(seed.id)).projectId;
+    const t = (await c.req("POST", `/api/projects/${projectId}/tickets`, { title: "Looped", assigneeAgentId: c.worker.id, risk: "medium" })).json() as { id: string };
+    await c.db.update(tickets).set({ branch: `bossman/${t.id}`, systemState: "review", stateChangedAt: new Date(Date.now() - 20 * 60_000) }).where(eq(tickets.id, t.id));
+    const [card] = await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", question: "Reviews keep rejecting it", options: ["Go on"], recommendedOption: "Go on", tier: "ceo", status: "open" }).returning();
+    await c.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: card!.id });
+    const { sweepNoReviewerCards } = await import("../src/services/signoff.js");
+    expect(await sweepNoReviewerCards(c.db)).toBe(0);
+    expect(await c.cards(t.id, "open")).toHaveLength(0);
+  });
+  it("gives a ticket with nothing open a 10-minute grace, then a card", async () => {
+    const c = await setup();
+    const seed = await c.approvedHighRisk();
+    const projectId = (await c.row(seed.id)).projectId;
+    const t = (await c.req("POST", `/api/projects/${projectId}/tickets`, { title: "Nobody opened", assigneeAgentId: c.worker.id, risk: "medium" })).json() as { id: string };
+    await c.db.update(tickets).set({ branch: `bossman/${t.id}`, systemState: "review", stateChangedAt: new Date() }).where(eq(tickets.id, t.id));
+    const { sweepNoReviewerCards } = await import("../src/services/signoff.js");
+    expect(await sweepNoReviewerCards(c.db)).toBe(0);
+    await c.db.update(tickets).set({ stateChangedAt: new Date(Date.now() - 20 * 60_000) }).where(eq(tickets.id, t.id));
+    expect(await sweepNoReviewerCards(c.db)).toBe(1);
+    expect(await c.cards(t.id, "open")).toHaveLength(1);
+  });
+});

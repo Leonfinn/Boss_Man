@@ -2,11 +2,11 @@
 // worked out from the facts: the review policy, the latest review round and the recorded sign-off. The card only
 // shows that state. A ticket that waits with no open card (lost, never raised, the policy switched on after the
 // reviews) is "missing": the sweep raises the card again, and no merge path lands it in the meantime.
-import { and, desc, eq, gt, gte, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, gt, gte, inArray, isNull, sql } from "drizzle-orm";
 import { mergeContext } from "./decision-context.js";
 import { RISK_TIERS, riskOf, ruleFor, type RiskTier } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { activity, agents, companies, decisions, ticketDependencies, ticketReviews, tickets } from "../db/schema.js";
+import { activity, agents, companies, decisions, reviewRequests, ticketDependencies, ticketReviews, tickets } from "../db/schema.js";
 import { APPROVE_MERGE, supersedeSignoffs } from "./decisions.js";
 import { evaluate, latestRows } from "./review-kinds.js";
 import { effectivePolicy } from "./review-policy.js";
@@ -170,7 +170,7 @@ export async function signoffHistory(db: Db, ticketId: string, limit = 5): Promi
  * transaction, so a crash can't leave a card without its hold or a hold without its card. The card closes
  * itself once the ticket stops waiting on the sign-off (`signoffNotWaiting`, DR-021).
  */
-export async function raiseSignoffCard(db: Db, t: Ticket, o: { reviewer: string; reviewerAgentId: string | null; head?: string | null; /** How many files the branch changes at that head (BOS-1236); kept on the card so listing it needs no runner call. */ files?: number; earlier?: SignedOff | null; /** Why this replaces an earlier card for older code (BOS-734). */ changed?: string; /** Why the owner has to approve this one whatever its risk (BOS-1094), e.g. it changes scripts/check-all.sh. */ because?: string; /** A real conflict with a branch ahead in the merge line (BOS-1411): one line on the card, never a hold. */ conflictsBecause?: string }): Promise<string> {
+export async function raiseSignoffCard(db: Db, t: Ticket, o: { reviewer: string; reviewerAgentId: string | null; head?: string | null; /** How many files the branch changes at that head (BOS-1236); kept on the card so listing it needs no runner call. */ files?: number; earlier?: SignedOff | null; /** Why this replaces an earlier card for older code (BOS-734). */ changed?: string; /** Why the owner has to approve this one whatever its risk (BOS-1094), e.g. it changes scripts/check-all.sh. */ because?: string; /** A real conflict with a branch ahead in the merge line (BOS-1411): one line on the card, never a hold. */ conflictsBecause?: string; /** BOS-2582: the whole question, for a ticket no agent can review (the default says a reviewer approved it). */ question?: string; /** BOS-2582: what closes the card, when it isn't "the ticket stops waiting on a sign-off". */ clearWhen?: Array<{ kind: string; [k: string]: unknown }> }): Promise<string> {
   const earlier = o.earlier ? `\n\nYou approved an earlier version (${o.earlier.head.slice(0, 8)}) on ${hhmm(new Date(o.earlier.at))}; the code has changed since.` : o.changed ? `\n\nThis replaces an earlier card: since then the branch changed (${o.changed}).` : "";
   const conflict = o.conflictsBecause ? `\n\n${o.conflictsBecause}` : "";
   return db.transaction(async (txn) => {
@@ -181,13 +181,13 @@ export async function raiseSignoffCard(db: Db, t: Ticket, o: { reviewer: string;
       .values({
         companyId: t.companyId,
         kind: "approval",
-        question: `Merge "${t.title}"? ${o.reviewer} approved it, and it is rated ${riskOf(t.risk)} risk.${o.because ? `\n\n${o.because}` : ""}${earlier}${conflict}`,
+        question: o.question ?? `Merge "${t.title}"? ${o.reviewer} approved it, and it is rated ${riskOf(t.risk)} risk.${o.because ? `\n\n${o.because}` : ""}${earlier}${conflict}`,
         options: [APPROVE_MERGE, "Send it back"],
         recommendedOption: APPROVE_MERGE,
         raisedByAgentId: o.reviewerAgentId,
         tier: "owner",
         dedupeKey: `risk-review:${t.id}:${Date.now()}`,
-        context: { type: "risk_review", ticketId: t.id, reviewer: o.reviewer, ...(o.head ? { head: o.head, risk: riskOf(t.risk) } : {}), ...(o.files !== undefined ? { files: o.files } : {}), ...(o.conflictsBecause ? { conflictsBecause: o.conflictsBecause } : {}), clearWhen: [{ kind: "signoffNotWaiting", ticketId: t.id }] },
+        context: { type: "risk_review", ticketId: t.id, reviewer: o.reviewer, ...(o.head ? { head: o.head, risk: riskOf(t.risk) } : {}), ...(o.files !== undefined ? { files: o.files } : {}), ...(o.conflictsBecause ? { conflictsBecause: o.conflictsBecause } : {}), clearWhen: o.clearWhen ?? [{ kind: "signoffNotWaiting", ticketId: t.id }] },
       })
       .returning({ id: decisions.id });
     await addTicketDependency(tx, { companyId: t.companyId, blockedTicketId: t.id, blockerDecisionId: d!.id, actor: { type: "system" } });
@@ -297,6 +297,61 @@ export async function sweepMissingSignoffs(db: Db, tellCeo?: (companyId: string,
     if (!id) continue;
     raised++;
     await tellCeo?.(t.companyId, `"${t.title}" (${t.id}) passed every review and waits on the owner's sign-off, but no sign-off card was open. Boss Man raised it again (card ${id}); it is in the owner's Decisions. Nothing to do unless it stays unanswered.`).catch(() => undefined);
+  }
+  return raised;
+}
+
+/**
+ * BOS-2582 (DR-021 amended): a ticket in review that no agent can review is the owner's, and an owner task always has a
+ * card. This raises the one card for it (the same "Merge it, or send it back?" kind: "Approve and merge" lands it as the
+ * owner, "Send it back" sends it back), when the board would show it as "No agent can review this" and nothing else holds
+ * it: no open sign-off card, no other open owner card it waits on, not being checked. A ticket with nothing open gets a
+ * 10-minute grace, so the moment between a move to review and its reviews opening raises nothing. The card closes when
+ * the ticket leaves review. Returns the card's id, or null when none was needed.
+ */
+export async function restoreNoReviewerCard(db: Db, t: Ticket, now: Date = new Date(), headOf?: (ticketId: string) => Promise<string | null>): Promise<string | null> {
+  if (t.systemState !== "review" || t.checkHoldAt) return null;
+  if (await openSignoffCard(db, t.id)) return null;
+  // Any open card the ticket waits on holds it, whatever its tier (a CEO-tier review-loop card too).
+  const [other] = await db
+    .select({ id: decisions.id })
+    .from(ticketDependencies)
+    .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
+    .where(and(eq(ticketDependencies.blockedTicketId, t.id), eq(decisions.status, "open")))
+    .limit(1);
+  if (other) return null;
+  const [noOne] = await db.select({ id: reviewRequests.id }).from(reviewRequests).where(and(eq(reviewRequests.ticketId, t.id), eq(reviewRequests.status, "pending"), isNull(reviewRequests.reviewerAgentId))).limit(1);
+  if (!noOne) {
+    if (t.pullRequestUrl || now.getTime() - t.stateChangedAt.getTime() < 10 * 60_000) return null;
+    const [open] = await db.select({ id: reviewRequests.id }).from(reviewRequests).where(and(eq(reviewRequests.ticketId, t.id), inArray(reviewRequests.status, ["pending", "approved"]))).limit(1);
+    if (open || (await derivedSignoff(db, t)).state === "waiting") return null;
+  }
+  // The runner is asked for the head only now, for a ticket that really gets a card, so the card follows the head rules.
+  const head = headOf ? await headOf(t.id).catch(() => null) : null;
+  const id = await raiseSignoffCard(db, t, {
+    reviewer: "the owner",
+    reviewerAgentId: null,
+    head,
+    question: `Merge "${t.title}"? No agent can review it, so it is yours to approve. It is rated ${riskOf(t.risk)} risk. Choose "${APPROVE_MERGE}" to land it, or "Send it back".`,
+    clearWhen: [{ kind: "noReviewerGone", ticketId: t.id }],
+  });
+  await record(db, { companyId: t.companyId, ticketId: t.id, kind: "signoff_restored", summary: "No agent can review this ticket, so Boss Man raised a card for the owner to approve it or send it back." });
+  return id;
+}
+
+/** BOS-2582 sweep: every ticket in review that no agent can review gets its card, once. Paused companies are left alone. */
+export async function sweepNoReviewerCards(db: Db, tellCeo?: (companyId: string, note: string) => Promise<unknown>, headOf?: (ticketId: string) => Promise<string | null>): Promise<number> {
+  const rows = await db
+    .select({ t: tickets })
+    .from(tickets)
+    .innerJoin(companies, eq(companies.id, tickets.companyId))
+    .where(and(eq(tickets.systemState, "review"), eq(companies.paused, false)));
+  let raised = 0;
+  for (const { t } of rows) {
+    const id = await restoreNoReviewerCard(db, t, new Date(), headOf);
+    if (!id) continue;
+    raised++;
+    await tellCeo?.(t.companyId, `"${t.title}" (${t.id}) is in review and no agent can review it, so it waited on the owner with no card. Boss Man raised one (card ${id}); it is in the owner's Decisions. Nothing to do unless it stays unanswered.`).catch(() => undefined);
   }
   return raised;
 }
