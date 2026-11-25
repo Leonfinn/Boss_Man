@@ -1,6 +1,6 @@
 {
-  "id": "b1c7d0a4-6f2e-4c19-9a83-2d5e7c40f681",
-  "prevId": "6d0e5f27-3a91-4b7c-8e42-1f9c6b8a2d53",
+  "id": "a36297c2-430c-44e3-a341-399c622621a8",
+  "prevId": "49a9572b-abde-44e4-ac9f-360e04ca453c",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -2713,24 +2713,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": 0
-        },
-        "info_ask_why": {
-          "name": "info_ask_why",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "info_ask_due_at": {
-          "name": "info_ask_due_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "info_ask_nagged_at": {
-          "name": "info_ask_nagged_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {
@@ -6445,12 +6427,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "info_ask_card_id": {
-          "name": "info_ask_card_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -6655,6 +6631,149 @@
           "tableTo": "runs",
           "columnsFrom": [
             "run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.owner_holds": {
+      "name": "owner_holds",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "subject": {
+          "name": "subject",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "reason": {
+          "name": "reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "commit": {
+          "name": "commit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "result": {
+          "name": "result",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ticket_id": {
+          "name": "ticket_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "decision_id": {
+          "name": "decision_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "release_by": {
+          "name": "release_by",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "released_at": {
+          "name": "released_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "released_by": {
+          "name": "released_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "outcome": {
+          "name": "outcome",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "owner_text": {
+          "name": "owner_text",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ended_at": {
+          "name": "ended_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "owner_holds_one_current": {
+          "name": "owner_holds_one_current",
+          "columns": [
+            {
+              "expression": "subject",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"owner_holds\".\"ended_at\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "owner_holds_ticket_id_tickets_id_fk": {
+          "name": "owner_holds_ticket_id_tickets_id_fk",
+          "tableFrom": "owner_holds",
+          "tableTo": "tickets",
+          "columnsFrom": [
+            "ticket_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "owner_holds_decision_id_decisions_id_fk": {
+          "name": "owner_holds_decision_id_decisions_id_fk",
+          "tableFrom": "owner_holds",
+          "tableTo": "decisions",
+          "columnsFrom": [
+            "decision_id"
           ],
           "columnsTo": [
             "id"

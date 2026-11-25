@@ -2394,6 +2394,40 @@ export const updateHolds = pgTable(
   (t) => [uniqueIndex("update_holds_started").on(t.startedAt)],
 );
 
+/**
+ * DR-076 A (BOS-2554): a system offer held while an owner ask about the same action is open. Boss Man opens one when a
+ * server or runner update ends failed, half-done or switched back; while it holds, no card for that update is put on
+ * the owner's queue. Released by an agent (`retry_safe` or `do_not_retry`, with text for the owner) or, past
+ * `releaseBy`, as `unknown`. Ended by a later successful update of the same subject, or a newer hold. Rows are kept.
+ */
+export const ownerHolds = pgTable(
+  "owner_holds",
+  {
+    id: id(),
+    /** "server_deploy" | "runner_update". */
+    subject: text("subject").notNull(),
+    /** The host's own words for the failure. */
+    reason: text("reason").notNull(),
+    /** The commit the failed update was for, and how it ended ("failed", "partial", "rolled_back"). */
+    commit: text("commit").notNull(),
+    result: text("result").notNull(),
+    /** The ticket diagnosing it and an agent card linked to it (DR-076 B), when known. */
+    ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "set null" }),
+    decisionId: uuid("decision_id").references(() => decisions.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    releaseBy: timestamp("release_by", { withTimezone: true }).notNull(),
+    releasedAt: timestamp("released_at", { withTimezone: true }),
+    /** An agent's name, or "timeout". */
+    releasedBy: text("released_by"),
+    /** "retry_safe" | "do_not_retry" | "unknown". */
+    outcome: text("outcome"),
+    ownerText: text("owner_text"),
+    /** A later successful update of this subject, or a newer hold, ended it. */
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+  },
+  (t) => [uniqueIndex("owner_holds_one_current").on(t.subject).where(sql`${t.endedAt} is null`)],
+);
+
 /** BOS-2380: one reading of the database's size per day (UTC), so the 7-day growth in the server health box survives a restart. */
 export const serverSizeReadings = pgTable("server_size_readings", {
   day: text("day").primaryKey(),
