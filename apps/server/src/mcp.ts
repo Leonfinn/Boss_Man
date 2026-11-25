@@ -41,7 +41,7 @@ import { clearsWhenToConditions, type ClearWhen } from "./services/alert-clearin
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { PAGE_DEFAULT } from "./services/list-page.js";
 import { DeployError, liveTagOf, type deploysService } from "./services/deploys.js";
-import { linkHold, releaseHold } from "./services/owner-holds.js";
+import { linkHold, releaseHold, type OwnerHold } from "./services/owner-holds.js";
 import { RunError, runOriginQuery, type runsService } from "./services/runs.js";
 import { holdView } from "./services/review-holds.js";
 import { cardIdInput, resolveCardId, resolveReplacedBy } from "./services/card-id.js";
@@ -194,6 +194,8 @@ export type Services = {
   addons?: () => Promise<AddonFacts>;
   /** Facts for the card lint's R15 (DR-036): whether Boss Man raises its own update card, and its commit. Absent: R15 is not checked. */
   selfDeployCards?: () => Promise<SelfDeployFacts>;
+  /** BOS-2616: offers the card a released hold frees and says what really happened (self-deploy afterHoldRelease); null keeps release_hold's own words. Absent: those words alone. */
+  afterHoldRelease?: (hold: OwnerHold) => Promise<string | null>;
   /** The company's embedder for owner-answer meaning search (BOS-1593); absent or null: word search alone. */
   ownerAnswerEmbedder?: (companyId: string) => Promise<Embedder | null>;
   /** The company's embedder for meaning search over tickets and the CEO's advice (BOS-2116); absent or null: word search alone. */
@@ -284,7 +286,7 @@ async function reportInfoResult(db: Db, notes: Services["notes"], scope: Scope, 
  * has the same set in its chat as in its runs (BOS-224). Chat skips create_ticket and nudge,
  * which it has its own version of, and only the CEO's chat registers these tools at all.
  */
-function registerRunTools(server: McpServer, db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, skillProposals, agents: team, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, deviceProfiles, addons, selfDeployCards, checkRequests, ownerAnswerEmbedder, ticketEmbedder, gitTokenProbe }: Services, scope: Scope, hooks: McpHooks, skip?: ReadonlySet<string>, withServerStatus = true) {
+function registerRunTools(server: McpServer, db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, skillProposals, agents: team, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, deviceProfiles, addons, selfDeployCards, afterHoldRelease, checkRequests, ownerAnswerEmbedder, ticketEmbedder, gitTokenProbe }: Services, scope: Scope, hooks: McpHooks, skip?: ReadonlySet<string>, withServerStatus = true) {
   const originalRegister = server.registerTool.bind(server);
   if (skip?.size) server.registerTool = ((name: string, config: never, cb: never) => (skip.has(name) ? undefined : originalRegister(name, config, cb))) as never;
   const resolveProject = (project?: string) => findProject(db, scope, project);
@@ -860,7 +862,10 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           }
           if (input.outcome !== "retry_safe" && input.outcome !== "do_not_retry") return fail("Give outcome retry_safe (the same version can go out again) or do_not_retry (only a newer one).");
           const r = await releaseHold(db, { subject: input.subject, by: me?.name ?? "an agent", agentId: scope.agentId, isCeo, outcome: input.outcome, ownerText: input.ownerText ?? "" });
-          return r.ok ? text(r.text) : fail(r.text);
+          if (!r.ok) return fail(r.text);
+          // BOS-2616: the reply says where the freed card really is, read after offering it, never a promise.
+          const after = await afterHoldRelease?.(r.hold).catch(() => null);
+          return text(after ? `Released. ${after}` : r.text);
         }
         if (input.action === "request") {
           if (!input.target || !input.ref) return fail("Give the target and the ref to deploy.");

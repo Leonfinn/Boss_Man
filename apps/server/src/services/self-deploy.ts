@@ -1057,7 +1057,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   const RUNNER_DUE = "self_deploy_runner_due";
   const LAST_SERVER = "self_deploy_last_server";
   /** `offer`: the runner needs updating once the window is over; without it the hold only blocks (a row from before BOS-401 is an offer). */
-  type RunnerDue = { commit: string; fromCommit: string; after: string; offer?: boolean; /** The newest commit that carried a runner change (BOS-764): the offer is dropped when the live runner image already has it. */ needs?: string; /** BOS-1086: when the owner pressed Build and update runners (or the combined deploy button) and it was queued: the update then starts by itself, with no card, once nothing blocks it. */ pressed?: string; /** The `offer` the hold had before the press, restored if the owner cancels the queued update. */ priorOffer?: boolean };
+  type RunnerDue = { commit: string; fromCommit: string; after: string; offer?: boolean; /** BOS-2616: the retry of a runner update that failed, kept while its hold is diagnosed. The host just tried to build from `commit`, and it builds only from what the server runs, so the last server deploy's record (stale after a hand-apply) doesn't decide whether it is still for the live version. */ retry?: boolean; /** The newest commit that carried a runner change (BOS-764): the offer is dropped when the live runner image already has it. */ needs?: string; /** BOS-1086: when the owner pressed Build and update runners (or the combined deploy button) and it was queued: the update then starts by itself, with no card, once nothing blocks it. */ pressed?: string; /** The `offer` the hold had before the press, restored if the owner cancels the queued update. */ priorOffer?: boolean };
   /** BOS-1086: the one server deploy approved while a runner update was queued or under way; sent once the runner update is with the host. */
   const HELD_SERVER = "self_deploy_held_server";
   type HeldServer = { id: string; commit: string; since: string };
@@ -1295,7 +1295,12 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     // the live version: a refused or failed one (or none at all) says nothing about it, and the host's `deployed`
     // commit decides, so the card can't be dropped for a running state the status file never wrote.
     const live = last?.result === "deployed" ? last.to : a?.deployed;
-    if (switchedBack || live !== due.commit) {
+    // BOS-2616: a failed runner update's retry is not judged by the last server deploy's record. A hand-apply
+    // (rebuild-live.sh, deploy.sh) never writes the host deployer's status, so that record still named an older server
+    // deploy (or a failed one), and the retry was dropped a minute after the failure, long before the hold was
+    // released: the "retry card" never came back (25 Nov, 51c5b40a). A later server deploy replaces or clears this
+    // entry in finished(), and raiseRunner still refuses a card for a version the server no longer runs.
+    if (!due.retry && (switchedBack || live !== due.commit)) {
       await putSetting(RUNNER_DUE, null);
       if (due.pressed) await putSetting(QUEUE_CANCELLED, { at: new Date().toISOString(), why: "The server is no longer on the version the runner update was queued for, so it was cancelled. Press Build and update runners again if you still want it." });
       deps.log?.(`self-deploy: runner update for ${short(due.commit)} dropped; the server is not on it after its trial`);
@@ -1315,6 +1320,34 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const r = await raiseRunner(due.commit, due.fromCommit, a);
     // Held (blocked): keep the offer for the next pass instead of dropping it.
     if (!(r && "blocked" in r)) await putSetting(RUNNER_DUE, null);
+  }
+
+  /**
+   * BOS-2616: what happened to the runner card after a failed runner update's hold was released as retry_safe, in
+   * plain words for the agent who released it. It offers the card now (the same pass step the poller runs, so the
+   * owner needn't wait a minute) and then reads what is really there: it says the card is on the owner's queue only
+   * when an open runner card is. A retry entry lost before this shipped is put back for the held commit first.
+   */
+  async function afterRunnerRelease(hold: OwnerHold): Promise<string> {
+    const a = await available();
+    if (!(await getSetting<RunnerDue>(RUNNER_DUE)) && !(await imageHas(hold.commit)))
+      await putSetting(RUNNER_DUE, { commit: hold.commit, fromCommit: hold.commit, after: new Date().toISOString(), offer: true, needs: hold.commit, retry: true } satisfies RunnerDue);
+    const pressed = !!(await getSetting<RunnerDue>(RUNNER_DUE))?.pressed;
+    if ((await status())?.result !== "running") await releaseRunnerDue(a);
+    if (pressed && !(await getSetting<RunnerDue>(RUNNER_DUE)) && (await pendingRunnerRequest())) return "The owner had already pressed Build and update runners, so the runner update was sent to the host now; no card is needed.";
+    const card = (await openFor("runner"))[0];
+    if (card) return `The runner update card (${short((card.context as SelfDeployContext).commit ?? hold.commit)}) is on the owner's queue now, with your words on it, recommending going ahead.`;
+    if (await getSetting<RunnerDue>(RUNNER_DUE)) {
+      const trial = await trialState(a);
+      const why = trial ? `the server update is still in its ${trialWords(soakSeconds(a))} trial` : ((await runnerBlocker(a))?.replace(/\.$/, "") ?? "it is waiting for Boss Man's next pass");
+      return `The runner update card is not on the owner's queue yet: ${why}. Boss Man raises it by itself once that clears; tell the owner it follows, not that it is there.`;
+    }
+    const need = await runnerNeed(a);
+    if (need?.state === "not_needed") return `No runner update card follows, because none is needed: ${need.words} Tell the owner there is nothing to retry.`;
+    if (await imageHas(hold.commit)) return `No runner update card follows: the runners were already rebuilt from a version that has ${short(hold.commit)}. Tell the owner there is nothing to retry.`;
+    const live = a?.deployed && isSha(a.deployed) ? a.deployed : null;
+    if (live && live.toLowerCase() !== hold.commit.toLowerCase()) return `No runner update card follows for ${short(hold.commit)}: the server now runs ${short(live)}, and runners are built only from what the server runs. The runners update with the server's version once it is offered.`;
+    return `Boss Man could not raise the runner update card (see its log). Do not tell the owner it is on their queue; they can press Settings → Server and runner → Updates → Build and update runners instead.`;
   }
 
   /**
@@ -1375,7 +1408,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       // The runner offer was spent when the build was sent. Keep one queued, so the card comes back by itself once the
       // hold is released (releaseRunnerDue → raiseRunner, which waits while runnerBlocker reports the hold).
       if (s.target === "runner" && s.to_commit && !(await getSetting<RunnerDue>(RUNNER_DUE)))
-        await putSetting(RUNNER_DUE, { commit: s.to_commit, fromCommit: s.from_commit || s.to_commit, after: now.toISOString(), offer: true, needs: s.to_commit } satisfies RunnerDue);
+        await putSetting(RUNNER_DUE, { commit: s.to_commit, fromCommit: s.from_commit || s.to_commit, after: now.toISOString(), offer: true, needs: s.to_commit, retry: true } satisfies RunnerDue);
       // BOS-2609: somebody is put on it now, not when the owner asks.
       const diagnosis = await startDiagnosis(hold, s);
       holdNote = ` Boss Man is holding the next ${heldWhat} card while this is diagnosed, so the owner is not offered it again.${diagnosis} ${RELEASE_HOW} If nobody does within ${minutes} minutes, the card goes to the owner saying the cause is unknown, with Not now recommended, and you are woken again.`;
@@ -1944,6 +1977,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const shown = s && active && s.result === "rejected" ? { ...s, message: s.message.replace(/\s*Try again in \d+ minute\(s\)\.?/i, "").trim() } : s;
       const companyId = await homeCompany();
       const runnerImage = companyId ? await runnerImageCommit(db, companyId) : null;
+      const need = await runnerNeed(a).catch((err: Error) => (deps.log?.(`self-deploy: the runner answer failed: ${err.message}`), null));
+      // BOS-2616: a released runner hold with no runner update needed says so, instead of leaving the panel to imply a card follows.
+      const noRetry = need?.state === "not_needed" ? ` No runner update card follows: ${need.words}` : "";
       // BOS-753: when the host deployer last showed it is alive, so Settings only says "not reported" when it really is overdue.
       return {
         enabled: !!dir,
@@ -1953,7 +1989,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         previousRun: real && s && refused && s.id === refused.id && s.ended === refused.ended && real.result !== "running" ? real : null,
         runnerImage: { running: runnerImage, needed: a?.deployed ?? null },
         // BOS-1648: needed / not needed / can't tell, with the words the panel shows (never "may be needed").
-        runnerUpdate: await runnerNeed(a).then((n) => (n ? { state: n.state, words: n.words, tickets: n.state === "unknown" ? [] : n.tickets } : null)).catch((err: Error) => (deps.log?.(`self-deploy: the runner answer failed: ${err.message}`), null)),
+        runnerUpdate: need ? { state: need.state, words: need.words, tickets: need.state === "unknown" ? [] : need.tickets } : null,
         available: a,
         staging: await stagingBlock(),
         pending: await pending(),
@@ -1971,7 +2007,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         // BOS-2609 (R59): who is diagnosing it is read from live state on every read: "being looked into" only once a run started.
         failureHolds: await Promise.all((["server_deploy", "runner_update"] as const).map(async (subject) => {
           const h = await currentHold(db, subject);
-          return h ? { subject, commit: h.commit, since: h.createdAt.toISOString(), releaseBy: h.releaseBy.toISOString(), outcome: h.outcome, words: holdCardLead(h, subject === "server_deploy" ? (a?.tip ?? h.commit) : (a?.deployed ?? h.commit), pickupWords(await pickupOf(db, h))).lead } : null;
+          if (!h) return null;
+          const lead = holdCardLead(h, subject === "server_deploy" ? (a?.tip ?? h.commit) : (a?.deployed ?? h.commit), pickupWords(await pickupOf(db, h))).lead;
+          return { subject, commit: h.commit, since: h.createdAt.toISOString(), releaseBy: h.releaseBy.toISOString(), outcome: h.outcome, words: subject === "runner_update" && h.releasedAt ? `${lead}${noRetry}` : lead };
         })).then((l) => l.filter((x) => !!x)),
       };
     },
@@ -2028,6 +2066,16 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     /** Whether a runner update card is open (the drain hands over to it after a server update). */
     async runnerCardOpen(): Promise<boolean> {
       return (await openFor("runner")).length > 0;
+    },
+
+    /**
+     * BOS-2616: called by the deploy tool's release_hold once a hold is released. A runner hold released as retry_safe
+     * offers its card now and says what really happened (afterRunnerRelease). Anything else returns null: the tool's
+     * own words stand (a server card follows on the next pass; do_not_retry offers only a newer version).
+     */
+    async afterHoldRelease(hold: OwnerHold): Promise<string | null> {
+      if (!dir || hold.subject !== "runner_update" || hold.outcome !== "retry_safe") return null;
+      return afterRunnerRelease(hold);
     },
 
     /**

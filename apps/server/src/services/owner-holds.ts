@@ -203,9 +203,13 @@ export async function releaseHold(
     .returning();
   if (!row) return { ok: false, text: "Someone released it a moment ago. Nothing more to do." };
   const what = h.subject === "server_deploy" ? "server update" : "runner update";
+  // BOS-2616: a runner retry is not promised here. The deploy tool offers it at once and adds what really happened
+  // (self-deploy afterHoldRelease): on the owner's queue, waiting for something named, or not needed and why.
   const text =
     r.outcome === "retry_safe"
-      ? `Released. Within a minute Boss Man offers the owner the ${what} card with your words on it, and recommends going ahead.`
+      ? h.subject === "runner_update"
+        ? "Released. Boss Man offers the runner update again only if the runners still need it; read the Updates panel before telling the owner a card is waiting."
+        : `Released. Within a minute Boss Man offers the owner the ${what} card with your words on it, and recommends going ahead.`
       : `Released. ${short(h.commit)} is never offered again; the next newer version on main is offered with your words on it, and recommends going ahead.`;
   return { ok: true, hold: row, text };
 }

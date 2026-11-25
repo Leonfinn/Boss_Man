@@ -148,6 +148,19 @@ describe("deploy tool: release_hold (BOS-2554, DR-076 A)", () => {
     expect((await currentHold(c.db, "runner_update"))?.outcome).toBe("do_not_retry");
     expect((await currentHold(c.db, "server_deploy"))?.releasedAt).toBeNull();
   });
+
+  // BOS-2616: the reply said the runner card would be back "within a minute" while none ever came.
+  it("a released runner hold never says the card is on the owner's queue unless Boss Man put it there", async () => {
+    const c = (ctx = await setup()); // no host deployer here: Boss Man raises no update card at all
+    const home = await c.mk("Home");
+    await openHold(c.db, { subject: "runner_update", commit: "c".repeat(40), result: "failed", reason: "network is unreachable" });
+    const client = await c.mcp(await c.ceoOf(home));
+    const r = await client.callTool({ name: "deploy", arguments: { action: "release_hold", outcome: "retry_safe", ownerText: "A network blip." } });
+    await client.close();
+    expect(textOf(r)).toMatch(/^Released\./);
+    expect(textOf(r)).not.toMatch(/on the owner's queue now|Within a minute|offers the owner the runner update card/);
+    expect(textOf(r)).toContain("read the Updates panel before telling the owner a card is waiting");
+  });
 });
 
 describe("deploy summary and status filter (BOS-2409)", () => {
