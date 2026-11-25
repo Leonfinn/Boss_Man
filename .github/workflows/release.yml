@@ -99,11 +99,16 @@ jobs:
               if docker buildx imagetools inspect "$p/$name:$VERSION" > /dev/null 2>&1; then echo "$p/$name:$VERSION already exists. Pick a new version."; exit 1; fi
             done
           done
+          first="$(scripts/publish-images.sh prefixes | head -n 1)"
+          missing=""
           for name in $(scripts/publish-images.sh images); do
-            first="$(scripts/publish-images.sh prefixes | head -n 1)"
-            docker buildx imagetools inspect "$first/$name:$TAG" > /dev/null 2>&1 \
-              || { echo "No $name image for commit ${{ steps.s.outputs.sha }} ($TAG). Wait for the 'Publish images' run for that commit to finish (or type the sha of an older green main commit in the commit box), then run this again."; exit 1; }
+            docker buildx imagetools inspect "$first/$name:$TAG" > /dev/null 2>&1 || missing="$missing $name"
           done
+          if [ -n "$missing" ]; then
+            echo "No image for commit ${{ steps.s.outputs.sha }} ($TAG) for:$missing."
+            echo "Either the 'Publish images' run for that commit has not finished (wait, then run this again), or an image was added to PUBLISH_IMAGES after that commit was published: re-run 'Publish images' for the commit (Actions > Publish images > the run > Re-run all jobs), or type the sha of an older green main commit in the commit box."
+            exit 1
+          fi
       - name: Check every image in every registry (identical digest, signature, SBOM, provenance)
         env:
           TAG: ${{ steps.s.outputs.tag }}
