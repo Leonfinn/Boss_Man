@@ -77,7 +77,7 @@ describe.skipIf(!browser || !vite)("Roadmap reason line (BOS-2579)", () => {
         await stubApi(page, api);
         await page.goto(`${vite!.resolvedUrls.local[0]}#roadmap/timeline`, { waitUntil: "networkidle" });
         await page.waitForSelector(".rm-obj", { timeout: 15_000 });
-        const m = await page.evaluate(measure);
+        const m = (await page.evaluate(measure)) as ReturnType<typeof measure>;
         expect(m.sideways, "no sideways scroll").toBe(false);
         expect(m.rows.map((r) => [r.status, r.hasReason]).sort()).toEqual([["at_risk", true], ["late", true], ["live_checked", true], ["on_track", false]]);
         for (const r of m.rows.filter((x) => x.hasReason)) {
