@@ -611,6 +611,18 @@ export const decisions = pgTable("decisions", {
   recheckNote: text("recheck_note"),
   /** How many times a re-check confirmed this card; a card confirmed twice and flagged again within a day goes straight to the CEO. */
   recheckCount: integer("recheck_count").notNull().default(0),
+  /**
+   * BOS-2555: the answer was information the card asked the owner for (a log, a screenshot, a value), so its
+   * outcome must be reported back to them. The words that marked it (kept so the card says why), and when the
+   * report was expected by; null for every other card. Cleared once the report reaches the owner's chat.
+   */
+  infoAskWhy: text("info_ask_why"),
+  infoAskDueAt: timestamp("info_ask_due_at", { withTimezone: true }),
+  /**
+   * BOS-2555 stage 2: the time the owner was told nobody has reported back yet. The raiser still has the first window to
+   * report; the CEO is woken at this deadline if the report never came.
+   */
+  infoAskNaggedAt: timestamp("info_ask_nagged_at", { withTimezone: true }),
 },
   // The open queue is read on the dashboard, brief and ladder, and the notifications sweep scans status (BOS-407).
   // Every hot read also names the company, so the two go together (BOS-546); status alone still serves the sweeps that cross companies.
@@ -1549,6 +1561,8 @@ export const ownerChatMessages = pgTable(
     text: text("text").notNull(),
     /** The run that answered (assistant) or was asked (owner). */
     runId: uuid("run_id").references(() => runs.id, { onDelete: "set null" }),
+    /** BOS-2555: the information-request card this system line reports the result of, so each card gets one line. */
+    infoAskCardId: uuid("info_ask_card_id"),
     createdAt: createdAt(),
   },
   (t) => [index("owner_chat_company_time").on(t.companyId, t.createdAt), index("owner_chat_agent_time").on(t.agentId, t.createdAt)],

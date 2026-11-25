@@ -11,6 +11,7 @@ import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { and, asc, desc, eq, gt, ilike, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { OTHER_CARD_HELD, otherTicketCardsNamed, ticketHasOpenCard } from "./services/owner-todo.js";
+import { noteResultReported } from "./services/owner-result.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -263,6 +264,15 @@ function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, 
 }
 
 /**
+ * BOS-2555: this agent raised a card that asked the owner for information, and it is still owed the result because the owner
+ * has answered. Posts the reply into the owner's chat too, so a status-only result reaches them there, not only on the ticket.
+ */
+async function reportInfoResult(db: Db, notes: Services["notes"], scope: Scope, ticketId: string, text: string): Promise<void> {
+  if (!scope.agentId) return;
+  await noteResultReported(db, { companyId: scope.companyId, ticketId, agentId: scope.agentId, text }, { notify: (n) => notes.notify(n) }).catch(() => false);
+}
+
+/**
  * The tools a ticket run has beyond the shared reads and the board (which both a run and the
  * owner chat register): handing out and moving tickets, decisions, engagements, deploys, runs,
  * notifications, review and the rest. Both buildServer and buildChatServer call it, so the CEO
@@ -374,6 +384,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       // A watcher's report reads as a status update (R80).
       const title = t?.watcher && t.watcher === scope.agentId ? `Status: "${t.title}"` : `Reply on "${t?.title ?? "a ticket"}"`;
       await notes.notify({ companyId: scope.companyId, agentId: scope.agentId, level: "note", title, body, link: `#/tickets/${ticketId}` });
+      // BOS-2555: a status-only reply that is the result of a card asking the owner for information goes into their chat too.
+      if (notAnAsk) await reportInfoResult(db, notes, scope, ticketId, body);
       // A reply that asks the owner to act doesn't reach their queue (BOS-122). Say so in the result so the
       // agent's next turn raises a decision; the reply still posts, so a status update isn't blocked.
       // (Held above for agents; this is only the raised-sign-off-card message, or the owner's own reply.)

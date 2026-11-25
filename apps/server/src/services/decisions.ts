@@ -90,6 +90,7 @@ import type { ClearWhen } from "./alert-clearing.js";
 import { unlinkedWaiters } from "./owner-todo.js";
 import { openAlertsLine } from "./go-live-card.js";
 import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer, similarQuestion } from "./stale-requests.js";
+import { infoAskOf, reportBackNote, startedInfoAnswer } from "./owner-result.js";
 import { openReviewProposal } from "./skill-proposals.js";
 import { lineEvent } from "./merge-line.js";
 import { mergeContext } from "./decision-context.js";
@@ -3475,6 +3476,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // The owner's own note is kept on the card too (BOS-951), so a card read by id after it drops off the queue
       // shows it beside the answer. `settled` covers the CEO's note; this is the owner's, kept whole in the card.
       const ownerNote = !extra.settledBy && extra.note?.trim() ? extra.note.trim().slice(0, 4000) : null;
+      // BOS-2555: a card whose purpose was to get information from the owner. Only their own answer counts (a CEO settling it
+      // is answering for them), and only a plain question card, so nothing else is turned into one.
+      const infoWhy = !extra.settledBy && extra.by !== "ceo" ? infoAskOf(d) : null;
+      const infoAsk = !!infoWhy;
       // Conditional on still being open (and, for the CEO, still asked) and still on the same tier it
       // was read on, so whoever closes it first wins and the loser changes nothing. The tier clause
       // closes the race where the ladder hands the open card to the owner between the CEO reading it
@@ -3528,6 +3533,15 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           await postAnswerOnTickets(db, { companyId: d.companyId, question: d.question, answer }, await decisionTicketIds(db, d), extra.by === "ceo" ? "The CEO" : "The owner", extra.note, log, now);
         } catch (err) {
           log(`answering decision ${id} was saved, but posting it on its tickets failed: ${(err as Error).message}`);
+        }
+      }
+      // BOS-2555: the owner gave information a card asked for, so they hear at once that it is with someone, and the deadline
+      // for the result is set. Their own answer only; a CEO settling it is answering for them.
+      if (infoAsk) {
+        try {
+          await startedInfoAnswer(db, d, infoWhy!, { notify: notifyFeed, log, now: now() });
+        } catch (err) {
+          log(`answering decision ${id} was saved, but telling the owner their answer was received failed: ${(err as Error).message}`);
         }
       }
 
@@ -3854,6 +3868,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           } else if (ctx.type === "stalled_run") skipWake = true;
         }
         if (skipWake) return { id, answer, delivered, endedHere };
+        // BOS-2555: a card that asked the owner for information (a log, a screenshot, a value) must come back to them with
+        // the result where they are. The owner already has the line and flag (posted below); the raiser is who reports back.
         // An answer in the owner's own words can carry pictures or files (BOS-759): say so plainly, so
         // the agent opens them with open_attachment instead of reading the links as part of the answer.
         const pictures = ownWords && ATTACHMENT_LINK.test(answer) ? " It includes picture(s) or file(s) they attached; open each with open_attachment." : "";
@@ -3861,7 +3877,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         // match is said here, where waiting still saves the build. Read-only; nothing is linked.
         const plan = (ctx as { plan?: boolean; planText?: string | null; ticketId?: string | null });
         const overlap = plan.plan && plan.ticketId && answer === APPROVE_PLAN ? await planApprovalOverlapNote(plan.ticketId, plan.planText ?? "").catch(() => "") : "";
-        await wake({ agentId: d.raisedByAgentId, reason: "decision answered", ticketId: onTicket?.id ?? null, note: `${settled ? `${settled.name} settled` : extra.by === "ceo" ? "The CEO settled" : "The owner answered"} your question "${d.question}": ${answer}${extra.note ? ` — their note: ${extra.note}` : ""}${pictures}${overlap ? ` ${overlap}` : ""}` });
+        const reportBack = infoAsk && !extra.settledBy ? `\n\n${reportBackNote({ ownerVoice: "The owner", question: d.question, ticketId: onTicket?.id ?? "", ref: null })}` : "";
+        await wake({ agentId: d.raisedByAgentId, reason: "decision answered", ticketId: onTicket?.id ?? null, note: `${settled ? `${settled.name} settled` : extra.by === "ceo" ? "The CEO settled" : "The owner answered"} your question "${d.question}": ${answer}${extra.note ? ` — their note: ${extra.note}` : ""}${pictures}${overlap ? ` ${overlap}` : ""}${reportBack}` });
       }
       for (const t of unblocked) {
         if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "unblocked", ticketId: t.id, note: await unblockedNote(db, t.id, { question: d.question, answer, raisedByAgentId: d.raisedByAgentId }) });

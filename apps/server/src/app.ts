@@ -912,6 +912,8 @@ export async function buildApp(opts: AppOptions) {
   const sweeps = sweepService(db, {
     // BOS-2160: a background step that throws is logged (the error buffer reads app.log.error) and, if it keeps failing, raises one owner card.
     log: (message) => app.log.error(message),
+    // BOS-2555: the owner's feed flag when a card answer's result never reached them.
+    notify: (n) => notes.notify(n),
     homeCompany: async () => (await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1))[0]?.id ?? null,
     // The merge line jam alert (BOS-766) reads the same view the Merge queue screen does; `mergeQueue` is
     // built below, so this resolves it per pass.
