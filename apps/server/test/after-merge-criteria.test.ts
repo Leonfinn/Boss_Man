@@ -11,6 +11,7 @@ import { openPglite } from "../src/db/client.js";
 import { agents, decisions, reviewRequests, settings, ticketDependencies, ticketImages, ticketMessages, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { landingText } from "../src/services/review.js";
+import { type OpenCheck, tiedCriteria, unreportedUntied } from "../src/services/after-merge-check-tickets.js";
 import { type StandInReplies, standInRunner } from "./helpers/stand-in-runner.js";
 
 let server: Awaited<ReturnType<typeof boot>>;
@@ -140,6 +141,35 @@ describe("after-merge criteria: the rules", () => {
 
   it("a merge with only before-merge criteria closes the ticket as it always did", async () => {
     expect(landingText({ outcome: "merged" }, { branch: "main", assignee: "Dev" })).toBe("Merged into main.");
+  });
+});
+
+// BOS-2564: tiedCriteria and unreportedUntied decide which after-merge criteria an open check ticket
+// settles (BOS-2417) and which are still genuinely missing from the done gate. Pure calls: no database.
+describe("after-merge criteria: check tickets tie their criteria (BOS-2417)", () => {
+  const OTHER_LIVE = { text: "The owner's phone gets the test push", after: "merge" as const };
+  const check = (criterion: number): OpenCheck => ({ id: `check-${criterion}`, number: null, criterion, assigneeAgentId: null, watchingFor: null, watchTrigger: null });
+
+  it("ties the criteria named by open check tickets, and only the after-merge ones", () => {
+    expect([...tiedCriteria([BEFORE, LIVE, OTHER_LIVE], [check(2)])]).toEqual([1]);
+    // More than one open check may tie more than one criterion.
+    expect([...tiedCriteria([BEFORE, LIVE, OTHER_LIVE], [check(2), check(3)])].sort()).toEqual([1, 2]);
+    // A number that names a before-merge criterion, or is past the end, ties nothing.
+    expect(tiedCriteria([BEFORE, LIVE], [check(1)])).toEqual(new Set());
+    expect(tiedCriteria([BEFORE, LIVE], [check(9)])).toEqual(new Set());
+    // No criteria at all: nothing can be tied.
+    expect(tiedCriteria([], [check(1)])).toEqual(new Set());
+  });
+
+  it("leaves tied criteria out of the unreported list, and lists the rest as before", () => {
+    const note = `${BEFORE} pass`;
+    expect(unreportedUntied([BEFORE, LIVE, OTHER_LIVE], note, new Set())).toEqual([LIVE.text, OTHER_LIVE.text]);
+    expect(unreportedUntied([BEFORE, LIVE, OTHER_LIVE], note, new Set([1]))).toEqual([OTHER_LIVE.text]);
+    // All tied, or all reported: nothing is missing.
+    expect(unreportedUntied([BEFORE, LIVE, OTHER_LIVE], note, new Set([1, 2]))).toEqual([]);
+    expect(unreportedUntied([BEFORE, LIVE, OTHER_LIVE], `${note}. ${LIVE.text} pass. ${OTHER_LIVE.text} pass`, new Set())).toEqual([]);
+    // No criteria: no unreported list.
+    expect(unreportedUntied([], null, new Set())).toEqual([]);
   });
 });
 
