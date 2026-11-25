@@ -6,7 +6,7 @@ import { openPglite } from "../src/db/client.js";
 import { companies, decisions, permissionDecisions } from "../src/db/schema.js";
 import { permissionLogDays, prunePermissionDecisions } from "../src/services/housekeeping.js";
 import { createPermissionLog } from "../src/services/permission-log.js";
-import { permissionsForRun, permissionStore, PERMISSION_TITLE_MAX, mostAskedCards, ruleUsage } from "../src/services/permission-store.js";
+import { permissionsForRun, permissionStore, PERMISSION_TITLE_MAX, mostAskedCards, ruleUsage, storedTitle } from "../src/services/permission-store.js";
 
 const DAY = 86_400_000;
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -22,6 +22,30 @@ async function waitForRows(db: Awaited<ReturnType<typeof openPglite>>["db"], n: 
   }
   throw new Error("rows never arrived");
 }
+
+describe("storedTitle (BOS-2565)", () => {
+  it("keeps a normal title as it is", () => {
+    expect(storedTitle("Bash: ls -la")).toBe("Bash: ls -la");
+  });
+
+  it("stores nothing for a missing title and an empty string for a blank one", () => {
+    expect(storedTitle(null)).toBeNull();
+    expect(storedTitle(undefined)).toBeNull();
+    expect(storedTitle("")).toBe("");
+    expect(storedTitle(" \t\n ")).toBe("");
+  });
+
+  it("collapses runs of whitespace, including newlines and tabs, and trims the ends", () => {
+    expect(storedTitle("  Bash:  echo\n\t\"hi\"  \r\n")).toBe('Bash: echo "hi"');
+  });
+
+  it("caps a very long title at the stored limit", () => {
+    const long = "Bash: " + "x".repeat(500);
+    const got = storedTitle(long);
+    expect(got).toHaveLength(PERMISSION_TITLE_MAX);
+    expect(got).toBe(long.slice(0, PERMISSION_TITLE_MAX));
+  });
+});
 
 describe("permission store", () => {
   it("stores each decision, then who answered the card, and lists one run's rows", async () => {
