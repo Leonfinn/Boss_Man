@@ -112,6 +112,8 @@ export type SelfDeployView = {
   heldDeploy?: { id: string; commit: string; since: string } | null;
   /** Why a queued runner update was cancelled (a rolled-back server update), until the next press. */
   queueCancelled?: { at: string; why: string } | null;
+  /** BOS-2554 (DR-076 A): a failed update that is held while its failure is looked into, with the words to show. Absent from an older server. */
+  failureHolds?: { subject: "server_deploy" | "runner_update"; commit: string; since: string; releaseBy: string; outcome: string | null; words: string }[];
 };
 
 /** A server update waiting for a quiet machine (BOS-420). */
