@@ -188,11 +188,17 @@ function WaitingChanges({ commits }: { commits: { subject?: string }[] | undefin
  * host's frozen text and never disagree with the BLUE/GREEN rows (the trial comes from the same colour probe).
  * Pure, so a layout test can render it on its own.
  */
-export function TrialLines({ trial, wait, now, queue, cancelled, held }: { trial?: { endsAt: string } | null; wait?: { until: string; target?: string } | null; now: number; queue?: { startsAt: string | null; why: string } | null; cancelled?: { why: string } | null; held?: { commit: string } | null }) {
+export function TrialLines({ trial, wait, now, queue, cancelled, held, failureHolds }: { trial?: { endsAt: string } | null; wait?: { until: string; target?: string } | null; now: number; queue?: { startsAt: string | null; why: string } | null; cancelled?: { why: string } | null; held?: { commit: string } | null; failureHolds?: { subject: string; words: string }[] }) {
   const trialOver = trial ? Date.parse(trial.endsAt) <= now : false;
   const waitOver = wait ? Date.parse(wait.until) <= now : false;
   return (
     <>
+      {/* BOS-2562: a failed update is held while its failure is looked into, so no Deploy card is on the queue. The server's words, one line per hold. */}
+      {(failureHolds ?? []).map((h) => (
+        <p className="muted" role="status" key={h.subject} data-testid="failure-hold" style={{ fontSize: 14, overflowWrap: "anywhere" }}>
+          {h.words}
+        </p>
+      ))}
       {trial && !trialOver && (
         <p className="muted" role="status" data-testid="runner-trial" style={{ fontSize: 14 }}>
           {queue
@@ -353,7 +359,7 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
           )}
           {st.more && <p className="muted" style={{ fontSize: 14 }}>{st.more}</p>}
           {st.next && <p style={{ fontSize: 14 }} data-testid="update-next">{st.next}</p>}
-          {v && <TrialLines trial={v.trial ?? null} wait={v.deployWait ?? null} now={now} queue={v.runnerQueue ?? null} cancelled={v.queueCancelled ?? null} held={v.heldDeploy ?? null} />}
+          {v && <TrialLines trial={v.trial ?? null} wait={v.deployWait ?? null} now={now} queue={v.runnerQueue ?? null} cancelled={v.queueCancelled ?? null} held={v.heldDeploy ?? null} failureHolds={v.failureHolds ?? []} />}
           {st.raw && (
             <details>
               <summary className="muted" style={{ fontSize: 13 }}>What the host said</summary>
