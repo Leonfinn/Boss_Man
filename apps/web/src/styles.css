@@ -554,10 +554,13 @@ code { font-family: var(--mono); font-size: 0.92em; }
 .rm-risk-all { margin: 0 0 10px; font-size: 13px; }
 .rm-risk-on { color: var(--green-ink); overflow-wrap: anywhere; }
 .rm-risk-warn { color: var(--amber-ink); overflow-wrap: anywhere; }
+/* BOS-2627: the CEO's plan, under the milestone's reason line and lined up with it, so the two read together. */
+.rm-plan { margin: 0 10px 10px 172px; font-size: 13px; color: var(--ink); overflow-wrap: anywhere; }
+.rm-plan-label { font-weight: 600; }
 /* The switch is a tappable target, not a small text button (WCAG 2.2 target size). */
 .rm-risk .btn, .rm-risk-all .btn { min-height: 36px; }
 @media (max-width: 600px) {
-  .rm-risk { margin-left: 10px; }
+  .rm-risk, .rm-plan { margin-left: 10px; }
 }
 .rm-chip.blue { background: var(--accent-soft); color: var(--accent-ink); }
 .rm-strip { position: relative; display: block; height: 16px; margin-top: 6px; border-radius: 4px; background: var(--ground); }

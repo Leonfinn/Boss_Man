@@ -1,14 +1,19 @@
-// Milestones the owner put in the CEO's hands (BOS-2581, step 3 of the milestones work). The owner ticks "CEO manages at
-// risk" on a milestone (off by default, or on for every milestone at once, which costs more CEO runs). Each sweep reads the
-// roadmap's own status rule (milestoneVerdict, via planning.managedMilestones) for the managed milestones only, and wakes that
-// company's CEO once each time one turns At risk or Late, with the milestone's title, its target date and the reason line
-// under its badge (which names the tickets). Nothing is woken while the status stays the same, and a switched-off milestone
-// never wakes anyone. What the CEO was last woken about is kept in settings (milestone_risk:<milestoneId>), so a restart
-// neither repeats a wake nor loses one.
+// Milestones the owner put in the CEO's hands (BOS-2581, step 3 of the milestones work; BOS-2627 fixed its live failure).
+// The owner ticks "CEO manages at risk" on a milestone (off by default, or on for every milestone at once, which costs more
+// CEO runs). Each sweep reads the roadmap's own status rule (milestoneVerdict, via planning.managedMilestones) for the
+// managed milestones only, and wakes that company's CEO once each time one turns At risk or Late, with the milestone's
+// title, its target date and the reason line under its badge (which names the tickets). Nothing is woken while the status
+// stays the same, and a switched-off milestone never wakes anyone.
+//
+// What the CEO was last woken about is kept in settings (milestone_risk:<milestoneId>), so a restart neither repeats a
+// wake nor loses one. BOS-2627: that row is written BEFORE the wake is sent, and it only says "wake started" once the wake
+// really started one, so a pass that is skipped, that fails part way, or whose wake is dropped tries again next minute
+// instead of going quiet for good. That pass also clears a CEO plan left under a milestone that is no longer At risk or Late.
 //
 // BOS-2633: the wake goes through tellOnce (services/tell-once.ts), the one rule every sweep uses since BOS-2632: it counts
 // only when it resolved with a real wake row, and a throw, a "no CEO" null or a dropped wake is logged and answered null, so
-// the milestone stays "not woken yet" and the next pass tries again.
+// the milestone stays "not woken yet" and the next pass tries again. A company with no CEO has nobody to retry for, so that
+// case stays quiet (logged by tellOnce once per pass, not as an error every pass) until a CEO is hired.
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { ceoPlanWake, dateIn, needsCeoPlan } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
@@ -46,7 +51,7 @@ export function milestoneRiskService(db: Db, deps: { planning: ReturnType<typeof
       // the pass that turns the last one off still clears it.
       const forget = async (managed: Array<{ id: string }>) => {
         const live = new Set(managed.map((m) => m.id));
-        for (const id of seen.keys()) if (!live.has(id)) await db.delete(settings).where(eq(settings.key, MILESTONE_RISK_KEY(id))).catch(() => undefined);
+        for (const id of seen.keys()) if (!live.has(id)) await db.delete(settings).where(eq(settings.key, MILESTONE_RISK_KEY(id))).catch((err) => log(`milestone at risk: forgetting ${id} failed: ${(err as Error).message}`));
       };
       // The switch is off on every milestone by default, so most passes have nothing more to do: one read of the switch,
       // before any of the roadmap's own work (the first version rebuilt the whole roadmap each minute, which is what ran
@@ -69,9 +74,9 @@ export function milestoneRiskService(db: Db, deps: { planning: ReturnType<typeof
         // status leaves At risk/Late, so a return to that state is a new wake; otherwise the last woken status stays.
         // BOS-2633: the send goes through tellOnce, so the wake counts only when it resolved with a real wake row. A throw or a
         // dropped wake is logged by tellOnce and answers null, and the milestone is not marked woken, so the next pass tries
-        // again (BOS-2627 did this locally; this is now the sweeps' one shared rule). A company with no CEO has nobody to tell:
-        // there is nothing to retry until one is hired, so this pass records "not woken yet" and says nothing, rather than
-        // logging (and, through BOS-2160, risking an owner card) on every pass for every managed milestone.
+        // again (BOS-2627 did this locally; this is now the sweeps' one shared rule). A company with no CEO has nobody to
+        // tell: there is nothing to retry until one is hired, so this pass records "not woken yet" and says nothing, rather
+        // than logging an error (and, through BOS-2160, risking an owner card) on every pass for every managed milestone.
         const delivered = async (): Promise<string | null> => {
           const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, m.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
           if (!ceo) return null;
@@ -83,7 +88,7 @@ export function milestoneRiskService(db: Db, deps: { planning: ReturnType<typeof
                 agentId: ceo.id,
                 reason: MILESTONE_RISK_REASON,
                 priority: 3,
-                note: `The milestone "${m.title}" under the objective "${m.objective}" at ${m.company} is now ${status === "late" ? "Late" : "At risk"}: ${reasonForWake(m.reason)}. ${what} The owner asked you to manage this one: plan a remedy for it in plain words, and say it to them when they next ask how it is going.`,
+                note: `The milestone "${m.title}" under the objective "${m.objective}" at ${m.company} is now ${status === "late" ? "Late" : "At risk"}: ${reasonForWake(m.reason)}. ${what} The owner asked you to manage this one: work out a short remedy for it and record it with the roadmap tool, action set_plan (milestoneId, plan), so it shows under the milestone's reason on the owner's Roadmap.`,
               }) as Promise<Told>,
             log,
           );
@@ -110,6 +115,9 @@ export function milestoneRiskService(db: Db, deps: { planning: ReturnType<typeof
             .onConflictDoUpdate({ target: settings.key, set: { value: after } })
             .catch((err) => log(`milestone at risk: recording the wake for ${m.id} failed: ${(err as Error).message}`));
         }
+        // BOS-2627: a CEO plan belongs to a milestone the CEO manages while it is At risk or Late; once it leaves those
+        // states the line has nothing to explain, so it goes (and asking to manage it again starts afresh).
+        if (!needsCeoPlan(status)) await db.update(milestones).set({ ceoPlan: null }).where(and(eq(milestones.id, m.id), sql`${milestones.ceoPlan} is not null`)).catch((err) => log(`milestone at risk: clearing the plan for ${m.id} failed: ${(err as Error).message}`));
       }
       await forget(managed);
       return { woken };

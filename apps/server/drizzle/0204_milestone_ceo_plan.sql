@@ -1,0 +1,1 @@
+ALTER TABLE "milestones" ADD COLUMN "ceo_plan" text;

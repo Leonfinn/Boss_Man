@@ -919,7 +919,7 @@ export async function buildApp(opts: AppOptions) {
     planning: roadmapPlanning,
     wake: (input) => scheduler.wake(input),
     now: opts.now,
-    // BOS-2633: tellOnce logs a tell that did not get through (BOS-2160: into the error buffer, which raises an owner card if it keeps failing).
+    // BOS-2627, BOS-2633: tellOnce logs a wake that doesn't start (BOS-2160: into the error buffer, which raises an owner card if it keeps failing) and never counts it as delivered.
     log: (message) => app.log.error(message),
   });
   const sweeps = sweepService(db, {
@@ -1511,7 +1511,8 @@ export async function buildApp(opts: AppOptions) {
   ciSweepFirst.unref();
   ciSweepEvery.unref();
   app.addHook("onClose", async () => { clearTimeout(ciSweepFirst); clearInterval(ciSweepEvery); });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, deviceProfiles, addons: addonFacts, selfDeployCards: () => selfDeploy.cardFacts(), afterHoldRelease: (h) => selfDeploy.afterHoldRelease(h), checkRequests, githubWatch, ownerAnswerEmbedder: (companyId) => semantic.ownerAnswerEmbedder(companyId), ticketEmbedder: (companyId) => semantic.ticketEmbedder(companyId), gitTokenProbe }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: async (ticketId, agentId, runId) => ((await review.keptRound(ticketId).catch(() => false)) ? undefined : scheduler.onTicketReview(ticketId, agentId, runId)), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i), onRunTicket: (ticketId, runId) => work.attachRun(ticketId, runId) });
+  // BOS-2627: the roadmap tool lists each milestone's status and CEO plan as the page shows them, so it gets the roadmap's own service.
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, planning: planningService(db, { release: (ticketId) => decisionsSvc.release(ticketId) }), feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, deviceProfiles, addons: addonFacts, selfDeployCards: () => selfDeploy.cardFacts(), afterHoldRelease: (h) => selfDeploy.afterHoldRelease(h), checkRequests, githubWatch, ownerAnswerEmbedder: (companyId) => semantic.ownerAnswerEmbedder(companyId), ticketEmbedder: (companyId) => semantic.ticketEmbedder(companyId), gitTokenProbe }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: async (ticketId, agentId, runId) => ((await review.keptRound(ticketId).catch(() => false)) ? undefined : scheduler.onTicketReview(ticketId, agentId, runId)), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i), onRunTicket: (ticketId, runId) => work.attachRun(ticketId, runId) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined, mailer, portalUrl: opts.portalUrl });
 

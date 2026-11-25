@@ -375,6 +375,8 @@ export const milestones = pgTable("milestones", {
   horizon: roadmapHorizon("horizon"),
   /** BOS-2581: the owner wants the CEO to plan a remedy when it turns At risk or Late. Off unless the owner turns it on. */
   ceoManagesRisk: boolean("ceo_manages_risk").notNull().default(false),
+  /** BOS-2627: the CEO's one-line plan for a managed milestone that is At risk or Late, shown under its reason line. Cleared when it leaves those states. */
+  ceoPlan: text("ceo_plan"),
 });
 
 export const riskTier = pgEnum("risk_tier", ["trivial", "low", "medium", "high", "critical"]);

@@ -2,7 +2,7 @@
 // on a timeline; the plan is a company's tickets and what they wait on, as a graph with blocked
 // chains and their causes worked out on the server, so the browser only draws.
 import { and, asc, eq, gte, inArray, ne, or, sql } from "drizzle-orm";
-import { layoutPlan, leftGroup, milestoneHorizon, milestoneVerdict, ticketRef, type Horizon, type MilestoneAction, type MilestoneStatus } from "@boss-man/shared";
+import { dateIn, layoutPlan, leftGroup, milestoneHorizon, milestoneVerdict, needsCeoPlan, ticketRef, type Horizon, type MilestoneAction, type MilestoneStatus } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, engagements, features, keyResults, milestones, objectives, projects, ticketDependencies, tickets, watchdogFlags } from "../db/schema.js";
 import { WorkError } from "./work.js";
@@ -203,6 +203,8 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
                     horizon: milestoneHorizon({ ...f.counts, active: f.active, targetDate: m.targetDate, horizon: m.horizon }, today),
                     /** BOS-2581: the owner has asked the CEO to plan a remedy when this turns At risk or Late. Off unless turned on. */
                     ceoManagesRisk: m.ceoManagesRisk,
+                    /** BOS-2627: the CEO's plan line, shown under the reason while it is At risk or Late; null otherwise. */
+                    ceoPlan: needsCeoPlan(f.status) ? m.ceoPlan : null,
                   };
                 }),
             })),
@@ -289,10 +291,18 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
       return o;
     },
 
-    async updateMilestone(id: string, patch: { title?: string; targetDate?: string | null; objectiveId?: string; horizon?: Horizon | null; ceoManagesRisk?: boolean }) {
-      const [m] = await db.select({ objectiveId: milestones.objectiveId }).from(milestones).where(eq(milestones.id, id));
+    async updateMilestone(id: string, patch: { title?: string; targetDate?: string | null; objectiveId?: string; horizon?: Horizon | null; ceoManagesRisk?: boolean; ceoPlan?: string | null }) {
+      const [m] = await db.select().from(milestones).where(eq(milestones.id, id));
       if (!m) throw new WorkError(404, "No such milestone.");
       if (patch.objectiveId && (await companyOfObjective(patch.objectiveId)) !== (await companyOfObjective(m.objectiveId))) throw new WorkError(422, "A milestone can only move to an objective of the same company.");
+      // BOS-2627: a plan line only means something on a milestone the CEO manages while it is At risk or Late. Any plan
+      // stored while it leaves those states is cleared by the sweep (milestone-risk.ts), so the page shows none either way.
+      if (patch.ceoPlan) {
+        if (!(patch.ceoManagesRisk ?? m.ceoManagesRisk)) throw new WorkError(422, 'Only a milestone the CEO manages at risk can have a plan. Turn on "CEO manages at risk" for it first.');
+        const planned = { ...m, ...patch };
+        const status = (await milestoneFigures(db, [planned], dateIn(new Date(), "UTC")))(planned).status;
+        if (!needsCeoPlan(status)) throw new WorkError(422, "A plan is shown under the reason while the milestone is At risk or Late, and this one isn't. Record it once it is.");
+      }
       const [u] = await db.update(milestones).set(patch).where(eq(milestones.id, id)).returning();
       return u!;
     },
