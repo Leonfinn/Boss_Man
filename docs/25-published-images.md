@@ -25,6 +25,10 @@ Variables: repository Settings → Secrets and variables → Actions → Variabl
 
 The updater image (`boss-man-updater`) is also not in the default set: add it to `PUBLISH_IMAGES` before the first release the updater is meant to read. Until it is listed, a `release.json` has no updater image and the updater refuses to move to it, which is safe (the install stays where it is).
 
+An image added to `PUBLISH_IMAGES` is built only from the next publish on. Commits published before the edit have no image for it, and Release refuses them (naming the missing images). Re-run "Publish images" for the commit you want to release (Actions > Publish images > the run > Re-run all jobs) before pressing Release (BOS-2590).
+
+Where to look for a signature and SBOM in the registry (BOS-2590): cosign stores the signature as a tag `sha256-<hex of the image index digest>.sig`, not `sha-<commit>.sig`, and buildx `--sbom=true` stores the SBOM and provenance as `attestation-manifest` entries inside the image index, not as a `.sbom` tag. `scripts/publish-images.sh verify` checks both and the publish job runs it, so a green publish job means both are there.
+
 The runner image (`boss-man-runner`) is **not** in the default set. Since the Claude pack (BOS-972) it holds no Claude Code (Claude is installed on first start), so to publish it, add `boss-man-runner` to `PUBLISH_IMAGES`. The publish job then refuses the runner unless `scripts/image-tests.sh no-anthropic` passes on it (with the expected-fail marker off).
 
 ## Setting it up (any host; the account steps are on the registries' own sites)
