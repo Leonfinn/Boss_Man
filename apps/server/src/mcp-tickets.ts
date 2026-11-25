@@ -45,7 +45,13 @@ import { dueChatReport, setReportInChat } from "./services/chat-report-back.js";
 const CRITERIA_REPLACED_NOTE = "The CEO replaced this ticket's acceptance criteria. Report each one again.";
 
 // A run that had no ticket now works on one: say so on the run (BOS-254). Never blocks the tool.
-const runTicketNoter = (scope: Scope, hooks: McpHooks) => (ticketId: string) => (scope.agentId ? Promise.resolve(hooks.onRunTicket?.(ticketId, scope.runId)).catch(() => undefined) : undefined);
+/** BOS-2577: a run that passed an update hold (urgent / fixes-live) is never told to wrap up. */
+const runPassedHold = async (db: Db, runId: string | undefined | null) => {
+  if (!runId) return false;
+  const [r] = await db.select({ p: runsTable.passedUpdateHold }).from(runsTable).where(eq(runsTable.id, runId));
+  return !!r?.p;
+};
+const runTicketNoter =(scope: Scope, hooks: McpHooks) => (ticketId: string) => (scope.agentId ? Promise.resolve(hooks.onRunTicket?.(ticketId, scope.runId)).catch(() => undefined) : undefined);
 
 /** The words every ownerSetup field adds to its help (DR-052). */
 const SETUP_HELP = `${HOST_TOKEN_HELP} Each step is checked like an owner card when you write it; a vague host step (".env" with no path, "restart the add-on" with no command or button path) is refused. lintOverride (CEO only) lets a wrong finding through with a reason. With steps, also give ownerSetupWhy (what it changes for the owner) and ownerSetupIfSkipped (what happens if they skip it, or "nothing breaks"): the go-live card opens with them. No "If …", "Only if …", "Unless …" or "nothing to do" in a step: start a step that applies only sometimes with [when <fact>] (known facts: network guard allow line can go) and Boss Man keeps or drops it from its own record at go-live.`;
@@ -948,7 +954,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         }
       }
       const heldNote = heldEarly.length ? `\n\nNot counted yet: ${heldEarly.map((h) => `"${h}"`).join(", ")} ${heldEarly.length > 1 ? "are checks" : "is a check"} for after the work is live, so the pass was stored as "not yet checked". Report it once the ticket is live.` : "";
-      return text(`Ticket ${ticketId} is now ${state}.${heldNote}${moved.urgentOver ? " It started over your WIP limit because it is urgent." : ""}${beingChecked.held ? ` Boss Man queued its quick check (${beingChecked.where}), so it waits in Review as "Being checked" and no reviewer is woken until the check passes. A pass opens the reviews by itself; you are woken only if it fails. End your turn; don't call request_check or poll.` : ""}${sameState ? (reAsked.length ? ` It was already in review, so the note changed and no new round opened. ${reAsked.join(" and ")} asked for changes on earlier code and ${reAsked.length > 1 ? "were" : "was"} asked to review again; reviewers who approved were not asked.` : " It was already there, so only the note changed and no reviews were re-requested (no reviewer who asked for changes needed to look again).") : ""}${followUp}${tieNote}${watchNote}${planNote}${warn}${setupHint}${signoffHint}${(await getHold(db)) ? ` ${WRAP_UP}` : ""}${waitsOnAdvice(summary)}`);
+      return text(`Ticket ${ticketId} is now ${state}.${heldNote}${moved.urgentOver ? " It started over your WIP limit because it is urgent." : ""}${beingChecked.held ? ` Boss Man queued its quick check (${beingChecked.where}), so it waits in Review as "Being checked" and no reviewer is woken until the check passes. A pass opens the reviews by itself; you are woken only if it fails. End your turn; don't call request_check or poll.` : ""}${sameState ? (reAsked.length ? ` It was already in review, so the note changed and no new round opened. ${reAsked.join(" and ")} asked for changes on earlier code and ${reAsked.length > 1 ? "were" : "was"} asked to review again; reviewers who approved were not asked.` : " It was already there, so only the note changed and no reviews were re-requested (no reviewer who asked for changes needed to look again).") : ""}${followUp}${tieNote}${watchNote}${planNote}${warn}${setupHint}${signoffHint}${(await getHold(db)) && !(await runPassedHold(db, scope.runId)) ? ` ${WRAP_UP}` : ""}${waitsOnAdvice(summary)}`);
     },
   );
 }

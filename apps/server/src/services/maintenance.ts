@@ -432,11 +432,11 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
   }
 
   /** Every work run still going, as ids: whoever started before an ask and is still going gets told, once (BOS-988). */
-  async function liveWorkRunIds() {
+  async function liveWorkRunIds(leavePassedHold = false) {
     const live = await db
       .select({ id: runs.id })
       .from(runs)
-      .where(and(isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.purpose} is distinct from 'reply'`));
+      .where(and(isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.purpose} is distinct from 'reply'`, leavePassedHold ? sql`not ${runs.passedUpdateHold}` : undefined));
     return live.map((r) => r.id);
   }
 
@@ -546,7 +546,8 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
    */
   async function tell(text: string, h: Hold, field: "startTold" | "wrapTold"): Promise<Record<string, string>> {
     const already = h[field] ?? {};
-    const live = await liveWorkRunIds();
+    // BOS-2577: a run that passed the hold (urgent / fixes-live) is never told to wrap up: it keeps its own prompt line.
+    const live = await liveWorkRunIds(true);
     const fresh = live.filter((id) => !already[id]);
     const nowIso = now().toISOString();
     const reached = deps.tellRuns ? await deps.tellRuns(text, fresh).catch((err) => (deps.log?.(`telling running agents to wrap up failed: ${(err as Error).message}`), [])) : (await deps.tellRunning?.(text).catch((err) => (deps.log?.(`telling running agents to wrap up failed: ${(err as Error).message}`), null)), fresh);
