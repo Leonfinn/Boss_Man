@@ -90,6 +90,24 @@ export function milestoneVerdict(m: MilestoneStatusInput, targetDate: string | n
   return none("on_track");
 }
 
+/** The groups of a milestone's "What's left" list, in the order they are shown (BOS-2580). */
+export const LEFT_GROUPS = ["owner", "held", "look", "running", "building"] as const;
+export type LeftGroup = (typeof LEFT_GROUPS)[number];
+export const LEFT_GROUP_LABEL: Record<LeftGroup, string> = { owner: "Waiting for you", held: "Held up", look: "Needs a look", running: "Running", building: "Being built" };
+
+/**
+ * Which group a ticket that isn't done sits in, from facts read when the page loads (R59): a live ticket is a final check
+ * (Running, or Needs a look once it has gone quiet); an unbuilt one waits for you when an open card holds it, needs a
+ * look when the watchdog flagged it, is held up when something else (a ticket, a date, an engagement, a note-only block)
+ * holds it, and is otherwise being built. First match wins, so every ticket is in exactly one group.
+ */
+export function leftGroup(t: { delivered: boolean; quiet: boolean; stuck: boolean; ownerCard: boolean; held: boolean }): LeftGroup {
+  if (t.delivered) return t.quiet ? "look" : "running";
+  if (t.ownerCard) return "owner";
+  if (t.stuck) return "look";
+  return t.held ? "held" : "building";
+}
+
 /** The badge alone; see milestoneVerdict for the rule. */
 export function milestoneStatus(m: MilestoneStatusInput, targetDate: string | null, today: string): MilestoneStatus {
   return milestoneVerdict(m, targetDate, today).status;
