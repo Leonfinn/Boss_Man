@@ -112,13 +112,13 @@ describe.skipIf(!browser)("merge queue: a merge waiting on GitHub CI (BOS-2605)"
         expect(ci.word).toBe("On GitHub");
         expect(ci.tagText).toBe("On GitHub");
         expect(ci.tagClass).toContain("blue");
-        expect(ci.wait).toBe("on GitHub 31 min");
+        expect(ci.wait).toBe("on GitHub 31m");
         expect(ci.text).toContain("workflow change: GitHub runs every job");
-        expect(ci.text).not.toMatch(/waiting 31 min/);
+        expect(ci.text).not.toMatch(/waiting 31m/);
 
         expect(slot.word).toBe("Waiting");
         expect(slot.tagClass).toContain("grey");
-        expect(slot.wait).toBe("waiting 4 min");
+        expect(slot.wait).toBe("waiting 4m");
         // The tag colour differs: the two rows can't be told apart by words alone otherwise.
         expect(ci.tagColor).not.toBe(slot.tagColor);
 
