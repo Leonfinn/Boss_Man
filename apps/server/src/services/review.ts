@@ -15,7 +15,7 @@ import { landOnce, mergePullRequest } from "./merge-attempt.js";
 import { approve, diff, keptRound, landApproved, migrations, needsChanges, noteRead, overrule, passedHead, passedThisHead, readFile, reAskChangesRequested, requireSignoff, reviewStall, sendBack, sendBackRound, sequence, settle, signoffCovers, signoffStale, submit, withdrawRepeatRounds, withdrawStaleSignoff } from "./review-rounds.js";
 import { registerBoardBuilds } from "./board-build.js";
 import { afterLandingSweep, claimLanding, land, landVisible, recordLanded, releaseHolds, retryHeldBy, retryMerge, startLanding } from "./merge-land.js";
-import { branchChecks, branchChecksLine, branchChecksOrThrow, branchClash, followUpFailedChecks, gitAction, landing, landingActive, landingMergeIds, landingMergesByCompany, landingTurnStatus, landingWaitFacts, mergeLineClashes, mergeState, notifyChecks, recordMissedMerge, recordMissedMerges, runningMerges, setCheckMergedResult, setMergeCarry, setMergeRetarget, setMergeTurnMinutes, setTemplates, setWaitForCi, sweepCiBranches, syncPullRequests } from "./merge-status.js";
+import { branchChecks, branchChecksLine, branchChecksOrThrow, branchClash, followUpFailedChecks, gitAction, landing, landingActive, landingMergeIds, landingMergesByCompany, landingTurnStatus, landingWaitFacts, seatPhase, mergeLineClashes, mergeState, notifyChecks, recordMissedMerge, recordMissedMerges, runningMerges, setCheckMergedResult, setMergeCarry, setMergeRetarget, setMergeTurnMinutes, setTemplates, setWaitForCi, sweepCiBranches, syncPullRequests } from "./merge-status.js";
 
 /**
  * The assembled review service: the `this` a moved part (review-hold-actions.ts, merge-attempt.ts and later moves) calls other methods on.
@@ -85,6 +85,7 @@ export function reviewService(
 
     runningMerges(...a: Rest<typeof runningMerges>) { return runningMerges.call(this, ctx, ...a); },
     landingTurnStatus(...a: Rest<typeof landingTurnStatus>) { return landingTurnStatus.call(this, ctx, ...a); },
+    seatPhase(...a: Rest<typeof seatPhase>) { return seatPhase.call(this, ctx, ...a); },
     landingMergesByCompany(...a: Rest<typeof landingMergesByCompany>) { return landingMergesByCompany.call(this, ctx, ...a); },
     landingMergeIds(...a: Rest<typeof landingMergeIds>) { return landingMergeIds.call(this, ctx, ...a); },
     landingWaitFacts(...a: Rest<typeof landingWaitFacts>) { return landingWaitFacts.call(this, ctx, ...a); },

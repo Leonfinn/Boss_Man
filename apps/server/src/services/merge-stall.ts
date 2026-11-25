@@ -49,12 +49,16 @@ export function stalls(f: TrainFacts, now: number, pause?: { on: boolean; floor:
 type Named = { ref: string | null; title: string; companyId: string };
 const label = (n: Named | undefined, id: string) => n?.ref ?? (n ? `"${n.title}"` : id.slice(0, 8));
 
+export type SeatPhase = { phase: string; ciSince: string | null; ciRunning: string[] };
+
 /** The train in words for server_status: refs, held-alone clashes and the stall clocks as ISO times. */
 export type MergeTrainStatus = {
   projectId: string;
   project: string;
   seats: number;
   seated: string[];
+  /** BOS-2605: each seat's phase (the one function holderPhase, as in landingTurns), when its GitHub wait began and the GitHub jobs still running. */
+  seatDetails: Array<{ ticket: string } & SeatPhase>;
   waiting: string[];
   heldAlone: Array<{ ticketId: string; ticket: string; clashWith: string[]; files: string[]; since: string | null; passed: number; holdsLine: boolean }>;
   emptySeatSince: string | null;
@@ -87,7 +91,7 @@ function inWords(f: TrainFacts, n: Map<string, Named>): MergeTrainStatus["heldAl
 }
 
 /** server_status mergeTrain: each of the company's projects this server has a train for. Read only. */
-export async function mergeTrainStatus(db: Db, companyId: string, facts: (projectId: string) => TrainFacts | null = trainFacts): Promise<MergeTrainStatus[]> {
+export async function mergeTrainStatus(db: Db, companyId: string, facts: (projectId: string) => TrainFacts | null = trainFacts, seatInfo?: (ticketId: string) => SeatPhase | Promise<SeatPhase>): Promise<MergeTrainStatus[]> {
   const rows = await db.select({ id: projects.id, name: projects.name }).from(projects).where(eq(projects.companyId, companyId));
   const out: MergeTrainStatus[] = [];
   for (const p of rows) {
@@ -99,6 +103,7 @@ export async function mergeTrainStatus(db: Db, companyId: string, facts: (projec
       project: p.name,
       seats: f.seats,
       seated: f.seated.map((id) => label(n.get(id), id)),
+      seatDetails: await Promise.all(f.seated.map(async (id) => ({ ticket: label(n.get(id), id), ...((await seatInfo?.(id)) ?? { phase: "unknown", ciSince: null, ciRunning: [] }) }))),
       waiting: f.waiting.map((id) => label(n.get(id), id)),
       heldAlone: inWords(f, n),
       emptySeatSince: iso(f.emptySeatSince),
