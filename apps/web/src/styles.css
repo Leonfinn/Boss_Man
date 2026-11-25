@@ -532,7 +532,7 @@ code { font-family: var(--mono); font-size: 0.92em; }
 .rm-rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .rm-row { min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
 .rm-row:has(> .rm-rowbtn[aria-expanded="true"]) { border-color: var(--accent); }
-.rm-rowbtn { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 4px 12px; align-items: start; width: 100%; min-height: 44px; padding: 10px; border: 0; border-radius: 8px; background: none; color: var(--ink); text-align: left; font-size: 14px; }
+.rm-rowbtn { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 4px 12px; align-items: start; width: 100%; min-height: 44px; padding: 10px; border: 0; border-radius: 8px; background: none; color: var(--ink); text-align: left; font-size: 14px; }
 .rm-rowbtn:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
 .rm-rowbtn > .rm-strip { grid-column: 1 / -1; }
 .rm-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
@@ -543,6 +543,11 @@ code { font-family: var(--mono); font-size: 0.92em; }
 .rm-chip.red { background: var(--red-soft); color: var(--red-ink); }
 .rm-chip.amber { background: var(--amber-soft); color: var(--amber-ink); }
 .rm-chip.green { background: var(--green-soft); color: var(--green-ink); }
+/* BOS-2579: the one-line reason sits under the row, outside its button, lined up with the title (chip column 150 + gap 12 + padding 10). */
+.rm-reason { margin: 0 10px 10px 172px; font-size: 13px; color: var(--ink); overflow-wrap: anywhere; }
+.rm-reason.at_risk { color: var(--amber-ink); }
+.rm-reason.late { color: var(--red-ink); }
+.rm-reason a { color: inherit; text-decoration: underline; }
 .rm-chip.blue { background: var(--accent-soft); color: var(--accent-ink); }
 .rm-strip { position: relative; display: block; height: 16px; margin-top: 6px; border-radius: 4px; background: var(--ground); }
 .rm-strip > span { position: absolute; top: 0; bottom: 0; }
@@ -585,6 +590,7 @@ code { font-family: var(--mono); font-size: 0.92em; }
 @media (max-width: 600px) {
   /* The chip sits on its own line above the title; month names lose their year. */
   .rm-rowbtn { grid-template-columns: minmax(0, 1fr); }
+  .rm-reason { margin-left: 10px; }
   .rm-axis .yr { display: none; }
 }
 

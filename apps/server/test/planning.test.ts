@@ -20,6 +20,48 @@ async function setup() {
   return { req, company, project, ticket, db: t.db };
 }
 
+describe("roadmap badge and reason (BOS-2579)", () => {
+  async function milestone(c: Awaited<ReturnType<typeof setup>>, targetDate: string) {
+    const obj = (await c.req("POST", `/api/companies/${c.company.id}/objectives`, { title: "Ship it", priority: 1 })).json();
+    return (await c.req("POST", `/api/objectives/${obj.id}/milestones`, { title: "Launch", targetDate })).json() as { id: string };
+  }
+  const read = async (c: Awaited<ReturnType<typeof setup>>) => (await c.req("GET", "/api/roadmap?today=2026-10-16")).json()[0].objectives[0].milestones[0];
+
+  it("reads merged, live tickets as delivered: only final checks left means Live, being checked, not Late or At risk", async () => {
+    const c = await setup();
+    const m = await milestone(c, "2026-10-10");
+    const a = await c.ticket("Built and live", { milestoneId: m.id, state: "blocked" });
+    await c.ticket("Done work", { milestoneId: m.id, state: "done" });
+    await c.db.update(tickets).set({ mergeCommit: "abc123", goLiveWait: null }).where(eq(tickets.id, a.id));
+    const got = await read(c);
+    expect(got).toMatchObject({ status: "live_checked", blocked: 0 });
+    expect(got.reason).toContain("1 final check running");
+  });
+
+  it("a merged ticket still waiting to go live is not delivered, so the date still counts", async () => {
+    const c = await setup();
+    const m = await milestone(c, "2026-10-10");
+    const a = await c.ticket("Merged, not live", { milestoneId: m.id, state: "blocked" });
+    await c.db.update(tickets).set({ mergeCommit: "abc123", goLiveWait: "server" }).where(eq(tickets.id, a.id));
+    expect(await read(c)).toMatchObject({ status: "late" });
+  });
+
+  it("names an unbuilt ticket that waits on the owner's card; a blocked ticket with no card is only on track", async () => {
+    const c = await setup();
+    const m = await milestone(c, "2026-11-30");
+    const waiting = await c.ticket("Needs an answer", { milestoneId: m.id, state: "blocked" });
+    await c.ticket("Done work", { milestoneId: m.id, state: "done" });
+    expect(await read(c)).toMatchObject({ status: "on_track", reason: null, blocked: 1 });
+    const [d] = await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", question: "Which provider?", options: ["A", "B"], recommendedOption: "A", context: { type: "question" } }).returning();
+    await c.db.insert(ticketDependencies).values({ blockedTicketId: waiting.id, blockerDecisionId: d!.id });
+    const got = await read(c);
+    expect(got.status).toBe("at_risk");
+    expect(got.reason).toMatch(/^At risk: [A-Z]+-\d+ waits on your card\.$/);
+    // The reason names exactly the tickets it links.
+    expect(got.reasonTickets).toEqual([{ ref: expect.stringMatching(/^[A-Z]+-\d+$/), id: waiting.id }]);
+  });
+});
+
 describe("roadmap", () => {
   it("groups milestones by objective and company with their progress and status", async () => {
     const c = await setup();
@@ -40,7 +82,8 @@ describe("roadmap", () => {
     expect(o.keyResults[0]).toMatchObject({ title: "Beta users", progress: 0.4 });
     expect(o.milestones.map((m: { title: string; status: string; total: number; done: number }) => [m.title, m.status, m.done, m.total])).toEqual([
       ["Alpha", "late", 1, 2],
-      ["Beta", "at_risk", 1, 2],
+      // BOS-2579: a blocked ticket alone no longer turns the badge amber.
+      ["Beta", "on_track", 1, 2],
       ["Later", "no_work", 0, 0],
     ]);
 
