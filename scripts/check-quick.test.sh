@@ -764,6 +764,11 @@ notlogged "squeeze " "squeeze with no time left"
 grep -q "^SQUEEZE  skipped: 3 files, not enough time left (" "$t/out" || fail "squeeze skip line: $(cat "$t/out")"
 grep -q "^check-quick: all steps passed" "$t/out" || fail "squeeze skip changed the verdict"
 grep -q "3 skipped for lack of time, [0-9]* left out" "$t/out" || fail "squeeze skip note: $(cat "$t/out")"
+# The runner's real limit (BOSSMAN_CHECK_TIME_LIMIT_SECONDS) wins over the script's own default and over CHECK_QUICK_BUDGET_SECONDS.
+run 0 "squeeze: runner limit short" env BOSSMAN_CHECK_TIME_LIMIT_SECONDS=10 CHECK_QUICK_BUDGET_SECONDS=100000
+notlogged "squeeze " "squeeze with the runner's limit short"
+grep -q "^SQUEEZE  skipped: 3 files, not enough time left (" "$t/out" || fail "runner limit not used: $(cat "$t/out")"
+grep -q "^check-quick: all steps passed" "$t/out" || fail "runner limit changed the verdict"
 # A hang and an error are reported without failing (own run: only those two files).
 g reset -q --hard origin/main
 commit apps/web/src/hangs.test.ts apps/web/src/errors.test.ts

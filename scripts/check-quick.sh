@@ -651,10 +651,11 @@ if [ "${CHECK_QUICK_SQUEEZE:-}" != 0 ] && [ "$failed" -eq 0 ] && [ "$skipped" -e
   sq_all="$(squeeze_files | { grep . || true; })"
   if [ -n "$sq_all" ]; then
     sq_total=$(grep -c . <<<"$sq_all"); sq_run=0 sq_bad=0 sq_none=0 sq_err=0
-    # BOS-2603: the report must never push a passing check past the job's time limit. CHECK_QUICK_BUDGET_SECONDS (default 1800,
-    # a check job's default limit) is counted from the start of this script; a file is squeezed only when its own stop
-    # (SQUEEZE_STOP_SECONDS, default 200) plus CHECK_QUICK_SQUEEZE_MARGIN (default 300) still fits in what is left.
-    sq_budget="${CHECK_QUICK_BUDGET_SECONDS:-1800}"; [[ "$sq_budget" =~ ^[0-9]+$ ]] || sq_budget=1800
+    # BOS-2603: the report must never push a passing check past the job's time limit. The budget is the runner's real limit for
+    # this job (BOSSMAN_CHECK_TIME_LIMIT_SECONDS), else CHECK_QUICK_BUDGET_SECONDS, else 1800 (a check job's default limit). It is
+    # counted from the start of this script; a file is squeezed only when its own stop (SQUEEZE_STOP_SECONDS, default 200)
+    # plus CHECK_QUICK_SQUEEZE_MARGIN (default 300) still fits in what is left.
+    sq_budget="${BOSSMAN_CHECK_TIME_LIMIT_SECONDS:-${CHECK_QUICK_BUDGET_SECONDS:-1800}}"; [[ "$sq_budget" =~ ^[0-9]+$ ]] || sq_budget=1800
     sq_margin="${CHECK_QUICK_SQUEEZE_MARGIN:-300}"; [[ "$sq_margin" =~ ^[0-9]+$ ]] || sq_margin=300
     sq_stop="${SQUEEZE_STOP_SECONDS:-200}"; [[ "$sq_stop" =~ ^[0-9]+$ ]] || sq_stop=200
     sq_skip=0
