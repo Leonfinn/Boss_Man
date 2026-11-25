@@ -491,8 +491,21 @@ describe("a review no agent can take has a card too (BOS-2582, DR-021)", () => {
     expect((await c.boardCard(orphan.id)).waitingDecisionId).toBe(open[0]!.id);
     const heldCards = await c.cards(held.id, "open");
     expect(heldCards.map((d) => d.id)).toEqual([existing]);
-    // The card closes when the ticket leaves review (the condition is on the card itself).
-    expect((open[0]!.context as { clearWhen?: unknown }).clearWhen).toEqual([{ kind: "ticketLeft", ticketId: orphan.id, state: "review" }]);
+    // The card closes by itself: still open while nobody can review, closed once a reviewer holds the review.
+    const { alertClearing } = await import("../src/services/alert-clearing.js");
+    const closer = alertClearing(c.db, { isConnected: () => false, hasRoom: async () => true });
+    await closer.check();
+    expect(await c.cards(orphan.id, "open")).toHaveLength(1);
+    await c.db.update(reviewRequests).set({ reviewerAgentId: c.senior.id }).where(eq(reviewRequests.ticketId, orphan.id));
+    await closer.check();
+    expect(await c.cards(orphan.id, "open")).toHaveLength(0);
+    // And when the ticket leaves review.
+    await c.db.update(reviewRequests).set({ reviewerAgentId: null }).where(eq(reviewRequests.ticketId, orphan.id));
+    await sweepNoReviewerCards(c.db);
+    expect(await c.cards(orphan.id, "open")).toHaveLength(1);
+    await c.db.update(tickets).set({ systemState: "in_progress" }).where(eq(tickets.id, orphan.id));
+    await closer.check();
+    expect(await c.cards(orphan.id, "open")).toHaveLength(0);
   });
   it("gives a ticket with nothing open a 10-minute grace, then a card", async () => {
     const c = await setup();

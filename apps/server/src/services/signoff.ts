@@ -329,7 +329,7 @@ export async function restoreNoReviewerCard(db: Db, t: Ticket, now: Date = new D
     reviewer: "the owner",
     reviewerAgentId: null,
     question: `Merge "${t.title}"? No agent can review it, so it is yours to approve. It is rated ${riskOf(t.risk)} risk. Choose "${APPROVE_MERGE}" to land it, or "Send it back".`,
-    clearWhen: [{ kind: "ticketLeft", ticketId: t.id, state: "review" }],
+    clearWhen: [{ kind: "noReviewerGone", ticketId: t.id }],
   });
   await record(db, { companyId: t.companyId, ticketId: t.id, kind: "signoff_restored", summary: "No agent can review this ticket, so Boss Man raised a card for the owner to approve it or send it back." });
   return id;
