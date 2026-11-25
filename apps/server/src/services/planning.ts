@@ -11,6 +11,8 @@ import { ticketBlockerFinished } from "./ticket-links.js";
 import { hiddenWhileRechecked } from "./card-validity.js";
 import { heldReadyTickets } from "./agent-wip.js";
 import { readingsFor } from "./key-result-readings.js";
+import { ticketsOfMilestones } from "./milestone-tickets.js";
+import { burnupWeeks, paceFromBurnup } from "./roadmap-burnup.js";
 
 export const OBJECTIVE_STATUSES = ["active", "done", "dropped"] as const;
 
@@ -104,36 +106,21 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
       const krs = ids.length ? await db.select().from(keyResults).where(inArray(keyResults.objectiveId, ids)) : [];
       const readings = await readingsFor(db, krs.map((k) => k.id));
       const msIds = ms.map((m) => m.id);
-      const counts = msIds.length
-        ? await db
-            .select({
-              milestoneId: tickets.milestoneId,
-              total: sql<number>`count(*) filter (where ${tickets.outcome} is distinct from 'cancelled')`.mapWith(Number),
-              done: sql<number>`count(*) filter (where ${tickets.systemState} = 'done' and ${tickets.outcome} is distinct from 'cancelled')`.mapWith(Number),
-              blocked: sql<number>`count(*) filter (where ${tickets.systemState} = 'blocked')`.mapWith(Number),
-              active: sql<number>`count(*) filter (where ${tickets.systemState} in ('in_progress', 'review'))`.mapWith(Number),
-            })
-            .from(tickets)
-            .where(inArray(tickets.milestoneId, msIds))
-            .groupBy(tickets.milestoneId)
-        : [];
-      const byMs = new Map(counts.map((c) => [c.milestoneId, c]));
-
-      // Forecast: sized points per milestone (direct tickets, or tickets of its features) and each company's 28-day pace.
-      const feats = msIds.length ? await db.select({ id: features.id, milestoneId: features.milestoneId }).from(features).where(inArray(features.milestoneId, msIds)) : [];
-      const msOfFeature = new Map(feats.map((f) => [f.id, f.milestoneId!]));
-      const sized = msIds.length
-        ? await db
-            .select({ milestoneId: tickets.milestoneId, featureId: tickets.featureId, size: tickets.size, done: sql<boolean>`${tickets.systemState} = 'done'` })
-            .from(tickets)
-            .where(and(sql`${tickets.outcome} is distinct from 'cancelled'`, or(inArray(tickets.milestoneId, msIds), feats.length ? inArray(tickets.featureId, feats.map((f) => f.id)) : undefined)))
-        : [];
-      const rowsOf = new Map<string, Array<{ size: number | null; done: boolean }>>();
-      for (const r of sized) {
-        const msId = r.milestoneId && msIds.includes(r.milestoneId) ? r.milestoneId : r.featureId ? msOfFeature.get(r.featureId) : undefined;
-        if (msId) rowsOf.set(msId, [...(rowsOf.get(msId) ?? []), { size: r.size, done: r.done }]);
-      }
-      const paceOf = await paceByCompany(db, today);
+      // One set of tickets per milestone (direct plus its features', cancelled left out): the counts, the status, the
+      // forecast and the burn-up are all worked out from it, so the timeline and the list can't disagree (BOS-2560).
+      const ticketsOf = new Map<string, Awaited<ReturnType<typeof ticketsOfMilestones>>>();
+      for (const t of await ticketsOfMilestones(db, msIds)) ticketsOf.set(t.milestoneId, [...(ticketsOf.get(t.milestoneId) ?? []), t]);
+      const figures = (m: (typeof ms)[number]) => {
+        const rows = ticketsOf.get(m.id) ?? [];
+        const done = rows.filter((t) => t.state === "done");
+        const burnup = burnupWeeks(rows.map((t) => ({ size: t.size, createdAt: t.createdAt, doneAt: t.state === "done" ? t.changedAt : null })), today);
+        // Its own pace: points of this milestone finished in the last 4 weeks, a week.
+        const forecast = forecastMilestone(rows.map((t) => ({ size: t.size, done: t.state === "done" })), paceFromBurnup(burnup), m.targetDate, today);
+        const counts = { total: rows.length, done: done.length, blocked: rows.filter((t) => t.state === "blocked").length };
+        const finishedAt = rows.length > 0 && done.length === rows.length ? new Date(Math.max(...done.map((t) => t.changedAt.getTime()))).toISOString() : null;
+        const status = milestoneStatus({ ...counts, daysLate: forecast.daysLate, noEstimate: forecast.pointsLeft > 0 && forecast.expectedFinish === null }, m.targetDate, today) as MilestoneStatus;
+        return { counts, active: rows.filter((t) => t.state === "in_progress" || t.state === "review").length, burnup, forecast, finishedAt, status };
+      };
       return cos
         .map((c) => ({
           ...c,
@@ -150,32 +137,31 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
               milestones: ms
                 .filter((m) => m.objectiveId === o.id)
                 .map((m) => {
-                  const n = byMs.get(m.id) ?? { total: 0, done: 0, blocked: 0, active: 0 };
-                  const counts = { total: n.total, done: n.done, blocked: n.blocked };
+                  const f = figures(m);
                   return {
                     id: m.id,
                     title: m.title,
                     targetDate: m.targetDate,
-                    ...counts,
-                    active: n.active,
-                    status: milestoneStatus(counts, m.targetDate, today) as MilestoneStatus,
-                    forecast: forecastMilestone(rowsOf.get(m.id) ?? [], paceOf.get(c.id) ?? 0, m.targetDate, today),
+                    ...f.counts,
+                    active: f.active,
+                    status: f.status,
+                    forecast: f.forecast,
+                    /** When the last of its tickets was finished (the burn-up's stand-in); null until it is done. */
+                    finishedAt: f.finishedAt,
+                    /** 8 weekly points of points done and planned, oldest first (BOS-2397). */
+                    burnup: f.burnup,
                     pinned: m.horizon,
-                    horizon: milestoneHorizon({ ...counts, active: n.active, targetDate: m.targetDate, horizon: m.horizon }, today),
+                    horizon: milestoneHorizon({ ...f.counts, active: f.active, targetDate: m.targetDate, horizon: m.horizon }, today),
                   };
                 }),
             })),
         }));
     },
 
-    /** A milestone's tickets, for the roadmap's detail panel. */
+    /** A milestone's tickets, for the roadmap's detail panel: the same set the counts and forecast use, with cancelled ones shown as such. */
     async milestoneTickets(milestoneId: string) {
-      return db
-        .select({ id: tickets.id, title: tickets.title, state: tickets.systemState, outcome: tickets.outcome, assignee: agents.name })
-        .from(tickets)
-        .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
-        .where(eq(tickets.milestoneId, milestoneId))
-        .orderBy(asc(tickets.createdAt));
+      const rows = await ticketsOfMilestones(db, [milestoneId], { includeCancelled: true });
+      return rows.map((t) => ({ id: t.id, title: t.title, state: t.state, outcome: t.outcome, assignee: t.assignee }));
     },
 
     async updateObjective(id: string, patch: { title?: string; priority?: number; status?: (typeof OBJECTIVE_STATUSES)[number] }) {

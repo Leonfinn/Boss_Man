@@ -523,27 +523,69 @@ code { font-family: var(--mono); font-size: 0.92em; }
 .rm-head h3 { font-size: 16px; font-weight: 600; }
 .rm-krs { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
 .rm-krs li { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-.rm-track { position: relative; background: var(--ground); border-radius: 8px; overflow: hidden; }
-.rm-month { position: absolute; top: 0; bottom: 0; padding: 4px 6px; border-left: 1px solid var(--line-strong); font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; }
-.rm-today { position: absolute; top: 0; bottom: 0; border-left: 2px solid var(--accent); }
-.rm-today::after { content: "Today"; position: absolute; bottom: 2px; left: 4px; font-family: var(--mono); font-size: 10px; color: var(--link); }
-.rm-ms { position: absolute; display: flex; gap: 6px; align-items: flex-start; max-width: 150px; padding: 2px 4px; margin-left: -7px; border: 0; border-radius: 6px; background: none; color: var(--ink); text-align: left; font-size: 13px; line-height: 1.25; }
-.rm-ms[style*="translateX"] { margin-left: 7px; }
-.rm-ms:hover, .rm-ms[aria-pressed="true"] { background: var(--card); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4); z-index: 1; max-width: 240px; }
-.rm-ms b { display: block; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rm-ms small { display: block; color: var(--muted); font-size: 11.5px; white-space: nowrap; }
-.rm-dot { flex: none; width: 11px; height: 11px; margin-top: 3px; transform: rotate(45deg); background: var(--c); border-radius: 2px; }
-.rm-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-.rm-list button { width: 100%; display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; min-height: 44px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--ink); text-align: left; font-size: 14px; }
-.rm-list button[aria-pressed="true"] { border-color: var(--accent); }
-.rm-list .tag { margin-left: auto; }
-.rm-list li.dated { display: none; }
+/* The milestone rows (BOS-2560). One row each, in normal flow: a long title wraps and pushes the next row down, so nothing
+   prints over anything else. Only the markers inside a row's own date strip are positioned. No title is nowrap or cut. */
+.rm-summary { margin: 0; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.rm-axis { position: relative; height: 18px; margin: 0 11px; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.rm-axis .month { position: absolute; top: 0; height: 18px; line-height: 18px; padding-left: 4px; border-left: 1px solid var(--line-strong); white-space: nowrap; }
+.rm-axis .month.end { transform: translateX(-100%); padding: 0 4px 0 0; border-left: 0; border-right: 1px solid var(--line-strong); }
+.rm-rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.rm-row { min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+.rm-row:has(> .rm-rowbtn[aria-expanded="true"]) { border-color: var(--accent); }
+.rm-rowbtn { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 4px 12px; align-items: start; width: 100%; min-height: 44px; padding: 10px; border: 0; border-radius: 8px; background: none; color: var(--ink); text-align: left; font-size: 14px; }
+.rm-rowbtn:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+.rm-rowbtn > .rm-strip { grid-column: 1 / -1; }
+.rm-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.rm-title { font-weight: 600; overflow-wrap: anywhere; }
+.rm-meta, .rm-meta2 { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.rm-meta2.warn { color: var(--amber-ink); }
+.rm-chip { display: inline-flex; align-items: center; gap: 4px; justify-self: start; padding: 2px 8px; border-radius: 6px; background: var(--grey-soft); color: var(--grey-ink); font-size: 12px; font-weight: 500; line-height: 1.4; white-space: nowrap; }
+.rm-chip.red { background: var(--red-soft); color: var(--red-ink); }
+.rm-chip.amber { background: var(--amber-soft); color: var(--amber-ink); }
+.rm-chip.green { background: var(--green-soft); color: var(--green-ink); }
+.rm-chip.blue { background: var(--accent-soft); color: var(--accent-ink); }
+.rm-strip { position: relative; display: block; height: 16px; margin-top: 6px; border-radius: 4px; background: var(--ground); }
+.rm-strip > span { position: absolute; top: 0; bottom: 0; }
+.rm-strip .tick { border-left: 1px solid var(--line); }
+.rm-strip .today { border-left: 2px solid var(--accent-dark); }
+.rm-strip .bar { top: 5px; bottom: 5px; border-radius: 3px; background: var(--line-strong); }
+.rm-strip .bar.on_track { background: var(--accent); }
+.rm-strip .bar.at_risk { background: var(--amber-line); }
+.rm-strip .bar.late { background: var(--red-ink); opacity: 0.6; }
+.rm-strip .finish { top: 3px; bottom: auto; z-index: 1; width: 10px; height: 10px; margin-left: -5px; box-sizing: border-box; border: 2px solid var(--ink); border-radius: 50%; background: var(--ground); }
+.rm-strip .due { top: 3px; bottom: auto; z-index: 2; width: 9px; height: 9px; margin-left: -4.5px; background: var(--ink); transform: rotate(45deg); }
+.rm-key { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 0; font-size: 12px; }
+.rm-key i { display: inline-block; vertical-align: middle; margin-right: 6px; }
+.rm-key i.due { width: 8px; height: 8px; background: var(--ink); transform: rotate(45deg); }
+.rm-key i.finish { width: 10px; height: 10px; box-sizing: border-box; border: 2px solid var(--ink); border-radius: 50%; }
+.rm-key i.today { width: 0; height: 12px; border-left: 2px solid var(--accent-dark); }
+.rm-rules ul { margin: 0; padding: 0 0 0 22px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.rm-done ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
+.rm-done li { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+.rm-done .rm-title { flex: 1 1 200px; min-width: 0; font-weight: 500; }
+.rm-open { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 0 10px 10px; }
+.rm-open h4 { margin: 0; font-size: 14px; }
+.rm-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 0; font-size: 12px; color: var(--muted); }
+.rm-legend i { display: inline-block; width: 22px; margin-right: 6px; vertical-align: middle; border-top: 2px solid var(--accent-ink); }
+.rm-legend i.dashed { border-top: 2px dashed var(--muted); }
+.rm-legend i.dotted { border-top: 2px dotted var(--accent-ink); }
+.rm-chart-holder { width: 100%; max-width: 560px; min-width: 0; }
+.rm-chart { display: block; max-width: 100%; font-family: var(--sans); font-size: 10.5px; fill: var(--muted); }
+.rm-chart .axis { stroke: var(--line-strong); stroke-width: 1; }
+.rm-chart .today { stroke: var(--accent-dark); stroke-width: 2; }
+.rm-chart .due { stroke: var(--muted); stroke-dasharray: 3 3; }
+.rm-chart .planned { fill: none; stroke: var(--muted); stroke-width: 2; stroke-dasharray: 5 4; }
+.rm-chart .done { fill: none; stroke: var(--accent-ink); stroke-width: 2; }
+.rm-chart .pace { stroke: var(--accent-ink); stroke-width: 2; stroke-dasharray: 1 4; stroke-linecap: round; }
+.rm-chart .finish { fill: var(--ground); stroke: var(--accent-ink); stroke-width: 2; }
+.rm-pace { margin: 0; font-size: 13px; }
 .rm-detail { display: flex; flex-direction: column; gap: 10px; padding: 14px; border-radius: 8px; background: var(--ground); }
 .rm-tickets, .link-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
 .rm-tickets li, .link-list li { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-@media (max-width: 720px) {
-  .rm-wide { display: none; }
-  .rm-list li.dated { display: block; }
+@media (max-width: 600px) {
+  /* The chip sits on its own line above the title; month names lose their year. */
+  .rm-rowbtn { grid-template-columns: minmax(0, 1fr); }
+  .rm-axis .yr { display: none; }
 }
 
 /* ---------- Plan ---------- */

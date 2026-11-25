@@ -3,9 +3,6 @@
 // Same rows as the forecast in planning.ts: sized tickets that sit on the milestone or on one of its features, cancelled left out.
 // There is no per-ticket state history, so a finished ticket counts as done from its last state change (the same
 // stand-in the weekly pace uses); a ticket that was reopened and finished again counts from the later date.
-import { and, inArray, or, sql } from "drizzle-orm";
-import type { Db } from "../db/client.js";
-import { features, tickets } from "../db/schema.js";
 
 export const BURNUP_WEEKS = 8;
 const dayMs = 86_400_000;
@@ -31,23 +28,11 @@ export function burnupWeeks(rows: BurnupRow[], today: string): BurnupPoint[] {
   return points;
 }
 
-/** Burn-up per milestone id; every id asked for gets 8 points (all zero when it has no sized work). */
-export async function roadmapBurnup(db: Db, milestoneIds: string[], today: string): Promise<Map<string, BurnupPoint[]>> {
-  if (!milestoneIds.length) return new Map(milestoneIds.map((id): [string, BurnupPoint[]] => [id, []]));
-  const feats = await db.select({ id: features.id, milestoneId: features.milestoneId }).from(features).where(inArray(features.milestoneId, milestoneIds));
-  const msOfFeature = new Map(feats.map((f) => [f.id, f.milestoneId!]));
-  const rows = await db
-    .select({ milestoneId: tickets.milestoneId, featureId: tickets.featureId, size: tickets.size, createdAt: tickets.createdAt, state: tickets.systemState, changedAt: tickets.stateChangedAt })
-    .from(tickets)
-    .where(and(sql`${tickets.outcome} is distinct from 'cancelled'`, or(inArray(tickets.milestoneId, milestoneIds), feats.length ? inArray(tickets.featureId, feats.map((f) => f.id)) : undefined)));
-  const msIdOf = (r: (typeof rows)[number]) => (r.milestoneId && milestoneIds.includes(r.milestoneId) ? r.milestoneId : r.featureId ? msOfFeature.get(r.featureId) : undefined);
-  return new Map(
-    milestoneIds.map((id): [string, BurnupPoint[]] => [
-      id,
-      burnupWeeks(
-        rows.filter((r) => msIdOf(r) === id).map((r) => ({ size: r.size, createdAt: r.createdAt, doneAt: r.state === "done" ? r.changedAt : null })),
-        today,
-      ),
-    ]),
-  );
+/**
+ * A milestone's own pace, points a week: the points it finished in the last 4 weeks (done now minus done 4 weeks ago) over 4.
+ * Read off the burn-up rows, so the chart and the forecast cannot disagree (BOS-2558).
+ */
+export function paceFromBurnup(b: BurnupPoint[]): number {
+  if (b.length < BURNUP_WEEKS) return 0;
+  return Math.max(0, b[BURNUP_WEEKS - 1]!.done - b[BURNUP_WEEKS - 5]!.done) / 4;
 }

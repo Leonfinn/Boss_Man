@@ -169,6 +169,7 @@ reads:
 
 ## #/roadmap
 sections: 
+  - Progress over the last 8 weeks
   - Roadmap
 reads: 
   - /api/milestones/:id/tickets

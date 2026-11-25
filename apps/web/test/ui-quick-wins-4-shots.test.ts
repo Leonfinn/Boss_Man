@@ -49,7 +49,7 @@ const roadmapTimeline = [
         priority: 2,
         status: "active",
         keyResults: [],
-        milestones: [{ id: "m1", title: "Beta", targetDate: "2026-12-01", total: 2, done: 1, blocked: 0, active: 1, status: "on_track", horizon: "now", pinned: null }],
+        milestones: [{ id: "m1", title: "Beta", targetDate: "2026-12-01", total: 2, done: 1, blocked: 0, active: 1, status: "on_track", horizon: "now", pinned: null, forecast: { pointsDone: 1, pointsLeft: 1, unsized: 0, pace: 1, expectedFinish: "2026-11-30", daysLate: 0 } }],
       },
     ],
   },
