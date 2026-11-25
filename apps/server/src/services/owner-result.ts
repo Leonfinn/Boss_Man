@@ -58,8 +58,6 @@ export function infoAskOf(d: Pick<Decision, "kind" | "question" | "context">): s
   return hit[0].replace(/\s+/g, " ").trim().slice(0, 120);
 }
 
-const ATTACHED = new RegExp(ATTACHMENT_LINK.source, "g");
-
 /**
  * BOS-2593 (DR-076 B): the second trigger. An owner answer that carries their own content (a picture or file, a note, or
  * words beyond the button label) owes them a reply in their chat, whatever the card's wording, steps cards included: on
@@ -81,7 +79,9 @@ export function ownContentOf(
   const note = extra.note?.trim() ?? "";
   if (ATTACHMENT_LINK.test(answer) || ATTACHMENT_LINK.test(note)) return "the owner attached a picture or file";
   if (note) return "the owner added a note of their own";
-  const words = answer.replace(ATTACHED, " ").trim();
+  // Built here, not at module level: ticket-images.ts sits in an import cycle with decisions.ts, so ATTACHMENT_LINK can
+  // still be undefined while this module loads (attachment-link.test.ts loads it in that order).
+  const words = answer.replace(new RegExp(ATTACHMENT_LINK.source, "g"), " ").trim();
   const options = (d.options as string[] | null) ?? [];
   if (extra.custom && words && !options.includes(words)) return "the owner answered in their own words";
   return null;
