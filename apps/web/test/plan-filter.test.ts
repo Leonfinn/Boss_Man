@@ -1,7 +1,7 @@
 // BOS-2430: the Plan page's filters, per-person summary and CSV.
 import { describe, expect, it } from "vitest";
 import type { Plan, PlanNode } from "../src/api";
-import { applyPlanFilter, NO_PLAN_FILTER, parsePlanFilter, personSummary, planFilterQuery, planToCsv, UNASSIGNED } from "../src/plan-filter";
+import { applyPlanFilter, matchesPlanFilter, NO_PLAN_FILTER, parsePlanFilter, personSummary, planFilterQuery, planToCsv, UNASSIGNED } from "../src/plan-filter";
 
 const node = (over: Partial<PlanNode> & { id: string }): PlanNode => ({
   kind: "ticket", ref: null, title: over.id, state: "in_progress", open: true, link: "#", assignee: null, project: null, layer: 0, blocked: false, causes: [], holdingUp: 0, ...over,
@@ -25,6 +25,32 @@ describe("plan filter link", () => {
     expect(parsePlanFilter(new URLSearchParams(planFilterQuery(f)))).toEqual(f);
     expect(planFilterQuery(NO_PLAN_FILTER)).toBe("");
     expect(parsePlanFilter(new URLSearchParams("kind=nonsense")).kind).toBe("");
+  });
+});
+
+describe("matchesPlanFilter", () => {
+  const open = node({ id: "a", assignee: "Ann", project: "Web" });
+  const done = node({ id: "d", open: false, state: "done", assignee: "Ann", project: "Web" });
+  const unassigned = node({ id: "e", kind: "decision", assignee: null, project: "Server" });
+
+  it("shows open items and hides finished ones with the empty filter", () => {
+    expect(matchesPlanFilter(open, NO_PLAN_FILTER)).toBe(true);
+    expect(matchesPlanFilter(done, NO_PLAN_FILTER)).toBe(false);
+  });
+  it("shows finished items when finished is set", () => {
+    expect(matchesPlanFilter(done, { ...NO_PLAN_FILTER, finished: true })).toBe(true);
+  });
+  it("filters by project, assignee and kind on their own", () => {
+    expect(matchesPlanFilter(open, { ...NO_PLAN_FILTER, project: "Web" })).toBe(true);
+    expect(matchesPlanFilter(open, { ...NO_PLAN_FILTER, project: "Server" })).toBe(false);
+    expect(matchesPlanFilter(open, { ...NO_PLAN_FILTER, assignee: "Ann" })).toBe(true);
+    expect(matchesPlanFilter(open, { ...NO_PLAN_FILTER, assignee: "Bob" })).toBe(false);
+    expect(matchesPlanFilter(unassigned, { ...NO_PLAN_FILTER, kind: "decision" })).toBe(true);
+    expect(matchesPlanFilter(unassigned, { ...NO_PLAN_FILTER, kind: "ticket" })).toBe(false);
+  });
+  it("matches only items with no assignee for UNASSIGNED", () => {
+    expect(matchesPlanFilter(unassigned, { ...NO_PLAN_FILTER, assignee: UNASSIGNED })).toBe(true);
+    expect(matchesPlanFilter(open, { ...NO_PLAN_FILTER, assignee: UNASSIGNED })).toBe(false);
   });
 });
 

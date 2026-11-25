@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compareLastMoved, isStalled, lastMovedLabel } from "../src/feature-stall";
+import { compareLastMoved, isStalled, lastMovedLabel, lastMovedTitle } from "../src/feature-stall";
 
 const NOW = Date.parse("2026-11-24T12:00:00Z");
 const daysAgo = (n: number) => new Date(NOW - n * 86_400_000).toISOString();
@@ -24,6 +24,17 @@ describe("lastMovedLabel", () => {
     expect(lastMovedLabel(daysAgo(0.2), NOW)).toBe("today");
     expect(lastMovedLabel(daysAgo(2.5), NOW)).toBe("2 d ago");
     expect(lastMovedLabel(null, NOW)).toBe("—");
+  });
+});
+
+describe("lastMovedTitle", () => {
+  it("says no tasks yet when nothing has moved", () => {
+    expect(lastMovedTitle(null, NOW)).toBe("No tasks yet");
+    expect(lastMovedTitle(undefined, NOW)).toBe("No tasks yet");
+  });
+  it("says the last task change and its age", () => {
+    expect(lastMovedTitle(new Date(NOW - 3 * 3_600_000).toISOString(), NOW)).toBe("Last task change 3h ago");
+    expect(lastMovedTitle(daysAgo(2.5), NOW)).toBe("Last task change 2d ago");
   });
 });
 
