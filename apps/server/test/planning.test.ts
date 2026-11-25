@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { activity, decisions, features, ticketDependencies, tickets } from "../src/db/schema.js";
-import { forecastMilestone } from "../src/services/planning.js";
+import { effectiveSize, forecastMilestone } from "../src/services/planning.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
 let t: TestApp | undefined;
@@ -391,5 +391,28 @@ describe("one ticket set per milestone (BOS-2560)", () => {
     const idleM = ms.find((x) => x.title === "Idle")!;
     expect(idleM.forecast).toMatchObject({ pace: 0, expectedFinish: null });
     expect(idleM.status).toBe("on_track"); // nothing finished in 4 weeks, but it is due in 40 days
+  });
+});
+
+describe("effectiveSize (BOS-2532, BOS-2567)", () => {
+  it("gives a sized ticket its whole-number points", () => {
+    expect(effectiveSize(1)).toBe(1);
+    expect(effectiveSize(3)).toBe(3);
+    expect(effectiveSize(8)).toBe(8);
+  });
+
+  it("falls back to 0 when no size is set", () => {
+    expect(effectiveSize(null)).toBe(0);
+    expect(effectiveSize(undefined)).toBe(0);
+  });
+
+  it("counts a size that is not on the point scale as unsized, not as points", () => {
+    expect(effectiveSize(0)).toBe(0);
+    expect(effectiveSize(-2)).toBe(0);
+    expect(effectiveSize(Number.NaN)).toBe(0);
+    expect(effectiveSize(Number.POSITIVE_INFINITY)).toBe(0);
+    // A stored fraction is rounded to whole points, as the comment on the helper promises.
+    expect(effectiveSize(3.4)).toBe(3);
+    expect(effectiveSize(3.6)).toBe(4);
   });
 });

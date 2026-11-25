@@ -12,7 +12,7 @@ import { openPglite } from "../src/db/client.js";
 import { tickets } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { WAKE_CLASSES_FILE, WAKE_CLASSES_TEST } from "../src/services/list-guard-gate.js";
-import { diffOnce } from "../src/services/list-guard-move.js";
+import { diffOnce, LIST_GUARD_WRONG_MIN, listGuardWrongProblem } from "../src/services/list-guard-move.js";
 
 const SCHED = "apps/server/src/services/scheduler.ts";
 const BASE: WorkspaceDiff = { baseCommit: "a".repeat(40), head: "b".repeat(40), commits: [{ sha: "b".repeat(40), subject: "Plan due" }], files: [], diff: "", truncated: false };
@@ -113,5 +113,28 @@ describe("BOS-2522: the list guards at the move to review", () => {
     const b = await ctx.ticket();
     await toReview(b.id);
     expect((await stateOf(b.id)).systemState).toBe("review");
+  });
+});
+
+describe("BOS-2567: listGuardWrongProblem, the reason for overruling a list guard", () => {
+  it("accepts a one-line reason with something to say, and trims the line first", () => {
+    expect(listGuardWrongProblem("the label is built from a variable")).toBeNull();
+    expect(listGuardWrongProblem("  the label is built from a variable\n")).toBeNull();
+  });
+
+  it("asks for one line of at least the minimum, counting the trimmed reason", () => {
+    expect(LIST_GUARD_WRONG_MIN).toBe(10);
+    const justLongEnough = "a".repeat(LIST_GUARD_WRONG_MIN);
+    expect(listGuardWrongProblem(justLongEnough)).toBeNull();
+    // The problem names the minimum and says what to give it; the shorter reason is refused, trimmed blanks included.
+    for (const why of ["", "   ", "a".repeat(LIST_GUARD_WRONG_MIN - 1), `  ${"a".repeat(LIST_GUARD_WRONG_MIN - 1)}  `]) {
+      expect(listGuardWrongProblem(why)).toContain(`at least ${LIST_GUARD_WRONG_MIN} characters`);
+    }
+  });
+
+  it("refuses a reason split over more than one line, whether broken by \\n, \\r or \\r\\n", () => {
+    for (const why of ["the label is built\nfrom a variable", "the label is built\rfrom a variable", "the label is built\r\nfrom a variable"]) {
+      expect(listGuardWrongProblem(why)).toBe("listGuardWrong must be one line.");
+    }
   });
 });
