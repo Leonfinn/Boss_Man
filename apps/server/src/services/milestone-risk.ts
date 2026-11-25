@@ -36,7 +36,10 @@ export function reasonForWake(reason: string | null): string {
     .trim();
 }
 
-type Kept = { status: string | null; managed: boolean };
+// BOS-2627 follow-up: `woke` says a wake for that status really started. Rows written before 25dcf039 have no `woke`
+// (the old code recorded the status whether or not the wake started, so a live row can say "late" with nothing sent);
+// those are treated as not woken, so the first pass after the update wakes the CEO once instead of going quiet for good.
+type Kept = { status: string | null; managed: boolean; woke?: boolean };
 
 export function milestoneRiskService(db: Db, deps: { planning: ReturnType<typeof planningService>; wake: (input: { agentId: string; reason: string; note: string; priority?: number }) => Promise<unknown>; now?: () => Date; log?: (message: string) => void }) {
   const now = deps.now ?? (() => new Date());
@@ -69,7 +72,11 @@ export function milestoneRiskService(db: Db, deps: { planning: ReturnType<typeof
       for (const m of managed) {
         const prev = seen.get(m.id) ?? null;
         const status = m.status;
-        const shouldWake = ceoPlanWake({ managed: true, wasManaged: prev?.managed ?? false, status, lastWoken: (prev?.status ?? null) as never });
+        // BOS-2627 follow-up: only a row that says its wake really started counts as woken. A row written before 25dcf039
+        // has no `woke` (the old code recorded the status whether or not the wake started, and swallowed the failure), and
+        // one left by a dropped or failed send says status null; neither is a wake, so the CEO is woken on this pass.
+        const lastWoken = prev?.woke === true ? (prev.status ?? null) : null;
+        const shouldWake = ceoPlanWake({ managed: true, wasManaged: prev?.managed === true, status, lastWoken: lastWoken as never });
         // What the next pass compares against: the status the milestone was last WOKEN about. It is cleared as soon as the
         // status leaves At risk/Late, so a return to that state is a new wake; otherwise the last woken status stays.
         // BOS-2633: the send goes through tellOnce, so the wake counts only when it resolved with a real wake row. A throw or a
@@ -98,8 +105,10 @@ export function milestoneRiskService(db: Db, deps: { planning: ReturnType<typeof
         // nothing yet") when a wake is due, unless the status has now left At risk/Late, which is cleared as before. Only a
         // wake that really started replaces it with the status it was about; a dropped or failed wake leaves it, so the next
         // pass tries again.
-        const next: Kept = { status: shouldWake || !needsCeoPlan(status) ? null : (prev?.status ?? null), managed: true };
-        if (!prev || prev.status !== next.status || prev.managed !== next.managed) {
+        const next: Kept = shouldWake || !needsCeoPlan(status) ? { status: null, managed: true, woke: false } : { status: lastWoken, managed: true, woke: prev?.woke === true };
+        // Skipped when nothing changed, so a delivered row isn't rewritten every minute.
+        const write = !prev || prev.status !== next.status || prev.managed !== next.managed || prev.woke !== next.woke;
+        if (write) {
           await db
             .insert(settings)
             .values({ key: MILESTONE_RISK_KEY(m.id), value: next })
@@ -108,7 +117,7 @@ export function milestoneRiskService(db: Db, deps: { planning: ReturnType<typeof
         }
         if (shouldWake && (await delivered())) {
           woken++;
-          const after: Kept = { status, managed: true };
+          const after: Kept = { status, managed: true, woke: true };
           await db
             .insert(settings)
             .values({ key: MILESTONE_RISK_KEY(m.id), value: after })

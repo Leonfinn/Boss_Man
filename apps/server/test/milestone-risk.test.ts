@@ -292,7 +292,7 @@ describe("milestone at risk: the wake is never lost (BOS-2627, kept through tell
     // The first pass's wake comes back "dropped": the milestone was not woken, so the next pass tries again.
     expect(await queued(c, "2026-10-16", { value: { id: "w1", outcome: "dropped" } }).service.run()).toEqual({ woken: 0 });
     const [kept] = await c.db.select().from(settings).where(eq(settings.key, `milestone_risk:${m.id}`));
-    expect(kept!.value).toEqual({ status: null, managed: true });
+    expect(kept!.value).toMatchObject({ status: null, managed: true, woke: false });
     // Next pass: this time it really starts; the CEO is woken and it goes quiet.
     expect(await queued(c, "2026-10-17", { value: { id: "w2", outcome: "queued" } }).service.run()).toEqual({ woken: 1 });
     expect(c.woken).toHaveLength(2);
@@ -325,6 +325,28 @@ describe("milestone at risk: the wake is never lost (BOS-2627, kept through tell
     expect(await sweep(c, "2026-10-16").run()).toEqual({ woken: 1 });
     expect(await sweep(c, "2026-10-17").run()).toEqual({ woken: 0 });
     expect(c.woken).toHaveLength(1);
+  });
+
+  it("a row written under the old code (status recorded, wake never sent) still wakes the CEO once after the update", async () => {
+    const c = await setup();
+    const { m } = await lateNow(c);
+    await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
+    // f8969188 recorded the status on the pass that turned the switch on, whether or not the wake started, and swallowed
+    // the failure. So a live row can say {status: "late", managed: true} with no wake ever reaching the CEO.
+    await c.db.insert(settings).values({ key: `milestone_risk:${m.id}`, value: { status: "late", managed: true } });
+    // The first pass after 25dcf039 must not read that as "already woken": it wakes once, then goes quiet.
+    expect(await sweep(c, "2026-10-17").run()).toEqual({ woken: 1 });
+    expect(await sweep(c, "2026-10-17").run()).toEqual({ woken: 0 });
+    expect(c.woken).toHaveLength(1);
+  });
+
+  it("a row that records the status but says the wake had not started (status null) wakes on the next pass", async () => {
+    const c = await setup();
+    const { m } = await lateNow(c);
+    await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
+    await c.db.insert(settings).values({ key: `milestone_risk:${m.id}`, value: { status: null, managed: true } });
+    expect(await sweep(c, "2026-10-17").run()).toEqual({ woken: 1 });
+    expect(await sweep(c, "2026-10-17").run()).toEqual({ woken: 0 });
   });
 
   it("switching the switch on for an already At risk milestone wakes once, however long it has been At risk", async () => {
