@@ -108,7 +108,8 @@ export class CheckJobs {
     void this.workspaces
       .runCommitCheck({ projectId: cmd.projectId, jobId: cmd.jobId, commit: cmd.commit }, cmd.command, cmd.timeoutMs ?? VERIFY_TIMEOUT_MS, {
         scanList: cmd.scanList,
-        limitsEnv: checkLimitsEnv(cmd.limits),
+        // BOS-2603: the job's real run limit, so check-quick's report-only squeeze can stay inside it.
+        limitsEnv: { ...checkLimitsEnv(cmd.limits), BOSSMAN_CHECK_TIME_LIMIT_SECONDS: String(Math.floor((cmd.timeoutMs ?? VERIFY_TIMEOUT_MS) / 1000)) },
         onStart: (kill) => {
           this.cancels.set(cmd.jobId, () => {
             cancelled = true;

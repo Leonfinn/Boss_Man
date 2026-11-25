@@ -651,8 +651,18 @@ if [ "${CHECK_QUICK_SQUEEZE:-}" != 0 ] && [ "$failed" -eq 0 ] && [ "$skipped" -e
   sq_all="$(squeeze_files | { grep . || true; })"
   if [ -n "$sq_all" ]; then
     sq_total=$(grep -c . <<<"$sq_all"); sq_run=0 sq_bad=0 sq_none=0 sq_err=0
+    # BOS-2603: the report must never push a passing check past the job's time limit. The budget is the runner's real limit for
+    # this job (BOSSMAN_CHECK_TIME_LIMIT_SECONDS), else CHECK_QUICK_BUDGET_SECONDS, else 1800 (a check job's default limit). It is
+    # counted from the start of this script; a file is squeezed only when its own stop (SQUEEZE_STOP_SECONDS, default 200)
+    # plus CHECK_QUICK_SQUEEZE_MARGIN (default 300) still fits in what is left.
+    sq_budget="${BOSSMAN_CHECK_TIME_LIMIT_SECONDS:-${CHECK_QUICK_BUDGET_SECONDS:-1800}}"; [[ "$sq_budget" =~ ^[0-9]+$ ]] || sq_budget=1800
+    sq_margin="${CHECK_QUICK_SQUEEZE_MARGIN:-300}"; [[ "$sq_margin" =~ ^[0-9]+$ ]] || sq_margin=300
+    sq_stop="${SQUEEZE_STOP_SECONDS:-200}"; [[ "$sq_stop" =~ ^[0-9]+$ ]] || sq_stop=200
+    sq_skip=0
     while IFS= read -r sq_f; do
       [ "$sq_run" -lt 3 ] || break
+      sq_left_s=$((sq_budget - SECONDS))
+      if [ "$sq_left_s" -lt $((sq_stop + sq_margin)) ]; then sq_skip=$(( (sq_total < 3 ? sq_total : 3) - sq_run )); break; fi
       sq_run=$((sq_run + 1)); sq_rc=0
       sq_out="$(scripts/squeeze-test.sh "$sq_f" 2>&1 </dev/null)" || sq_rc=$?
       case "$sq_rc" in
@@ -664,9 +674,12 @@ if [ "${CHECK_QUICK_SQUEEZE:-}" != 0 ] && [ "$failed" -eq 0 ] && [ "$skipped" -e
         *) sq_err=$((sq_err + 1)); echo "SQUEEZE  could not run (exit $sq_rc; not a finding): $sq_f"; printf '%s\n' "$sq_out" | tail -n 4 | sed 's/^/      /' ;;
       esac
     done <<<"$sq_all"
-    sq_left=$((sq_total - sq_run))
-    [ "$sq_left" -le 0 ] || echo "SQUEEZE  $sq_left more changed test file(s) were not squeezed (at most 3 a check)"
-    squeeze_note="squeeze (report only): $sq_run of $sq_total test files run on a slow CPU, $sq_bad failed, $sq_none no answer, $sq_err could not run, $((sq_total - sq_run)) left out"
+    if [ "$sq_skip" -gt 0 ]; then
+      echo "SQUEEZE  skipped: $sq_skip files, not enough time left ($((sq_budget - SECONDS))s)"
+    fi
+    sq_left=$((sq_total - sq_run - sq_skip)); [ "$sq_left" -ge 0 ] || sq_left=0
+    [ "$sq_left" -le 0 ] || [ "$sq_skip" -gt 0 ] || echo "SQUEEZE  $sq_left more changed test file(s) were not squeezed (at most 3 a check)"
+    squeeze_note="squeeze (report only): $sq_run of $sq_total test files run on a slow CPU, $sq_bad failed, $sq_none no answer, $sq_err could not run, $sq_skip skipped for lack of time, $((sq_total - sq_run - sq_skip)) left out"
   else
     squeeze_note="squeeze (report only): no new or changed test file to run"
   fi
