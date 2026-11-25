@@ -32,13 +32,26 @@ export function sameQuestionText(others: Array<{ number?: number | null; title: 
   return `Same question as ${list}: one answer releases ${all === 2 ? "both" : `all ${NUMBER_WORDS[all] ?? all}`}.`;
 }
 
-export function OwnerAsksStrip({ waiting }: { waiting: Waiter[] }) {
+/** Open Decisions cards that hold no task (the badge counts them, the board's tasks don't). */
+export function cardsWithoutTask(waiting: Waiter[], decisionsOpen: number | null | undefined): number {
+  if (decisionsOpen == null) return 0;
+  const withTask = new Set(waiting.map((t) => t.ownerQuestionId).filter(Boolean)).size;
+  return Math.max(0, decisionsOpen - withTask);
+}
+
+export function noTaskWords(n: number): string {
+  return `${n === 1 ? "1 more question has" : `${n} more questions have`} no task: see Decisions.`;
+}
+
+export function OwnerAsksStrip({ waiting, decisionsOpen }: { waiting: Waiter[]; decisionsOpen?: number | null }) {
+  const extra = cardsWithoutTask(waiting, decisionsOpen);
   return (
     <a className="strip" href="#your-review" onClick={(e) => { e.preventDefault(); document.getElementById("your-review")?.scrollIntoView?.({ behavior: "smooth", inline: "center" }); }}>
       <span>
         <span className="count-badge">{askCount(waiting)}</span>
         <span>
           <strong data-testid="owner-asks-words">{asksWords(waiting)}</strong> {waiting[0]!.title}
+          {extra > 0 && <span data-testid="owner-asks-no-task"> {noTaskWords(extra)}</span>}
         </span>
       </span>
       <strong style={{ whiteSpace: "nowrap" }}>Review it <span aria-hidden="true">→</span></strong>
@@ -46,17 +59,19 @@ export function OwnerAsksStrip({ waiting }: { waiting: Waiter[] }) {
   );
 }
 
-export function OwnerAsksLaneHead({ waiting }: { waiting: Waiter[] }) {
+export function OwnerAsksLaneHead({ waiting, decisionsOpen }: { waiting: Waiter[]; decisionsOpen?: number | null }) {
   const cards = askCount(waiting);
+  const extra = cardsWithoutTask(waiting, decisionsOpen);
   return (
     <header className="lane-head">
       <div className="lane-title">
         <h2 id="lane-your-review">Your review</h2>
         <span className="count-badge">{cards}</span>
       </div>
-      {cards !== waiting.length && (
+      {(cards !== waiting.length || extra > 0) && (
         <span className="lane-hint" data-testid="owner-asks-lane-hint">
-          {cards === 1 ? "1 question" : `${cards} questions`} hold{cards === 1 ? "s" : ""} {waiting.length} tasks. One answer releases every task on the same question.
+          {cards !== waiting.length && `${cards === 1 ? "1 question" : `${cards} questions`} hold${cards === 1 ? "s" : ""} ${waiting.length} tasks. One answer releases every task on the same question.`}
+          {extra > 0 && `${cards !== waiting.length ? " " : ""}${noTaskWords(extra)}`}
         </span>
       )}
     </header>

@@ -5,7 +5,7 @@ import { api, today, FEATURE_STATUSES, FEATURE_STATUS_LABEL, RISKS, type Board a
 import { BULK_TICKET_MAX, isLiveCheckWait, ticketRef, type Criterion } from "@boss-man/shared";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
 import { OwnerAsksLaneHead, OwnerAsksStrip, SameQuestionLine, sameQuestionAs, sameQuestionText } from "../components/OwnerAsks";
-import { OwnerMessageBox,tooLongToSend } from "../components/OwnerMessageBox";
+import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { art } from "../brand";
 import { RiskHelp, useRiskTiers, type RiskTiers } from "../components/RiskHelp";
 import { State } from "../components/State";
@@ -740,7 +740,7 @@ function TicketCard({ sameAs, waiters, t, mine, merging, who, name, prefix, tier
       </h3>
       {mine && <span ref={noteRef} className={`note${open ? "" : " clamp2"}`} title={hover(noteCut, noteText)}>{noteText}</span>}
       {mine && sameAs && sameAs.length > 0 && <SameQuestionLine text={sameQuestionText(sameAs, (n) => ticketRef(prefix, n) ?? `#${n}`)} />}
-      {t.recheckingBy && !mine &&<span className="note" data-testid="board-rechecking">Card being re-checked by {t.recheckingBy}</span>}
+      {t.recheckingBy && !mine && <span className="note" data-testid="board-rechecking">Card being re-checked by {t.recheckingBy}</span>}
       {mine && (
         <a className="btn primary small" href={t.ownerQuestion ? (t.ownerQuestionId ? `#/decisions/${t.ownerQuestionId}` : "#/decisions") : `#/tickets/${t.id}`} style={{ justifyContent: "center" }}>
           {t.ownerQuestion ? "Answer in Decisions" : "Review and approve"}
@@ -876,7 +876,7 @@ function TicketCard({ sameAs, waiters, t, mine, merging, who, name, prefix, tier
   );
 }
 
-export function Board({ companies, projectId, subpage, go, onCompaniesChanged }: { companies: Company[]; projectId: string | undefined; subpage?: string; go: (to: string) => void; onCompaniesChanged: () => void }) {
+export function Board({ companies, projectId, subpage, go, onCompaniesChanged, decisionsOpen }: { companies: Company[]; projectId: string | undefined; subpage?: string; go: (to: string) => void; onCompaniesChanged: () => void; /** The Decisions badge's figure, so the board can say how many open questions hold no task. */ decisionsOpen?: number | null }) {
   // The wheel over the sideways board must scroll the page even when the hand adds a little sideways movement (BOS-1915).
   const boardScrollRef = useWheelToPage();
   const projects = usePoll(
@@ -1264,7 +1264,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           {board.error.message}
         </p>
       )}
-      {waiting.length > 0 && <OwnerAsksStrip waiting={waiting} />}
+      {waiting.length > 0 && <OwnerAsksStrip waiting={waiting} decisionsOpen={decisionsOpen} />}
       {!!board.data?.withoutTicket?.length && (
         <section className="unticketed" aria-label="Working on something other than a ticket">
           <strong>Working on something other than a ticket</strong>
@@ -1412,7 +1412,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
             return (
               <section className={`lane${mine ? " mine" : ""}${parked ? " parked" : ""}`} key={mine ? "your-review" : merging ? "merging" : held ? "held" : liveCheck ? "live-check" : checking ? "being-checked" : col.id} id={mine ? "your-review" : undefined} aria-labelledby={mine ? "lane-your-review" : merging ? "lane-merging" : held ? "lane-held" : liveCheck ? "lane-live-check" : checking ? "lane-being-checked" : `lane-${col.id}`}>
                 {mine ? (
-                  <OwnerAsksLaneHead waiting={shown} />
+                  <OwnerAsksLaneHead waiting={shown} decisionsOpen={decisionsOpen} />
                 ) : merging ? (
                   <header className="lane-head">
                     <div className="lane-title">

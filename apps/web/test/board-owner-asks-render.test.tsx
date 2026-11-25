@@ -48,9 +48,9 @@ const ref = (n: number) => `BOS-${n}`;
 
 const html = `<!doctype html><html><head><meta charset="utf-8"><style>${css}</style></head><body><main class="main">${renderToStaticMarkup(
   <>
-    <OwnerAsksStrip waiting={waiting} />
+    <OwnerAsksStrip waiting={waiting} decisionsOpen={2} />
     <section className="lane mine">
-      <OwnerAsksLaneHead waiting={waiting} />
+      <OwnerAsksLaneHead waiting={waiting} decisionsOpen={2} />
       {waiting.map((t) => (
         <article className="ticket mine" key={t.id} data-ticket-id={t.id}>
           <h3>{t.title}</h3>
@@ -66,6 +66,12 @@ const read = () => ({
   badges: [...document.querySelectorAll(".count-badge")].map((b) => (b as HTMLElement).innerText),
   hint: (document.querySelector('[data-testid="owner-asks-lane-hint"]') as HTMLElement | null)?.innerText ?? null,
   notes: [...document.querySelectorAll('[data-testid="same-question-note"]')].map((n) => (n as HTMLElement).innerText),
+  noTask: (document.querySelector('[data-testid="owner-asks-no-task"]') as HTMLElement | null)?.innerText ?? null,
+  stripInside: (() => {
+    const strip = document.querySelector("a.strip")!.getBoundingClientRect();
+    const text = (document.querySelector('[data-testid="owner-asks-words"]') as HTMLElement).getBoundingClientRect();
+    return text.left >= strip.left - 1 && text.right <= strip.right + 1;
+  })(),
   overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
 });
 
@@ -86,6 +92,9 @@ describe.skipIf(!browser)("Board owner asks in a real browser (BOS-2578)", () =>
         expect(got.banner).toBe("1 question is waiting on you, holding 3 tasks.");
         expect(got.badges).toEqual(["1", "1"]);
         expect(got.hint).toContain("1 question holds 3 tasks");
+        expect(got.hint).toContain("1 more question has no task: see Decisions.");
+        expect(got.noTask?.trim()).toBe("1 more question has no task: see Decisions.");
+        expect(got.stripInside).toBe(true);
         expect(got.notes).toHaveLength(3);
         expect(got.notes[0]).toBe("Same question as BOS-1488 and BOS-2271: one answer releases all three.");
         expect(got.overflow).toBeLessThanOrEqual(1);
