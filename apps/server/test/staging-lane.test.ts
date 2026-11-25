@@ -32,7 +32,7 @@ afterEach(async () => {
   await ctx?.close();
   ctx = undefined;
   for (const f of [inbox("staging-request.json")]) rmSync(f, { force: true });
-  for (const f of ["staging-lane.json", "staging-status.json"]) rmSync(out(f), { force: true });
+  for (const f of ["staging-lane.json", "staging-status.json", "staging-refused.json"]) rmSync(out(f), { force: true });
 });
 
 async function setup() {
@@ -181,6 +181,26 @@ describe("the staging lane (BOS-1472)", () => {
     await c.deploys.syncStaging();
     const [refused] = await c.db.select().from(deploys).where(eq(deploys.id, b.deploy.id));
     expect(refused).toMatchObject({ status: "failed", outcome: "Rejected: abc is not on main." });
+  });
+
+  it("keeps the last real failure's log_tail when a later request is refused by the rate limit (BOS-2592)", async () => {
+    const c = (ctx = await setup());
+    lane(true);
+    await c.deploys.syncStaging();
+    const a = await c.deploys.request(c.actor, { target: "staging", ref: "main" });
+    rmSync(inbox("staging-request.json"));
+    writeFileSync(out("staging-status.json"), JSON.stringify({ id: a.deploy.id, target: "staging", result: "failed", message: "stopped with an error (exit 1)", to_commit: SHA, started: "2026-11-17T10:00:00Z", ended: "2026-11-17T10:05:00Z", at: "2026-11-17T10:05:00Z", log_tail: "build step failed: exit 1" }));
+    await c.deploys.syncStaging();
+    const b = await c.deploys.request(c.actor, { target: "staging", ref: "main" });
+    rmSync(inbox("staging-request.json"));
+    writeFileSync(out("staging-refused.json"), JSON.stringify({ id: b.deploy.id, target: "staging", result: "rejected", message: "Rejected: only one staging deploy every 5 minutes. Try again in 3 minute(s).", to_commit: SHA, started: "2026-11-17T10:06:00Z", ended: "2026-11-17T10:06:00Z", at: "2026-11-17T10:06:00Z" }));
+    await c.deploys.syncStaging();
+    // The refused request still gets its answer ...
+    expect((await c.db.select().from(deploys).where(eq(deploys.id, b.deploy.id)))[0]).toMatchObject({ status: "failed", outcome: expect.stringContaining("only one staging deploy") });
+    // ... but staging.last is still the real failure with its log_tail, and the refusal sits beside it.
+    const block = await c.selfDeploy.stagingBlock();
+    expect(block.last).toMatchObject({ id: a.deploy.id, result: "failed", logTail: "build step failed: exit 1" });
+    expect(block.refused).toMatchObject({ id: b.deploy.id });
   });
 
   it("refuses with a plain reason when the lane is off, and fails a request the host never answers", async () => {

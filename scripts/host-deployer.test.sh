@@ -1305,24 +1305,27 @@ sreq() { # commit [id]
   printf '{"id":"%s","target":"staging","commit":"%s","requestedAt":"2026-10-20T12:00:00.000Z","approvedBy":"owner-1"}\n' "${2:-$(node -e 'console.log(crypto.randomUUID())')}" "$1" >"$D/inbox/staging-request.json"
 }
 sstatus() { jget "$D/outbox/staging-status.json" "$1"; }
+# BOS-2592: a refused (rejected) request is recorded in staging-refused.json, not staging-status.json.
+srefused() { jget "$D/outbox/staging-refused.json" "$1"; }
+R="$D/outbox/staging-refused.json"
 : >"$STUB_LOG"; rm -f "$D/outbox/status.json" "$D/outbox/history.jsonl"
 
 # Lane off (no STAGING_DIR): the lane file says so and a request is answered, not left waiting.
 conf 0; host
 has "$D/outbox/staging-lane.json" '"configured": "false"'
 sreq "$s1"; host
-[[ $(sstatus result) == rejected ]] || fail "lane off: $(cat "$D/outbox/staging-status.json")"
-has "$D/outbox/staging-status.json" "not configured"
+[[ $(srefused result) == rejected ]] || fail "lane off: $(cat "$R")"
+has "$R" "not configured"
 [[ ! -e $D/inbox/staging-request.json ]] || fail "lane off left the request in the inbox"
 hasnt "$STUB_LOG" "deploy-staging.sh"
 # A symlinked request is never read (BOS-1775): the id behind it must not reach the world-readable status file.
 printf '{"id":"secret"}\n' >"$T/secret-target.json"; ln -s "$T/secret-target.json" "$D/inbox/staging-request.json"; host
-[[ $(sstatus result) == rejected ]] || fail "lane off, symlink: $(cat "$D/outbox/staging-status.json")"
-hasnt "$D/outbox/staging-status.json" "secret"
+[[ $(srefused result) == rejected ]] || fail "lane off, symlink: $(cat "$R")"
+hasnt "$R" "secret"
 hasnt "$D/outbox/staging-history.jsonl" "secret"
 # A plain file whose id is not a UUID is not echoed either.
 printf '{"id":"secret"}\n' >"$D/inbox/staging-request.json"; host
-hasnt "$D/outbox/staging-status.json" "secret"
+hasnt "$R" "secret"
 
 # Lane on: a main commit deploys, then the smoke checks run, with production's folder passed for the isolation checks.
 conf 0; printf 'STAGING_DIR=%s\nSTAGING_RATE_LIMIT_SECONDS=3600\n' "$T/stg" >>"$D/host.conf"
@@ -1342,27 +1345,31 @@ hasnt "$D/outbox/history.jsonl" "$sid"
 
 # Replay: the same id is refused. Rate limit: a new id within the window is refused.
 sreq "$s1" "$sid"; host
-has "$D/outbox/staging-status.json" "already handled"
+has "$R" "already handled"
+[[ $(sstatus result) == deployed && $(sstatus id) == "$sid" ]] || fail "a replay refusal replaced the last real staging record: $(cat "$D/outbox/staging-status.json")"
 sreq "$s1"; host
-has "$D/outbox/staging-status.json" "only one staging deploy"
+# BOS-2592: the refusal goes to staging-refused.json; the real record (the deploy above) is left exactly as it was.
+has "$R" "only one staging deploy"
+[[ $(sstatus result) == deployed && $(sstatus id) == "$sid" ]] || fail "a rate-limit refusal replaced the last real staging record: $(cat "$D/outbox/staging-status.json")"
+hasnt "$D/outbox/staging-status.json" "only one staging deploy"
 [[ $(grep -c "^deploy-staging.sh" "$STUB_LOG") == 1 ]] || fail "staging deployed more than once: $(cat "$STUB_LOG")"
 
 # Only main: a commit on a side branch is refused before anything runs.
 rm -f "$D/state/last-staging"; sreq "$side"; host
-has "$D/outbox/staging-status.json" "is not on main"
+has "$R" "is not on main"
 [[ $(grep -c "^deploy-staging.sh" "$STUB_LOG") == 1 ]] || fail "a non-main commit reached deploy-staging.sh"
 # A commit from before the lane (no scripts/smoke-staging.sh) is refused, and the lane file says which repository staging follows.
 rm -f "$D/state/last-staging"; sreq "$c1"; host
-has "$D/outbox/staging-status.json" "older than the staging lane"
+has "$R" "older than the staging lane"
 [[ $(grep -c "^deploy-staging.sh" "$STUB_LOG") == 1 ]] || fail "a pre-lane commit reached deploy-staging.sh"
 has "$D/outbox/staging-lane.json" "\"origin\": \"$T/origin.git\""
 # A malformed request (shell characters in the commit) is refused.
 # shellcheck disable=SC2016 # the command substitution is literal text in the request: it must never be run
 printf '{"id":"%s","target":"staging","commit":"$(touch %s/pwned)","requestedAt":"2026-10-20T12:00:00.000Z","approvedBy":"owner-1"}\n' "$sid" "$T" >"$D/inbox/staging-request.json"; host
-has "$D/outbox/staging-status.json" "expected format"; [[ ! -e $T/pwned ]] || fail "request text was executed"
+has "$R" "expected format"; [[ ! -e $T/pwned ]] || fail "request text was executed"
 # A production request target is not accepted in the staging file.
 printf '{"id":"%s","target":"server","commit":"%s","requestedAt":"2026-10-20T12:00:00.000Z","approvedBy":"owner-1"}\n' "$(node -e 'console.log(crypto.randomUUID())')" "$s1" >"$D/inbox/staging-request.json"; host
-has "$D/outbox/staging-status.json" "expected format"
+has "$R" "expected format"
 
 # Memory: held (left in the inbox) while an update would not have room; taken when memory frees up.
 rm -f "$D/state/last-staging"; meminfo 33554432 100; sreq "$s1"; host
