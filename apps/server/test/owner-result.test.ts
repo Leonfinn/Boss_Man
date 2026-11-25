@@ -117,15 +117,20 @@ describe("BOS-2555: an information answer reaches the owner", () => {
   });
 
   // BOS-2593 (DR-076 B): the 25 Nov case. A release steps card answered "I think step 4 failed" with a screenshot got nothing back.
-  it("a steps card answered in the owner's own words with a picture starts the loop: line, flag, deadline and report-back note", async () => {
+  it("a steps card answered with a note and a picture starts the loop: line, flag, deadline and report-back note", async () => {
     const c = await setup();
     const t = await c.ticket("Release beta.2");
     const [d] = await c.db
       .insert(decisions)
       .values({ companyId: c.company.id, kind: "question", question: "Release beta.2: follow the steps, then press Done.", options: ["Done", "Not now"], recommendedOption: "Done", raisedByAgentId: c.dev.id, tier: "owner", context: { type: "question", ticketId: t.id, ownerMustDo: true, steps: ["Open the Releases page", "Press Publish", "Wait for the build", "Check the download works"] } })
       .returning();
+    // A plain Done first, on a twin card: no owed result, no line (no noise).
+    const [plain] = await c.db.insert(decisions).values({ ...d!, id: undefined, createdAt: undefined }).returning();
+    expect((await c.req("POST", `/api/decisions/${plain!.id}/answer`, { answer: "Done" })).statusCode).toBe(200);
+    expect(await c.dueCount(plain!.id)).toBeNull();
+    expect((await c.chatLines()).filter((l) => l.text.includes("your answer to"))).toEqual([]);
     const answer = "I think step 4 failed ![screenshot](/api/ticket-images/0b7e3f4a-1c2d-4e5f-8a9b-0c1d2e3f4a5b)";
-    const res = await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer, custom: true });
+    const res = await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Done", note: answer });
     expect(res.statusCode).toBe(200);
     const [after] = await c.db.select().from(decisions).where(eq(decisions.id, d!.id));
     expect(after!.infoAskWhy).toContain("picture");
@@ -133,7 +138,7 @@ describe("BOS-2555: an information answer reaches the owner", () => {
     expect((await c.chatLines()).some((l) => l.role === "system" && l.text.includes("your answer to") && l.text.includes("Dougal"))).toBe(true);
     expect((await c.flags()).some((n) => n.level === "flag" && n.title.includes("Dougal"))).toBe(true);
     const w = await c.db.select().from(wakes).where(eq(wakes.agentId, c.dev.id));
-    expect(w.some((x) => x.reason === "decision answered" && x.note?.includes("report back") && x.note.includes("open_attachment"))).toBe(true);
+    expect(w.some((x) => x.reason === "decision answered" && x.note?.includes("report back") && x.note.includes("step 4 failed"))).toBe(true);
   });
 
   it("a note on an ordinary card starts the loop; a plain button press does not", async () => {
