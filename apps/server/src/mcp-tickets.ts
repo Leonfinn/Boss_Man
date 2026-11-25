@@ -755,7 +755,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
           if (withCriteria.criteria.some((c) => namesOutsideService(criterionText(c)))) {
             const shots = await db.select({ id: ticketImages.id, createdAt: ticketImages.createdAt }).from(ticketImages).where(eq(ticketImages.ticketId, ticketId));
             const since = live?.liveAt ?? live?.liveMarkedAt ?? live?.mergedAt ?? own?.createdAt ?? null;
-            const refusal = outsideServiceEvidenceRefusal(withCriteria.criteria, shots, since, reported ?? "", ownSiteHosts(own?.title, own?.body, criteriaText(withCriteria.criteria)));
+            const refusal = outsideServiceEvidenceRefusal(withCriteria.criteria, shots, since, reported ?? "", ownSiteHosts(own?.title, own?.body, withCriteria.criteria.map(criterionText).join("\n")));
             if (refusal) return fail(refusal);
           }
           // BOS-1867: a check ticket's result reaches its parent only through numbered verdicts on its own criteria.
