@@ -11,7 +11,7 @@ import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { and, asc, desc, eq, gt, ilike, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { OTHER_CARD_HELD, otherTicketCardsNamed, ticketHasOpenCard } from "./services/owner-todo.js";
-import { noteResultReported } from "./services/owner-result.js";
+import { mirrorLaterReply, noteResultReported } from "./services/owner-result.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -266,10 +266,15 @@ function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, 
 /**
  * BOS-2555: this agent raised a card that asked the owner for information, and it is still owed the result because the owner
  * has answered. Posts the reply into the owner's chat too, so a status-only result reaches them there, not only on the ticket.
+ * BOS-2594: any other posted reply from the raiser or the CEO, inside the 24 h after that result, is mirrored there too (a
+ * correction may read as an ask, so notAnAsk is not required for that; a held ask never gets here).
  */
-async function reportInfoResult(db: Db, notes: Services["notes"], scope: Scope, ticketId: string, text: string): Promise<void> {
+async function reportInfoResult(db: Db, notes: Services["notes"], scope: Scope, ticketId: string, text: string, notAnAsk: boolean, closes: boolean): Promise<void> {
   if (!scope.agentId) return;
-  await noteResultReported(db, { companyId: scope.companyId, ticketId, agentId: scope.agentId, text }, { notify: (n) => notes.notify(n) }).catch(() => false);
+  const input = { companyId: scope.companyId, ticketId, agentId: scope.agentId, text, closes };
+  const deps = { notify: (n: Parameters<Services["notes"]["notify"]>[0]) => notes.notify(n) };
+  if (notAnAsk && (await noteResultReported(db, input, deps).catch(() => false))) return;
+  await mirrorLaterReply(db, input, deps).catch(() => false);
 }
 
 /**
@@ -356,9 +361,9 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     "ticket_reply",
     {
       description: "Write on a ticket's conversation, where the owner talks to the agents working it. Use it to answer the owner's messages there, or to tell them something about the ticket. Name a wiki page as [[slug]] so the owner can open it with one click. For anything you need the owner to decide or do (including closing a ticket you can't), use raise_decision with blocksTicketId instead: a reply doesn't reach their queue or the Your review lane on the board. Ask the owner only after you have tried every way to do it yourself. A reply that asks the owner to act is not posted until an open decision on this ticket covers it (or, for steps after go-live, the ticket's ownerSetup is set); a status-only reply that trips this can be sent again with notAnAsk true. The owner is not a developer: start with 1 to 3 plain sentences (what changed for them and whether they need to do anything), then a line \"Details:\" followed by the technical report (files, commits, tests).",
-      inputSchema: { ticketId: z.string().uuid(), text: z.string().min(1).max(8000), notAnAsk: z.boolean().optional().describe("Send a reply that only reports status and asks nothing of the owner, even though its wording looks like an ask. Without it, a reply that asks the owner to act is held (not posted) until an open decision on this ticket covers it."), quotesUrgent: QUOTES_URGENT },
+      inputSchema: { ticketId: z.string().uuid(), text: z.string().min(1).max(8000), notAnAsk: z.boolean().optional().describe("Send a reply that only reports status and asks nothing of the owner, even though its wording looks like an ask. Without it, a reply that asks the owner to act is held (not posted) until an open decision on this ticket covers it."), quotesUrgent: QUOTES_URGENT, closesOwnerLoop: z.boolean().optional().describe("After the owner answered a card about this ticket and had its result, your later replies here (and the CEO's) go into their chat for 24 hours, corrections included. Set this on the last word once the matter is settled: it is posted there too, then later replies stay on the ticket.") },
     },
-    async ({ ticketId, text: body, notAnAsk, quotesUrgent }) => {
+    async ({ ticketId, text: body, notAnAsk, quotesUrgent, closesOwnerLoop }) => {
       const urgentHold = quotesUrgent === true ? null : await ceoUrgentHold(db, scope, body, ticketId);
       if (urgentHold) return fail(urgentHold);
       const factHold = await ownerFactHeldLive(db, scope.companyId, gitTokenProbe, [body]); // BOS-1596, R34
@@ -384,8 +389,9 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       // A watcher's report reads as a status update (R80).
       const title = t?.watcher && t.watcher === scope.agentId ? `Status: "${t.title}"` : `Reply on "${t?.title ?? "a ticket"}"`;
       await notes.notify({ companyId: scope.companyId, agentId: scope.agentId, level: "note", title, body, link: `#/tickets/${ticketId}` });
-      // BOS-2555: a status-only reply that is the result of a card asking the owner for information goes into their chat too.
-      if (notAnAsk) await reportInfoResult(db, notes, scope, ticketId, body);
+      // BOS-2555: a status-only reply that is the result of a card asking the owner for information goes into their chat too;
+      // BOS-2594: so does a later correction or update on that card's ticket, for 24 h or until closesOwnerLoop.
+      await reportInfoResult(db, notes, scope, ticketId, body, notAnAsk === true, closesOwnerLoop === true);
       // A reply that asks the owner to act doesn't reach their queue (BOS-122). Say so in the result so the
       // agent's next turn raises a decision; the reply still posts, so a status update isn't blocked.
       // (Held above for agents; this is only the raised-sign-off-card message, or the owner's own reply.)

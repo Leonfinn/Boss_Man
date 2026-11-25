@@ -1,0 +1,1 @@
+ALTER TABLE "decisions" ADD COLUMN "info_ask_follow_until" timestamp with time zone;

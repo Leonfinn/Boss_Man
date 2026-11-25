@@ -15,7 +15,12 @@
 //   4. if nothing has reached the owner 30 minutes after the answer, the CEO is woken to post the result, and the owner gets
 //      a line and a flag saying who is on it. The sweep reads the card's own row, so a restart loses nothing. A card with no
 //      ticket of its own is matched on the raiser alone, and its wake carries no empty ticket id (Rex's review of BOS-2555).
-import { and, desc, eq, gt, inArray, isNotNull, lte } from "drizzle-orm";
+//   5. (BOS-2594) the loop stays open after the first result: for FOLLOW_HOURS, every later non-interim reply from the raiser
+//      or the CEO on the card's ticket (or the ticket it blocks) is mirrored into the owner's chat, so a correction travels
+//      the same road as the first answer (25 Nov: "press again", then "don't press", were written only on tickets). The
+//      window opens wherever the first result is settled (the raiser's reply, a line in chat, or the CEO's escalation) and
+//      closes early when the raiser or the CEO sends a reply with closesOwnerLoop.
+import { and, desc, eq, gt, inArray, isNotNull, isNull, lte } from "drizzle-orm";
 import { ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, ownerChatMessages, tickets } from "../db/schema.js";
@@ -24,6 +29,11 @@ import { ATTACHMENT_LINK } from "./ticket-images.js";
 
 /** How long the raiser has to report back before the CEO is asked to (BOS-2555, the ticket's "e.g. 30 minutes"). */
 export const INFO_ASK_MINUTES = 30;
+
+/** How long after the first result later corrections and updates still go to the owner's chat (BOS-2594). */
+export const FOLLOW_HOURS = 24;
+
+const followUntil = (now: Date) => new Date(now.getTime() + FOLLOW_HOURS * 60 * 60_000);
 
 /** Why a run started when the result never arrived is told to report back (a wake class of its own). */
 export const INFO_RESULT_REASON = "a result for the owner";
@@ -112,6 +122,7 @@ export function reportBackNote(input: { ownerVoice: string; question: string; ti
     `- Also say one line in the owner chat (the CEO's chat): the same two things in a sentence or two, naming this ticket (${input.ref ?? input.ticketId}). A line there counts too, so a result said only in the chat still reaches them.`,
     `Never put a question back to them in either; if something else is needed from them, raise a new card for that.`,
     `Only the real result counts. An interim note ("checking now, back shortly") does not: say that if you must, but keep the deadline, and post the result itself when you have it. If you cannot report at all, the CEO is asked 30 minutes after their answer and will tell them for you.`,
+    `After the result, for ${FOLLOW_HOURS} hours, any later reply you or the CEO post on this ticket (a correction, a changed next step) goes into their chat too, so never leave a correction only on a ticket. When the matter is settled, send your last reply with closesOwnerLoop set to true; later replies then stay on the ticket.`,
   ].join("\n");
 }
 
@@ -133,6 +144,7 @@ export function ceoResultNote(input: { ownerVoice: string; raiser: string; quest
     input.ticketId
       ? `Post the result for the owner now: read what they sent on ticket #/tickets/${input.ticketId}, work out what it showed, and tell them in plain words in the owner chat: what happened, and the next step (what to press, or nothing to do). You may also reply on the ticket with notAnAsk. If it needs real work, open a ticket and say so in the same line.`
       : `Post the result for the owner now: this card wasn't about a ticket, so ask ${input.raiser} what it showed (a card open on its answer), then tell the owner in plain words in their chat: what happened, and the next step (what to press, or nothing to do). If it needs real work, open a ticket and say so in the same line.`,
+    ...(input.ticketId ? [`For the next ${FOLLOW_HOURS} hours, later replies from you or ${input.raiser} on that ticket (a correction, a changed next step) go into the owner's chat too; send the last one with closesOwnerLoop set to true once the matter is settled.`] : []),
   ].join("\n");
 }
 
@@ -256,12 +268,13 @@ export async function reportDueInfoAnswers(db: Db, now: Date, deps: SweepDeps): 
   for (const d of due) {
     // A result already posted in the owner's chat (the raiser was told to say one line there) means nobody needs waking.
     if (await reportedInChat(db, d, d.answeredAt ?? d.infoAskDueAt!, d.raisedByAgentId)) {
-      await db.update(decisions).set({ infoAskDueAt: null }).where(and(eq(decisions.id, d.id), eq(decisions.infoAskDueAt, d.infoAskDueAt!)));
+      await db.update(decisions).set({ infoAskDueAt: null, infoAskFollowUntil: followUntil(now) }).where(and(eq(decisions.id, d.id), eq(decisions.infoAskDueAt, d.infoAskDueAt!)));
       continue;
     }
+    // The CEO is now on it: its later replies on the ticket (and the raiser's late ones) reach the owner too (BOS-2594).
     const [claimed] = await db
       .update(decisions)
-      .set({ infoAskDueAt: null, infoAskNaggedAt: now })
+      .set({ infoAskDueAt: null, infoAskNaggedAt: now, infoAskFollowUntil: followUntil(now) })
       .where(and(eq(decisions.id, d.id), eq(decisions.infoAskDueAt, d.infoAskDueAt!)))
       .returning({ id: decisions.id });
     if (!claimed) continue;
@@ -270,7 +283,7 @@ export async function reportDueInfoAnswers(db: Db, now: Date, deps: SweepDeps): 
     } catch (err) {
       deps.log?.(`reporting the result of card ${d.id} failed: ${(err as Error).message}`);
       // Put the deadline back, an hour out, so a broken wake doesn't spin on every pass.
-      await db.update(decisions).set({ infoAskDueAt: new Date(now.getTime() + 60 * 60_000), infoAskNaggedAt: null }).where(eq(decisions.id, d.id));
+      await db.update(decisions).set({ infoAskDueAt: new Date(now.getTime() + 60 * 60_000), infoAskNaggedAt: null, infoAskFollowUntil: null }).where(eq(decisions.id, d.id));
     }
   }
   return { woken };
@@ -281,7 +294,7 @@ async function escalateToCeo(db: Db, d: Decision, now: Date, deps: SweepDeps): P
   if (!ceo) {
     // No CEO to hand it to: keep the deadline, a day out, and log it, rather than losing the result silently (Rex's review).
     deps.log?.(`card ${d.id} asked the owner for information and no result came, but this company has no CEO to post it.`);
-    await db.update(decisions).set({ infoAskDueAt: new Date(now.getTime() + 24 * 60 * 60_000), infoAskNaggedAt: null }).where(eq(decisions.id, d.id));
+    await db.update(decisions).set({ infoAskDueAt: new Date(now.getTime() + 24 * 60 * 60_000), infoAskNaggedAt: null, infoAskFollowUntil: null }).where(eq(decisions.id, d.id));
     return false;
   }
   const [raiser] = d.raisedByAgentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, d.raisedByAgentId)) : [];
@@ -308,12 +321,14 @@ async function escalateToCeo(db: Db, d: Decision, now: Date, deps: SweepDeps): P
  * someone. An interim "still working" reply is not the result and leaves the deadline running. Never throws: the ticket reply
  * itself is already saved.
  */
-export async function noteResultReported(db: Db, input: { companyId: string; ticketId: string; agentId: string; text: string }, deps: { notify: (n: NotifyInput) => Promise<unknown>; log?: (m: string) => void }): Promise<boolean> {
+export async function noteResultReported(db: Db, input: { companyId: string; ticketId: string; agentId: string; text: string; closes?: boolean }, deps: { notify: (n: NotifyInput) => Promise<unknown>; log?: (m: string) => void; now?: Date }): Promise<boolean> {
   try {
+    // Only cards still owed their first result: a card already reported stays open for corrections (mirrorLaterReply), and
+    // must not shadow a newer card on the same ticket that is still waiting (BOS-2594).
     const cards = await db
       .select()
       .from(decisions)
-      .where(and(eq(decisions.companyId, input.companyId), eq(decisions.raisedByAgentId, input.agentId), eq(decisions.status, "answered"), isNotNull(decisions.infoAskWhy)))
+      .where(and(eq(decisions.companyId, input.companyId), eq(decisions.raisedByAgentId, input.agentId), eq(decisions.status, "answered"), isNotNull(decisions.infoAskWhy), isNotNull(decisions.infoAskDueAt)))
       .orderBy(desc(decisions.answeredAt))
       .limit(10);
     const about = await Promise.all(cards.map(async (c) => ({ card: c, tickets: await aboutTickets(db, c) })));
@@ -322,10 +337,11 @@ export async function noteResultReported(db: Db, input: { companyId: string; tic
     // A card with no ticket of its own can't be matched by ticket: the raiser is the only link, so its newest such card counts.
     const card = about.find((x) => x.tickets.includes(input.ticketId)) ?? about.find((x) => x.tickets.length === 0);
     if (!card) return false;
-    // Cleared first, conditional on the deadline: a second reply, or the 30-minute sweep, never posts a second result.
+    // Cleared first, conditional on the deadline: a second reply, or the 30-minute sweep, never posts a second result. The
+    // same write opens the window for later corrections, unless this reply already closes the matter (BOS-2594).
     const [claimed] = await db
       .update(decisions)
-      .set({ infoAskDueAt: null })
+      .set({ infoAskDueAt: null, infoAskFollowUntil: input.closes ? null : followUntil(deps.now ?? new Date()) })
       .where(and(eq(decisions.id, card.card.id), isNotNull(decisions.infoAskDueAt)))
       .returning({ id: decisions.id });
     if (!claimed) return false;
@@ -346,6 +362,51 @@ export async function noteResultReported(db: Db, input: { companyId: string; tic
     return true;
   } catch (err) {
     deps.log?.(`posting the result of a card answer in the owner's chat failed: ${(err as Error).message}`);
+    return false;
+  }
+}
+
+/**
+ * BOS-2594: a reply after the first result, from the raiser or the CEO, on a ticket an open loop is about, goes into the owner's
+ * chat (one line and one flag per reply, however many cards it matches). An interim note does not. `closes` posts it as the
+ * last word and ends the loop. A card with no ticket of its own is left out: only the raiser links it, so every reply that
+ * agent wrote on any ticket would be mirrored. Never throws: the ticket reply itself is already saved.
+ */
+export async function mirrorLaterReply(
+  db: Db,
+  input: { companyId: string; ticketId: string; agentId: string; text: string; closes?: boolean },
+  deps: { notify: (n: NotifyInput) => Promise<unknown>; log?: (m: string) => void; now?: Date },
+): Promise<boolean> {
+  try {
+    const now = deps.now ?? new Date();
+    if (!input.closes && isInterimReply(input.text)) return false;
+    const open = await db
+      .select()
+      .from(decisions)
+      .where(and(eq(decisions.companyId, input.companyId), eq(decisions.status, "answered"), isNull(decisions.infoAskDueAt), gt(decisions.infoAskFollowUntil, now)))
+      .orderBy(desc(decisions.answeredAt))
+      .limit(20);
+    if (!open.length) return false;
+    const ceo = await ceoOf(db, input.companyId);
+    const writerMay = (c: Decision) => c.raisedByAgentId === input.agentId || ceo?.id === input.agentId;
+    const mine = [];
+    for (const c of open) if (writerMay(c) && (await aboutTickets(db, c)).includes(input.ticketId)) mine.push(c);
+    if (!mine.length) return false;
+    const card = mine[0]!;
+    if (input.closes) await db.update(decisions).set({ infoAskFollowUntil: null }).where(inArray(decisions.id, mine.map((c) => c.id)));
+    const [writer] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, input.agentId));
+    const name = writer?.name ?? "The team";
+    const ref = await refOf(db, input.companyId, input.ticketId);
+    const text = short(input.text, 600);
+    // The thread the owner was told the answer is in (the CEO chat, by default); else the CEO's, else the writer's own.
+    const [line] = await db.select({ agentId: ownerChatMessages.agentId }).from(ownerChatMessages).where(and(eq(ownerChatMessages.companyId, input.companyId), eq(ownerChatMessages.infoAskCardId, card.id)));
+    const agentId = line?.agentId ?? ceo?.id ?? input.agentId;
+    const body = `${name}, a later word on "${short(card.question, 120)}": ${text}${input.closes ? " (This matter is now closed.)" : ""} Ticket: #/tickets/${input.ticketId}`;
+    await db.insert(ownerChatMessages).values({ companyId: input.companyId, agentId, role: "assistant", text: body });
+    await deps.notify({ companyId: input.companyId, agentId: null, level: "flag", title: `Update on "${short(card.question, 60)}"`, body: `${name}${ref ? ` on ${ref}` : ""}: ${short(text, 400)}`, link: `#/tickets/${input.ticketId}` });
+    return true;
+  } catch (err) {
+    deps.log?.(`posting a later reply on a card answer into the owner's chat failed: ${(err as Error).message}`);
     return false;
   }
 }

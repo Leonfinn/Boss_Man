@@ -11,7 +11,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agents, decisions, notifications, ownerChatMessages, runs, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
-import { infoAskOf, INFO_ASK_MINUTES, noteResultReported, ownContentOf } from "../src/services/owner-result.js";
+import { FOLLOW_HOURS, infoAskOf, INFO_ASK_MINUTES, mirrorLaterReply, noteResultReported, ownContentOf } from "../src/services/owner-result.js";
 import { notificationsService } from "../src/services/notifications.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
@@ -258,6 +258,124 @@ describe("BOS-2555: an information answer reaches the owner", () => {
     await c.db.update(decisions).set({ infoAskDueAt: new Date(Date.now() - 60_000) }).where(eq(decisions.id, d.id));
     await c.sweeps.run();
     expect(await c.dueCount(d.id)).not.toBeNull();
+  });
+});
+
+// BOS-2594: on 25 Nov "press again", then "don't press", were written only on tickets after the first result; the loop had
+// closed, so neither reached the owner's chat.
+describe("BOS-2594: the loop stays open after the first result", () => {
+  const later = (c: Awaited<ReturnType<typeof setup>>) => async () => (await c.chatLines()).filter((l) => l.text.includes("a later word on"));
+  const firstResult = async (c: Awaited<ReturnType<typeof setup>>, t: { id: string }) =>
+    expect(await noteResultReported(c.db, { companyId: c.company.id, ticketId: t.id, agentId: c.dev.id, text: "It failed because Release was pressed early; press it again, it should work." }, { notify: c.notify })).toBe(true);
+  const followUntilOf = async (c: Awaited<ReturnType<typeof setup>>, id: string) => (await c.db.select().from(decisions).where(eq(decisions.id, id)))[0]!.infoAskFollowUntil;
+
+  it("a correction after the first result reaches the owner's chat and feed; an interim note does not", async () => {
+    const c = await setup();
+    const laterLines = later(c);
+    const t = await c.ticket("Release beta.2");
+    const d = await c.card(t, "Please paste the Release log.");
+    await c.req("POST", `/api/decisions/${d.id}/answer`, { answer: "Sent it" });
+    const before = Date.now();
+    await firstResult(c, t);
+    const after = Date.now();
+    // The window is 24 h from the first result (bounded by the clock reads on either side of it, not a time limit).
+    const until = (await followUntilOf(c, d.id))!.getTime();
+    expect(until).toBeGreaterThanOrEqual(before + FOLLOW_HOURS * 3_600_000);
+    expect(until).toBeLessThanOrEqual(after + FOLLOW_HOURS * 3_600_000);
+    const said = "Correction: don't press Release again. The images were already published; nothing for you to do.";
+    expect(await mirrorLaterReply(c.db, { companyId: c.company.id, ticketId: t.id, agentId: c.dev.id, text: said }, { notify: c.notify })).toBe(true);
+    const lines = await laterLines();
+    expect(lines.length).toBe(1);
+    expect(lines[0]!.text).toContain("don't press Release again");
+    expect(lines[0]!.role).toBe("assistant");
+    expect((await c.flags()).some((n) => n.level === "flag" && n.title.startsWith("Update on") && (n.body ?? "").includes("don't press"))).toBe(true);
+    // AC3: an interim note stays on the ticket.
+    expect(await mirrorLaterReply(c.db, { companyId: c.company.id, ticketId: t.id, agentId: c.dev.id, text: "Still checking the signatures, back shortly." }, { notify: c.notify })).toBe(false);
+    expect((await laterLines()).length).toBe(1);
+  });
+
+  it("the CEO's reply on the ticket the card blocks counts; another agent's, or one on an unrelated ticket, does not", async () => {
+    const c = await setup();
+    const laterLines = later(c);
+    const own = await c.ticket("Release beta.2");
+    const held = await c.ticket("Release log");
+    const other = await c.ticket("Something else");
+    const [d] = await c.db
+      .insert(decisions)
+      .values({ companyId: c.company.id, kind: "question", question: "Please paste the Release log.", options: ["Sent it"], recommendedOption: "Sent it", raisedByAgentId: c.dev.id, tier: "owner", context: { type: "question", ticketId: own.id, blockedTicketId: held.id } })
+      .returning();
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Sent it" });
+    await firstResult(c, own);
+    const bystander = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Zebedee" })).json() as { id: string };
+    expect(await mirrorLaterReply(c.db, { companyId: c.company.id, ticketId: own.id, agentId: bystander.id, text: "The signatures are there." }, { notify: c.notify })).toBe(false);
+    expect(await mirrorLaterReply(c.db, { companyId: c.company.id, ticketId: other.id, agentId: c.dev.id, text: "Unrelated: the docs page is fixed." }, { notify: c.notify })).toBe(false);
+    expect((await laterLines()).length).toBe(0);
+    expect(await mirrorLaterReply(c.db, { companyId: c.company.id, ticketId: held.id, agentId: c.ceo.id, text: "I need to correct what I told you earlier: don't press Release again." }, { notify: c.notify })).toBe(true);
+    expect((await laterLines()).map((l) => l.text).join("\n")).toContain("don't press Release again");
+  });
+
+  it("AC2: after the raiser closes the matter, or once 24 h pass, later replies stay on the ticket", async () => {
+    const c = await setup();
+    const laterLines = later(c);
+    const t = await c.ticket("Release beta.2");
+    const d = await c.card(t, "Please paste the Release log.");
+    await c.req("POST", `/api/decisions/${d.id}/answer`, { answer: "Sent it" });
+    await firstResult(c, t);
+    expect(await mirrorLaterReply(c.db, { companyId: c.company.id, ticketId: t.id, agentId: c.dev.id, text: "Beta.2 is out and signed. Done.", closes: true }, { notify: c.notify })).toBe(true);
+    expect((await laterLines())[0]!.text).toContain("now closed");
+    expect(await followUntilOf(c, d.id)).toBeNull();
+    expect(await mirrorLaterReply(c.db, { companyId: c.company.id, ticketId: t.id, agentId: c.dev.id, text: "Correction: one more note." }, { notify: c.notify })).toBe(false);
+    // A second card on its own ticket, past its 24 h.
+    const t2 = await c.ticket("Release beta.3");
+    const d2 = await c.card(t2, "Please paste the second Release log.");
+    await c.req("POST", `/api/decisions/${d2.id}/answer`, { answer: "Sent it" });
+    expect(await c.dueCount(d2.id)).not.toBeNull();
+    await firstResult(c, t2);
+    await c.db.update(decisions).set({ infoAskFollowUntil: new Date(Date.now() - 60_000) }).where(eq(decisions.id, d2.id));
+    expect(await mirrorLaterReply(c.db, { companyId: c.company.id, ticketId: t2.id, agentId: c.dev.id, text: "Correction: don't press." }, { notify: c.notify })).toBe(false);
+    expect((await laterLines()).length).toBe(1);
+  });
+
+  it("after the 30-minute escalation, the CEO's reply on the ticket reaches the owner", async () => {
+    const c = await setup();
+    const t = await c.ticket("Release beta.2");
+    const d = await c.card(t, "Please paste the Release log.");
+    await c.req("POST", `/api/decisions/${d.id}/answer`, { answer: "Sent it" });
+    // Before any result there is no window: a CEO reply is not mirrored yet.
+    expect(await mirrorLaterReply(c.db, { companyId: c.company.id, ticketId: t.id, agentId: c.ceo.id, text: "Looking at your log." }, { notify: c.notify })).toBe(false);
+    await c.db.update(decisions).set({ infoAskDueAt: new Date(Date.now() - 60_000) }).where(eq(decisions.id, d.id));
+    await c.sweeps.run();
+    expect(await followUntilOf(c, d.id)).not.toBeNull();
+    expect(await mirrorLaterReply(c.db, { companyId: c.company.id, ticketId: t.id, agentId: c.ceo.id, text: "Your log shows Release ran 45 s early; nothing for you to do." }, { notify: c.notify })).toBe(true);
+  });
+
+  it("over ticket_reply: the first result goes once, a later correction follows it, and closesOwnerLoop ends it", async () => {
+    const c = await setup();
+    await c.app.listen({ host: "127.0.0.1", port: 0 });
+    const base = `127.0.0.1:${(c.app.server.address() as { port: number }).port}`;
+    const t = await c.ticket("Release beta.2");
+    const d = await c.card(t, "Please paste the Release log.");
+    await c.req("POST", `/api/decisions/${d.id}/answer`, { answer: "Sent it" });
+    const runId = (await c.db.insert(runs).values({ companyId: c.company.id, agentId: c.dev.id, ticketId: t.id, model: "m", startedAt: new Date() }).returning())[0]!.id;
+    const token = await issueRunToken(c.db, { companyId: c.company.id, agentId: c.dev.id, runId });
+    const client = new Client({ name: "t", version: "0" });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
+    const reply = async (text: string, extra: Record<string, unknown> = {}) => {
+      const r = await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text, notAnAsk: true, ...extra } });
+      expect((r as { isError?: boolean }).isError).toBeFalsy();
+    };
+    const chat = async () => (await c.req("GET", `/api/companies/${c.company.id}/chat?agentId=${c.ceo.id}`)).json().items as Array<{ text: string }>;
+    await reply("Release was pressed early; it is fine now, nothing for you to do.");
+    expect((await chat()).filter((l) => l.text.includes("checked what you sent")).length).toBe(1);
+    expect((await chat()).some((l) => l.text.includes("a later word on"))).toBe(false);
+    await reply("Correction: the images were never signed; don't press Release until the fix is in. Nothing for you to do now.");
+    expect((await chat()).filter((l) => l.text.includes("a later word on") && l.text.includes("never signed")).length).toBe(1);
+    await reply("Fixed and released; beta.2 is out.", { closesOwnerLoop: true });
+    await reply("Tidied the release notes.");
+    await client.close();
+    const lines = (await chat()).filter((l) => l.text.includes("a later word on"));
+    expect(lines.length).toBe(2);
+    expect(lines.some((l) => l.text.includes("Tidied"))).toBe(false);
   });
 });
 
