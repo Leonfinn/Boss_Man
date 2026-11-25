@@ -919,7 +919,7 @@ export async function buildApp(opts: AppOptions) {
     planning: roadmapPlanning,
     wake: (input) => scheduler.wake(input),
     now: opts.now,
-    // BOS-2627: a wake that doesn't start is logged (and never counted as delivered), so a silent loss can be read in the log.
+    // BOS-2627, BOS-2633: tellOnce logs a wake that doesn't start (BOS-2160: into the error buffer, which raises an owner card if it keeps failing) and never counts it as delivered.
     log: (message) => app.log.error(message),
   });
   const sweeps = sweepService(db, {

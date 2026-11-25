@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { ceoPlanWake, needsCeoPlan } from "@boss-man/shared";
-import { milestones as msTable, settings, tickets as ticketsTable } from "../src/db/schema.js";
+import { milestones as msTable, settings, tickets as ticketsTable, agents } from "../src/db/schema.js";
 import { milestoneRiskService } from "../src/services/milestone-risk.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
@@ -44,7 +44,8 @@ const sweep = (c: Awaited<ReturnType<typeof setup>>, now: string) =>
     planning: c.planning,
     wake: async (input) => {
       c.woken.push(input);
-      return { outcome: "queued" };
+      // The scheduler's wake row, with its id: since BOS-2633 a tell counts only when it resolved with a real row.
+      return { id: `wake-${c.woken.length}`, outcome: "queued" };
     },
     now: () => new Date(`${now}T09:00:00Z`),
   });
@@ -170,7 +171,7 @@ describe("milestone at risk: who wakes the CEO, and when (BOS-2581)", () => {
     let asked: string[] = [];
     const counted = milestoneRiskService(c.db, {
       planning: { managedMilestones: async (today: string) => ((asked.push(today), [])) } as unknown as typeof c.planning,
-      wake: async () => ({ outcome: "queued" }),
+      wake: async () => ({ id: "w0", outcome: "queued" }),
       now: () => new Date("2026-10-16T09:00:00Z"),
     });
     expect(await counted.run()).toEqual({ woken: 0 });
@@ -193,30 +194,109 @@ describe("milestone at risk: who wakes the CEO, and when (BOS-2581)", () => {
   });
 });
 
-describe("milestone at risk: the wake is never lost (BOS-2627)", () => {
+describe("milestone at risk: the wake goes through tellOnce (BOS-2633)", () => {
+  /** A sweep that records what the pass logged, with the wake's outcome (or a throw) under the test's control. */
+  const through = (c: Awaited<ReturnType<typeof setup>>, now: string, wake: () => Promise<unknown>) => {
+    const logs: string[] = [];
+    const service = milestoneRiskService(c.db, { planning: c.planning, wake: async (input) => ((c.woken.push(input), wake())), now: () => new Date(`${now}T09:00:00Z`), log: (m) => logs.push(m) });
+    return { logs, service };
+  };
+
+  it("a wake that was not saved counts as not told, is logged once, and the next pass tries again", async () => {
+    const c = await setup();
+    const { m } = await lateNow(c);
+    await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
+    // wake() saying null is what a sweep gets when nothing was saved: tellOnce answers null, so the milestone is not woken.
+    const first = through(c, "2026-10-16", async () => null);
+    expect(await first.service.run()).toEqual({ woken: 0 });
+    expect(c.woken).toHaveLength(1);
+    expect(first.logs.some((l) => l.includes('"milestone at risk Launch') && l.includes("nothing was sent"))).toBe(true);
+    // The row stays "not woken yet", so the next pass tries again and, this time, it goes through.
+    const [kept] = await c.db.select().from(settings).where(eq(settings.key, `milestone_risk:${m.id}`));
+    expect(kept!.value).toMatchObject({ status: null });
+    expect(await through(c, "2026-10-17", async () => ({ id: "w1", outcome: "queued" })).service.run()).toEqual({ woken: 1 });
+    expect(c.woken).toHaveLength(2);
+  });
+
+  it("a company with no CEO is not woken and nothing is logged every pass, and the wake happens once a CEO exists", async () => {
+    const c = await setup();
+    const { m } = await lateNow(c);
+    await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
+    // No CEO: there is nobody to tell, so no wake is attempted and the pass says nothing (BOS-2633, to keep a no-CEO
+    // company from logging a line, and risking an owner card through BOS-2160, on every pass for every managed milestone).
+    await c.db.update(agents).set({ retiredAt: new Date("2026-10-01T00:00:00Z") }).where(eq(agents.id, c.ceo.id));
+    const first = through(c, "2026-10-16", async () => ({ id: "never", outcome: "queued" }));
+    expect(await first.service.run()).toEqual({ woken: 0 });
+    expect(c.woken).toHaveLength(0);
+    expect(first.logs).toEqual([]);
+    // Two more passes stay quiet, and the row stays "not woken yet".
+    expect(await through(c, "2026-10-17", async () => ({ id: "never", outcome: "queued" })).service.run()).toEqual({ woken: 0 });
+    expect(first.logs).toEqual([]);
+    const [kept] = await c.db.select().from(settings).where(eq(settings.key, `milestone_risk:${m.id}`));
+    expect(kept!.value).toMatchObject({ status: null });
+    // A CEO is hired: the next pass wakes them, because the milestone was never marked woken.
+    await c.db.update(agents).set({ retiredAt: null }).where(eq(agents.id, c.ceo.id));
+    expect(await through(c, "2026-10-18", async () => ({ id: "w1", outcome: "queued" })).service.run()).toEqual({ woken: 1 });
+    expect(c.woken.map((w) => w.agentId)).toEqual([c.ceo.id]);
+  });
+
+  it("a wake that throws is logged by tellOnce, the pass carries on, and the next pass wakes the CEO", async () => {
+    const c = await setup();
+    const { m } = await lateNow(c);
+    await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
+    const first = through(c, "2026-10-16", async () => {
+      throw new Error("scheduler unavailable");
+    });
+    // tellOnce swallows the error on purpose: the sweep step must not go down for one failed tell.
+    expect(await first.service.run()).toEqual({ woken: 0 });
+    expect(first.logs.some((l) => l.includes("scheduler unavailable"))).toBe(true);
+    const [kept] = await c.db.select().from(settings).where(eq(settings.key, `milestone_risk:${m.id}`));
+    expect(kept!.value).toMatchObject({ status: null });
+    expect(await through(c, "2026-10-17", async () => ({ id: "w2", outcome: "queued" })).service.run()).toEqual({ woken: 1 });
+    expect(c.woken).toHaveLength(2);
+  });
+
+  it("a dropped wake is retried, and only a wake that really started goes quiet", async () => {
+    const c = await setup();
+    const { m } = await lateNow(c);
+    await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
+    const first = through(c, "2026-10-16", async () => ({ id: "w3", outcome: "dropped" }));
+    expect(await first.service.run()).toEqual({ woken: 0 });
+    expect(first.logs.some((l) => l.includes("dropped"))).toBe(true);
+    expect(await through(c, "2026-10-17", async () => ({ id: "w4", outcome: "queued" })).service.run()).toEqual({ woken: 1 });
+    expect(await through(c, "2026-10-18", async () => ({ id: "w5", outcome: "queued" })).service.run()).toEqual({ woken: 0 });
+    expect(c.woken).toHaveLength(2);
+  });
+});
+
+describe("milestone at risk: the wake is never lost (BOS-2627, kept through tellOnce)", () => {
   /** A sweep whose wake goes through a scheduler-like queue: outcomes are whatever `outcome` says, and failures throw. */
-  const queued = (c: Awaited<ReturnType<typeof setup>>, now: string, outcome: { value: unknown } | (() => unknown)) =>
-    milestoneRiskService(c.db, {
+  const queued = (c: Awaited<ReturnType<typeof setup>>, now: string, outcome: { value: unknown } | (() => unknown)) => {
+    const logs: string[] = [];
+    const service = milestoneRiskService(c.db, {
       planning: c.planning,
       wake: async (input) => {
         c.woken.push(input);
         return typeof outcome === "function" ? outcome() : outcome.value;
       },
       now: () => new Date(`${now}T09:00:00Z`),
+      log: (m) => logs.push(m),
     });
+    return { service, logs };
+  };
 
   it("a wake that was not started (dropped) is tried again next pass, and only a real wake keeps it quiet", async () => {
     const c = await setup();
     const { m } = await lateNow(c);
     await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
     // The first pass's wake comes back "dropped": the milestone was not woken, so the next pass tries again.
-    expect(await queued(c, "2026-10-16", { value: { outcome: "dropped" } }).run()).toEqual({ woken: 0 });
+    expect(await queued(c, "2026-10-16", { value: { id: "w1", outcome: "dropped" } }).service.run()).toEqual({ woken: 0 });
     const [kept] = await c.db.select().from(settings).where(eq(settings.key, `milestone_risk:${m.id}`));
     expect(kept!.value).toEqual({ status: null, managed: true });
     // Next pass: this time it really starts; the CEO is woken and it goes quiet.
-    expect(await queued(c, "2026-10-17", { value: { outcome: "queued" } }).run()).toEqual({ woken: 1 });
+    expect(await queued(c, "2026-10-17", { value: { id: "w2", outcome: "queued" } }).service.run()).toEqual({ woken: 1 });
     expect(c.woken).toHaveLength(2);
-    expect(await queued(c, "2026-10-18", { value: { outcome: "queued" } }).run()).toEqual({ woken: 0 });
+    expect(await queued(c, "2026-10-18", { value: { id: "w3", outcome: "queued" } }).service.run()).toEqual({ woken: 0 });
     expect(c.woken).toHaveLength(2);
   });
 
@@ -224,11 +304,12 @@ describe("milestone at risk: the wake is never lost (BOS-2627)", () => {
     const c = await setup();
     const { m } = await lateNow(c);
     await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
-    await expect(
-      queued(c, "2026-10-16", () => {
-        throw new Error("scheduler unavailable");
-      }).run(),
-    ).rejects.toThrow("scheduler unavailable");
+    // tellOnce answers null for a throw (it logs it and the pass carries on), so nothing is recorded as woken.
+    const first = queued(c, "2026-10-16", () => {
+      throw new Error("scheduler unavailable");
+    });
+    expect(await first.service.run()).toEqual({ woken: 0 });
+    expect(first.logs.some((l) => l.includes("scheduler unavailable"))).toBe(true);
     const [kept] = await c.db.select().from(settings).where(eq(settings.key, `milestone_risk:${m.id}`));
     expect(kept!.value).toMatchObject({ status: null });
     // Nobody was recorded as woken, so turning the switch on is not silently lost: the next pass wakes.
