@@ -33,6 +33,7 @@ export const ALLOWED: Allowed[] = [
   { file: "pages/Decisions.tsx", text: "It is waiting on you for a permission answer.", why: "one run's state as a sentence; there is no count" },
   { file: "pages/Decisions.tsx", text: "It is not waiting on you.", why: "the empty case of the same run state; there is no count" },
   { file: "pages/Decisions.tsx", text: "is waiting on you", why: "a pill saying one live run is holding its card; there is no count" },
+  { file: "pages/MilestoneLeft.tsx", text: "Nothing here is waiting for you", why: "the empty case of a milestone's What's left list: it says no ticket waits for the owner, and its only number is a gone-quiet count, not a waiting-on-you figure" },
   { file: "pages/Ticket.tsx", text: "waiting for you", why: "a sign-off state word shown for one ticket; there is no count" },
   // Real counts the board already showed before this rule reached them; kept because the sentence is not one figure.
   {

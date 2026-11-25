@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { NoCompany } from "../components/NoCompany";
 import { api, FEATURE_STATUS_LABEL, today, type Company, type FeatureRoadmapCompany, type Horizon, type RoadmapCompany, type RoadmapFeature, type RoadmapMilestone, type RoadmapObjective } from "../api";
+import { MilestoneLeft, type MilestoneTicketRow } from "./MilestoneLeft";
 import { MilestoneRows, STATUS, rangeOf, type DateRange } from "./RoadmapRows";
 import { usePoll } from "../hooks";
 import { Loader } from "../components/Loader";
@@ -12,7 +13,7 @@ import { buildCsv, download } from "../csv";
 export { STATUS };
 
 function MilestoneDetail({ m, onChanged }: { m: RoadmapMilestone; onChanged: () => void }) {
-  const list = usePoll((signal) => api<Array<{ id: string; title: string; state: string; outcome: string | null; assignee: string | null }>>(`/api/milestones/${m.id}/tickets`, { signal }), 30_000, m.id);
+  const list = usePoll((signal) => api<MilestoneTicketRow[]>(`/api/milestones/${m.id}/tickets`, { signal }), 30_000, m.id);
   const [title, setTitle] = useState(m.title);
   const [date, setDate] = useState(m.targetDate ?? "");
   const [error, setError] = useState<string | null>(null);
@@ -45,15 +46,7 @@ function MilestoneDetail({ m, onChanged }: { m: RoadmapMilestone; onChanged: () 
       {error && <p className="error">{error}</p>}
       {m.blocked > 0 && <p className="muted" style={{ fontSize: 14 }}>{m.blocked} blocked: see what they're waiting on in the Plan.</p>}
       {list.data?.length ? (
-        <ul className="rm-tickets">
-          {list.data.map((t) => (
-            <li key={t.id}>
-              <a href={`#/tickets/${t.id}`}>{t.title}</a>
-              <span className={`tag ${t.state === "done" ? "green" : t.state === "blocked" ? "red" : ""}`}>{t.outcome === "cancelled" ? "cancelled" : t.state.replace(/_/g, " ")}</span>
-              {t.assignee && <span className="muted">{t.assignee}</span>}
-            </li>
-          ))}
-        </ul>
+        <MilestoneLeft rows={list.data} today={today()} />
       ) : (
         list.data && <p className="muted">No tickets yet. Pick this milestone on a ticket's page to add it.</p>
       )}

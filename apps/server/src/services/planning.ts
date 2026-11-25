@@ -2,7 +2,7 @@
 // on a timeline; the plan is a company's tickets and what they wait on, as a graph with blocked
 // chains and their causes worked out on the server, so the browser only draws.
 import { and, asc, eq, gte, inArray, ne, or, sql } from "drizzle-orm";
-import { layoutPlan, milestoneHorizon, milestoneVerdict, ticketRef, type Horizon, type MilestoneAction, type MilestoneStatus } from "@boss-man/shared";
+import { layoutPlan, leftGroup, milestoneHorizon, milestoneVerdict, ticketRef, type Horizon, type MilestoneAction, type MilestoneStatus } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, engagements, features, keyResults, milestones, objectives, projects, ticketDependencies, tickets, watchdogFlags } from "../db/schema.js";
 import { WorkError } from "./work.js";
@@ -193,9 +193,57 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
     },
 
     /** A milestone's tickets, for the roadmap's detail panel: the same set the counts and forecast use, with cancelled ones shown as such. */
-    async milestoneTickets(milestoneId: string) {
+    async milestoneTickets(milestoneId: string, today: string = new Date().toISOString().slice(0, 10)) {
       const rows = await ticketsOfMilestones(db, [milestoneId], { includeCancelled: true });
-      return rows.map((t) => ({ id: t.id, title: t.title, state: t.state, outcome: t.outcome, assignee: t.assignee }));
+      // BOS-2580 "What's left": every ticket that isn't done or cancelled gets a group and what holds it, all read from
+      // ticket state, the waits-on links, open cards and watchdog flags now (R59). Nothing is typed or stored.
+      const left = rows.filter((t) => t.state !== "done" && t.outcome !== "cancelled");
+      const ids = left.map((t) => t.id);
+      const deps = ids.length
+        ? await db
+            .select({ to: ticketDependencies.blockedTicketId, until: ticketDependencies.until, bId: tickets.id, bState: tickets.systemState, bMerge: tickets.mergeCommit, bNumber: tickets.number, bPrefix: companies.ticketPrefix, eId: engagements.id, eTitle: engagements.title, eStatus: engagements.status, dId: decisions.id, dStatus: decisions.status, dStale: decisions.staleAt, dStage: decisions.recheckStage, dContext: decisions.context })
+            .from(ticketDependencies)
+            .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
+            .leftJoin(companies, eq(companies.id, tickets.companyId))
+            .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
+            .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
+            .where(inArray(ticketDependencies.blockedTicketId, ids))
+        : [];
+      const hidden = await hiddenWhileRechecked(db, deps.flatMap((d) => (d.dId ? [{ id: d.dId, staleAt: d.dStale, recheckStage: d.dStage, context: d.dContext }] : [])));
+      const stuck = new Set(
+        ids.length
+          ? (await db.select({ id: watchdogFlags.ticketId }).from(watchdogFlags).where(and(inArray(watchdogFlags.ticketId, ids), eq(watchdogFlags.status, "open"), ne(watchdogFlags.rule, "owner_decision_waiting"), sql`${watchdogFlags.lastFlaggedAt} is not null`))).map((f) => f.id)
+          : [],
+      );
+      const holds = ids.length ? await db.select({ id: tickets.id, until: tickets.blockedUntil, reason: tickets.blockedUntilReason }).from(tickets).where(inArray(tickets.id, ids)) : [];
+      const nowMs = Date.parse(`${today}T00:00:00Z`);
+      const extra = new Map(
+        left.map((t) => {
+          const delivered = (t.state === "blocked" || t.state === "in_progress") && !!t.mergeCommit && !t.goLiveWait;
+          const mine = deps.filter((d) => d.to === t.id);
+          const waits: Array<{ kind: "ticket" | "card" | "engagement" | "date" | "note"; text: string; id?: string }> = [];
+          let cardId: string | null = null;
+          for (const d of mine) {
+            if (d.bId && !ticketBlockerFinished({ ticketState: d.bState, mergeCommit: d.bMerge, until: d.until })) waits.push({ kind: "ticket", text: `${d.bPrefix}-${d.bNumber}`, id: d.bId });
+            else if (d.eId && d.eStatus !== "signed_off") waits.push({ kind: "engagement", text: d.eTitle ?? "an engagement", id: d.eId });
+            else if (d.dId && d.dStatus === "open") {
+              waits.push({ kind: "card", text: "your card", id: d.dId });
+              if (!hidden.has(d.dId)) cardId ??= d.dId;
+            }
+          }
+          const hold = holds.find((h) => h.id === t.id);
+          if (hold?.until && hold.until.getTime() > Date.now()) waits.push({ kind: "date", text: `${hold.reason ?? "a set date"}, until ${hold.until.toISOString().slice(0, 10)}` });
+          // Blocked with no record of what it waits on: say so, so a wait kept only in its note shows as a gap, not as nothing.
+          if (t.state === "blocked" && !delivered && !waits.length) waits.push({ kind: "note", text: "no link recorded; see its note" });
+          const ownerCard = waits.some((w) => w.kind === "card");
+          const since = t.watchUntil ? t.watchUntil.getTime() : t.changedAt.getTime();
+          const idle = Math.max(0, Math.floor((nowMs - since) / 86_400_000));
+          const quiet = delivered && (t.watchUntil ? since < nowMs : idle >= 3);
+          const group = leftGroup({ delivered, quiet, stuck: stuck.has(t.id), ownerCard, held: waits.length > 0 });
+          return [t.id, { group, waits, cardId, quietDays: quiet ? idle : null, watchUntil: t.watchUntil ? t.watchUntil.toISOString().slice(0, 10) : null, updatedDaysAgo: Math.max(0, Math.floor((nowMs - t.changedAt.getTime()) / 86_400_000)), stuck: stuck.has(t.id) }] as const;
+        }),
+      );
+      return rows.map((t) => ({ id: t.id, ref: t.ref, title: t.title, state: t.state, outcome: t.outcome, assignee: t.assignee, ...(extra.get(t.id) ?? { group: null, waits: [], cardId: null, quietDays: null, watchUntil: null, updatedDaysAgo: null, stuck: false }) }));
     },
 
     async updateObjective(id: string, patch: { title?: string; priority?: number; status?: (typeof OBJECTIVE_STATUSES)[number] }) {
