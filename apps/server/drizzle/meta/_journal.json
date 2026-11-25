@@ -1296,6 +1296,13 @@
       "when": 1795630688621,
       "tag": "0203_owner_hold_pickup",
       "breakpoints": true
+    },
+    {
+      "idx": 204,
+      "version": "7",
+      "when": 1795639409265,
+      "tag": "0204_milestone_ceo_plan",
+      "breakpoints": true
     }
   ]
 }

@@ -304,6 +304,12 @@ export function MilestoneRows({ ms, range, now, selected, onSelect, detail, onCh
                       <ReasonText text={m.reason} tickets={m.reasonTickets ?? []} />
                     </p>
                   )}
+                  {/* BOS-2627: the CEO's remedy, under the reason line. Server-cleared once the milestone leaves At risk/Late. */}
+                  {m.ceoPlan && (
+                    <p className="rm-plan" data-testid="rm-plan">
+                      <span className="rm-plan-label">CEO&apos;s plan:</span>{" "}{m.ceoPlan}
+                    </p>
+                  )}
                   <MilestoneRiskSwitch m={m} onChanged={onChanged} />{/* BOS-2581 */}
                   {isOpen && (
                     <div className="rm-open">

@@ -13,15 +13,15 @@ import { API, launch, startVite, stubApi } from "./real-page";
 
 const DAY = 86_400_000;
 const day = (n: number) => new Date(Date.now() + n * DAY).toISOString().slice(0, 10);
-type Spec = { title: string; on: boolean; status: string; due: number; reason: string | null };
+type Spec = { title: string; on: boolean; status: string; due: number; reason: string | null; plan?: string };
 const open: Spec[] = [
   { title: "Launch the customer portal", on: false, status: "at_risk", due: 9, reason: "At risk: at its pace the unbuilt work finishes about Sat 5 Dec, 15 days after its date." },
-  { title: "Public beta for the first customers, with sign-in and billing", on: true, status: "late", due: -4, reason: "Late: its date passed 4 days ago and 2 tickets are not built and live yet." },
+  { title: "Public beta for the first customers, with sign-in and billing", on: true, status: "late", due: -4, reason: "Late: its date passed 4 days ago and 2 tickets are not built and live yet.", plan: "Hand the two unbuilt tickets to Zippy on Monday, and ship sign-in alone if billing slips." },
 ];
 const weeks = (i: number) => Array.from({ length: 8 }, (_, w) => ({ weekEnd: day(-7 * (7 - w)), done: w * 2 + i, total: 20 + w + i }));
 const milestone = (s: Spec, i: number) => ({
   id: `m${i}`, title: s.title, targetDate: day(s.due), total: 5, done: 2, blocked: 0, active: 1, status: s.status, horizon: "now", pinned: null, finishedAt: null,
-  reason: s.reason, reasonTickets: [], forecast: { pointsDone: 10, pointsLeft: 6, unsized: 0, pace: 4, expectedFinish: day(s.due - 1), daysLate: 0 }, burnup: weeks(i), ceoManagesRisk: s.on,
+  reason: s.reason, reasonTickets: [], forecast: { pointsDone: 10, pointsLeft: 6, unsized: 0, pace: 4, expectedFinish: day(s.due - 1), daysLate: 0 }, burnup: weeks(i), ceoManagesRisk: s.on, ceoPlan: s.plan ?? null,
 });
 const api: Record<string, unknown> = {
   ...API,
@@ -51,6 +51,7 @@ const measure = () => {
       const title = li.querySelector(".rm-title")!;
       const btn = li.querySelector(".rm-rowbtn")!;
       const controls = [...sw.querySelectorAll("button")].map((b) => rect(b).height);
+      const plan = li.querySelector(".rm-plan");
       return {
         on: sw.getAttribute("data-on"),
         inButton: !!sw.closest("button"),
@@ -63,6 +64,10 @@ const measure = () => {
         titleLeft: rect(title).left,
         minControl: controls.length ? Math.min(...controls) : 999,
         text: sw.textContent,
+        // BOS-2627: the CEO's plan, under the reason and above the switch, inside the card and aligned on wide screens.
+        plan: plan
+          ? { left: rect(plan).left, right: rect(plan).right, top: rect(plan).top, bottom: rect(plan).bottom, text: plan.textContent, inButton: !!plan.closest("button") }
+          : null,
       };
     }),
     allLeft: rect(document.querySelector(".rm-risk-all")!).left,
@@ -93,6 +98,17 @@ describe.skipIf(!browser || !vite)("CEO manages at risk switch (BOS-2581)", () =
         }
         expect(before.rows.find((r) => r.on === "off")!.text).toContain("CEO manages At risk");
         expect(before.rows.find((r) => r.on === "on")!.text).toContain("costs a CEO run");
+        // BOS-2627: one row carries the CEO's plan. It sits under the reason, inside the card, and lines up with it on a wide
+        // screen; the other row has none, so no plan line shows there.
+        const withPlan = before.rows.filter((r) => r.plan);
+        expect(withPlan, "exactly one milestone has a plan").toHaveLength(1);
+        const p = withPlan[0]!.plan!;
+        expect(p.text).toContain("Hand the two unbuilt tickets to Zippy on Monday");
+        expect(p.inButton, "the plan is outside the row's button").toBe(false);
+        expect(p.top, "the plan is under its reason line").toBeGreaterThanOrEqual((withPlan[0]!.reasonBottom ?? 0) - 1);
+        expect(p.bottom, "the plan is above the switch").toBeLessThanOrEqual(withPlan[0]!.top + 1);
+        expect(p.right, "the plan is inside the card").toBeLessThanOrEqual(before.cardRight + 0.5);
+        if (width > 600) expect(Math.abs(p.left - withPlan[0]!.titleLeft), "the plan is aligned with the title").toBeLessThan(2);
         // The "for all" control lines up with the card's milestones, not the page.
         expect(before.allLeft).toBeGreaterThanOrEqual(0);
         expect(before.allLeft).toBeLessThanOrEqual(before.rows[0]!.left + 0.5);
