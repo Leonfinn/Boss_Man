@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
+import { screenExtras, type Package } from "../src/services/company-import.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
 afterEach(async () => {
@@ -527,5 +528,136 @@ describe("deploy targets and permission rules in a package (BOS-2169)", () => {
     expect(await enabledOf(company.id)).toBe(false);
     await req("POST", "/api/companies/import", { zip: Buffer.from(zipSync(on)).toString("base64"), name: "Another Co" });
     expect(await enabledOf(company.id)).toBe(false);
+  });
+});
+
+// BOS-2461: the pure rule that decides which deploy targets and permission rules a package may bring.
+describe("screenExtras, the pure rule behind the preview and the import (BOS-2461)", () => {
+  const agent = (name: string, slug: string): Package["agents"][number] => ({ name, role: "worker", agentKind: "claude", slug, avatar: null });
+  const target = (o: Partial<Package["deployTargets"][number]> = {}): Package["deployTargets"][number] => ({
+    name: "Production",
+    kind: "ssh",
+    endpoint: "deploy@example.com",
+    isProduction: false,
+    rules: {},
+    secrets: [],
+    ...o,
+  });
+  const rule = (o: Partial<Package["permissionRules"][number]> = {}): Package["permissionRules"][number] => ({
+    name: "Restarts are fine",
+    trigger: "permission",
+    condition: { commandPattern: "^docker\\s+restart\\b" },
+    outcome: "allow",
+    position: 0,
+    ...o,
+  });
+  const pkg = (o: Partial<Package> = {}): Package => ({
+    company: { name: "Test Co" },
+    agents: [],
+    skills: [],
+    projects: [],
+    plan: { objectives: [], features: [] },
+    toolServers: [],
+    secrets: [],
+    deployTargets: [],
+    permissionRules: [],
+    settings: {},
+    wiki: [],
+    tickets: [],
+    notes: [],
+    ...o,
+  });
+
+  it("a package with no deploy targets or permission rules screens to nothing", () => {
+    expect(screenExtras(pkg())).toEqual({ targets: [], rules: [], lines: [] });
+  });
+
+  it("imports a safe target and keeps a rule that names a packaged agent, softening Allow and Ask the CEO to Ask me", () => {
+    const extras = screenExtras(
+      pkg({
+        agents: [agent("Ann", "ann")],
+        deployTargets: [target({ rules: { requiresApproval: true } })],
+        permissionRules: [
+          rule(),
+          rule({ name: "Ann's deletes", condition: { kinds: ["delete"], agents: ["Ann"] }, outcome: "owner", position: 1 }),
+          rule({ name: "No pushes", condition: { kinds: ["execute"], commandPattern: "^git\\s+push\\b" }, outcome: "deny", position: 2 }),
+        ],
+      }),
+    );
+    expect(extras.targets).toEqual([expect.objectContaining({ name: "Production", rules: { requiresApproval: true } })]);
+    expect(extras.rules).toEqual([
+      { name: "Restarts are fine", match: { commandPattern: "^docker\\s+restart\\b" }, outcome: "owner", agentNames: null },
+      { name: "Ann's deletes", match: { kinds: ["delete"] }, outcome: "owner", agentNames: ["Ann"] },
+      { name: "No pushes", match: { kinds: ["execute"], commandPattern: "^git\\s+push\\b" }, outcome: "deny", agentNames: null },
+    ]);
+    expect(extras.lines).toEqual(['Rule "Restarts are fine" was Allow in the export; it asks you now. If you trust it, change it back in Settings → Permissions.']);
+  });
+
+  it("carries a safe target but warns that its live tag and secrets must be set again", () => {
+    const extras = screenExtras(
+      pkg({
+        agents: [agent("Ann", "ann")],
+        deployTargets: [
+          target({
+            name: "Staging",
+            kind: "docker",
+            endpoint: "tcp://192.168.1.50:2375",
+            rules: { liveTag: { project: "site", name: "live" } },
+            secrets: [{ name: "Deploy key", kind: "generic", envName: "DEPLOY_KEY", agents: ["ann"] }],
+          }),
+        ],
+      }),
+    );
+    expect(extras.targets.map((t) => t.name)).toEqual(["Staging"]);
+    expect(extras.lines).toEqual([
+      'Deploy target "Staging" had a live tag "live" for project "site"; it was not carried over. Set it again on the target once the company\'s runner is running.',
+      'Add the secret "Deploy key" and grant it as DEPLOY_KEY to deploy target "Staging", for Ann.',
+    ]);
+  });
+
+  it("screens out a target it would refuse, a duplicate and rules it can't place, and says why", () => {
+    const extras = screenExtras(
+      pkg({
+        agents: [agent("Ann", "ann")],
+        deployTargets: [
+          target({ name: "Socket", endpoint: "unix:///var/run/docker.sock" }),
+          target({ name: "Production" }),
+          target({ name: "production" }),
+        ],
+        permissionRules: [
+          rule({ name: "Not a permission rule", trigger: "deploy" }),
+          rule({ name: "Raw ids", condition: { kinds: ["edit"], agentIds: ["x"] }, outcome: "deny" }),
+          rule({ name: "Ghost's rule", condition: { kinds: ["edit"], agents: ["Nobody"] }, outcome: "owner" }),
+        ],
+      }),
+    );
+    expect(extras.targets.map((t) => t.name)).toEqual(["Production"]);
+    expect(extras.rules).toEqual([]);
+    expect(extras.lines).toEqual([
+      'Deploy target "Socket" was not imported: The raw Docker socket gives root on the host. Put a Docker socket proxy in front of it (for example tecnativa/docker-socket-proxy) and use its tcp:// address.',
+      'Deploy target "production" appears twice in the package; only the first was imported.',
+      'Rule "Not a permission rule" was not imported: it is a "deploy" rule and only permission rules are carried.',
+      'Rule "Raw ids" was not imported: it names agents by id, which can\'t be placed in this company.',
+      'Rule "Ghost\'s rule" names Nobody, who isn\'t in this company; it was not imported.',
+    ]);
+  });
+
+  it("narrows a rule that names some agents it doesn't hold, and refuses a condition the rule form can't set", () => {
+    const extras = screenExtras(
+      pkg({
+        agents: [agent("Ann", "ann")],
+        permissionRules: [
+          rule({ name: "Ann and Nobody delete", condition: { kinds: ["delete"], agents: ["Ann", "Nobody"] }, outcome: "owner" }),
+          rule({ name: "Built-in only", condition: { bossmanCall: true }, outcome: "deny", position: 1 }),
+          rule({ name: "Bad pattern", condition: { commandPattern: "(" }, outcome: "deny", position: 2 }),
+        ],
+      }),
+    );
+    expect(extras.rules).toEqual([{ name: "Ann and Nobody delete", match: { kinds: ["delete"] }, outcome: "owner", agentNames: ["Ann"] }]);
+    expect(extras.lines).toEqual([
+      'Rule "Ann and Nobody delete" also named Nobody, who isn\'t in this company; it applies to Ann only.',
+      'Rule "Built-in only" was not imported: its condition isn\'t one the rule form can set (bossmanCall).',
+      'Rule "Bad pattern" was not imported: The command pattern isn\'t a valid regular expression.',
+    ]);
   });
 });
