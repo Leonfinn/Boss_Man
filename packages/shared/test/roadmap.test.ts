@@ -94,6 +94,41 @@ describe("milestoneVerdict (BOS-2579: badge and reason from one function)", () =
     expect(milestoneVerdict({ total: 2, done: 2, ...base }, "2026-10-10", today)).toMatchObject({ status: "done", reason: null });
   });
 
+  it("the owner's five 25 Nov milestones (22 blocked tickets, every one merged and live) read Live, being checked or On track, never At risk or Late", () => {
+    // Shape from the BOS-2573 design page: 5 milestones, 22 "blocked" tickets that are all built and live, with the
+    // pace estimate saying they run past their dates. Figures per milestone are made up to that shape.
+    const fiveMilestones = [
+      { done: 5, delivered: 4, date: "2026-11-30" },
+      { done: 2, delivered: 4, date: "2026-12-05" },
+      { done: 2, delivered: 6, date: "2026-12-12" },
+      { done: 1, delivered: 5, date: "2026-12-20" },
+      { done: 3, delivered: 3, date: "2026-12-31" },
+    ];
+    expect(fiveMilestones.reduce((n, m) => n + m.delivered, 0)).toBe(22);
+    for (const { date, ...m } of fiveMilestones) {
+      const total = m.done + m.delivered; // every unfinished ticket is built and live
+      const checks = Array.from({ length: m.delivered }, (_, i) => check(`BOS-${100 + i}`, null));
+      const v = milestoneVerdict({ ...base, ...m, total, blocked: m.delivered, daysLate: 12, checks }, date, today);
+      expect(["live_checked", "on_track"]).toContain(v.status);
+      expect(v.reason ?? "").not.toMatch(/^(At risk|Late)/);
+    }
+  });
+
+  it("the badge and the reason line always agree: the reason opens with the words of its badge, and only a badge with something to say has one", () => {
+    const opening: Record<string, RegExp | null> = { at_risk: /^At risk: /, late: /^Late: /, live_checked: /^All built and live\./, done: null, on_track: null, no_work: null, no_date: null };
+    const dates = [null, "2026-10-01", "2026-10-10", "2026-11-30"];
+    for (const date of dates) for (const done of [0, 2, 4]) for (const delivered of [0, 2]) for (const daysLate of [0, 5]) for (const owner of [false, true]) {
+      const total = 4 + (done === 4 ? 0 : delivered);
+      const needsAction = owner ? [t("BOS-7", "owner")] : [];
+      const input = { ...base, total, done, delivered: Math.min(delivered, total - done), daysLate, needsAction, checks: [] };
+      const v = milestoneVerdict(input, date, today);
+      expect(v.status).toBe(milestoneStatus(input, date, today));
+      const re = opening[v.status];
+      if (re) expect(v.reason ?? "").toMatch(re);
+      else expect(v.reason).toBeNull();
+    }
+  });
+
   it("gives every status the same badge milestoneStatus does", () => {
     const input = { total: 3, done: 1, ...base, needsAction: [t("BOS-5", "owner")] };
     expect(milestoneStatus(input, "2026-11-30", today)).toBe(milestoneVerdict(input, "2026-11-30", today).status);

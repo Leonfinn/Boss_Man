@@ -19,7 +19,7 @@ export const NO_ESTIMATE_RISK_DAYS = 28;
 export type MilestoneReasonTicket = { ref: string; id: string };
 
 /** An unbuilt ticket that makes a milestone at risk on its own, and why (BOS-2579). */
-export type MilestoneAction = MilestoneReasonTicket & { why: "owner" | "stuck" | "wait_past_date" };
+export type MilestoneAction = MilestoneReasonTicket & { why: "owner" | "stuck" };
 
 /** A merged, live ticket whose final check hasn't reported. `quietDays` is set once it has gone quiet (BOS-2579 rule 5). */
 export type MilestoneCheck = MilestoneReasonTicket & { assignee: string | null; quietDays: number | null };
@@ -32,7 +32,7 @@ export type MilestoneStatusInput = MilestoneCounts & {
   noEstimate: boolean;
   /** Merged and live, not yet done: counts as delivered, never as blocked (BOS-2579). Default none. */
   delivered?: number;
-  /** Unbuilt tickets waiting on the owner, flagged stuck, or waiting past the date: only these make a blocked ticket matter. Default none. */
+  /** Unbuilt tickets waiting on the owner, or flagged stuck: only these make a blocked ticket matter. Default none. */
   needsAction?: MilestoneAction[];
   /** The delivered tickets as final checks, for the reason line. Default none. */
   checks?: MilestoneCheck[];
@@ -55,7 +55,7 @@ const showRefs = (ts: MilestoneReasonTicket[]) => (ts.length > 3 ? `${ts.slice(0
  * when it has none; No date when it has no date. A merged, live ticket counts as delivered. When every unfinished ticket is
  * delivered the milestone is "Live, being checked", never Late. Otherwise Late when the date has passed with unbuilt work
  * left; At risk when the unbuilt work finishes after the date at its own pace, there is no estimate and it's due within 28
- * days, or an unbuilt ticket waits on the owner, looks stuck or waits past the date; else On track. A blocked ticket alone
+ * days, or an unbuilt ticket waits on the owner or looks stuck; else On track. A blocked ticket alone
  * never turns it amber. `today` and `targetDate` are calendar dates, YYYY-MM-DD. The badge and the reason come from here
  * together, so they can't disagree; nothing is stored.
  */
@@ -80,14 +80,12 @@ export function milestoneVerdict(m: MilestoneStatusInput, targetDate: string | n
   const act = m.needsAction ?? [];
   const owner = act.filter((a) => a.why === "owner");
   const stuck = act.filter((a) => a.why === "stuck");
-  const waits = act.filter((a) => a.why === "wait_past_date");
   const ahead = dayDiff(today, targetDate);
   const risk = (reason: string, tickets: MilestoneReasonTicket[] = []): MilestoneVerdict => ({ status: "at_risk", reason: `At risk: ${reason}`, tickets: tickets.slice(0, 3).map(({ ref, id }) => ({ ref, id })) });
-  // The single worst thing, in a fixed order: waiting for the owner, missing the date, looks stuck, a wait past the date, no estimate.
+  // The single worst thing, in a fixed order: waiting for the owner, missing the date, looks stuck, no estimate.
   if (owner.length) return risk(`${showRefs(owner)} ${owner.length === 1 ? "waits" : "wait"} on your card.`, owner);
   if (m.daysLate > 0) return risk(`at its pace the unbuilt work finishes ${m.expectedFinish ? `about ${niceDate(m.expectedFinish)}, ` : ""}${days(m.daysLate)} after its date.`);
   if (stuck.length) return risk(`${showRefs(stuck)} ${stuck.length === 1 ? "looks" : "look"} stuck.`, stuck);
-  if (waits.length) return risk(`${showRefs(waits)} ${waits.length === 1 ? "waits" : "wait"} until after its date.`, waits);
   if (m.noEstimate && ahead <= NO_ESTIMATE_RISK_DAYS) return risk(`nothing finished in the last 4 weeks, so there is no estimate, and it is due in ${days(ahead)}.`);
   return none("on_track");
 }

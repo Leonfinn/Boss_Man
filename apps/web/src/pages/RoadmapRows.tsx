@@ -198,7 +198,9 @@ function MonthAxis({ range }: { range: DateRange }) {
 /** The reason line with each named ticket's reference turned into a link. It sits outside the row's button, so the links can be reached by keyboard. */
 export function ReasonText({ text, tickets }: { text: string; tickets: Array<{ ref: string; id: string }> }) {
   if (!tickets.length) return <>{text}</>;
-  const re = new RegExp(`(${tickets.map((t) => t.ref.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "g");
+  // Longest reference first and not inside a longer one, so BOS-12 never links inside BOS-123.
+  const refs = [...tickets].map((t) => t.ref).sort((a, b) => b.length - a.length);
+  const re = new RegExp(`(?<![\\w-])(${refs.map((r) => r.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?![\\w-])`, "g");
   return (
     <>
       {text.split(re).map((part, i) => {
@@ -209,7 +211,7 @@ export function ReasonText({ text, tickets }: { text: string; tickets: Array<{ r
   );
 }
 
-const finishedOn =(m: RoadmapMilestone) => (m.finishedAt ? m.finishedAt.slice(0, 10) : null);
+const finishedOn = (m: RoadmapMilestone) => (m.finishedAt ? m.finishedAt.slice(0, 10) : null);
 
 /** The rows of one objective, the key, the rules and the folded Done group. */
 export function MilestoneRows({ ms, range, now, selected, onSelect, detail }: { ms: RoadmapMilestone[]; range: DateRange; now: string; selected: string | null; onSelect: (id: string | null) => void; detail: (m: RoadmapMilestone) => ReactNode }) {
