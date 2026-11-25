@@ -126,7 +126,11 @@ export const OWNER_CONTROLS = {
   // Below three recently finished checks, "Show N more" opens the rest (BOS-1239).
   // BOS-2473: Merge history's CSV of the rows shown.
   "Merge queue": ["Merges", "Quick checks", "Show …", "Move to front", "Download CSV"],
-  Roadmap: ["Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "Add objective", "Milestones", "Change", "Download CSV"],
+  Roadmap: [
+    "Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "Add objective", "Milestones", "Change", "Download CSV",
+    // BOS-2581: the "CEO manages at risk" switch on a milestone, and for all of a company's milestones.
+    "CEO manages At risk", "Take it on", "Keep it off", "Turning it off", "CEO manages At risk for all", "Turn it on for all", "Keep it as it is", "Turn it off for all", "Turn it off everywhere", "Keep it on",
+  ],
   Plan: [
     "Refresh",
     // "What's holding work up" (BOS-745): its heading folds the section away and opens it again (the label carries

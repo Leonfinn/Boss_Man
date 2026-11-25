@@ -95,6 +95,66 @@ function AddMilestone({ objectiveId, onAdded, horizon }: { objectiveId: string; 
 
 const STALE_KEY_RESULT_DAYS = 14;
 
+/**
+ * BOS-2581: "CEO manages at risk" for every milestone of a company at once. Off offers it (with the cost warning); on
+ * offers to turn every milestone back off. It never turns on by itself, and it says how many milestones it will cover.
+ */
+function AllMilestonesRisk({ c, onChanged }: { c: RoadmapCompany; onChanged: () => void }) {
+  const [confirming, setConfirming] = useState<false | "on" | "off">(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const ms = c.objectives.flatMap((o) => o.milestones);
+  const managed = ms.filter((m) => m.ceoManagesRisk).length;
+  if (!ms.length) return null;
+  const save = (on: boolean) => {
+    setSaving(true);
+    setError(null);
+    void api(`/api/companies/${c.id}/milestones/ceo-manages-risk`, { method: "POST", body: { on } }).then(
+      () => (setConfirming(false), setSaving(false), onChanged()),
+      (err: Error) => (setSaving(false), setError(err.message)),
+    );
+  };
+  const allOn = managed === ms.length;
+  return (
+    <div className="rm-risk-all" data-count={ms.length}>
+      {allOn ? (
+        <>
+          <span className="rm-risk-on">The CEO manages all {ms.length} of these milestones: each time one turns At risk or Late and the CEO plans a remedy, that costs a CEO run.</span>
+          {confirming === "off" ? (
+            <>
+              <span className="rm-risk-warn">Turn this off for all {ms.length} milestones? None of them will wake the CEO, and a milestone At risk now won't wake them when it stops being At risk.</span>
+              <button type="button" className="btn small primary" disabled={saving} onClick={() => save(false)}>
+                Turn it off everywhere
+              </button>
+              <button type="button" className="btn small" disabled={saving} onClick={() => setConfirming(false)}>
+                Keep it on
+              </button>
+            </>
+          ) : (
+            <button type="button" className="btn small" onClick={() => setConfirming("off")}>
+              Turn it off for all
+            </button>
+          )}
+        </>
+      ) : confirming === "on" ? (
+        <>
+          <span className="rm-risk-warn">Turn this on for all {ms.length} milestones? Each time one is At risk or Late it costs a CEO run to plan a remedy, so this can cost one next time it happens. You can turn it off again here.</span>
+          <button type="button" className="btn small primary" disabled={saving} onClick={() => save(true)}>
+            Turn it on for all
+          </button>
+          <button type="button" className="btn small" disabled={saving} onClick={() => setConfirming(false)}>
+            Keep it as it is
+          </button>
+        </>
+      ) : (
+        <button type="button" className="btn small" onClick={() => setConfirming("on")}>
+          CEO manages At risk for all
+        </button>
+      )}
+      {error && <p className="error">{error}</p>}
+    </div>
+  );
+}
 /** A small line of recent values, left oldest (BOS-2458). */
 function Sparkline({ values, label }: { values: number[]; label: string }) {
   const lo = Math.min(...values);
@@ -281,7 +341,7 @@ function Objective({ o, win, now, onChanged }: { o: RoadmapObjective; win: DateR
           No milestones yet. Add one to see whether it will be ready by its date.
         </p>
       ) : (
-        <MilestoneRows ms={o.milestones} range={win} now={now} selected={selected} onSelect={setSelected} detail={(m) => <MilestoneDetail key={m.id} m={m} onChanged={onChanged} />} />
+        <MilestoneRows ms={o.milestones} range={win} now={now} selected={selected} onSelect={setSelected} detail={(m) => <MilestoneDetail key={m.id} m={m} onChanged={onChanged} />} onChanged={onChanged} />
       )}
       {/* Under the milestones, so the status is the first thing seen. */}
       <div className="rm-actions" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -623,6 +683,7 @@ export function Roadmap({ companies, tab: tabParam, go }: { companies: Company[]
                   See the plan
                 </a>
               </h2>
+              <AllMilestonesRisk c={c} onChanged={data.reload} />
               {c.objectives.length ? c.objectives.map((o) => <Objective key={o.id} o={o} win={win} now={now} onChanged={data.reload} />) : <p className="muted">No objectives yet.</p>}
             </section>
           ))

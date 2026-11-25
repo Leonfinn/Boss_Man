@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dateIn, dateInCacheSize, milestoneHorizon, milestoneStatus, milestoneVerdict, nextMidnightIn, timeZoneOr } from "../src/index.js";
+import { ceoPlanWake, CEO_RISK_STATUSES, dateIn, dateInCacheSize, milestoneHorizon, milestoneStatus, milestoneVerdict, needsCeoPlan, nextMidnightIn, timeZoneOr } from "../src/index.js";
 
 // BOS-2188: "until midnight (server time)" for a timed permission rule.
 describe("nextMidnightIn", () => {
@@ -183,5 +183,26 @@ describe("dateIn", () => {
       expect(dateIn(at, spelt)).toMatch(/^\d{4}-\d{2}-\d{2}$/);
       expect(dateInCacheSize()).toBeLessThanOrEqual(256);
     }
+  });
+});
+
+describe("milestone in the CEO's hands (BOS-2581)", () => {
+  it("At risk and Late are the two statuses that need a plan", () => {
+    expect(CEO_RISK_STATUSES).toEqual(["at_risk", "late"]);
+    expect(needsCeoPlan("at_risk")).toBe(true);
+    expect(needsCeoPlan("late")).toBe(true);
+    for (const s of ["done", "on_track", "live_checked", "no_work", "no_date"] as const) expect(needsCeoPlan(s), s).toBe(false);
+  });
+
+  it("wakes on entering At risk or Late only, not while it stays there, and a move between them is the same state", () => {
+    expect(ceoPlanWake({ managed: true, wasManaged: false, status: "at_risk", lastWoken: null })).toBe(true);
+    expect(ceoPlanWake({ managed: true, wasManaged: true, status: "at_risk", lastWoken: "at_risk" })).toBe(false);
+    expect(ceoPlanWake({ managed: true, wasManaged: true, status: "late", lastWoken: "at_risk" })).toBe(false);
+    expect(ceoPlanWake({ managed: true, wasManaged: true, status: "late", lastWoken: "late" })).toBe(false);
+    // On track in between: a return to At risk or Late is a new wake.
+    expect(ceoPlanWake({ managed: true, wasManaged: true, status: "at_risk", lastWoken: "on_track" })).toBe(true);
+    // Switched off, never a wake.
+    expect(ceoPlanWake({ managed: false, wasManaged: false, status: "late", lastWoken: null })).toBe(false);
+    expect(ceoPlanWake({ managed: false, wasManaged: true, status: "at_risk", lastWoken: "at_risk" })).toBe(false);
   });
 });

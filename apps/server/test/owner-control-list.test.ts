@@ -145,6 +145,8 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Search.tsx": "Search",
   "pages/Portal.tsx": "Feedback portal",
   "pages/Roadmap.tsx": "Roadmap",
+  // The Timeline tab's rows, rendered by pages/Roadmap.tsx (BOS-2581's "CEO manages at risk" switch is on them).
+  "pages/RoadmapRows.tsx": "Roadmap",
   // The old Rules page is now the Permission rules card on Settings → Permissions (BOS-1019).
   "pages/Rules.tsx": "Permissions",
   "pages/Run.tsx": "Run",

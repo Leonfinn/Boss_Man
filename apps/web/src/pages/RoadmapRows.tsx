@@ -4,6 +4,7 @@
 // inside a row's own date strip.
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { BurnupPoint, MilestoneStatus, RoadmapCompany, RoadmapMilestone } from "../api";
+import { api } from "../api";
 import { dayOf, short } from "../short-date";
 
 const DAY = 86_400_000;
@@ -213,8 +214,64 @@ export function ReasonText({ text, tickets }: { text: string; tickets: Array<{ r
 
 const finishedOn = (m: RoadmapMilestone) => (m.finishedAt ? m.finishedAt.slice(0, 10) : null);
 
+/**
+ * BOS-2581: "CEO manages at risk" for one milestone, off by default. Off, the switch is a small tick under the reason
+ * line; on, it shows a note that the CEO will plan a remedy (which costs a CEO run) when the milestone turns At risk or
+ * Late. Turning it on takes a second press ("Take it on"), so nobody spends a CEO run by a stray click.
+ */
+export function MilestoneRiskSwitch({ m, onChanged }: { m: RoadmapMilestone; onChanged?: () => void }) {
+  const [confirming, setConfirming] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const on = !!m.ceoManagesRisk;
+  const save = (value: boolean) => {
+    setSaving(true);
+    setError(null);
+    void api(`/api/milestones/${m.id}`, { method: "PATCH", body: { ceoManagesRisk: value } }).then(
+      () => (setConfirming(false), setSaving(false), onChanged?.()),
+      (err: Error) => (setSaving(false), setError(err.message)),
+    );
+  };
+  return (
+    <div className="rm-risk" data-on={on ? "on" : "off"}>
+      {on ? (
+        <>
+          <span className="rm-risk-on">The CEO manages this: when it turns At risk or Late, they are woken to plan a remedy, which costs a CEO run.</span>
+          <button type="button" className="btn small" disabled={saving} onClick={() => save(false)}>
+            Turning it off
+          </button>
+        </>
+      ) : confirming ? (
+        <>
+          <span className="rm-risk-warn">Turn this on? The CEO will plan a remedy each time this milestone turns At risk or Late, and each one costs a CEO run.</span>
+          <button
+            type="button"
+            className="btn small primary"
+            disabled={saving}
+            onClick={() => {
+              const x = window.confirm(`Let the CEO plan a remedy whenever "${m.title}" turns At risk or Late? Each time costs a CEO run.`);
+              if (x) save(true);
+              else setConfirming(false);
+            }}
+          >
+            Take it on
+          </button>
+          <button type="button" className="btn small" disabled={saving} onClick={() => setConfirming(false)}>
+            Keep it off
+          </button>
+        </>
+      ) : (
+        <button type="button" className="btn small" onClick={() => setConfirming(true)}>
+          CEO manages At risk
+        </button>
+      )}
+      {error && <p className="error">{error}</p>}
+    </div>
+  );
+}
+
 /** The rows of one objective, the key, the rules and the folded Done group. */
-export function MilestoneRows({ ms, range, now, selected, onSelect, detail }: { ms: RoadmapMilestone[]; range: DateRange; now: string; selected: string | null; onSelect: (id: string | null) => void; detail: (m: RoadmapMilestone) => ReactNode }) {
+export function MilestoneRows({ ms, range, now, selected, onSelect, detail, onChanged }: { ms: RoadmapMilestone[]; range: DateRange; now: string; selected: string | null; onSelect: (id: string | null) => void; detail: (m: RoadmapMilestone) => ReactNode; /** BOS-2581: called after "CEO manages at risk" is switched, so the page reads the new state. */ onChanged?: () => void }) {
   const open = ms.filter((m) => m.status !== "done").sort((a, b) => (a.targetDate ?? "9999").localeCompare(b.targetDate ?? "9999") || a.title.localeCompare(b.title));
   const done = ms.filter((m) => m.status === "done").sort((a, b) => (finishedOn(b) ?? "").localeCompare(finishedOn(a) ?? ""));
   const latest = done[0] ? finishedOn(done[0]) : null;
@@ -247,6 +304,7 @@ export function MilestoneRows({ ms, range, now, selected, onSelect, detail }: { 
                       <ReasonText text={m.reason} tickets={m.reasonTickets ?? []} />
                     </p>
                   )}
+                  <MilestoneRiskSwitch m={m} onChanged={onChanged} />{/* BOS-2581 */}
                   {isOpen && (
                     <div className="rm-open">
                       <h4>Progress over the last 8 weeks</h4>
