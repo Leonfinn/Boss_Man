@@ -83,20 +83,84 @@ export const namesOutsideService = (text: string): boolean => OUTSIDE_SERVICE.te
  * ("..." with at least 6 characters). Criteria with a page or host-fact clause have their own gates. Like R37, one
  * piece of evidence in the note covers it: the reviewer reads it against the criterion.
  */
-export function outsideServiceEvidenceRefusal(criteria: readonly Criterion[], images: ReadonlyArray<{ id: string; createdAt: Date }>, liveSince: Date | null, note: string): string | null {
+export function outsideServiceEvidenceRefusal(
+  criteria: readonly Criterion[],
+  images: ReadonlyArray<{ id: string; createdAt: Date }>,
+  liveSince: Date | null,
+  note: string,
+  /** BOS-2598: host names of the ticket's own site; a link to one of them shows nothing about what the service read. */
+  ownHosts: readonly string[] = [],
+): string | null {
   const verdicts = readVerdicts(criteria, note);
-  const lower = note.toLowerCase();
-  const hasLink = /https?:\/\/\S{4,}/i.test(note);
-  const hasQuote = /["“][^"”]{6,}["”]/.test(note);
-  const hasShot = images.some((img) => (!liveSince || img.createdAt.getTime() >= liveSince.getTime()) && (lower.includes(img.id.toLowerCase()) || lower.includes(img.id.slice(0, 8).toLowerCase())));
-  if (hasLink || hasQuote || hasShot) return null;
-  const lines = criteria.flatMap((c, i) => {
+  const own = ownHosts.map((h) => h.toLowerCase());
+  const lines: string[] = [];
+  const receipts: string[] = [];
+  for (const [i, c] of criteria.entries()) {
     const text = criterionText(c);
-    return isAfterMerge(c) && verdicts[i]?.verdict === "pass" && namesOutsideService(text) && !pageClauses(text).length && !factClauses(text).length ? [`"${text}"`] : [];
-  });
-  return lines.length
-    ? `A pass on a check about an outside service needs evidence: ${lines.join(", ")}. Add a link to what you looked at, a screenshot (attach_image, put its id in the note) or the reading quoted in double quotes, e.g. "Sitemap read, 12 pages discovered". If the service doesn't show it yet, report the criterion as fail: the ticket still closes and Boss Man opens the follow-up.`
-    : null;
+    // BOS-2598 (G2): any criterion that names an outside service, before or after merge.
+    if (verdicts[i]?.verdict !== "pass" || !namesOutsideService(text) || pageClauses(text).length || factClauses(text).length) continue;
+    const mine = ownLine(note, i + 1, text);
+    if (!mine) {
+      lines.push(`"${text}" (no line of its own in the note: start one with "${i + 1} pass")`);
+      continue;
+    }
+    // G3: the words of a receipt say the service took the request, not what it did with it.
+    if (RECEIPT.test(mine)) {
+      receipts.push(`"${text}"`);
+      continue;
+    }
+    const lower = mine.toLowerCase();
+    const hasLink = [...mine.matchAll(/https?:\/\/([^\s/"”)]+)\S*/gi)].some((m) => m[0].length >= 11 && !own.includes(m[1]!.toLowerCase().replace(/:\d+$/, "")));
+    const hasQuote = /["“][^"”]{6,}["”]/.test(mine);
+    const hasShot = images.some((img) => (!liveSince || img.createdAt.getTime() >= liveSince.getTime()) && (lower.includes(img.id.toLowerCase()) || lower.includes(img.id.slice(0, 8).toLowerCase())));
+    if (!hasLink && !hasQuote && !hasShot) lines.push(`"${text}"`);
+  }
+  const out: string[] = [];
+  if (receipts.length) out.push(`${receipts.join(", ")}: ${RECEIPT_REFUSAL}`);
+  if (lines.length)
+    out.push(
+      `A pass on a check about an outside service needs evidence on its own line: ${lines.join(", ")}. Add a link to what you looked at (not a link to our own site), a screenshot (attach_image, put its id on that line) or the reading quoted in double quotes, e.g. "Sitemap read, 12 pages discovered". If the service doesn't show it yet, report the criterion as fail: the ticket still closes and Boss Man opens the follow-up for it.`,
+    );
+  return out.length ? out.join("\n") : null;
+}
+
+/** Words of a service's receipt: it took the request, nothing more (BOS-2598, BOS-2073). */
+const RECEIPT = /\b(pending|submitted|accepted|queued|processing|202|204)\b/i;
+export const RECEIPT_REFUSAL = `That's a receipt, not the outcome. Move to Blocked with a dated re-check (schedule_check), or report fail. Use set_ticket_state blocked with blocked_until at the service's normal turnaround (a sitemap read: 48 hours) and watching_for one line saying what the service must show, then schedule_check at that time; on the re-check, quote what the service now shows. A ticket with no merge can wait in Blocked on blocked_until alone.`;
+
+/** The part of the note about criterion `n`: the segment (split on ; and newlines) that starts with its number, else the one that best repeats its words. */
+export function ownLine(note: string, n: number, text: string): string | null {
+  const segs = note.split(/[;\n]/).map((s) => s.trim()).filter(Boolean);
+  const numbered = segs.find((s) => new RegExp(`^(?:C|criterion )?${n}\\b(?!\\.\\d)`, "i").test(s) && /\b(pass|ok|fail)/i.test(s));
+  if (numbered) return numbered;
+  const words = new Set(text.toLowerCase().match(/[a-z0-9]{4,}/g) ?? []);
+  let best: string | null = null;
+  let bestHits = 0;
+  for (const s of segs) {
+    const hits = (s.toLowerCase().match(/[a-z0-9]{4,}/g) ?? []).filter((w) => words.has(w)).length;
+    if (hits > bestHits && hits >= Math.min(3, words.size)) {
+      best = s;
+      bestHits = hits;
+    }
+  }
+  return best;
+}
+
+/**
+ * BOS-2598 (G2): a done move on a no-branch ticket that names an outside service in its title or description and has no
+ * criteria at all has nothing the service's answer is checked against. Refused until the outcome is a criterion.
+ */
+export function noCriteriaOutsideServiceRefusal(ticket: { title: string; body: string | null; noCode: boolean }, criteria: readonly Criterion[]): string | null {
+  if (!ticket.noCode || criteria.length || !namesOutsideService(`${ticket.title}\n${ticket.body ?? ""}`)) return null;
+  return `This ticket's title or description names an outside service and it has no acceptance criteria, so nothing says what that service must show before it closes: add the outcome as a criterion (update_ticket acceptanceCriteria, e.g. "Google Search Console shows the sitemap read with no errors"), then report it pass with the reading quoted on its own line, or fail. A reply like "submitted" or "204" is a receipt, not the outcome: ${RECEIPT_REFUSAL}`;
+}
+
+/** Host names of links in the ticket's own text that are not outside services: the site the work is about. */
+export function ownSiteHosts(...texts: Array<string | null | undefined>): string[] {
+  const hosts = texts.flatMap((t) => [...(t ?? "").matchAll(/https?:\/\/([^\s/"”)]+)/gi)].map((m) => m[1]!))
+    .filter((h) => !namesOutsideService(h))
+    .map((h) => h.toLowerCase().replace(/:\d+$/, ""));
+  return hosts.filter((h, i) => hosts.indexOf(h) === i);
 }
 
 /** An id of an open card counts as cited when the note holds the whole id or its first 8 characters. */

@@ -2,7 +2,7 @@
 // never a "pass" in the note or an owner card answer. These tests pin the gate's pure helpers.
 import { describe, expect, it } from "vitest";
 import type { Criterion } from "@boss-man/shared";
-import { CARD_CITE_REFUSAL, citedOpenCard, hostFactRefusal, outsideServiceEvidenceRefusal, pageShotRefusal, uncitedCardPasses } from "../src/services/host-fact-gate.js";
+import { CARD_CITE_REFUSAL, citedOpenCard, hostFactRefusal, noCriteriaOutsideServiceRefusal, outsideServiceEvidenceRefusal, ownSiteHosts, pageShotRefusal, uncitedCardPasses } from "../src/services/host-fact-gate.js";
 import type { HostFact } from "../src/services/host-facts.js";
 
 const after = (text: string): Criterion => ({ text, after: "merge" });
@@ -185,6 +185,46 @@ describe("outsideServiceEvidenceRefusal", () => {
     expect(outsideServiceEvidenceRefusal(crit, [old], LIVE, "1 pass; 2 pass, shot abcd1234")).not.toBeNull();
     expect(outsideServiceEvidenceRefusal(crit, [], LIVE, "1 pass; 2 fail: Google knows no pages")).toBeNull();
     expect(outsideServiceEvidenceRefusal([after("The panel loads")], [], LIVE, "1 pass")).toBeNull();
+  });
+
+  // BOS-2598 (G2-G4): BOS-2073 closed on a sitemap submit that returned 204.
+  const SITEMAP = "Google Search Console shows the sitemap read with no errors";
+  it("refuses a receipt as the outcome and points to Blocked plus schedule_check", () => {
+    for (const receipt of ["pending, 0 errors", "submitted ok", "HTTP 204", "accepted", "queued", "processing", "202"]) {
+      const out = outsideServiceEvidenceRefusal([SITEMAP], [], LIVE, `1 pass: ${receipt} "Sitemap submitted, 0 errors" https://search.google.com/x`);
+      expect(out, receipt).toContain("That's a receipt, not the outcome. Move to Blocked with a dated re-check (schedule_check), or report fail.");
+      expect(out).toContain("48 hours");
+    }
+  });
+  it("refuses the BOS-2073 reading and accepts a real one", () => {
+    expect(outsideServiceEvidenceRefusal([SITEMAP], [], LIVE, '1 pass: "accepted (pending, 0 errors)" https://bossman.website/sitemap.xml', ["bossman.website"])).toContain("That's a receipt");
+    expect(outsideServiceEvidenceRefusal([SITEMAP], [], LIVE, '1 pass: "Success, last read 21 Nov, 7 discovered"', ["bossman.website"])).toBeNull();
+  });
+  it("checks before-merge criteria too, each on its own line", () => {
+    const two = [SITEMAP, "Bing lists the sitemap"];
+    expect(outsideServiceEvidenceRefusal(two, [], LIVE, '1 pass: "Sitemap read, 12 pages discovered"; 2 pass')).toContain('"Bing lists the sitemap"');
+    // Evidence on line 1 does not cover line 2.
+    expect(outsideServiceEvidenceRefusal(two, [], LIVE, '1 pass: "Sitemap read, 12 pages discovered"; 2 pass: "Bing shows 12 URLs indexed"')).toBeNull();
+  });
+  it("does not count a link to our own site", () => {
+    const note = "1 pass: https://example.com/sitemap.xml";
+    expect(outsideServiceEvidenceRefusal([SITEMAP], [], LIVE, note, ["example.com"])).toContain("needs evidence");
+    expect(outsideServiceEvidenceRefusal([SITEMAP], [], LIVE, "1 pass: https://search.google.com/search-console/sitemaps", ["example.com"])).toBeNull();
+  });
+  it("finds the own-site hosts in ticket text, leaving out outside services", () => {
+    expect(ownSiteHosts("Submit https://example.com/sitemap.xml to https://search.google.com/x", null)).toEqual(["example.com"]);
+  });
+});
+
+describe("noCriteriaOutsideServiceRefusal (BOS-2598)", () => {
+  it("refuses a no-branch ticket that names an outside service and has no criteria", () => {
+    const out = noCriteriaOutsideServiceRefusal({ title: "Submit the sitemap to Google", body: null, noCode: true }, []);
+    expect(out).toContain("add the outcome as a criterion");
+  });
+  it("leaves tickets with criteria, with a branch or naming no service alone", () => {
+    expect(noCriteriaOutsideServiceRefusal({ title: "Submit the sitemap to Google", body: null, noCode: true }, ["It works"])).toBeNull();
+    expect(noCriteriaOutsideServiceRefusal({ title: "Submit the sitemap to Google", body: null, noCode: false }, [])).toBeNull();
+    expect(noCriteriaOutsideServiceRefusal({ title: "Tidy the wiki", body: "no service", noCode: true }, [])).toBeNull();
   });
 });
 
