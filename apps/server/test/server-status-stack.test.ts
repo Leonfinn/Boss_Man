@@ -26,6 +26,17 @@ describe("stackSummary", () => {
     expect(stackSummary({ ...base, status: { target: "runner", result: "partial", message: "" } }).stack).toBe("degraded");
   });
 
+  // BOS-2616: "degraded" lasted until a runner update succeeded, even when none was needed any more.
+  it("drops a failed runner update once no runner update is needed, and keeps it when one is or Boss Man can't tell", () => {
+    const failed = { target: "runner", result: "failed", message: "The runner action stopped with an error (exit 1)." };
+    expect(stackSummary({ ...base, status: failed, runnerUpdate: { state: "not_needed" } })).toEqual({ stack: "healthy", why: [] });
+    expect(stackSummary({ ...base, status: failed, runnerUpdate: { state: "needed" } }).stack).toBe("degraded");
+    expect(stackSummary({ ...base, status: failed, runnerUpdate: { state: "unknown" } }).stack).toBe("degraded");
+    expect(stackSummary({ ...base, status: failed, runnerUpdate: null }).stack).toBe("degraded");
+    // A failed server deploy is never excused by the runner answer.
+    expect(stackSummary({ ...base, status: { ...failed, target: "server" }, runnerUpdate: { state: "not_needed" } }).stack).toBe("degraded");
+  });
+
   it("clears once a later deploy result replaces the failed one", () => {
     expect(stackSummary({ ...base, status: { target: "server", result: "deployed", ended: DB } }).stack).toBe("healthy");
   });
@@ -59,13 +70,13 @@ describe("server_status stack fields", () => {
   let close: (() => Promise<void>) | undefined;
   afterEach(async () => { await close?.(); close = undefined; });
 
-  async function status(deps: { colours?: () => Promise<BlueGreen>; status?: unknown; cpuReserve?: () => Promise<unknown> }) {
+  async function status(deps: { colours?: () => Promise<BlueGreen>; status?: unknown; runnerUpdate?: unknown; cpuReserve?: () => Promise<unknown> }) {
     const opened = await openPglite();
     close = opened.close;
     const svc = serverStatusService(opened.db, {
       role: () => "leader", isConnected: () => false, hold: async () => null,
       errors: { recent: () => [], count: () => 0, untagged: () => 0 } as never,
-      deploy: async () => ({ enabled: true, pending: false, status: deps.status ?? null, available: null }),
+      deploy: async () => ({ enabled: true, pending: false, status: deps.status ?? null, available: null, runnerUpdate: deps.runnerUpdate ?? null }),
       colours: deps.colours,
       cpuReserve: deps.cpuReserve,
       commit: "dev", startedAt: new Date(0), now: () => NOW,
@@ -87,6 +98,14 @@ describe("server_status stack fields", () => {
     });
     expect(s.stack).toBe("degraded");
     expect(s.deploy.lastResult).toBe("failed");
+  });
+
+  it("reads the Updates panel's runner answer: a failed runner update nobody needs any more is not degraded (BOS-2616)", async () => {
+    const failed = { target: "runner", result: "failed", message: "The runner action stopped with an error (exit 1)." };
+    expect((await status({ colours: async () => bg(colour("green", true, "standby")), status: failed, runnerUpdate: { state: "not_needed", words: "Runners are up to date." } })).stack).toBe("healthy");
+    await close?.();
+    close = undefined;
+    expect((await status({ colours: async () => bg(colour("green", true, "standby")), status: failed, runnerUpdate: { state: "needed", words: "Runner update needed." } })).stack).toBe("degraded");
   });
 
   it("reads a probe that throws as could-not-check, never as a single server", async () => {

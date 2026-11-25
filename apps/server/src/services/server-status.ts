@@ -30,7 +30,7 @@ export type ServerStatusDeps = {
   /** When the runner's current connection opened (runnersService.connectedSince). */
   connectedSince?: (runnerId: string) => Date | null;
   /** What the host deployer last reported (selfDeployService.overview). */
-  deploy: () => Promise<{ enabled: boolean; status: unknown; available: unknown; pending: boolean }>;
+  deploy: () => Promise<{ enabled: boolean; status: unknown; available: unknown; pending: boolean; runnerUpdate?: unknown }>;
   /** Both colours' /api/health, the same probe as GET /api/bluegreen (DR-020 E). Absent: treated as a single server. */
   colours?: () => Promise<BlueGreen>;
   /** The runner-update hold, if one is on (maintenance). */
@@ -87,7 +87,7 @@ const leads = (role: string | null | undefined) => role === "leader" || role ===
  * purpose (host-deployer.sh soak_tick), so its being down then is healthy.
  * TODO(DR-020 D): when the deployer reports its health checklist, take its overall result here too.
  */
-export function stackSummary(input: { role: string; colours: BlueGreen | null; dbStartedAt: string | null; status: DeployStatus; available: Available; now: Date }): { stack: Stack; why: string[] } {
+export function stackSummary(input: { role: string; colours: BlueGreen | null; dbStartedAt: string | null; status: DeployStatus; available: Available; now: Date; /** BOS-1648's answer to "is a runner update needed?" (self-deploy overview); absent when unknown. */ runnerUpdate?: { state?: string } | null }): { stack: Stack; why: string[] } {
   const down: string[] = [];
   const degraded: string[] = [];
   if (!input.dbStartedAt) down.push("The database did not answer.");
@@ -100,7 +100,11 @@ export function stackSummary(input: { role: string; colours: BlueGreen | null; d
   if (leaders > 1) degraded.push("More than one server says it leads.");
   if (bg === null) degraded.push("The other colour could not be checked.");
   const s = input.status;
-  if (s && (s.result === "failed" || s.result === "partial")) degraded.push(`The last ${s.target === "runner" ? "runner" : "server"} deploy ${s.result === "partial" ? "only partly worked" : "failed"}${s.message ? `: ${s.message}` : "."}`);
+  // BOS-2616: a failed runner update stops counting once no runner update is needed (the runners already have every
+  // runner change the server runs): nothing is left to retry, and "degraded" would otherwise last until the next
+  // runner update, which may never be offered. "Needed" or "can't tell" keeps it degraded, as before.
+  const runnerMoot = s?.target === "runner" && input.runnerUpdate?.state === "not_needed";
+  if (s && (s.result === "failed" || s.result === "partial") && !runnerMoot) degraded.push(`The last ${s.target === "runner" ? "runner" : "server"} deploy ${s.result === "partial" ? "only partly worked" : "failed"}${s.message ? `: ${s.message}` : "."}`);
   if (bg?.enabled && self) {
     const ended = s?.target === "server" && s.result === "deployed" && s.ended ? Date.parse(s.ended) : NaN;
     const soakMs = (input.available?.soakSeconds ?? DEFAULT_SOAK_SECONDS) * 1000;
@@ -209,7 +213,7 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
       const colours = deps.colours ? await deps.colours().catch(() => null) : ({ enabled: false } as const);
       const dbStartedAt = await databaseStartedAt(db);
       const role = deps.role();
-      const { stack, why } = stackSummary({ role, colours, dbStartedAt, status, available, now: at });
+      const { stack, why } = stackSummary({ role, colours, dbStartedAt, status, available, now: at, runnerUpdate: (deploy?.runnerUpdate as { state?: string } | null | undefined) ?? null });
 
       return {
         // Report "up" only from this (DR-020 E): one server answering says nothing about the rest.

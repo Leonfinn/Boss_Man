@@ -11,7 +11,7 @@ import { setOwnerTodoFacts } from "../src/services/decisions.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { openPglite } from "../src/db/client.js";
 import { commandProblem, lintOwnerSteps, parseStep, sh, step } from "../src/services/steps.js";
-import { agents, companies, activity, decisions, notifications, ownerHolds, projects, runs, settings, tickets, wakes } from "../src/db/schema.js";
+import { agents, companies, activity, decisions, notifications, ownerHolds, projects, runners, runs, settings, tickets, wakes } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -2044,6 +2044,89 @@ describe("after a failed update the next card is held while it is diagnosed (BOS
     await c.available({ deployed: B, tip: B });
     await c.selfDeploy.sync();
     expect(JSON.parse(await readFile(path.join(c.dir, "inbox", "request.json"), "utf8"))).toMatchObject({ target: "runner", commit: B });
+  });
+
+  // BOS-2616 (25 Nov): 51c5b40a went live by hand (rebuild-live.sh writes no deployer status), its runner build failed,
+  // and the kept retry was dropped on the next pass because the last server deploy on record named an older version.
+  // The release then had nothing to bring back, yet said the card would come back.
+  describe("the retry after a failed runner update survives a hand-applied server (BOS-2616)", () => {
+    const failRunnerAfterHandApply = async (c: Awaited<ReturnType<typeof setup>>, last: { result: string; to: string }) => {
+      // The last deploy the host deployer ran; the hand-apply to B since then left no record of its own.
+      await c.db.insert(settings).values({ key: "self_deploy_last_server", value: { result: last.result, from: A, to: last.to, ended: "2026-10-20T11:00:00Z" } });
+      await c.available({ deployed: B, tip: B });
+      await c.status({ id: randomUUID(), target: "runner", result: "failed", message: "The runner action stopped with an error (exit 1).", from_commit: B, to_commit: B, ended: "2026-10-20T12:10:00Z" });
+      await c.selfDeploy.sync();
+      // Later passes while the hold is diagnosed must keep the retry.
+      await c.available({ deployed: B, tip: B });
+      await c.selfDeploy.sync();
+      expect(await c.open()).toHaveLength(0);
+    };
+
+    it.each([
+      ["an older deploy", { result: "deployed", to: A }],
+      ["a failed deploy", { result: "failed", to: B }],
+    ])("last deployer record is %s: the release puts the card on the queue at once and the reply says so", async (_, last) => {
+      const c = (ctx = await setup());
+      await failRunnerAfterHandApply(c, last);
+      const r = await releaseHold(c.db, { by: "Dougal", isCeo: true, outcome: "retry_safe", ownerText: "Docker's registry was unreachable for a moment; nothing changed." });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      // The owner-holds reply alone never promises the card.
+      expect(r.text).not.toMatch(/on the owner's queue|Within a minute/);
+      const said = await c.selfDeploy.afterHoldRelease(r.hold);
+      const cards = await c.open();
+      expect(cards).toHaveLength(1);
+      expect(cards[0]).toMatchObject({ recommendedOption: "Update runners", context: { target: "runner", commit: B } });
+      expect(cards[0]!.question).toContain("Dougal looked into it: Docker's registry was unreachable for a moment");
+      expect(said).toBe("The runner update card (bbbbbbbb) is on the owner's queue now, with your words on it, recommending going ahead.");
+    });
+
+    it("a retry lost before this fix is put back by the release", async () => {
+      const c = (ctx = await setup());
+      await failRunnerAfterHandApply(c, { result: "deployed", to: A });
+      await c.db.delete(settings).where(eq(settings.key, "self_deploy_runner_due"));
+      const r = await releaseHold(c.db, { by: "Dougal", isCeo: true, outcome: "retry_safe", ownerText: "A network blip." });
+      expect(await c.selfDeploy.afterHoldRelease(r.ok ? r.hold : (undefined as never))).toContain("is on the owner's queue now");
+      expect(await c.open()).toHaveLength(1);
+    });
+
+    it("released while something still blocks the card: the reply says it is not there yet, and why", async () => {
+      const c = (ctx = await setup());
+      await failRunnerAfterHandApply(c, { result: "deployed", to: A });
+      // A server update waiting for the host blocks the runner card (BOS-1010).
+      await writeFile(path.join(c.dir, "inbox", "request.json"), JSON.stringify({ id: randomUUID(), target: "server", commit: B }));
+      const r = await releaseHold(c.db, { by: "Dougal", isCeo: true, outcome: "retry_safe", ownerText: "A network blip." });
+      const said = await c.selfDeploy.afterHoldRelease(r.ok ? r.hold : (undefined as never));
+      expect(said).toMatch(/^The runner update card is not on the owner's queue yet: a server update is already waiting for the host/);
+      expect(said).not.toContain("is on the owner's queue now");
+      expect(await c.open()).toHaveLength(0);
+      // Once that clears, the next pass raises it.
+      await rm(path.join(c.dir, "inbox", "request.json"));
+      await c.available({ deployed: B, tip: B });
+      await c.selfDeploy.sync();
+      expect((await c.open()).map((d) => (d.context as { target: string }).target)).toEqual(["runner"]);
+    });
+
+    it("released when no runner update is needed: no card, and the reply and the Updates panel say why", async () => {
+      const c = (ctx = await setup());
+      // The runners report an image built from the version the server runs: nothing to rebuild.
+      const [co] = await c.db.select().from(companies).limit(1);
+      await c.db.insert(runners).values({ companyId: co!.id, tokenHash: "x", imageCommit: B });
+      await failRunnerAfterHandApply(c, { result: "deployed", to: A });
+      const r = await releaseHold(c.db, { by: "Dougal", isCeo: true, outcome: "retry_safe", ownerText: "A network blip." });
+      const said = await c.selfDeploy.afterHoldRelease(r.ok ? r.hold : (undefined as never));
+      expect(said).toMatch(/^No runner update card follows, because none is needed: Runners are up to date/);
+      expect(await c.open()).toHaveLength(0);
+      const panel = (await c.selfDeploy.overview()).failureHolds.find((h) => h.subject === "runner_update");
+      expect(panel?.words).toContain("No runner update card follows: Runners are up to date");
+    });
+
+    it("a server hold, or do_not_retry, keeps the tool's own words", async () => {
+      const c = (ctx = await setup());
+      await failRunnerAfterHandApply(c, { result: "deployed", to: A });
+      const r = await releaseHold(c.db, { by: "Dougal", isCeo: true, outcome: "do_not_retry", ownerText: "Broken image." });
+      expect(await c.selfDeploy.afterHoldRelease(r.ok ? r.hold : (undefined as never))).toBeNull();
+    });
   });
 
   it("a switch-back withdraws a Deploy card raised during the trial", async () => {
