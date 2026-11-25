@@ -3,7 +3,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Company, NoteSummary } from "../src/api";
-import { feedbackOrderHref, feedbackPageQuery, readFeedbackOrder, waitedText } from "../src/feedback-summary";
+import { daysWaited, feedbackOrderHref, feedbackPageQuery, readFeedbackOrder, waitedText } from "../src/feedback-summary";
 import { Feedback } from "../src/pages/Feedback";
 
 beforeEach(() => {
@@ -40,6 +40,12 @@ describe("helpers", () => {
   it("pages by before in newest order and by after in oldest order", () => {
     expect(feedbackPageQuery("newest", "T")).toBe("&order=newest&limit=50&before=T");
     expect(feedbackPageQuery("oldest", "T")).toBe("&order=oldest&limit=50&after=T");
+  });
+  it("counts whole days waited, never negative", () => {
+    const now = Date.parse("2026-11-24T12:00:00Z");
+    expect(daysWaited("2026-11-23T12:00:00Z", now)).toBe(1);
+    expect(daysWaited("2026-11-22T00:00:00Z", now)).toBe(2);
+    expect(daysWaited("2026-11-25T12:00:00Z", now)).toBe(0);
   });
   it("words the wait", () => {
     const now = Date.parse("2026-11-24T12:00:00Z");
