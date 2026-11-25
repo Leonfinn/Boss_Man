@@ -7,7 +7,7 @@ import { openPglite } from "../src/db/client.js";
 import { agents, checkJobs, checkResults, companies, projects, runners, settings, tickets } from "../src/db/schema.js";
 import { CHECK_QUEUE_MODE_KEY } from "../src/services/check-queue.js";
 import { checkRequestService } from "../src/services/check-request.js";
-import { ciPreflightService } from "../src/services/ci-preflight.js";
+import { ciPreflightService, readsWorkflows } from "../src/services/ci-preflight.js";
 import { CI_IMAGES_PATHS, touchesGithubOnlyJobs } from "../src/services/ci-publish.js";
 
 const shared = openPglite();
@@ -343,6 +343,26 @@ describe("GitHub CI before review (BOS-1664)", () => {
     await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
     expect(s.publish).not.toHaveBeenCalled();
     expect(await s.svc.reviewRefusal(s.co, s.ticket)).toBeNull();
+  });
+});
+
+// BOS-2564: a test "reads the workflows" (BOS-2438) only when its text both reads repo files and
+// names the workflow folder. Pure: the string decides, nothing on disk.
+describe("BOS-2438: readsWorkflows", () => {
+  it("is true for a test that reads files under .github/workflows", () => {
+    expect(readsWorkflows(`const yml = readFileSync(join(root, ".github/workflows/ci.yml"), "utf8");`)).toBe(true);
+    expect(readsWorkflows(`readdirSync(join(root, ".github", "workflows"))`)).toBe(true);
+  });
+
+  it("is false for a test that reads files elsewhere or never reads a file", () => {
+    expect(readsWorkflows(`const text = readFileSync("src/app.ts", "utf8");`)).toBe(false);
+    expect(readsWorkflows(`expect(1).toBe(2)`)).toBe(false);
+    // Naming the folder without reading a file is not enough.
+    expect(readsWorkflows(`".github/workflows"`)).toBe(false);
+  });
+
+  it("is false for empty text", () => {
+    expect(readsWorkflows("")).toBe(false);
   });
 });
 

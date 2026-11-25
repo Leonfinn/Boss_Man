@@ -4,7 +4,7 @@
 // long name, at the owner's three sizes (Safari 1550, Brave 1667×724 touch, phone 390). It measures what jsdom
 // cannot: the count and switch stay one line tall where room allows, never overlap, and never run off the list.
 // Skipped on a dev machine with no browser or Vite; at the merge gate a missing browser fails (CLAUDE.md).
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { API, launch, startVite, stubApi, type Browser, type Server } from "./real-page";
@@ -146,20 +146,14 @@ describe.skipIf(!browser || !server)("Skills needs-attention line in a real brow
         await stubApi(page, api);
         await page.goto(`${server!.resolvedUrls.local[0]}#/skills`, { waitUntil: "domcontentloaded" });
         await page.waitForSelector(".wiki-list .skills-attention", { timeout: 40_000 });
-        // Capture what the page hands the browser: its file name, and the blob's text (read at once, before the page frees the URL).
-        await page.evaluate(() => {
-          (window as unknown as { __dl: { name: string; text: string } | null }).__dl = null;
-          HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
-            const url = this.href;
-            const name = this.download;
-            void fetch(url)
-              .then((r) => r.text())
-              .then((text) => ((window as unknown as { __dl: { name: string; text: string } | null }).__dl = { name, text }));
-          };
-        });
-        await page.click(".skills-attention button.btn.small");
-        await page.waitForFunction(() => (window as unknown as { __dl: unknown }).__dl !== null, null, { timeout: 10_000 });
-        const saved = await page.evaluate(() => (window as unknown as { __dl: { name: string; text: string } }).__dl);
+        // Take the file the browser really saves, as the other CSV render tests do (BOS-2588). This file used to
+        // stub <a>.click() with a fetch of the blob URL and poll a window flag for 10 s; on a slow GitHub runner
+        // the flag was never set once (run 45596753558). The download event has no page-side race and no limit of its own.
+        const save = async () => {
+          const [dl] = await Promise.all([page.waitForEvent("download", { timeout: 40_000 }), page.click(".skills-attention button.btn.small")]);
+          return { name: dl.suggestedFilename(), text: readFileSync(await dl.path(), "utf8") };
+        };
+        const saved = await save();
         expect(saved.name).toMatch(/^skills-\d{4}-\d{2}-\d{2}\.csv$/);
         const lines = saved.text.split("\r\n");
         expect(lines[0]).toBe(SKILLS_CSV_HEAD.join(","));
@@ -167,10 +161,8 @@ describe.skipIf(!browser || !server)("Skills needs-attention line in a real brow
         expect(lines.slice(1).filter(Boolean)).toHaveLength(40);
         // With the switch on, the CSV narrows to the skills needing attention, as the count says.
         await page.click('.skills-attention [role="switch"]');
-        await page.evaluate(() => ((window as unknown as { __dl: unknown }).__dl = null));
-        await page.click(".skills-attention button.btn.small");
-        await page.waitForFunction(() => (window as unknown as { __dl: unknown }).__dl !== null, null, { timeout: 10_000 });
-        const narrowed = await page.evaluate(() => (window as unknown as { __dl: { name: string; text: string } }).__dl);
+        await page.waitForSelector('.skills-attention [role="switch"][aria-checked="true"]', { timeout: 40_000 });
+        const narrowed = await save();
         expect(narrowed.text.split("\r\n").slice(1).filter(Boolean)).toHaveLength(needing);
       } finally {
         await page.close();
