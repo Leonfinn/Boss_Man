@@ -163,6 +163,25 @@ describe("milestone at risk: who wakes the CEO, and when (BOS-2581)", () => {
     expect(c.woken).toHaveLength(2);
   });
 
+  it("with nothing managed the pass reads no milestone's tickets at all, so the switch's default costs the sweep nothing", async () => {
+    const c = await setup();
+    const { m } = await lateNow(c);
+    await c.req("GET", "/api/roadmap?today=2026-10-16"); // the fixture's own read, before counting
+    let asked: string[] = [];
+    const counted = milestoneRiskService(c.db, {
+      planning: { managedMilestones: async (today: string) => ((asked.push(today), [])) } as unknown as typeof c.planning,
+      wake: async () => ({ outcome: "queued" }),
+      now: () => new Date("2026-10-16T09:00:00Z"),
+    });
+    expect(await counted.run()).toEqual({ woken: 0 });
+    expect(asked).toEqual([]);
+    // Switched on, the pass asks for the managed milestone and gets exactly that one, not the whole roadmap.
+    await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
+    const one = await c.planning.managedMilestones("2026-10-16");
+    expect(one.map((x) => x.id)).toEqual([m.id]);
+    expect(one[0]).toMatchObject({ status: "late", company: "App Co", objective: "Ship it" });
+  });
+
   it("nothing managed means nobody is woken, and the wake goes to that company's own CEO", async () => {
     const c = await setup();
     await c.objective();

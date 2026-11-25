@@ -1,14 +1,14 @@
 // Milestones the owner put in the CEO's hands (BOS-2581, step 3 of the milestones work). The owner ticks "CEO manages at
-// risk" on a milestone (off by default, or on for every milestone at once, which costs more CEO runs). Each sweep asks the
-// roadmap's own status rule (milestoneVerdict, via planning.roadmap) for every managed milestone, and wakes that company's
-// CEO once each time one turns At risk or Late, with the milestone's title, its target date and the reason line under its
-// badge (which names the tickets). Nothing is woken while the status stays the same, and a switched-off milestone never wakes
-// anyone. What the CEO was last woken about is kept in settings (milestone_risk:<milestoneId>), so a restart neither repeats
-// a wake nor loses one.
+// risk" on a milestone (off by default, or on for every milestone at once, which costs more CEO runs). Each sweep reads the
+// roadmap's own status rule (milestoneVerdict, via planning.managedMilestones) for the managed milestones only, and wakes that
+// company's CEO once each time one turns At risk or Late, with the milestone's title, its target date and the reason line
+// under its badge (which names the tickets). Nothing is woken while the status stays the same, and a switched-off milestone
+// never wakes anyone. What the CEO was last woken about is kept in settings (milestone_risk:<milestoneId>), so a restart
+// neither repeats a wake nor loses one.
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { ceoPlanWake, dateIn, needsCeoPlan } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, companies, settings } from "../db/schema.js";
+import { agents, milestones, settings } from "../db/schema.js";
 import type { planningService } from "./planning.js";
 
 export const MILESTONE_RISK_REASON = "milestone at risk";
@@ -34,28 +34,41 @@ export function milestoneRiskService(db: Db, deps: { planning: ReturnType<typeof
   return {
     /** One pass (the sweep calls it every minute). Errors in one company don't stop the others. */
     async run(): Promise<{ woken: number }> {
-      const today = dateIn(now(), "UTC");
-      // The same reading the Roadmap shows: each milestone's status and reason come from milestoneVerdict (BOS-2579).
-      const tree = await deps.planning.roadmap(today, { includeClosed: true });
-      const managed = tree.flatMap((c) => c.objectives.flatMap((o) => o.milestones.filter((m) => m.ceoManagesRisk).map((m) => ({ companyId: c.id, objective: o.title, m }))));
       const kept = await db.select({ key: settings.key, value: settings.value }).from(settings).where(sql`${settings.key} like 'milestone_risk:%'`);
       const seen = new Map<string, Kept>(kept.map((r) => [r.key.slice("milestone_risk:".length), r.value as Kept]));
+      // A milestone switched off (or deleted) forgets its last wake, so switching it on again starts afresh. Done first, so
+      // the pass that turns the last one off still clears it.
+      const forget = async (managed: Array<{ id: string }>) => {
+        const live = new Set(managed.map((m) => m.id));
+        for (const id of seen.keys()) if (!live.has(id)) await db.delete(settings).where(eq(settings.key, MILESTONE_RISK_KEY(id))).catch(() => undefined);
+      };
+      // The switch is off on every milestone by default, so most passes have nothing more to do: one read of the switch,
+      // before any of the roadmap's own work (the first version rebuilt the whole roadmap each minute, which is what ran
+      // the merge check past its 30-minute limit).
+      const [anyManaged] = await db.select({ id: milestones.id }).from(milestones).where(eq(milestones.ceoManagesRisk, true)).limit(1);
+      if (!anyManaged) {
+        await forget([]);
+        return { woken: 0 };
+      }
+      const today = dateIn(now(), "UTC");
+      // The same reading the Roadmap shows, for the managed milestones only: each status and reason come from
+      // milestoneVerdict (BOS-2579).
+      const managed = await deps.planning.managedMilestones(today);
       let woken = 0;
-      for (const { companyId, objective, m } of managed) {
+      for (const m of managed) {
         const prev = seen.get(m.id) ?? null;
         const status = m.status;
         const shouldWake = ceoPlanWake({ managed: true, wasManaged: prev?.managed ?? false, status, lastWoken: (prev?.status ?? null) as never });
         if (shouldWake) {
-          const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+          const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, m.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
           if (ceo) {
-            const [company] = await db.select({ name: companies.name }).from(companies).where(eq(companies.id, companyId));
             const what = m.targetDate ? `Its date is ${m.targetDate}.` : "It has no date.";
             await deps
               .wake({
                 agentId: ceo.id,
                 reason: MILESTONE_RISK_REASON,
                 priority: 3,
-                note: `The milestone "${m.title}" under the objective "${objective}"${company ? ` at ${company.name}` : ""} is now ${status === "late" ? "Late" : "At risk"}: ${reasonForWake(m.reason)}. ${what} The owner asked you to manage this one: plan a remedy for it in plain words, and say it to them when they next ask how it is going.`,
+                note: `The milestone "${m.title}" under the objective "${m.objective}" at ${m.company} is now ${status === "late" ? "Late" : "At risk"}: ${reasonForWake(m.reason)}. ${what} The owner asked you to manage this one: plan a remedy for it in plain words, and say it to them when they next ask how it is going.`,
               })
               .catch(() => undefined);
             woken++;
@@ -72,9 +85,7 @@ export function milestoneRiskService(db: Db, deps: { planning: ReturnType<typeof
             .catch(() => undefined);
         }
       }
-      // A milestone switched off (or deleted) forgets its last wake, so switching it on again starts afresh.
-      const live = new Set(managed.map((x) => x.m.id));
-      for (const id of seen.keys()) if (!live.has(id)) await db.delete(settings).where(eq(settings.key, MILESTONE_RISK_KEY(id))).catch(() => undefined);
+      await forget(managed);
       return { woken };
     },
   };
