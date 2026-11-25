@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { WorkspaceDiff } from "@boss-man/shared";
-import { guardReads, listGuardRefusal, MAX_SCREEN_FILES, OWNER_CONTROL_TEST, OWNER_CONTROLS_FILE, UPDATE_WAITS_TEST, WAKE_CLASSES_FILE, WAKE_CLASSES_TEST, type GuardPlan } from "../src/services/list-guard-gate.js";
+import { addedLinesByFile, guardReads, listGuardRefusal, listedIn, MAX_SCREEN_FILES, OWNER_CONTROL_TEST, OWNER_CONTROLS_FILE, UPDATE_WAITS_TEST, WAKE_CLASSES_FILE, WAKE_CLASSES_TEST, type GuardPlan } from "../src/services/list-guard-gate.js";
 
 const diffOf = (files: Record<string, string[]>, opts: { removed?: Record<string, string[]>; truncated?: boolean } = {}): Pick<WorkspaceDiff, "files" | "diff" | "truncated"> => ({
   files: Object.entries(files).map(([p, lines]) => ({ path: p, added: lines.length, removed: opts.removed?.[p]?.length ?? 0 })),
@@ -105,6 +105,42 @@ describe("update-waits at the move", () => {
   });
   it("passes a listed reader", () => {
     expect(refuse({ "apps/server/src/services/scheduler.ts": ["  if (softHold()) return;"] }).refusal).toBeNull();
+  });
+});
+
+describe("addedLinesByFile (BOS-2566): each file's added lines, by its new path", () => {
+  it("collects two files' added lines and leaves out the ---/+++ headers", () => {
+    const diff = [
+      "diff --git a/apps/server/src/a.ts b/apps/server/src/a.ts",
+      "--- a/apps/server/src/a.ts",
+      "+++ b/apps/server/src/a.ts",
+      "@@ -1,2 +1,2 @@",
+      "-const a = 1;",
+      "+const a = 2;",
+      "+const b = 3;",
+      "diff --git a/apps/server/src/b.ts b/apps/server/src/b.ts",
+      "--- a/apps/server/src/b.ts",
+      "+++ b/apps/server/src/b.ts",
+      "@@ -0,0 +1 @@",
+      "+export const c = 4;",
+    ].join("\n");
+    const out = addedLinesByFile(diff);
+    expect([...out.keys()]).toEqual(["apps/server/src/a.ts", "apps/server/src/b.ts"]);
+    expect(out.get("apps/server/src/a.ts")).toEqual(["const a = 2;", "const b = 3;"]);
+    expect(out.get("apps/server/src/b.ts")).toEqual(["export const c = 4;"]);
+  });
+
+  it("returns an empty map for an empty diff", () => {
+    expect(addedLinesByFile("").size).toBe(0);
+  });
+});
+
+describe("listedIn (BOS-2566): whether a label sits in a list file as an entry", () => {
+  it("finds a listed name and misses one that isn't there", () => {
+    expect(listedIn(CONTROLS, "Save")).toBe(true); // double-quoted entry
+    expect(listedIn(CONTROLS, "Archive")).toBe(true); // single-quoted entry
+    expect(listedIn(CONTROLS, "Menu")).toBe(true); // a "starts with" entry: "Menu …"
+    expect(listedIn(CONTROLS, "Frobnicate all")).toBe(false);
   });
 });
 
