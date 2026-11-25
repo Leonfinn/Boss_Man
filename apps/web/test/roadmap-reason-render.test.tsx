@@ -3,7 +3,7 @@
 // widths (724, 1667, 380). It fails if the line sits inside the row's button (a link in a button can't be reached by
 // keyboard), if it isn't lined up with the title on a wide screen, if the "Live, being checked" chip wraps, if any line
 // overlaps another or runs out of the card, or if the page scrolls sideways. The ./real-page helper starts the real app under
-// Vite, so apps/web/src/styles.css is loaded as shipped; every check measures geometry with getBoundingClientRect.
+// Vite, so apps/web/src/styles.css is loaded as shipped, and drives it in playwright/chromium; every check measures geometry with getBoundingClientRect.
 // Skipped, not failed, where no browser is installed.
 import { afterAll, describe, expect, it } from "vitest";
 import { API, launch, startVite, stubApi } from "./real-page";
