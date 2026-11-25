@@ -373,6 +373,8 @@ export const milestones = pgTable("milestones", {
   targetDate: date("target_date"),
   /** Pinned to Now, Next or Later on the roadmap; null places it from its date and work. */
   horizon: roadmapHorizon("horizon"),
+  /** BOS-2581: the owner wants the CEO to plan a remedy when it turns At risk or Late. Off unless the owner turns it on. */
+  ceoManagesRisk: boolean("ceo_manages_risk").notNull().default(false),
 });
 
 export const riskTier = pgEnum("risk_tier", ["trivial", "low", "medium", "high", "critical"]);

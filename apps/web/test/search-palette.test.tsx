@@ -5,7 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App";
 import type { Company } from "../src/api";
-import { SEARCH_DEBOUNCE_MS, SEARCH_LABEL, SearchPalette, type SearchResults } from "../src/components/SearchPalette";
+import { SEARCH_DEBOUNCE_MS, SEARCH_LABEL, SearchPalette, searchAddress, ticketStateWord, type SearchResults } from "../src/components/SearchPalette";
 import { ChatPage } from "../src/pages/Chat";
 
 Element.prototype.scrollIntoView = () => {};
@@ -189,6 +189,22 @@ describe("features, decisions and runs in the search box (BOS-2326)", () => {
     await screen.findByText("Pelican tracking");
     expect(calls).toBe(2);
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+describe("search address and ticket state word (BOS-2596)", () => {
+  it("builds the search page address from the words alone, and with each filter set", () => {
+    expect(searchAddress({ q: "pelican" })).toBe("search?q=pelican");
+    expect(searchAddress({ q: "pelican", kind: "wiki", since: "7d", open: true, n: 20 })).toBe("search?q=pelican&kind=wiki&since=7d&open=1&n=20");
+  });
+  it("leaves an empty kind out of the address", () => {
+    expect(searchAddress({ q: "pelican", kind: "" })).toBe("search?q=pelican");
+  });
+  it("names a ticket's state, reads a cancelled done ticket as Cancelled, and passes an unknown state through", () => {
+    expect(ticketStateWord("in_progress")).toBe("In progress");
+    expect(ticketStateWord("done", "cancelled")).toBe("Cancelled");
+    expect(ticketStateWord("done")).toBe("Done");
+    expect(ticketStateWord("sideways")).toBe("sideways");
   });
 });
 

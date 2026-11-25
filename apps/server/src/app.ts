@@ -102,6 +102,7 @@ import { secretScanService } from "./services/secret-scan.js";
 import { PRIORITY_WATCH_REASON, priorityWatchService } from "./services/priority-watch.js";
 import { checkIdleService, IDLE_CHECK_SLOT_REASON, idleView } from "./services/check-idle.js";
 import { MERGE_STALL_REASON, mergeStallService, mergeTrainStatus } from "./services/merge-stall.js";
+import { milestoneRiskService } from "./services/milestone-risk.js";
 import { landingTurnAlertSweep, usualCiWait, usualMergeCheck } from "./services/landing-turn-eta.js";
 import { softHold } from "./services/deploy-wait-hold.js";
 import { checkGate } from "./services/check-gate.js";
@@ -690,7 +691,7 @@ export async function buildApp(opts: AppOptions) {
     netguardAllow,
     runLimits: (id) => scheduler.runLimits(id),
     mergeFailures: (id) => failuresForStatus(db, id),
-    mergeTrain: (id) => mergeTrainStatus(db, id),
+    mergeTrain: (id) => mergeTrainStatus(db, id, undefined, (ticketId) => review.seatPhase(ticketId)),
     // BOS-2119: read when server_status is asked, after `review` below is built.
     landingTurns: (id) => review.landingTurnStatus(id),
     idleCheckSlots: async (id) => (await checkIdle.view(id)).map(idleView),
@@ -911,6 +912,13 @@ export async function buildApp(opts: AppOptions) {
       .then((closed) => (closed ? notes.syncDecisions() : null))
       .catch((err) => app.log.error({ err, companyId: runner.companyId }, "closing cards failed"));
   });
+  const roadmapPlanning = planningService(db, { release: (ticketId) => decisionsSvc.release(ticketId) });
+  const milestoneRisk = milestoneRiskService(db, {
+    // The Roadmap's own status rule (BOS-2579), for the managed milestones only; it starts no run, only tells.
+    planning: roadmapPlanning,
+    wake: (input) => scheduler.wake(input),
+    now: opts.now,
+  });
   const sweeps = sweepService(db, {
     // BOS-2160: a background step that throws is logged (the error buffer reads app.log.error) and, if it keeps failing, raises one owner card.
     log: (message) => app.log.error(message),
@@ -925,6 +933,8 @@ export async function buildApp(opts: AppOptions) {
       return checkHold?.sweep();
     },
     priorityWatch: () => priorityWatch.run(),
+    // BOS-2581: a milestone the owner put in the CEO's hands turning At risk or Late; tells only.
+    milestoneRisk: () => milestoneRisk.run(),
     mergeStall: async () => {
       await landingTurnAlert.run(); // BOS-2359
       return mergeStall.run();
@@ -2972,5 +2982,5 @@ export async function buildApp(opts: AppOptions) {
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
   /** BOS-2159: removes login rows past their expiry (they are refused already; this stops the table growing). Returns how many. */
   const sweepExpiredSessions = async () => (await db.delete(sessions).where(lte(sessions.expiresAt, new Date())).returning({ h: sessions.tokenHash })).length;
-  return { app, webhooks, sweepExpiredSessions, mailer, weeklySummary, launcher: launch, githubWatch, memory, serverHealth, dailyBackup, checks, releaseLog, mainCi, secretScan, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, ticketMeaningEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
+  return { app, webhooks, sweepExpiredSessions, mailer, weeklySummary, launcher: launch, githubWatch, memory, serverHealth, dailyBackup, checks, releaseLog, mainCi, secretScan, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, planning: roadmapPlanning, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, ticketMeaningEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
 }

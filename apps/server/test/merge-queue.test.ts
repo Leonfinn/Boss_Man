@@ -589,6 +589,9 @@ describe("merge queue screen in server mode (BOS-597)", () => {
       const id = await waitingMerge(c);
       const landing = new Date(Date.now() - 40 * 60_000);
       const ciSince = new Date(Date.now() - 12 * 60_000);
+      // BOS-2605: the ended merge check's finish time is the "its check passed at" clause.
+      const passedAt = new Date("2026-11-25T12:44:10Z");
+      await c.db.insert(checkJobs).values({ companyId: c.company.id, projectId: c.project.id, ticketId: id, kind: "merge", scope: "full", state: "passed", commit: "a".repeat(40), tree: "a".repeat(40), startedAt: new Date("2026-11-25T12:30:00Z"), endedAt: passedAt } as never);
       const service = svc(c, {
         runningMerges: () => [{ ticketId: id, startedAt: landing.toISOString(), startedBy: "the merge gate", phase: "checking" as const, ci: { since: ciSince.toISOString(), waiting: ["check", "images (arm64)"] } }],
         runningChecks: async () => [],
@@ -598,7 +601,7 @@ describe("merge queue screen in server mode (BOS-597)", () => {
       const view = await service.get(c.company.id);
       expect(view.running).toEqual([]);
       const row = view.waiting.find((w) => w.ticketId === id)!;
-      expect(row).toMatchObject({ state: "waiting_for_ci", minutes: 12, stuck: false, actor: "system", label: "waiting for GitHub CI on its merge copy (check, images (arm64)), 12 min so far" });
+      expect(row).toMatchObject({ state: "waiting_for_ci", minutes: 12, stuck: false, actor: "system", label: "waiting for GitHub CI on its merge copy (check, images (arm64)), 12 min so far (its check passed at 12:44)" });
       expect(`${row.label} ${row.next}`).not.toMatch(/next in line|slot is free|check slot/);
       expect(row.statusLine).toMatchObject({ step: row.label, since: ciSince.toISOString(), blocker: null });
       expect(await service.statusLineFor(c.company.id, id)).toEqual(row.statusLine);

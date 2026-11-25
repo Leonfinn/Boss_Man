@@ -5,7 +5,7 @@
 // assignee is woken. Closing the parent stays a person's step (out of scope on the ticket).
 // BOS-2417: a merged parent whose only unreported criteria are tied to open check tickets may close at go-live (the
 // tie is not a reason to sit Blocked for a week); its watch moves to the check tickets, and the result still lands here.
-import { and, eq, isNotNull, ne, sql } from "drizzle-orm";
+import { and, eq, isNotNull, ne, or, sql } from "drizzle-orm";
 import { checkTicketLine, criterionText, isAfterMerge, readCriteria, readVerdicts, ticketRef, unreportedAfterMerge } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { activity, agents, companies, tickets } from "../db/schema.js";
@@ -61,6 +61,24 @@ export async function closableChecks(db: Db, parentId: string): Promise<OpenChec
 export function tiedCriteria(criteriaRaw: unknown, open: readonly OpenCheck[]): Set<number> {
   const criteria = readCriteria(criteriaRaw);
   return new Set(open.map((o) => o.criterion - 1).filter((i) => criteria[i] && isAfterMerge(criteria[i]!)));
+}
+
+/**
+ * BOS-2599 (cock-ups G1, the BOS-2069 path): the done gate reads a criterion as an after-merge check when the criterion
+ * itself says so, or when a check ticket is tied to it. On a ticket with no criteria that is never, so the trap those
+ * clauses guard against can't apply: the work exists only once a branch has changed the repo. On a merged ticket, and on
+ * one whose branch has changes waiting to merge, every not-reported criterion is still held. On a ticket with no branch
+ * and no changes of its own (BOS-2069: no criteria at all; BOS-2073: no criteria and no branch) every criterion is held:
+ * no live check can have been made, so closing it records nothing and the follow-up for it carries the criterion.
+ */
+export async function holdableUnreported(db: Db, ticket: { id: string; mergeCommit: string | null; criteria: unknown; note: string | null | undefined }, hasOwnChanges: boolean): Promise<boolean> {
+  if (ticket.mergeCommit || hasOwnChanges) return false;
+  const rows = await db
+    .select({ id: tickets.id })
+    .from(tickets)
+    .where(and(or(eq(tickets.checksTicketId, ticket.id), and(eq(tickets.id, ticket.id), isNotNull(tickets.checksCriterion))), ne(tickets.systemState, "done"), isNotNull(tickets.checksCriterion)))
+    .limit(1);
+  return rows.length === 0 && readVerdicts(readCriteria(ticket.criteria), ticket.note).some((r) => r.verdict === null);
 }
 
 /** BOS-2417: the done gate's "not reported" list, leaving out the criteria tied to an open check ticket. */

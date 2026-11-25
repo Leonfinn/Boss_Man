@@ -1,5 +1,5 @@
 {
-  "id": "a2814c28-ae43-47bd-9fc9-600e38de50b5",
+  "id": "015f0a80-b670-4dee-b939-2a9fe190d4b2",
   "prevId": "667133bd-f6a0-40ce-bcc5-77575b251f37",
   "version": "7",
   "dialect": "postgresql",
@@ -5582,6 +5582,13 @@
           "typeSchema": "public",
           "primaryKey": false,
           "notNull": false
+        },
+        "ceo_manages_risk": {
+          "name": "ceo_manages_risk",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         }
       },
       "indexes": {},
@@ -6761,18 +6768,6 @@
         },
         "ended_at": {
           "name": "ended_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "woken_at": {
-          "name": "woken_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "chased_at": {
-          "name": "chased_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false

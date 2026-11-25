@@ -94,11 +94,6 @@ jobs:
           set -euo pipefail
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "Version '$VERSION' is not like 0.1.0 or 0.1.0-beta.1."; exit 1; }
           if gh release view "v$VERSION" > /dev/null 2>&1; then echo "Version $VERSION is already released. Pick a new version."; exit 1; fi
-          for p in $(scripts/publish-images.sh prefixes); do
-            for name in $(scripts/publish-images.sh images); do
-              if docker buildx imagetools inspect "$p/$name:$VERSION" > /dev/null 2>&1; then echo "$p/$name:$VERSION already exists. Pick a new version."; exit 1; fi
-            done
-          done
           first="$(scripts/publish-images.sh prefixes | head -n 1)"
           missing=""
           for name in $(scripts/publish-images.sh images); do
@@ -109,6 +104,18 @@ jobs:
             echo "Either the 'Publish images' run for that commit has not finished (wait, then run this again), or an image was added to PUBLISH_IMAGES after that commit was published: re-run 'Publish images' for the commit (Actions > Publish images > the run > Re-run all jobs), or type the sha of an older green main commit in the commit box."
             exit 1
           fi
+          # A version tag that is already on an image is fine only when it is this commit's own image (same digest): a
+          # half-finished run (tags added, GitHub release not made, checked above) resumes. Tagging again is a no-op.
+          # A version tag on a different digest is another release's image: refuse, never move it.
+          for p in $(scripts/publish-images.sh prefixes); do
+            for name in $(scripts/publish-images.sh images); do
+              existing="$(docker buildx imagetools inspect "$p/$name:$VERSION" --format '{{json .Manifest}}' 2> /dev/null | jq -r .digest || true)"
+              [ -n "$existing" ] || continue
+              want="$(docker buildx imagetools inspect "$first/$name:$TAG" --format '{{json .Manifest}}' | jq -r .digest)"
+              if [ "$existing" != "$want" ]; then echo "$p/$name:$VERSION already exists and is not this commit's image. Pick a new version."; exit 1; fi
+              echo "::notice::$p/$name:$VERSION is already on this commit's image: resuming a half-finished release."
+            done
+          done
       - name: Check every image in every registry (identical digest, signature, SBOM, provenance)
         env:
           TAG: ${{ steps.s.outputs.tag }}
@@ -177,5 +184,15 @@ jobs:
           set -euo pipefail
           assets=(release.json release.json.sigstore.json)
           if [ -f images.env ]; then assets+=(images.env images.env.sigstore.json docker-compose.images.yml docker-compose.images.yml.sigstore.json); fi
-          gh release create "v$VERSION" "${assets[@]}" --prerelease --target "$SHA" \
-            --title "Boss Man $VERSION" --notes "Beta release. The images are listed, by digest and architecture, in release.json, which is signed (release.json.sigstore.json)."
+          # BOS-2601: this step failed in 1 s on release #3 and the job log is not readable by agents. Name any missing
+          # file, and put GitHub's own error text in an annotation (annotations are readable without the log).
+          for f in "${assets[@]}"; do
+            [ -s "$f" ] || { echo "::error title=Release file missing::$f is missing or empty, nothing was published. Files here: $(ls | tr '\n' ' ')"; exit 1; }
+          done
+          if ! out="$(gh release create "v$VERSION" "${assets[@]}" --prerelease --target "$SHA" \
+            --title "Boss Man $VERSION" --notes "Beta release. The images are listed, by digest and architecture, in release.json, which is signed (release.json.sigstore.json)." 2>&1)"; then
+            echo "$out"
+            echo "::error title=gh release create failed::$(echo "$out" | tr '\n' ' ' | cut -c1-400)"
+            exit 1
+          fi
+          echo "$out"

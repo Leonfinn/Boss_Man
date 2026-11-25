@@ -106,6 +106,8 @@ export function rowState(r: WaitingRow): { word: string; tone: "amber" | "red" |
   if (r.state === "check_failed_retrying") return { word: "Check failed", tone: "red" };
   if (r.stuck) return { word: "Stuck", tone: "red" };
   if (r.state === "checking") return { word: "Checking", tone: "blue" };
+  // BOS-2605: its check is over and it waits on GitHub's tests for its merge copy: under way, not queued for a slot.
+  if (r.state === "waiting_for_ci") return { word: "On GitHub", tone: "blue" };
   if (r.state === "held" || r.state === "waiting_host" || r.state === "waiting_for_other_ticket" || r.state === "waiting_for_decision") return { word: "Held", tone: "grey" };
   return { word: "Waiting", tone: "grey" };
 }
@@ -302,7 +304,7 @@ export function Waiting({ rows, companyId, onMoved, serverHost, firstNumber = 1 
                     <span className="mq-pos">{firstNumber + i}</span>
                     <TicketLink id={r.ticketId} ref={r.ref} title={r.title} />
                   </span>
-                  <span className="mq-wait">waiting {waited(r.minutes)}</span>
+                  <span className="mq-wait">{r.state === "waiting_for_ci" ? `on GitHub ${waited(r.minutes)}` : `waiting ${waited(r.minutes)}`}</span>
                 </div>
                 <p className="mq-line">
                   <span className={`tag ${s.tone}`}>{s.word}</span>

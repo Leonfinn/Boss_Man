@@ -8,7 +8,7 @@ import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { checkJobs, checkWorkers, companies, decisions, notifications, projects, runners, runs, settings, tickets, updateHolds, wakes } from "../src/db/schema.js";
-import { BUILD_HOLD_MAX_MINUTES, DRAIN_GO_AHEAD_MINUTES, drainForecast, drainGoAheadAt, getHold, HOLD_CAP_MINUTES, HOLD_REASON, holdBlocksStarts, holdCapAt, holdEndsAt, SWAP_WHEN_DONE_CAP_MINUTES, WRAP_UP, WRAP_UP_ASKED, WRAP_UP_DURING_UPDATE, WRAP_UP_SETTINGS } from "../src/services/maintenance.js";
+import { BUILD_HOLD_MAX_MINUTES, DRAIN_GO_AHEAD_MINUTES, drainForecast, drainGoAheadAt, getHold, HOLD_CAP_MINUTES, HOLD_REASON, holdBlocksStarts, holdCapAt, holdEndsAt, SWAP_WHEN_DONE_CAP_MINUTES, WRAP_UP, WRAPUP_HOLD_REASON,WRAP_UP_ASKED, WRAP_UP_DURING_UPDATE, WRAP_UP_SETTINGS } from "../src/services/maintenance.js";
 import { CEO_REPLY_REASON, MISSED_REASON, UPDATE_ALERT_REASON } from "../src/services/scheduler.js";
 import { FAILED_UPDATE_REASON } from "../src/services/owner-holds.js";
 import { activeWaits, WAIT_RULES } from "../src/services/update-waits.js";
@@ -1129,7 +1129,7 @@ describe("Ask agents to wrap up (BOS-929): a mode of the same hold", () => {
     expect(await c.scheduler.tick()).toMatchObject({ launched: 0, waiting: 1 });
     expect(c.commands).toHaveLength(1);
     const held = await c.db.select().from(wakes).where(eq(wakes.status, "queued"));
-    expect(held.map((w) => w.statusReason)).toContain(HOLD_REASON);
+    expect(held.map((w) => w.statusReason)).toContain(WRAPUP_HOLD_REASON); // BOS-2610: the label names the wrap-up
 
     // Cancelling lets the waiting wake run: nothing was lost.
     expect((await c.req("POST", "/api/maintenance/cancel", {})).json()).toEqual({ cancelled: true });
@@ -1256,7 +1256,7 @@ describe("Ask agents to wrap up (BOS-929): a mode of the same hold", () => {
     const started = await c.db.select().from(runs);
     expect(started.map((r) => [r.agentId, r.origin, r.purpose, r.passedUpdateHold])).toEqual([[a.ceo, FAILED_UPDATE_REASON, null, true]]);
     const held = await c.db.select().from(wakes).where(eq(wakes.status, "queued"));
-    expect(held.map((w) => [w.reason, w.statusReason])).toEqual([["nudge", HOLD_REASON]]);
+    expect(held.map((w) => [w.reason, w.statusReason])).toEqual([["nudge", WRAPUP_HOLD_REASON]]); // BOS-2610 names the wrap-up
   });
 
   it("BOS-2058: a wrap-up pressed while a server update waits belongs to it and lifts when that wait is over", async () => {
@@ -1689,15 +1689,78 @@ describe("urgent and fixes-live wakes pass an update's hold (BOS-2088)", () => {
     expect((await c.db.select().from(wakes).where(and(eq(wakes.status, "queued"), eq(wakes.ticketId, plain)))).map((w) => w.statusReason)).toEqual([HOLD_REASON]);
   });
 
-  it("a wrap-up with no update behind it still holds an urgent ticket's wake: the owner asked for quiet", async () => {
+  // BOS-2610: 25 Nov a standalone wrap-up held Dougal's urgent wake about the update failure. It passes now, whatever the wrap-up is for;
+  // a routine wake stays held, and its label names the wrap-up, not an update.
+  it("BOS-2610: a wrap-up (with or without an update behind it) lets an urgent wake through; a routine wake is held as 'wrap-up pending'", async () => {
     const c = (ctx = await setup());
-    const { a, urgent } = await seed(c);
+    const { a, urgent, plain } = await seed(c);
     await c.req("POST", "/api/maintenance/wrapup", {});
     expect(await getHold(c.db)).toMatchObject({ kind: "wrapup", forUpdate: "none" });
     await c.scheduler.wake({ agentId: a.ceo, reason: "assigned", ticketId: urgent });
+    await c.scheduler.wake({ agentId: a.ceo, reason: "nudge", ticketId: plain, note: "routine" });
     await c.scheduler.tick();
-    expect(await c.db.select().from(runs)).toEqual([]);
-    expect((await c.db.select().from(wakes).where(eq(wakes.status, "queued"))).map((w) => w.statusReason)).toEqual([HOLD_REASON]);
+    expect((await c.db.select().from(runs)).map((r) => [r.ticketId, r.passedUpdateHold])).toEqual([[urgent, true]]);
+    expect((await c.db.select().from(wakes).where(eq(wakes.status, "queued"))).map((w) => [w.ticketId, w.statusReason])).toEqual([[plain, WRAPUP_HOLD_REASON]]);
+  });
+});
+
+// BOS-2610: 25 Nov 16:01 the owner pressed Ask agents to wrap up while no update hold existed; update-runner.sh then asked for its
+// "building" hold, the build failed, and the wrap-up ("no update was waiting") held 10 wakes for the rest of the hour.
+describe("a wrap-up tied to a runner update lifts when the update fails (BOS-2610)", () => {
+  const drainFile = (dir: string, reason?: string) => writeFile(path.join(dir, "inbox", "drain.json"), JSON.stringify({ by: "update-runner.sh", ...(reason ? { reason } : {}) }));
+  const cancelFile = (dir: string) => writeFile(path.join(dir, "inbox", "drain-cancel.json"), "{}");
+
+  it("the build request ties a standalone wrap-up to the runner update; the failed build's cancel lifts it and work restarts", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    const a = await c.company("App Co", "app-co");
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(await getHold(c.db)).toMatchObject({ kind: "wrapup", forUpdate: "none" });
+    await drainFile(c.dir, "building");
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toMatchObject({ kind: "wrapup", forUpdate: "runner", tiedSince: expect.any(String) });
+    expect(await c.maint()).toMatchObject({ kind: "wrapup", wrapForUpdate: "runner" });
+    await c.wake(a);
+    expect(await c.scheduler.tick()).toMatchObject({ launched: 0 });
+    await cancelFile(c.dir); // update-runner.sh's EXIT trap after the build failed
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    expect((await c.maint()).last).toMatchObject({ title: "Wrap-up lifted: the runner update failed", body: expect.stringContaining("Work has restarted.") });
+    await c.scheduler.tick(); // the lift already ticked; this is a no-op if so
+    expect(c.commands).toHaveLength(1); // the held wake started
+  });
+
+  it("a wrap-up with no update behind it is not touched by a stale cancel file", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    await c.company("App Co", "app-co");
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    await cancelFile(c.dir);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toMatchObject({ kind: "wrapup", forUpdate: "none" });
+  });
+
+  it("a tied wrap-up that the update never followed lifts after the build's own cap", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    await c.company("App Co", "app-co");
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    await drainFile(c.dir, "building");
+    await c.maintenance.step();
+    c.advance((BUILD_HOLD_MAX_MINUTES + 1) * MIN);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    expect(await c.titles()).toContain("note: Wrap-up lifted: the runner update did not start");
+  });
+
+  it("the real drain taking over a tied wrap-up still swaps as before", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    await c.company("App Co", "app-co");
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    await drainFile(c.dir, "building");
+    await c.maintenance.step();
+    await drainFile(c.dir);
+    await c.maintenance.step();
+    // No runner is connected here, so the update finishes in the same pass; what matters is it was not ended as a "failed" wrap-up.
+    expect(await getHold(c.db)).toBeNull();
+    expect((await c.maint()).last?.title).not.toContain("Wrap-up lifted");
   });
 });
 

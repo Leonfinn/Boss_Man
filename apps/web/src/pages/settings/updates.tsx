@@ -160,6 +160,7 @@ export function wrapUpBannerText(m: { runs: number; wrapSince?: string; since?: 
   const { forUpdate, at } = wrapUpFor({ ...m, kind: "wrapup" });
   const runs = m.runs > 0 ? ` Waiting for ${plural(m.runs, "run", "runs")} to finish.` : "";
   if (forUpdate === "server") return `Wrapping up for the server update${at ? ` (asked at ${atTime(at)})` : ""}. Nothing new starts until it goes in; this lifts by itself then.${runs}`;
+  if (forUpdate === "runner") return `Wrapping up for the runner update${at ? ` (asked at ${atTime(at)})` : ""}. Nothing new starts until it goes in; this lifts by itself when it does, fails or is cancelled.${runs}`;
   return `You asked agents to wrap up${at ? ` at ${atTime(at)}` : ""} (no update was waiting). It lifts by itself after an hour, or sooner if you cancel it on Settings → Server and runner.${runs}`;
 }
 
@@ -350,8 +351,8 @@ export function updateStatus(view: SelfDeployView | null, maint: MaintenanceView
   if (wrap && maint && maint.on && maint.kind === "wrapup") {
     const n = wrap.runsList.length;
     const { forUpdate, at } = wrapUpFor(wrap);
-    const forServer = forUpdate === "server";
-    const who = forServer ? "Wrapping up for the server update. " : "";
+    const forServer = forUpdate !== "none";
+    const who = forUpdate === "server" ? "Wrapping up for the server update. " : forUpdate === "runner" ? "Wrapping up for the runner update. " : "";
     return {
       tone: "amber",
       tag: "Wrapping up",

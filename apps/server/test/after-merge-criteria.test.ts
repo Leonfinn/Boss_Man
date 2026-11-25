@@ -5,13 +5,13 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { and, eq } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { DEFAULT_REVIEW_POLICY, afterMergeLint, cardAnswerLine, carryFailedOver, criteriaForCard, failedAfterMerge, isAfterMerge, mentionsCriterion, missingVerdicts, readCriteria, readVerdicts, unreportedAfterMerge } from "@boss-man/shared";
+import { DEFAULT_REVIEW_POLICY, afterMergeLint, cardAnswerLine, carriedCriteria, carryFailedOver, criteriaForCard, failedAfterMerge, isAfterMerge, mentionsCriterion, missingVerdicts, readCriteria, readVerdicts, unreportedAfterMerge } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, decisions, reviewRequests, settings, ticketDependencies, ticketImages, ticketMessages, tickets, wakes } from "../src/db/schema.js";
+import { agents, companies, decisions, projects, reviewRequests, settings, ticketDependencies, ticketImages, ticketMessages, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { landingText } from "../src/services/review.js";
-import { type OpenCheck, tiedCriteria, unreportedUntied } from "../src/services/after-merge-check-tickets.js";
+import { type OpenCheck, holdableUnreported, tiedCriteria, unreportedUntied } from "../src/services/after-merge-check-tickets.js";
 import { type StandInReplies, standInRunner } from "./helpers/stand-in-runner.js";
 
 let server: Awaited<ReturnType<typeof boot>>;
@@ -170,6 +170,56 @@ describe("after-merge criteria: check tickets tie their criteria (BOS-2417)", ()
     expect(unreportedUntied([BEFORE, LIVE, OTHER_LIVE], `${note}. ${LIVE.text} pass. ${OTHER_LIVE.text} pass`, new Set())).toEqual([]);
     // No criteria: no unreported list.
     expect(unreportedUntied([], null, new Set())).toEqual([]);
+  });
+});
+
+// BOS-2599 (cock-ups G1): a ticket that never merged and has no changes of its own (BOS-2069 closed done with all
+// four criteria "[not reported]") has no after-merge criterion to skip the done gate, so every criterion is held.
+describe("after-merge criteria: a never-merged ticket holds every unreported criterion (BOS-2599)", () => {
+  const note = `${BEFORE} pass`;
+
+  it("holds a ticket with no branch and no changes of its own, unless a check ticket is tied to it", async () => {
+    const { db, close } = await openPglite();
+    const company = (await db.insert(companies).values({ name: `Never merged ${randomUUID()}`, ticketPrefix: "NM" }).returning())[0]!;
+    const project = (await db.insert(projects).values({ companyId: company.id, name: "Board" }).returning())[0]!;
+    const made = async (patch: Record<string, unknown>) => (await db.insert(tickets).values({ companyId: company.id, projectId: project.id, title: "Never merged", ...patch }).returning())[0]!;
+    const t = await made({ acceptanceCriteria: [BEFORE, LIVE], stateNote: note });
+    expect(await holdableUnreported(db, { id: t.id, mergeCommit: t.mergeCommit, criteria: t.acceptanceCriteria, note: t.stateNote }, false)).toBe(true);
+    // A ticket with changes waiting to merge, or one already merged, keeps the after-merge rule.
+    expect(await holdableUnreported(db, { id: t.id, mergeCommit: t.mergeCommit, criteria: t.acceptanceCriteria, note: t.stateNote }, true)).toBe(false);
+    expect(await holdableUnreported(db, { id: t.id, mergeCommit: "a".repeat(40), criteria: t.acceptanceCriteria, note: t.stateNote }, false)).toBe(false);
+    // Every criterion reported: nothing to hold.
+    expect(await holdableUnreported(db, { id: t.id, mergeCommit: null, criteria: [LIVE], note: `${LIVE.text} pass` }, false)).toBe(false);
+    // A check ticket tied to it settles that criterion: the close is allowed, as it always was (BOS-2417).
+    await made({ title: "The check", checksTicketId: t.id, checksCriterion: 2, systemState: "ready" });
+    expect(await holdableUnreported(db, { id: t.id, mergeCommit: t.mergeCommit, criteria: t.acceptanceCriteria, note: t.stateNote }, false)).toBe(false);
+    await close();
+  });
+});
+
+// BOS-2599 (cock-ups G1): which criteria a hand-on carries into its follow-up. Pure calls: no database.
+describe("acceptance criteria: a hand-on carries the outcome it came from (BOS-2599)", () => {
+  const REPORT = { text: "Report filed on the wiki", after: "merge" as const };
+
+  it("carries every criterion not reported pass, unchanged, and leaves the passes behind", () => {
+    const criteria = [BEFORE, LIVE, REPORT];
+    // 1 failed, 2 never reported, 3 pass: the fail and the one never shown go with the work.
+    expect(carriedCriteria(criteria, "1 fail: no sitemap; 3 pass: filed")).toEqual([BEFORE, LIVE]);
+    // Nothing reported at all: everything goes (BOS-2069's four).
+    expect(carriedCriteria(criteria, null)).toEqual(criteria);
+    // Every one passes: nothing is handed on.
+    expect(carriedCriteria(criteria, "1 pass; 2 pass; 3 pass")).toEqual([]);
+    // No criteria at all: nothing to carry.
+    expect(carriedCriteria([], "anything")).toEqual([]);
+  });
+
+  it("names exactly the criteria a follow-up picks, and refuses a number it can't carry", () => {
+    const criteria = [BEFORE, LIVE, REPORT];
+    expect(carriedCriteria(criteria, "1 fail; 2 pass; 3 pass", [1])).toEqual([BEFORE]);
+    expect(carriedCriteria(criteria, "1 fail", [3])).toEqual([REPORT]);
+    // Past the end, or a criterion already reported pass: the caller refuses the move (null).
+    expect(carriedCriteria(criteria, "1 fail", [9])).toBeNull();
+    expect(carriedCriteria(criteria, "1 fail; 2 pass", [2])).toBeNull();
   });
 });
 

@@ -27,7 +27,7 @@ import { monthStartUtc, projectSpendMicros } from "./project-spend.js";
 import { effectivePolicy } from "./review-policy.js";
 import { endedNormally, handOverReviews, requeueUnansweredReviews, REVIEW_REASON, requestReviews, reviewTicketsOf, wakeReviewers } from "./review-kinds.js";
 import { buildBrief } from "./brief.js";
-import { getHold, HOLD_REASON, HOLD_RELEASED_REASON, holdBlocksStarts } from "./maintenance.js";
+import { getHold, HOLD_REASON, HOLD_RELEASED_REASON, holdBlocksStarts, holdReasonFor, WRAPUP_HOLD_REASON } from "./maintenance.js";
 import { createLaneWatch } from "./lane-watch.js";
 import { limitUnderHold, softHold, softHoldReason } from "./deploy-wait-hold.js";
 import { RETRO_DUTY, RETRO_REASON } from "./retro.js";
@@ -1925,7 +1925,7 @@ export function schedulerService(
       if (hold && !holdBlocksStarts(hold, t)) {
         // BOS-1414: the drain is past its deadline and waits on the owner's answer. That is not a swap under way, so
         // nothing is held for it; wakes it held earlier are released here with the reason shown, and launch below.
-        await db.update(wakes).set({ statusReason: HOLD_RELEASED_REASON }).where(and(eq(wakes.status, "queued"), eq(wakes.statusReason, HOLD_REASON)));
+        await db.update(wakes).set({ statusReason: HOLD_RELEASED_REASON }).where(and(eq(wakes.status, "queued"), inArray(wakes.statusReason, [HOLD_REASON, WRAPUP_HOLD_REASON])));
       } else if (hold) {
         const work = await liveWorkRuns(db);
         // BOS-1877: running checks the swap waits on keep it from landing just as work runs do, so chat goes through
@@ -1939,9 +1939,9 @@ export function schedulerService(
         const busy = work > 0 || checksWaited > 0;
         // BOS-2088: a work wake about an open, unmerged urgent or fixes-live ticket passes too, and its run is marked so no
         // wait counts it (the swap cuts it off; recovery resumes it). Chat and the reply lane keep their own rules above,
-        // since the swap waits for those runs. Not under a wrap-up with no update behind it: the owner asked for quiet.
-        const standaloneWrapup = hold.kind === "wrapup" && hold.forUpdate !== "server" && hold.forUpdate !== "runner";
-        const passesByTicket = (w: (typeof queue)[number]) => !standaloneWrapup && w.reason !== CHAT_REASON && !isReplyLane(w.reason) && !!w.ticketId && duringUpdate(w.reason, ticketFacts.get(w.ticketId)) === "passes";
+        // since the swap waits for those runs. BOS-2610: also through a wrap-up hold, standalone or not: on 25 Nov a wrap-up held
+        // the urgent diagnosis of the very update failure it outlived.
+        const passesByTicket = (w: (typeof queue)[number]) => w.reason !== CHAT_REASON && !isReplyLane(w.reason) && !!w.ticketId && duringUpdate(w.reason, ticketFacts.get(w.ticketId)) === "passes";
         const passes = (w: (typeof queue)[number]) => {
           if (duringUpdate(w.reason) === "passes") return true;
           if (passesByTicket(w)) return true;
@@ -1953,8 +1953,9 @@ export function schedulerService(
         for (const w of through) if (passesByTicket(w) || (w.reason !== CHAT_REASON && !isReplyLane(w.reason) && duringUpdate(w.reason) === "passes")) passedHold.add(w.id);
         pass = through;
         const held = queue.filter((w) => !through.includes(w));
-        const unmarked = held.filter((w) => w.status !== "queued" || w.statusReason !== HOLD_REASON).map((w) => w.id);
-        if (unmarked.length) await db.update(wakes).set({ status: "queued", statusReason: HOLD_REASON }).where(inArray(wakes.id, unmarked));
+        const label = holdReasonFor(hold);
+        const unmarked = held.filter((w) => w.status !== "queued" || w.statusReason !== label).map((w) => w.id);
+        if (unmarked.length) await db.update(wakes).set({ status: "queued", statusReason: label }).where(inArray(wakes.id, unmarked));
         if (through.length === 0) return { ...result, waiting: queue.length };
       }
 

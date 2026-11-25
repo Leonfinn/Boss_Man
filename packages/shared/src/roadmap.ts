@@ -113,6 +113,22 @@ export function milestoneStatus(m: MilestoneStatusInput, targetDate: string | nu
   return milestoneVerdict(m, targetDate, today).status;
 }
 
+/** The two statuses that turn a milestone the CEO has in hand (BOS-2581). */
+export const CEO_RISK_STATUSES: readonly MilestoneStatus[] = ["at_risk", "late"];
+/** Whether this status makes the CEO plan a remedy, on a milestone they manage. */
+export const needsCeoPlan = (status: MilestoneStatus): boolean => CEO_RISK_STATUSES.includes(status);
+
+/**
+ * BOS-2581: whether a milestone the owner put in the CEO's hands should wake the CEO now. It wakes once each time the status
+ * becomes At risk or Late, and never while it stays that status (`lastWoken` is the status the CEO was last woken about, and
+ * whether the milestone was managed then). At risk and Late count as one state, so a move from one to the other within it
+ * doesn't wake twice; On track is not that state even though it follows it, so it resets the wake. Switching the managing off
+ * and on, or clearing it in between, also starts afresh (`wasManaged` false).
+ */
+export function ceoPlanWake(input: { managed: boolean; wasManaged: boolean; status: MilestoneStatus; lastWoken: MilestoneStatus | null }): boolean {
+  return input.managed && needsCeoPlan(input.status) && (!input.wasManaged || input.lastWoken === null || !needsCeoPlan(input.lastWoken));
+}
+
 /** A timezone name Intl understands, such as "Europe/London"; otherwise the fallback. */
 export function timeZoneOr(tz: string | null | undefined, fallback = "Europe/London"): string {
   if (!tz) return fallback;

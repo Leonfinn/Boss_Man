@@ -1,12 +1,21 @@
 // BOS-2137 (background lane): the two labels the merge queue shows for a waiting landing and a carried-work hold.
 // Both are pure and take their input as arguments (no clock, no database), so made-up values pin the exact words.
 import { describe, expect, it } from "vitest";
-import { CARRIED_NOTE_PREFIX, carriedHold, ciWaitLabel, turnWaitLabel } from "../src/services/merge-queue.js";
+import { CARRIED_NOTE_PREFIX, carriedHold, ciWaitLabel, turnWaitLabel, workflowOnlyChange } from "../src/services/merge-queue.js";
 
 describe("ciWaitLabel (BOS-2137)", () => {
   it("names no job when GitHub has not reported one yet", () => {
     expect(ciWaitLabel({ minutes: 0, waiting: [] })).toBe("waiting for GitHub CI on its merge copy, 0 min so far");
     expect(ciWaitLabel({ minutes: 12, waiting: [] })).toBe("waiting for GitHub CI on its merge copy, 12 min so far");
+  });
+
+  it("a change only under .github/workflows/ says GitHub runs every job (BOS-2605)", () => {
+    expect(workflowOnlyChange([".github/workflows/release.yml"])).toBe(true);
+    expect(workflowOnlyChange([".github/workflows/release.yml", "docs/a.md"])).toBe(false);
+    expect(workflowOnlyChange([])).toBe(false);
+    expect(ciWaitLabel({ minutes: 5, waiting: ["check"], workflowOnly: true })).toBe(
+      "waiting for GitHub CI on its merge copy (check), 5 min so far (workflow change: GitHub runs every job, usually longer)",
+    );
   });
 
   it("names the jobs GitHub is still running, in the order it was given them", () => {
