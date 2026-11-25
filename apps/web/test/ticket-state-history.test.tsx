@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
-import { spanText, stays, totals, TicketStateHistory, type StateChange } from "../src/components/TicketStateHistory";
+import { spanText, stateLabel, stays, totals, TicketStateHistory, type StateChange } from "../src/components/TicketStateHistory";
 import { ApiError } from "../src/api";
 
 const apiMock = vi.hoisted(() => vi.fn());
@@ -23,6 +23,14 @@ const list: StateChange[] = [
   { from: "in_progress", to: "review", at: at(8) },
   { from: "review", to: "done", at: at(9) },
 ];
+
+describe("stateLabel (BOS-2596)", () => {
+  it("names a known state, reads the start as New, and passes an unknown state through", () => {
+    expect(stateLabel("review")).toBe("Review");
+    expect(stateLabel(null)).toBe("New");
+    expect(stateLabel("sideways")).toBe("sideways");
+  });
+});
 
 describe("state history sums (BOS-2419)", () => {
   it("adds up time per state, counts bounces and finds first start and finish", () => {
