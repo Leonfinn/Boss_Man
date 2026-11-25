@@ -101,12 +101,14 @@ const QUIET_DAYS = 3;
  */
 async function milestoneFigures(db: Db, ms: MilestoneRow[], today: string) {
   const msIds = ms.map((m) => m.id);
+  // not state: per-call working data for the milestones given, dropped when this returns.
   const ticketsOf = new Map<string, Awaited<ReturnType<typeof ticketsOfMilestones>>>();
   for (const t of await ticketsOfMilestones(db, msIds)) ticketsOf.set(t.milestoneId, [...(ticketsOf.get(t.milestoneId) ?? []), t]);
   // Whether the unbuilt rest waits on the owner (an open card) or the watchdog flags it stuck is read once for every milestone.
   const unbuiltIds = [...ticketsOf.values()].flat().filter((t) => t.state !== "done" && !delivered(t)).map((t) => t.id);
-  const ownerWaiting = new Set<string>();
-  const stuckIds = new Set<string>();
+  // not state: locals of this one call, as above.
+  const ownerWaiting = new Set<string>(); // not state
+  const stuckIds = new Set<string>(); // not state
   if (unbuiltIds.length) {
     for (const r of await db
       .select({ id: ticketDependencies.blockedTicketId })
