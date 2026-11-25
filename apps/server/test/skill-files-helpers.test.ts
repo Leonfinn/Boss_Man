@@ -4,7 +4,9 @@ import { describe, expect, it } from "vitest";
 import {
   hasForeignLetters,
   hasHiddenChars,
+  hashFiles,
   skillChangeEntry,
+  skillSide,
   unreadableFile,
   type SkillSide,
 } from "../src/services/skill-files.js";
@@ -55,6 +57,34 @@ describe("unreadableFile", () => {
 
   it("returns null for valid UTF-8, including multi-byte text", () => {
     expect(unreadableFile([file("SKILL.md", "Hello, world\n"), file("notes.md", "héllo — 日本語 😀")])).toBeNull();
+  });
+});
+
+describe("skillSide", () => {
+  it("builds a side from a library row: the text from SKILL.md, every path, and the bundle fingerprint", () => {
+    const files = [file("SKILL.md", "# My skill\nDo the thing.\n"), file("notes.txt", "extra")];
+    const side = skillSide({ name: "my-skill", description: "does the thing", files });
+
+    expect(side.name).toBe("my-skill");
+    expect(side.description).toBe("does the thing");
+    expect(side.skillMd).toBe("# My skill\nDo the thing.\n");
+    expect(side.paths).toEqual(["SKILL.md", "notes.txt"]);
+    // The fingerprint is the same one the rest of the change log records.
+    expect(side.bundleHash).toBe(hashFiles(files).bundleHash);
+  });
+
+  it("has an empty skillMd when the row has no SKILL.md", () => {
+    const side = skillSide({ name: "scripts-only", description: "no instructions", files: [file("run.sh", "echo hi")] });
+    expect(side.skillMd).toBe("");
+    expect(side.paths).toEqual(["run.sh"]);
+  });
+
+  it("is empty but still has a stable fingerprint for a row with no files (unexpected input)", () => {
+    const side = skillSide({ name: "empty", description: "", files: [] });
+    expect(side.skillMd).toBe("");
+    expect(side.paths).toEqual([]);
+    expect(side.bundleHash).toBe(hashFiles([]).bundleHash);
+    expect(side.bundleHash).toMatch(/^[0-9a-f]{64}$/);
   });
 });
 
