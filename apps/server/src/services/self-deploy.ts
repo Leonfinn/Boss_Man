@@ -730,19 +730,8 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
               : `The launcher changed and has to be rebuilt, but ${noHost}`
             : `The launcher changed and has to be rebuilt, but ${noSrc}`,
         );
-      if (bg === true)
-        handSteps.push(
-          src && colour
-            ? host
-              ? step(
-                  `Check the new server has taken charge. Run this on the same machine; it asks the live copy (${colour}) whether it is ready:`,
-                  cmd(`cd ${src} && docker compose exec -T server-${colour} node -e "fetch('http://127.0.0.1:3100/api/ready').then(async r=>console.log(await r.text()))"`),
-                  "If it says standby, run this next:",
-                  cmd(`cd ${src} && docker compose kill -s SIGUSR2 server-${colour}`),
-                )
-              : noHost
-            : "Check the new server has taken charge. Boss Man can't tell which copy is live or where it is installed, so no command is shown. Open Settings → Server and runner → This server and ask us on this ticket.",
-        );
+      // No step names a blue/green colour (R31c, BOS-2619): scripts/rebuild-live.sh above already waits for /api/ready and
+      // tells the new copy to take charge, and the live colour can flip between the card being written and read.
       // Only when the runner's files changed: the same flag drives the summary line on the card.
       if (a?.runnerChanged) handSteps.push(`${RUNNER_STEP[0]!.toUpperCase()}${RUNNER_STEP.slice(1)}.`);
     }

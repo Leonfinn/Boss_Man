@@ -577,8 +577,8 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect(steps.join("\n")).toContain("host-deployer.sh didn't change; no copy needed.");
     expect(steps.join("\n")).not.toContain("chown root:root");
     expect(steps.join("\n")).not.toContain("docker compose build launcher");
-    // The card still checks that the new server took charge, and how to recover it.
-    expect(steps.join("\n")).toContain("docker compose kill -s SIGUSR2 server-green");
+    // No step names a colour (R31c, BOS-2619): rebuild-live.sh waits for the new copy and tells it to take charge.
+    expect(steps.join("\n")).not.toMatch(/server-(?:blue|green)|SIGUSR2/);
     expect(todo!.context).toMatchObject({ check: expect.stringContaining("This server: Role reads leader (or single on a server that runs one copy)") });
     // No fixed claim about the watchdog (a per-company setting an update never changes) or a vague Reviews look.
     expect((todo!.context as { check: string }).check).not.toMatch(/watchdog|look as expected/i);
@@ -605,12 +605,12 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       expect(commands([x.rollback!])).toEqual(["(umask 022 && cd /srv/bm/src && scripts/deploy.sh --rollback)"]);
     });
 
-    it("picks rebuild-live.sh on blue/green and uses the reported live colour", async () => {
+    it("picks rebuild-live.sh on blue/green and names no colour in a command (BOS-2619)", async () => {
       const c = (ctx = await setup());
       const x = await stepsOf(c, LAYOUT);
       const cmds = commands(x.handSteps!);
       expect(cmds).toContain("cd /srv/bm/src && scripts/rebuild-live.sh");
-      expect(cmds.some((k) => k.startsWith("cd /srv/bm/src && docker compose exec -T server-green "))).toBe(true);
+      expect(cmds.join("\n")).not.toMatch(/server-(?:blue|green)/);
       expect(cmds.join("\n")).not.toContain("scripts/deploy.sh");
       expect(x.rollback).toContain("scripts/rebuild-live.sh");
     });
@@ -702,6 +702,24 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
         expect(lintOwnerSteps([step("Run this:", sh(bare, { host: "nas01", as: "root" }))], [{ name: "nas01", ownership: [] }]).refuse.map((f) => f.rule)).toContain("R14");
       // The old fallback fails it, so this test would have caught it.
       expect(lintOwnerSteps(["Boss Man can't tell where it is installed, so no command is shown here. The folder is in docs/06-install-truenas.md; ask us on this ticket for the exact commands."]).refuse).not.toEqual([]);
+    });
+
+    // BOS-2619: Boss Man's own owner-card check held the by-hand card (a copy opening the deployer to everyone, and a step
+    // naming the standby colour). Run the real steps through it with the host's facts: blue/green on, each colour live in
+    // turn, the install folder private, and also the case where the colour flipped after the card was written.
+    it("passes the owner-card check with blue/green on, whichever colour is live (BOS-2619)", async () => {
+      const c = (ctx = await setup());
+      const hosts = [{ name: "nas01", ownership: [{ path: "/srv/bm/src", owner: "root", group: "root", mode: "755", role: "backups" as const }, { path: "/srv/bm/deployer", owner: "root", group: "root", mode: "755" }] }];
+      const compose = (liveColour: string) => ({ files: ["docker-compose.yml", "deploy/bluegreen.yml"], bluegreen: true, liveColour });
+      for (const [written, liveNow] of [["blue", "blue"], ["green", "green"], ["green", "blue"], ["blue", "green"]] as const) {
+        await c.db.delete(decisions);
+        const x = (await stepsOf(c, { ...LAYOUT, liveColour: written, infraPaths: ["scripts/host-deployer.sh"], paths: ["scripts/host-deployer.sh"] })) as { handSteps?: string[]; rollback?: string; check?: string };
+        const all = [...x.handSteps!, x.rollback!, ...(x.check ? [x.check] : [])];
+        const where = `written ${written}, live now ${liveNow}`;
+        expect(all.join("\n"), where).toContain("install -v -m 0750 -o root -g root /srv/bm/src/scripts/host-deployer.sh /srv/bm/deployer/host-deployer.sh");
+        expect(all.join("\n"), where).not.toMatch(/server-(?:blue|green)/);
+        expect(lintOwnerSteps(all, { hosts, serverHost: "nas01", compose: compose(liveNow) }).refuse.filter((f) => f.rule !== "R11"), where).toEqual([]);
+      }
     });
 
     it("renders every command as its own block holding only the command, on the recorded host as root (BOS-427)", async () => {
