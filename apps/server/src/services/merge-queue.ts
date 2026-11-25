@@ -3,11 +3,11 @@
 // gate that stops can be seen rather than asked about. Reads only what the server already records:
 // the tickets in review, their latest check results, the one open merge card per ticket, and the
 // merges this process is running. Nothing here changes the queue.
-import { and, asc, desc, eq, gte, inArray, isNotNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { type RiskTier, riskOf, ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { stageLine } from "./check-stage-line.js";
-import { agents, checkJobs, checkResults, checkWorkers, companies, decisions, reviewRequests, ticketDependencies, tickets } from "../db/schema.js";
+import { agents, checkJobs, checkResults, checkWorkers, companies, decisions, reviewRequests, runs, ticketDependencies, tickets } from "../db/schema.js";
 import { evaluate } from "./review-kinds.js";
 import { softHold, softHoldReason } from "./deploy-wait-hold.js";
 import { holdView, mergeHolds } from "./review-holds.js";
@@ -46,6 +46,24 @@ export async function endedMergePlaces(db: Db, companyId: string, ticketIds: str
   return out;
 }
 
+/**
+ * BOS-2609: an in-progress fix's words, read from live state: "being fixed by <agent> (started HH:MM UTC)" only while its
+ * assignee has a run going on it (a chat about it doesn't count), else who is assigned and that nobody is on it.
+ */
+async function fixPickupWords(db: Db, ticketId: string, assignee: string | null): Promise<string> {
+  if (!assignee) return "not picked up yet: nobody is assigned";
+  const [a] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, assignee));
+  const [run] = await db
+    .select({ at: runs.startedAt })
+    .from(runs)
+    .where(and(eq(runs.ticketId, ticketId), eq(runs.agentId, assignee), isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`))
+    .orderBy(desc(runs.startedAt))
+    .limit(1);
+  const name = a?.name ?? "its assignee";
+  if (!run) return `not picked up yet: ${name} is assigned, no run going`;
+  return `being fixed by ${name} (started ${String(run.at.getUTCHours()).padStart(2, "0")}:${String(run.at.getUTCMinutes()).padStart(2, "0")} UTC)`;
+}
+
 /** A fix that has been landing this long with no result is stalled (R28). */
 export const FIX_LANDING_LIMIT_MIN = 60;
 
@@ -62,7 +80,7 @@ async function heldBehindFixOf(
   const all = [...new Set([...heldWaits.values()].flatMap((h) => h.ids))];
   if (!all.length) return null;
   const fixes = await db
-    .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, companyId: tickets.companyId, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner, liveMarkedAt: tickets.liveMarkedAt })
+    .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, companyId: tickets.companyId, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner, liveMarkedAt: tickets.liveMarkedAt, assignee: tickets.assigneeAgentId })
     .from(tickets)
     .where(and(inArray(tickets.id, all), eq(tickets.fixesMergeCheck, true)));
   if (!fixes.length) return null;
@@ -95,7 +113,8 @@ async function heldBehindFixOf(
       // Sent back: its latest review round asked for changes. Nobody's review is moving it now, so the line is stuck on it.
       const [last] = await db.select({ round: reviewRequests.round }).from(reviewRequests).where(eq(reviewRequests.ticketId, f.id)).orderBy(desc(reviewRequests.round)).limit(1);
       const sentBack = last ? (await db.select({ id: reviewRequests.id }).from(reviewRequests).where(and(eq(reviewRequests.ticketId, f.id), eq(reviewRequests.round, last.round), eq(reviewRequests.status, "changes_requested"))).limit(1)).length > 0 : false;
-      stateText = sentBack ? "sent back for changes" : "being fixed";
+      // BOS-2609: "being fixed" only while its assignee has a run going on it; otherwise say who is assigned, or nobody.
+      stateText = sentBack ? "sent back for changes" : await fixPickupWords(db, f.id, f.assignee);
       if (sentBack) stalled = { reason: "it was sent back from review, so it is not landing yet" };
     } else {
       stateText = f.state === "blocked" ? "blocked" : f.state === "ready" || f.state === "backlog" ? "not started" : f.state;

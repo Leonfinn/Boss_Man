@@ -4,9 +4,13 @@
 // itself in self-deploy's finished(); every offer path asks heldFor(). The CEO, or the assignee of the ticket the CEO
 // linked to it (link_hold), releases it with one call (the deploy tool's release_hold); if nobody does within the hold time it is released as "unknown": the card then says the cause
 // isn't confirmed and recommends Not now, and the CEO is woken.
-import { and, desc, eq, isNull, lte, or } from "drizzle-orm";
+// BOS-2609: "while the failure is diagnosed" is made true. self-deploy opens an urgent diagnosis ticket itself, assigns
+// it, links it here and wakes the assignee on a reason no update or wrap-up holds; the words on screen say who is on it
+// only once their run has started (pickupWords), and the CEO is woken again after 15 minutes with no run.
+import { and, asc, desc, eq, gte, isNull, lte, ne, or, sql } from "drizzle-orm";
+import { ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { ownerHolds, settings, tickets } from "../db/schema.js";
+import { agents, companies, ownerHolds, runs, settings, tickets } from "../db/schema.js";
 import { atWords } from "./closed-notice.js";
 
 export type HoldSubject = "server_deploy" | "runner_update";
@@ -35,15 +39,80 @@ export async function currentHold(db: Db, subject: HoldSubject): Promise<OwnerHo
   return row ?? null;
 }
 
-/** Opens a hold after a failed update. A newer failure replaces the current hold (one current hold per subject). */
+/**
+ * Opens a hold after a failed update. A newer failure replaces the current hold (one current hold per subject). BOS-2609:
+ * the new hold keeps the replaced one's diagnosis ticket while that ticket is still open, so a repeat failure adds to the
+ * diagnosis under way instead of opening a second ticket.
+ */
 export async function openHold(db: Db, h: { subject: HoldSubject; commit: string; result: string; reason: string; now?: Date }): Promise<OwnerHold> {
   const now = h.now ?? new Date();
   const releaseBy = new Date(now.getTime() + (await holdMinutes(db)) * 60_000);
   return db.transaction(async (tx) => {
+    const [was] = await tx
+      .select({ ticketId: ownerHolds.ticketId })
+      .from(ownerHolds)
+      .innerJoin(tickets, eq(tickets.id, ownerHolds.ticketId))
+      .where(and(eq(ownerHolds.subject, h.subject), isNull(ownerHolds.endedAt), ne(tickets.systemState, "done")));
     await tx.update(ownerHolds).set({ endedAt: now }).where(and(eq(ownerHolds.subject, h.subject), isNull(ownerHolds.endedAt)));
-    const [row] = await tx.insert(ownerHolds).values({ subject: h.subject, commit: h.commit, result: h.result, reason: h.reason.slice(0, 500), createdAt: now, releaseBy }).returning();
+    const [row] = await tx.insert(ownerHolds).values({ subject: h.subject, commit: h.commit, result: h.result, reason: h.reason.slice(0, 500), createdAt: now, releaseBy, ticketId: was?.ticketId ?? null }).returning();
     return row!;
   });
+}
+
+/** BOS-2609: the wake about a failed update, for the diagnosis ticket's assignee and the CEO. It passes every update and wrap-up hold (wake-classes.ts). */
+export const FAILED_UPDATE_REASON = "failed update";
+/** BOS-2609: a hold whose diagnosis has not started this long after the wake wakes the CEO again, once. */
+export const PICKUP_CHASE_MS = 15 * 60_000;
+
+/** BOS-2609: records that Boss Man woke someone about this hold (the clock for the CEO's chase starts again). */
+export async function markWoken(db: Db, holdId: string, at = new Date()) {
+  await db.update(ownerHolds).set({ wokenAt: at, chasedAt: null }).where(eq(ownerHolds.id, holdId));
+}
+
+/** BOS-2609: links the hold to a diagnosis ticket Boss Man opened itself; unlike linkHold it never moves an existing link. */
+export async function linkNewDiagnosis(db: Db, holdId: string, ticketId: string): Promise<boolean> {
+  const [row] = await db.update(ownerHolds).set({ ticketId }).where(and(eq(ownerHolds.id, holdId), isNull(ownerHolds.ticketId), isNull(ownerHolds.endedAt))).returning({ id: ownerHolds.id });
+  return !!row;
+}
+
+/** Who is diagnosing a hold, read from live state (R59): the linked ticket, its assignee, and their first run on it since the hold began. */
+export type Pickup = { ticketId: string | null; ref: string | null; agent: string | null; startedAt: Date | null; wokenAt: Date | null };
+
+export async function pickupOf(db: Db, h: OwnerHold): Promise<Pickup> {
+  if (!h.ticketId) return { ticketId: null, ref: null, agent: null, startedAt: null, wokenAt: h.wokenAt };
+  const [t] = await db
+    .select({ number: tickets.number, prefix: companies.ticketPrefix, agentId: tickets.assigneeAgentId, agent: agents.name })
+    .from(tickets)
+    .innerJoin(companies, eq(companies.id, tickets.companyId))
+    .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
+    .where(eq(tickets.id, h.ticketId));
+  if (!t) return { ticketId: null, ref: null, agent: null, startedAt: null, wokenAt: h.wokenAt };
+  // A chat about the ticket is not the diagnosis; a work or reply run by its assignee is.
+  const [run] = t.agentId
+    ? await db
+        .select({ at: runs.startedAt })
+        .from(runs)
+        .where(and(eq(runs.ticketId, h.ticketId), eq(runs.agentId, t.agentId), gte(runs.startedAt, h.createdAt), sql`${runs.purpose} is distinct from 'chat'`))
+        .orderBy(asc(runs.startedAt))
+        .limit(1)
+    : [];
+  return { ticketId: h.ticketId, ref: ticketRef(t.prefix, t.number) ?? h.ticketId.slice(0, 8), agent: t.agent ?? null, startedAt: run?.at ?? null, wokenAt: h.wokenAt };
+}
+
+const hhmm = (d: Date) => `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")} UTC`;
+
+/**
+ * BOS-2609: one sentence on who is diagnosing the failure. It never says "being looked into" unless a run has started
+ * on the linked ticket; otherwise it names who was woken and when, or that nobody is assigned. `live` is for screens
+ * read now (the Updates panel); a card keeps its words once raised, so it gets the form that stays true (ticket and
+ * agent, no claim that work is under way).
+ */
+export function pickupWords(p: Pickup, live = true): string {
+  const woken = p.wokenAt ? ` woken at ${hhmm(p.wokenAt)}` : "";
+  if (!p.ticketId || !p.agent) return `Not picked up yet: nobody is assigned to diagnose it${p.wokenAt ? `; the CEO was${woken}` : ""}.`;
+  if (!live) return `The diagnosis is ${p.ref}, assigned to ${p.agent}.`;
+  if (p.startedAt) return `Being looked into by ${p.agent} on ${p.ref} (started ${hhmm(p.startedAt)}).`;
+  return `Not picked up yet: ${p.agent}${woken || " assigned"} (${p.ref}).`;
 }
 
 /** A successful update of this subject ends its hold: the failure is behind us. */
@@ -95,7 +164,9 @@ async function pickHold(db: Db, subject?: HoldSubject): Promise<{ ok: true; hold
 export async function linkHold(db: Db, r: { subject?: HoldSubject; ticketId: string }): Promise<{ ok: true; hold: OwnerHold } | { ok: false; text: string }> {
   const p = await pickHold(db, r.subject);
   if (!p.ok) return p;
-  const [row] = await db.update(ownerHolds).set({ ticketId: r.ticketId }).where(and(eq(ownerHolds.id, p.hold.id), isNull(ownerHolds.endedAt))).returning();
+  // BOS-2609: a new ticket clears the wake time, so the next self-deploy pass wakes its assignee on the reason no hold stops.
+  const moved = p.hold.ticketId !== r.ticketId ? { wokenAt: null, chasedAt: null } : {};
+  const [row] = await db.update(ownerHolds).set({ ticketId: r.ticketId, ...moved }).where(and(eq(ownerHolds.id, p.hold.id), isNull(ownerHolds.endedAt))).returning();
   return row ? { ok: true, hold: row } : { ok: false, text: "That hold ended a moment ago (a newer update finished). Nothing to link." };
 }
 
@@ -150,13 +221,14 @@ function failedWords(h: OwnerHold) {
  * owner's own button press raises a card then) and timed out both recommend Not now: no card claims a retry is safe
  * unless an agent said so.
  */
-export function holdCardLead(h: OwnerHold, commit: string): { lead: string; notNow: boolean } {
+export function holdCardLead(h: OwnerHold, commit: string, who: string): { lead: string; notNow: boolean } {
   const failed = failedWords(h);
   // Only the owner's own button press raises a card for the very version an agent said not to retry.
   if (h.outcome === "do_not_retry" && commit.toLowerCase() === h.commit.toLowerCase())
     return { lead: `${failed}, and it should not be tried again. ${h.releasedBy}: ${h.ownerText} Not now is recommended; a newer version is offered once there is one.`, notNow: true };
-  if (!h.releasedAt) return { lead: `Held: ${failed[0]!.toLowerCase()}${failed.slice(1)} and is being looked into. Trying again now may fail the same way, so Not now is recommended until we tell you a retry is safe. If a card asks you for the update's log, answer that one first.`, notNow: true };
-  if (h.outcome === "unknown") return { lead: `${failed}. Nobody has confirmed the cause yet, so trying again may fail the same way. Not now is recommended; we have been asked to look into it.`, notNow: true };
+  // BOS-2609: `who` (pickupWords) says who is diagnosing it; nothing here claims someone is unless they are.
+  if (!h.releasedAt) return { lead: `Held: ${failed[0]!.toLowerCase()}${failed.slice(1)}. ${who} Trying again now may fail the same way, so Not now is recommended until we tell you a retry is safe. If a card asks you for the update's log, answer that one first.`, notNow: true };
+  if (h.outcome === "unknown") return { lead: `${failed}. Nobody has confirmed the cause yet, so trying again may fail the same way. Not now is recommended. ${who}`, notNow: true };
   if (h.outcome === "do_not_retry") return { lead: `${failed}, and that version won't be offered again. ${h.releasedBy}: ${h.ownerText}`, notNow: false };
   return { lead: `${failed}. ${h.releasedBy} looked into it: ${h.ownerText}`, notNow: false };
 }

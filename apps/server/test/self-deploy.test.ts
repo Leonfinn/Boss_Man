@@ -6,12 +6,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { DEPLOY_UNCHANGED_REASON, selfDeployService } from "../src/services/self-deploy.js";
-import { currentHold, linkHold, releaseHold } from "../src/services/owner-holds.js";
+import { currentHold, FAILED_UPDATE_REASON, linkHold, releaseHold } from "../src/services/owner-holds.js";
 import { setOwnerTodoFacts } from "../src/services/decisions.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { openPglite } from "../src/db/client.js";
 import { commandProblem, lintOwnerSteps, parseStep, sh, step } from "../src/services/steps.js";
-import { agents, companies, activity, decisions, notifications, ownerHolds, projects, settings, tickets, wakes } from "../src/db/schema.js";
+import { agents, companies, activity, decisions, notifications, ownerHolds, projects, runs, settings, tickets, wakes } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -1821,9 +1821,10 @@ describe("after a failed update the next card is held while it is diagnosed (BOS
   const ceoWakes = async (c: Awaited<ReturnType<typeof setup>>) => {
     const [co] = await c.db.select().from(companies).limit(1);
     const [ceo] = await c.db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, co!.id), eq(agents.role, "ceo")));
-    return (await c.db.select().from(wakes)).filter((w) => w.agentId === ceo!.id && w.reason === DEPLOY_UNCHANGED_REASON);
+    // BOS-2609: every CEO wake about a broken update has its own reason, which passes every update and wrap-up hold.
+    return (await c.db.select().from(wakes)).filter((w) => w.agentId === ceo!.id && w.reason === FAILED_UPDATE_REASON);
   };
-  const release = (c: Awaited<ReturnType<typeof setup>>, outcome: "retry_safe" | "do_not_retry", ownerText: string, subject?: "server_deploy" | "runner_update") => releaseHold(c.db, { by: "Dougal", isCeo: true, outcome, ownerText, ...(subject ? { subject } : {}) });
+  const release =(c: Awaited<ReturnType<typeof setup>>, outcome: "retry_safe" | "do_not_retry", ownerText: string, subject?: "server_deploy" | "runner_update") => releaseHold(c.db, { by: "Dougal", isCeo: true, outcome, ownerText, ...(subject ? { subject } : {}) });
   const failOnce = async (c: Awaited<ReturnType<typeof setup>>) => {
     await c.available();
     await c.selfDeploy.sync();
@@ -1854,7 +1855,9 @@ describe("after a failed update the next card is held while it is diagnosed (BOS
     const r = (await c.selfDeploy.deployLatest()) as { decisionId: string };
     const [held] = await c.db.select().from(decisions).where(eq(decisions.id, r.decisionId));
     expect(held!.recommendedOption).toBe("Not now");
-    expect(held!.question).toMatch(/^Held: the last server update \(to bbbbbbbb\) failed at .* and is being looked into\./);
+    // BOS-2609: no project to open a diagnosis ticket in here, so the card says nobody is assigned, never "being looked into".
+    expect(held!.question).toMatch(/^Held: the last server update \(to bbbbbbbb\) failed at [^.]*\. Not picked up yet: nobody is assigned to diagnose it; the CEO was woken at \d\d:\d\d UTC\./);
+    expect(held!.question).not.toContain("being looked into");
     expect(held!.question).toContain("If a card asks you for the update's log, answer that one first.");
     const hold = (await currentHold(c.db, "server_deploy"))!;
     expect(held!.context).toMatchObject({ holdStamp: `${hold.id}:held` });
@@ -2016,7 +2019,7 @@ describe("after a failed update the next card is held while it is diagnosed (BOS
     await c.available({ deployed: B, tip: B });
     await c.status({ id: randomUUID(), target: "runner", result: "failed", message: "The runner image build failed.", from_commit: B, to_commit: B, ended: "2026-10-20T12:10:00Z" });
     await c.selfDeploy.sync();
-    expect(await c.selfDeploy.updateRunners()).toMatchObject({ queued: true, message: expect.stringContaining("The last runner update failed and is being looked into") });
+    expect(await c.selfDeploy.updateRunners()).toMatchObject({ queued: true, message: expect.stringContaining("The last runner update failed and the runners can't be updated until we know a retry is safe. Not picked up yet:") });
     await c.selfDeploy.sync();
     expect(await readdir(path.join(c.dir, "inbox"))).not.toContain("request.json");
     await release(c, "retry_safe", "Fixed.");
@@ -2039,6 +2042,151 @@ describe("after a failed update the next card is held while it is diagnosed (BOS
     const [gone] = await c.db.select().from(decisions).where(eq(decisions.id, trial!.id));
     expect(JSON.stringify((gone!.context as { closedNotice?: unknown }).closedNotice)).toContain("Withdrawn by Boss Man: the last update (to aaaaaaaa) failed, so this card is held while we find out why. What happens instead: a new card follows once we know a retry is safe, or in 120 minutes at the latest.");
     expect((await c.db.select().from(notifications)).map((n) => n.body).join("\n")).toContain("The next update card is held while we find out why.");
+  });
+});
+
+// BOS-2609 (25 Nov 16:02): the panel said the failed runner update was "being looked into" while nobody was assigned or
+// working on it; the owner had to ask. Boss Man now opens and assigns the diagnosis itself, and the panel says who is on
+// it only once their run has started.
+describe("a failed update is picked up by someone, and the panel says who (BOS-2609)", () => {
+  type Ctx = Awaited<ReturnType<typeof setup>>;
+  async function team(c: Ctx, opts: { infra?: boolean } = {}) {
+    const [co] = await c.db.select().from(companies).limit(1);
+    const [ceo] = await c.db.select({ id: agents.id, name: agents.name }).from(agents).where(and(eq(agents.companyId, co!.id), eq(agents.role, "ceo")));
+    const p = (await c.req("POST", `/api/companies/${co!.id}/projects`, { name: "Development" })).json() as { id: string };
+    await c.db.update(projects).set({ repoUrl: "https://example.com/boss-man.git" }).where(eq(projects.id, p.id));
+    const [infra] = opts.infra ? await c.db.insert(agents).values({ companyId: co!.id, name: "Dougal", role: "worker", agentKind: "claude", template: "senior-infra" }).returning() : [];
+    return { co: co!, ceo: ceo!, project: p, infra };
+  }
+  const fail = async (c: Ctx, ended = "2026-10-20T12:03:00Z") => {
+    await c.status({ id: randomUUID(), target: "runner", result: "failed", message: "The runner image build failed: no space left on device.", from_commit: B, to_commit: B, ended });
+    await c.available({ deployed: B, tip: B });
+    await c.selfDeploy.sync();
+  };
+  const diagnoses = (c: Ctx) => c.db.select().from(tickets);
+  const words = async (c: Ctx) => (await c.selfDeploy.overview()).failureHolds![0]!.words;
+  const refOf = async (c: Ctx, t: { number: number | null }) => {
+    const [co] = await c.db.select().from(companies).limit(1);
+    return `${co!.ticketPrefix || "T"}-${t.number}`;
+  };
+
+  it("failure → an urgent ticket with the failure's facts, assigned to the infrastructure engineer, linked to the hold, and they are woken on it", async () => {
+    const c = (ctx = await setup());
+    const { ceo, project, infra } = await team(c, { infra: true });
+    await fail(c);
+    const [t, ...more] = await diagnoses(c);
+    expect(more).toHaveLength(0);
+    expect(t).toMatchObject({ projectId: project.id, assigneeAgentId: infra!.id, urgent: true, risk: "medium", systemState: "ready" });
+    expect(t!.title).toBe("Diagnose the failed runner update (bbbbbbbb, failed)");
+    expect(t!.body).toContain("no space left on device");
+    expect(t!.body).toContain(B);
+    expect(t!.body).toContain("Host: nas01.");
+    expect(await currentHold(c.db, "runner_update")).toMatchObject({ ticketId: t!.id, wokenAt: expect.any(Date) });
+    const all = await c.db.select().from(wakes);
+    // The board's own "assigned" notice may come too; the wake that passes the holds is the failed-update one.
+    expect(all.filter((w) => w.agentId === infra!.id && w.reason === FAILED_UPDATE_REASON).map((w) => w.ticketId)).toEqual([t!.id]);
+    // The CEO is told too, with the ticket named, on the reason that passes every hold.
+    const told = all.filter((w) => w.agentId === ceo.id && w.reason === FAILED_UPDATE_REASON);
+    expect(told).toHaveLength(1);
+    expect(told[0]!.note).toContain(`the diagnosis ticket ${await refOf(c, t!)}, assigned to Dougal, linked to the hold`);
+    // So Dougal may release it without the CEO linking it first.
+    expect((await releaseHold(c.db, { by: "Dougal", agentId: infra!.id, isCeo: false, outcome: "retry_safe", ownerText: "Disk freed." })).ok).toBe(true);
+  });
+
+  it("with no infrastructure engineer the CEO gets the ticket", async () => {
+    const c = (ctx = await setup());
+    const { ceo } = await team(c);
+    await fail(c);
+    const [t] = await diagnoses(c);
+    expect(t!.assigneeAgentId).toBe(ceo.id);
+    expect((await c.db.select().from(wakes)).some((w) => w.agentId === ceo.id && w.ticketId === t!.id && w.reason === FAILED_UPDATE_REASON)).toBe(true);
+  });
+
+  it("the panel says 'Not picked up yet' until the assignee's run starts, then who and since when", async () => {
+    const c = (ctx = await setup());
+    const { co, infra } = await team(c, { infra: true });
+    await fail(c);
+    const [t] = await diagnoses(c);
+    const ref = await refOf(c, t!);
+    expect(await words(c)).toMatch(new RegExp(`^Held: the last runner update \\(built from bbbbbbbb\\) failed at [^.]*\\. Not picked up yet: Dougal woken at \\d\\d:\\d\\d UTC \\(${ref}\\)\\.`));
+    expect(await words(c)).not.toContain("being looked into");
+    // A chat about the ticket, or a run from before the failure, is not the diagnosis.
+    const hold = (await currentHold(c.db, "runner_update"))!;
+    await c.db.insert(runs).values({ companyId: co.id, agentId: infra!.id, ticketId: t!.id, purpose: "chat", startedAt: new Date(hold.createdAt.getTime() + 60_000) });
+    await c.db.insert(runs).values({ companyId: co.id, agentId: infra!.id, ticketId: t!.id, startedAt: new Date(hold.createdAt.getTime() - 60_000), endedAt: hold.createdAt });
+    expect(await words(c)).toContain("Not picked up yet: Dougal woken at");
+    const at = new Date(Date.UTC(2030, 0, 1, 16, 5));
+    await c.db.insert(runs).values({ companyId: co.id, agentId: infra!.id, ticketId: t!.id, startedAt: at });
+    expect(await words(c)).toContain(`Being looked into by Dougal on ${ref} (started 16:05 UTC).`);
+    // The owner's own Build and update runners press says the same, read at that moment.
+    expect(await c.selfDeploy.updateRunners()).toMatchObject({ message: expect.stringContaining(`Being looked into by Dougal on ${ref} (started 16:05 UTC).`) });
+  });
+
+  it("a repeat failure while the ticket is open opens no second ticket; the hold keeps it and the assignee is woken again", async () => {
+    const c = (ctx = await setup());
+    const { infra } = await team(c, { infra: true });
+    await fail(c);
+    const first = (await currentHold(c.db, "runner_update"))!;
+    await fail(c, "2026-10-20T12:30:00Z");
+    const second = (await currentHold(c.db, "runner_update"))!;
+    expect(second.id).not.toBe(first.id);
+    const ts = await diagnoses(c);
+    expect(ts).toHaveLength(1);
+    expect(second.ticketId).toBe(ts[0]!.id);
+    const notes = (await c.db.select().from(wakes)).filter((w) => w.agentId === infra!.id).map((w) => w.note ?? "").join("\n");
+    expect(notes).toContain("failed again while this ticket was diagnosing the last failure");
+    // Once that ticket is done, the next failure gets a fresh one.
+    await c.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, ts[0]!.id));
+    await fail(c, "2026-10-20T13:00:00Z");
+    expect(await diagnoses(c)).toHaveLength(2);
+  });
+
+  it("the CEO linking the hold to another ticket wakes its assignee on the reason no hold stops, once", async () => {
+    const c = (ctx = await setup());
+    const { co, project } = await team(c, { infra: true });
+    await fail(c);
+    const [rex] = await c.db.insert(agents).values({ companyId: co.id, name: "Rex", role: "worker", agentKind: "claude" }).returning();
+    const other = (await c.req("POST", `/api/projects/${project.id}/tickets`, { title: "Runner build disk", assigneeAgentId: rex!.id })).json() as { id: string; number: number };
+    expect((await linkHold(c.db, { ticketId: other.id })).ok).toBe(true);
+    expect(await currentHold(c.db, "runner_update")).toMatchObject({ ticketId: other.id, wokenAt: null });
+    const rexWakes = async () => (await c.db.select().from(wakes)).filter((w) => w.agentId === rex!.id && w.reason === FAILED_UPDATE_REASON);
+    await c.available({ deployed: B, tip: B });
+    await c.selfDeploy.sync();
+    expect((await rexWakes()).map((w) => w.ticketId)).toEqual([other.id]);
+    expect(await words(c)).toMatch(new RegExp(`Not picked up yet: Rex woken at \\d\\d:\\d\\d UTC \\(${await refOf(c, other)}\\)\\.`));
+    await c.available({ deployed: B, tip: B });
+    await c.selfDeploy.sync();
+    expect(await rexWakes()).toHaveLength(1);
+  });
+
+  it("15 minutes with no run wakes the CEO again, once; a started run stops it; a restart during the hold keeps it all", async () => {
+    const c = (ctx = await setup());
+    const { ceo, co, infra } = await team(c, { infra: true });
+    await fail(c);
+    const [t] = await diagnoses(c);
+    const chases = async () => (await c.db.select().from(wakes)).filter((w) => w.agentId === ceo.id && w.reason === FAILED_UPDATE_REASON).map((w) => w.note ?? "").join("\n").split("Nobody has started on the failed runner update").length - 1;
+    await c.available({ deployed: B, tip: B });
+    await c.selfDeploy.sync();
+    expect(await chases()).toBe(0); // not 15 minutes yet
+    await c.db.update(ownerHolds).set({ wokenAt: new Date(Date.now() - 16 * 60_000) });
+    // A restart: a fresh service on the same database, with no memory of the last pass.
+    const woken: { agentId: string; reason: string; note: string }[] = [];
+    const fresh = selfDeployService(c.db, { dir: c.dir, notify: async () => undefined, wake: async (agentId, input) => void woken.push({ agentId, ...input }) });
+    await fresh.sync();
+    expect(woken.map((w) => [w.agentId, w.reason])).toEqual([[ceo.id, FAILED_UPDATE_REASON]]);
+    expect(woken[0]!.note).toContain(`${await refOf(c, t!)}, assigned to Dougal`);
+    expect(woken[0]!.note).toContain('says "Not picked up yet"');
+    expect(await currentHold(c.db, "runner_update")).toMatchObject({ ticketId: t!.id, releasedAt: null, chasedAt: expect.any(Date) });
+    // Only once.
+    await c.available({ deployed: B, tip: B });
+    await fresh.sync();
+    expect(woken).toHaveLength(1);
+    // A hold whose diagnosis has started is never chased.
+    await c.db.update(ownerHolds).set({ chasedAt: null });
+    await c.db.insert(runs).values({ companyId: co.id, agentId: infra!.id, ticketId: t!.id, startedAt: new Date() });
+    await c.available({ deployed: B, tip: B });
+    await fresh.sync();
+    expect(woken).toHaveLength(1);
   });
 });
 

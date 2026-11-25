@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { checkJobs, checkResults, companies, decisions, reviewRequests, settings, ticketDependencies, ticketReviews, tickets } from "../src/db/schema.js";
+import { agents, checkJobs, checkResults, companies, decisions, reviewRequests, runs, settings, ticketDependencies, ticketReviews, tickets } from "../src/db/schema.js";
 import { failingLine, failingStep, mergeQueueService } from "../src/services/merge-queue.js";
 import { CHECK_QUEUE_MODE_KEY, CHECK_SLOTS_KEY } from "../src/services/check-queue.js";
 
@@ -52,7 +52,17 @@ describe("merge queue screen (BOS-587)", () => {
       await approve(c, t.id);
     }
     const data = await queue(c);
-    expect(data.line).toMatchObject({ state: "held_behind_fix", held: 2, fixes: [{ ticketId: fix.id, stateText: "being fixed", ownerUpdate: false }] });
+    // BOS-2609: nobody is assigned and no run is going, so the line never says "being fixed".
+    expect(data.line).toMatchObject({ state: "held_behind_fix", held: 2, fixes: [{ ticketId: fix.id, stateText: "not picked up yet: nobody is assigned", ownerUpdate: false }] });
+    // Assigned, but no run: it names the agent and says nobody is on it.
+    const [zippy] = await c.db.insert(agents).values({ companyId: c.company.id, name: "Zippy", role: "worker", agentKind: "claude" }).returning();
+    await c.db.update(tickets).set({ assigneeAgentId: zippy!.id }).where(eq(tickets.id, fix.id));
+    expect((await queue(c)).line).toMatchObject({ fixes: [{ stateText: "not picked up yet: Zippy is assigned, no run going" }] });
+    // A chat about it is not the fix; a work run is, and the line names it with its start.
+    await c.db.insert(runs).values({ companyId: c.company.id, agentId: zippy!.id, ticketId: fix.id, purpose: "chat", startedAt: new Date("2026-11-25T16:01:00Z") });
+    expect((await queue(c)).line).toMatchObject({ fixes: [{ stateText: "not picked up yet: Zippy is assigned, no run going" }] });
+    await c.db.insert(runs).values({ companyId: c.company.id, agentId: zippy!.id, ticketId: fix.id, startedAt: new Date("2026-11-25T16:05:00Z") });
+    expect((await queue(c)).line).toMatchObject({ fixes: [{ stateText: "being fixed by Zippy (started 16:05 UTC)" }] });
     await c.db.update(tickets).set({ systemState: "ready" }).where(eq(tickets.id, fix.id));
     expect((await queue(c)).line).toMatchObject({ state: "stuck", cause: "fix_stalled", others: 2 });
   });
@@ -70,14 +80,14 @@ describe("merge queue screen (BOS-587)", () => {
       return fix;
     }
 
-    it("a fix that was sent back is stalled, not 'being fixed'", async () => {
+    it("a fix that was sent back is stalled, not 'being fixed by'", async () => {
       const c = (ctx = await setup());
       const fix = await heldTwoBehind(c, { systemState: "in_progress" });
       await c.db.insert(reviewRequests).values({ ticketId: fix.id, kind: "code", round: 1, status: "changes_requested" });
       expect((await queue(c)).line).toMatchObject({ state: "stuck", cause: "fix_stalled", others: 2, reason: expect.stringMatching(/sent back/) });
       // A later round that is still pending (back with its reviewers) is not a sent-back fix.
       await c.db.insert(reviewRequests).values({ ticketId: fix.id, kind: "code", round: 2, status: "pending" });
-      expect((await queue(c)).line).toMatchObject({ state: "held_behind_fix", fixes: [{ stateText: "being fixed" }] });
+      expect((await queue(c)).line).toMatchObject({ state: "held_behind_fix", fixes: [{ stateText: "not picked up yet: nobody is assigned" }] });
     });
 
     it("an approved fix that has waited over an hour to land is stalled, whoever owns the wait", async () => {

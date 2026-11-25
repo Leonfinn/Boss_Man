@@ -14,7 +14,8 @@ export function healthLine(h: WatchdogHealthData, now = Date.now()): { text: str
   const lastSweep = h.lastSweepAt ? new Date(h.lastSweepAt).getTime() : null;
   const late = lastSweep !== null && now - lastSweep > 15 * 60_000;
   const check = lastSweep === null ? "no check yet" : now - lastSweep < 60_000 ? "last check just now" : `last check ${ageLabel(now - lastSweep)}`;
-  const handled = h.openFlags === 0 ? "no open issues" : `${h.openFlags} issue${h.openFlags === 1 ? "" : "s"} being handled`;
+  // BOS-2609: an open flag is not proof that anyone is working on it, so the line counts them and claims nothing more.
+  const handled = h.openFlags === 0 ? "no open issues" : `${h.openFlags} open issue${h.openFlags === 1 ? "" : "s"}`;
   // Record only (BOS-166): it is watching, but it reaches nobody, so the line says so.
   if (h.settings.recordOnly) return { text: `Watchdog: record only (not acting) · ${check} · ${handled}`, tone: late ? "amber" : "" };
   return { text: `Watchdog: ${check} · ${handled}`, tone: late ? "amber" : "green" };
