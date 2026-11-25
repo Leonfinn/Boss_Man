@@ -27,6 +27,18 @@ Release step: adding to this file is part of every release (Release Manager, on 
 Check before committing: pnpm --filter @boss-man/site build (it stops on a heading that is not a date, or one out of order).
 -->
 
+## 25 November 2026
+
+- In Settings → Server and runner → Updates, "Recent updates" no longer leaves older server updates stuck on "Waiting". The one now live says Live, and one a newer update took over from says Replaced. Each row shows its real number of changes, not "10 changes" on every row.
+- The Updates banner describes the newest update that is waiting or queued, not an older "Update failed" message, and "Try again" is hidden while that newer update is pending.
+- Pressing "Try again" after a failed update no longer makes a second Deploy card for a version you have already approved. It says that update is already approved and waiting, so you don't need to press again.
+- If a server update's build fails on a brief registry or network error, it waits 20 seconds and builds once more instead of failing the whole update.
+- After a server or runner update fails, its next update card is held back while the failure is looked into, so you are not offered a retry that may fail the same way. The card comes once a retry is known to be safe, or after 2 hours saying the cause is unknown, with Not now recommended. Cards you already had for that version are withdrawn, so you never see two cards that disagree.
+- While an update is held like this, the Updates status box says so ("Held: … being looked into"). It shows nothing when there is no hold.
+- The Roadmap's milestone timeline is redesigned: one row per milestone with one status, long titles that wrap without overlapping or being cut off, done milestones left out, and labelled charts. The timeline and the list now agree on each milestone's status and counts.
+- A page waiting on an answer that never comes no longer sits on "Checking…" until you reload. The read gives up after 30 seconds and tries again by itself.
+- When you answer a card that asked you for information, such as a log, a screenshot or a value, the result and next step now reach your chat and feed without you asking. If nothing arrives within 30 minutes, the CEO is asked to post it.
+
 ## 24 November 2026
 
 - The Feedback page has a summary above the list: how many notes are waiting to be triaged, how long the oldest has waited (with a link to it), and this week's notes by source. The list can be shown newest first or oldest first, the order is kept in the page address, "Show older" reads notes past the newest 50, and Download CSV follows the order you chose.
