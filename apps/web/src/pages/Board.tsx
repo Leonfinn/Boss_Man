@@ -4,7 +4,8 @@ import { buildCsv, download } from "../csv";
 import { api, today, FEATURE_STATUSES, FEATURE_STATUS_LABEL, RISKS, type Board as BoardData, type Company, type Feature, type FeatureStatus, type Project, type Risk, type ScoredFeatures } from "../api";
 import { BULK_TICKET_MAX, isLiveCheckWait, ticketRef, type Criterion } from "@boss-man/shared";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
-import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
+import { OwnerAsksLaneHead, OwnerAsksStrip, SameQuestionLine, sameQuestionAs, sameQuestionText } from "../components/OwnerAsks";
+import { OwnerMessageBox,tooLongToSend } from "../components/OwnerMessageBox";
 import { art } from "../brand";
 import { RiskHelp, useRiskTiers, type RiskTiers } from "../components/RiskHelp";
 import { State } from "../components/State";
@@ -661,7 +662,7 @@ export function BulkBar({ count, agents, busy, result, onRun, onClear }: { count
   );
 }
 
-function TicketCard({ waiters, t, mine, merging, who, name, prefix, tiers, numberOf, onRunNow, runState, mergeLine, quiet, select }: { waiters?: BoardTicket[]; select?: { checked: boolean; onClick: (id: string, shift: boolean) => void }; quiet?: boolean; runState?: { busy: boolean; error?: string }; mergeLine?: StatusLine; t: BoardTicket; mine: boolean; merging: boolean; who: Company["agents"][number] | undefined; name: string; prefix: string | null | undefined; tiers: RiskTiers; numberOf: (id: string) => number | null | undefined; onRunNow: (id: string) => void }) {
+function TicketCard({ sameAs, waiters, t, mine, merging, who, name, prefix, tiers, numberOf, onRunNow, runState, mergeLine, quiet, select }: { sameAs?: BoardTicket[]; waiters?: BoardTicket[]; select?: { checked: boolean; onClick: (id: string, shift: boolean) => void }; quiet?: boolean; runState?: { busy: boolean; error?: string }; mergeLine?: StatusLine; t: BoardTicket; mine: boolean; merging: boolean; who: Company["agents"][number] | undefined; name: string; prefix: string | null | undefined; tiers: RiskTiers; numberOf: (id: string) => number | null | undefined; onRunNow: (id: string) => void }) {
   const [open, setOpen] = useState(false);
   const bodyId = useId();
   const titleRef = useRef<HTMLAnchorElement>(null);
@@ -738,7 +739,8 @@ function TicketCard({ waiters, t, mine, merging, who, name, prefix, tiers, numbe
         <a ref={titleRef} className={open ? undefined : "clamp2"} href={`#/tickets/${t.id}`} data-shortcut-open title={hover(titleCut, t.title)}>{t.title}</a>
       </h3>
       {mine && <span ref={noteRef} className={`note${open ? "" : " clamp2"}`} title={hover(noteCut, noteText)}>{noteText}</span>}
-      {t.recheckingBy && !mine && <span className="note" data-testid="board-rechecking">Card being re-checked by {t.recheckingBy}</span>}
+      {mine && sameAs && sameAs.length > 0 && <SameQuestionLine text={sameQuestionText(sameAs, (n) => ticketRef(prefix, n) ?? `#${n}`)} />}
+      {t.recheckingBy && !mine &&<span className="note" data-testid="board-rechecking">Card being re-checked by {t.recheckingBy}</span>}
       {mine && (
         <a className="btn primary small" href={t.ownerQuestion ? (t.ownerQuestionId ? `#/decisions/${t.ownerQuestionId}` : "#/decisions") : `#/tickets/${t.id}`} style={{ justifyContent: "center" }}>
           {t.ownerQuestion ? "Answer in Decisions" : "Review and approve"}
@@ -1262,17 +1264,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           {board.error.message}
         </p>
       )}
-      {waiting.length > 0 && (
-        <a className="strip" href="#your-review" onClick={(e) => { e.preventDefault(); document.getElementById("your-review")?.scrollIntoView?.({ behavior: "smooth", inline: "center" }); }}>
-          <span>
-            <span className="count-badge">{waiting.length}</span>
-            <span>
-              <strong>{waiting.length === 1 ? "1 task is waiting on you." : `${waiting.length} tasks are waiting on you.`}</strong> {waiting[0]!.title}
-            </span>
-          </span>
-          <strong style={{ whiteSpace: "nowrap" }}>Review it <span aria-hidden="true">→</span></strong>
-        </a>
-      )}
+      {waiting.length > 0 && <OwnerAsksStrip waiting={waiting} />}
       {!!board.data?.withoutTicket?.length && (
         <section className="unticketed" aria-label="Working on something other than a ticket">
           <strong>Working on something other than a ticket</strong>
@@ -1420,12 +1412,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
             return (
               <section className={`lane${mine ? " mine" : ""}${parked ? " parked" : ""}`} key={mine ? "your-review" : merging ? "merging" : held ? "held" : liveCheck ? "live-check" : checking ? "being-checked" : col.id} id={mine ? "your-review" : undefined} aria-labelledby={mine ? "lane-your-review" : merging ? "lane-merging" : held ? "lane-held" : liveCheck ? "lane-live-check" : checking ? "lane-being-checked" : `lane-${col.id}`}>
                 {mine ? (
-                  <header className="lane-head">
-                    <div className="lane-title">
-                      <h2 id="lane-your-review">Your review</h2>
-                      <span className="count-badge">{shown.length}</span>
-                    </div>
-                  </header>
+                  <OwnerAsksLaneHead waiting={shown} />
                 ) : merging ? (
                   <header className="lane-head">
                     <div className="lane-title">
@@ -1528,6 +1515,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                     <TicketCard
                       key={t.id}
                       quiet={parked}
+                      sameAs={mine ? sameQuestionAs(t, waiting) : undefined}
                       waiters={waitersOf.get(t.id)}
                       select={selecting ? { checked: selected.has(t.id), onClick: pick } : undefined}
                       t={t}
