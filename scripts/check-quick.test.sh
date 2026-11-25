@@ -745,7 +745,7 @@ grep -q "^SQUEEZE  pass: apps/server/test/ok.test.ts" "$t/out" || fail "squeeze 
 grep -q "^SQUEEZE  FAILED on a slow, busy CPU (report only, does not fail this check): apps/server/test/fails.test.ts" "$t/out" || fail "squeeze fail line: $(cat "$t/out")"
 grep -q "AssertionError: too slow" "$t/out" || fail "squeeze fail output not shown"
 grep -q "^check-quick: all steps passed" "$t/out" || fail "squeeze fail changed the verdict"
-grep -q "^check-quick: squeeze (report only): 2 of 2 test files run on a slow CPU, 1 failed, 0 no answer, 0 could not run, 0 left out" "$t/out" || fail "squeeze note: $(cat "$t/out")"
+grep -q "^check-quick: squeeze (report only): 2 of 2 test files run on a slow CPU, 1 failed, 0 no answer, 0 could not run, 0 skipped for lack of time, 0 left out" "$t/out" || fail "squeeze note: $(cat "$t/out")"
 # No answer and a run that could not start are named as such, not as findings; more than 3 files: 3 run and the rest are counted.
 commit apps/web/src/hangs.test.ts apps/web/src/errors.test.ts apps/launcher/test/l.test.ts
 run 0 "squeeze: cap" env
@@ -758,6 +758,12 @@ notlogged "squeeze " "squeeze after a failed step"
 run 0 "squeeze: off" env CHECK_QUICK_SQUEEZE=0
 notlogged "squeeze " "squeeze off"
 ! grep -q "squeeze (report only)" "$t/out" || fail "squeeze note shown while off"
+# BOS-2603: with too little of the time budget left the squeeze is skipped, said so, and the verdict stays a pass.
+run 0 "squeeze: no time left" env CHECK_QUICK_BUDGET_SECONDS=10
+notlogged "squeeze " "squeeze with no time left"
+grep -q "^SQUEEZE  skipped: 3 files, not enough time left (" "$t/out" || fail "squeeze skip line: $(cat "$t/out")"
+grep -q "^check-quick: all steps passed" "$t/out" || fail "squeeze skip changed the verdict"
+grep -q "3 skipped for lack of time, [0-9]* left out" "$t/out" || fail "squeeze skip note: $(cat "$t/out")"
 # A hang and an error are reported without failing (own run: only those two files).
 g reset -q --hard origin/main
 commit apps/web/src/hangs.test.ts apps/web/src/errors.test.ts
