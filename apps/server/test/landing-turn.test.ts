@@ -2,7 +2,7 @@
 // other tickets' pushes wait for it, but never longer than the cap. The clock is injected: no test waits on the wall clock.
 import { describe, expect, it } from "vitest";
 import { LandingTurns, REBUILDS_FOR_TURN } from "../src/services/landing-turn.js";
-import { holderPhase, mergeState } from "../src/services/merge-status.js";
+import { ciPhaseWords, holderPhase, mergeState } from "../src/services/merge-status.js";
 
 const P = "project-1";
 const HOUR = 60 * 60_000;
@@ -189,6 +189,12 @@ describe("mergeState waiting on GitHub CI (BOS-2605)", () => {
     const since = Date.parse("2026-11-25T15:25:39Z");
     expect(await mergeState.call({ landing: l } as never, ctx({ ci: since }), "a")).toBe("merge waiting for GitHub CI since 15:25 UTC");
     expect(holderPhase({ ...(ctx({ ci: since }) as object), landings: new Map(), phases: new Map() } as never, "a")).toBe("waiting for GitHub CI since 15:25 UTC");
+  });
+  it("adds the time its check passed when it is known (BOS-2605 criterion 1)", () => {
+    const since = Date.parse("2026-11-25T15:25:39Z");
+    const passed = Date.parse("2026-11-25T15:10:05Z");
+    expect(ciPhaseWords(since, passed)).toBe("waiting for GitHub CI since 15:25 UTC (its check passed at 15:10)");
+    expect(holderPhase({ ...(ctx({ ci: since }) as object), landings: new Map(), phases: new Map() } as never, "a", passed)).toBe("waiting for GitHub CI since 15:25 UTC (its check passed at 15:10)");
   });
   it("without a CI wait it still says merging", async () => {
     expect(await mergeState.call({ landing: l } as never, ctx({}), "a")).toBe("merge merging (since 15:25 UTC)");

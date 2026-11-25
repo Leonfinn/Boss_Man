@@ -91,7 +91,7 @@ function inWords(f: TrainFacts, n: Map<string, Named>): MergeTrainStatus["heldAl
 }
 
 /** server_status mergeTrain: each of the company's projects this server has a train for. Read only. */
-export async function mergeTrainStatus(db: Db, companyId: string, facts: (projectId: string) => TrainFacts | null = trainFacts, seatInfo?: (ticketId: string) => SeatPhase): Promise<MergeTrainStatus[]> {
+export async function mergeTrainStatus(db: Db, companyId: string, facts: (projectId: string) => TrainFacts | null = trainFacts, seatInfo?: (ticketId: string) => SeatPhase | Promise<SeatPhase>): Promise<MergeTrainStatus[]> {
   const rows = await db.select({ id: projects.id, name: projects.name }).from(projects).where(eq(projects.companyId, companyId));
   const out: MergeTrainStatus[] = [];
   for (const p of rows) {
@@ -103,7 +103,7 @@ export async function mergeTrainStatus(db: Db, companyId: string, facts: (projec
       project: p.name,
       seats: f.seats,
       seated: f.seated.map((id) => label(n.get(id), id)),
-      seatDetails: f.seated.map((id) => ({ ticket: label(n.get(id), id), ...(seatInfo?.(id) ?? { phase: "unknown", ciSince: null, ciRunning: [] }) })),
+      seatDetails: await Promise.all(f.seated.map(async (id) => ({ ticket: label(n.get(id), id), ...((await seatInfo?.(id)) ?? { phase: "unknown", ciSince: null, ciRunning: [] }) }))),
       waiting: f.waiting.map((id) => label(n.get(id), id)),
       heldAlone: inWords(f, n),
       emptySeatSince: iso(f.emptySeatSince),

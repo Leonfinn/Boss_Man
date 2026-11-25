@@ -46,6 +46,23 @@ export async function endedMergePlaces(db: Db, companyId: string, ticketIds: str
   return out;
 }
 
+/** BOS-2605: when the latest ended merge check of each ticket finished (ms), for "its check passed at HH:MM". Missing: none ended yet, or a read error. */
+export async function endedMergeAt(db: Db, ticketIds: string[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  if (!ticketIds.length) return out;
+  try {
+    const rows = await db
+      .select({ ticketId: checkJobs.ticketId, endedAt: checkJobs.endedAt })
+      .from(checkJobs)
+      .where(and(eq(checkJobs.kind, "merge"), inArray(checkJobs.ticketId, ticketIds), isNotNull(checkJobs.startedAt), isNotNull(checkJobs.endedAt)))
+      .orderBy(desc(checkJobs.endedAt));
+    for (const r of rows) if (r.endedAt && !out.has(r.ticketId)) out.set(r.ticketId, r.endedAt.getTime());
+  } catch {
+    // A failed read only drops the clause.
+  }
+  return out;
+}
+
 /** A fix that has been landing this long with no result is stalled (R28). */
 export const FIX_LANDING_LIMIT_MIN = 60;
 
@@ -371,8 +388,9 @@ export function carriedNoteText(note: string | null | undefined): string {
  * BOS-1871: the words for a landing that waits only for GitHub CI on its merge copy, e.g. "waiting for GitHub CI (check), 12 min
  * so far". Written where that wait is decided (the landing's own CI marker), so the screen can't fall through to "next in line".
  */
-export function ciWaitLabel(ci: { minutes: number; waiting: string[]; workflowOnly?: boolean }): string {
-  return `waiting for GitHub CI on its merge copy${ci.waiting.length ? ` (${ci.waiting.join(", ")})` : ""}, ${waitedText(Math.max(0, ci.minutes))} so far${ci.workflowOnly ? " (workflow change: GitHub runs every job, usually longer)" : ""}`;
+export function ciWaitLabel(ci: { minutes: number; waiting: string[]; workflowOnly?: boolean; checkPassedMs?: number }): string {
+  const passed = ci.checkPassedMs === undefined ? "" : ` (its check passed at ${new Date(ci.checkPassedMs).toISOString().slice(11, 16)})`;
+  return `waiting for GitHub CI on its merge copy${ci.waiting.length ? ` (${ci.waiting.join(", ")})` : ""}, ${waitedText(Math.max(0, ci.minutes))} so far${passed}${ci.workflowOnly ? " (workflow change: GitHub runs every job, usually longer)" : ""}`;
 }
 
 /** BOS-2605 (F4): every changed file is under .github/workflows/, which switches on every optional CI job. False for no files. */
@@ -775,7 +793,8 @@ export function mergeQueueService(
         if (ci) {
           const since = new Date(ci.since);
           const [files] = await db.select({ f: tickets.diffFiles }).from(tickets).where(eq(tickets.id, r.id));
-          const words = ciWaitLabel({ minutes: mins(t.getTime() - since.getTime()), waiting: ci.waiting, workflowOnly: workflowOnlyChange(files?.f ?? []) });
+          const passedAt = (await endedMergeAt(db, [r.id])).get(r.id);
+          const words = ciWaitLabel({ minutes: mins(t.getTime() - since.getTime()), waiting: ci.waiting, workflowOnly: workflowOnlyChange(files?.f ?? []), ...(passedAt !== undefined ? { checkPassedMs: passedAt } : {}) });
           sinceOf.set(r.id, since.toISOString());
           waiting.push({
             ticketId: r.id,
