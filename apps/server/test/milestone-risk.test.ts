@@ -193,6 +193,114 @@ describe("milestone at risk: who wakes the CEO, and when (BOS-2581)", () => {
   });
 });
 
+describe("milestone at risk: the wake is never lost (BOS-2627)", () => {
+  /** A sweep whose wake goes through a scheduler-like queue: outcomes are whatever `outcome` says, and failures throw. */
+  const queued = (c: Awaited<ReturnType<typeof setup>>, now: string, outcome: { value: unknown } | (() => unknown)) =>
+    milestoneRiskService(c.db, {
+      planning: c.planning,
+      wake: async (input) => {
+        c.woken.push(input);
+        return typeof outcome === "function" ? outcome() : outcome.value;
+      },
+      now: () => new Date(`${now}T09:00:00Z`),
+    });
+
+  it("a wake that was not started (dropped) is tried again next pass, and only a real wake keeps it quiet", async () => {
+    const c = await setup();
+    const { m } = await lateNow(c);
+    await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
+    // The first pass's wake comes back "dropped": the milestone was not woken, so the next pass tries again.
+    expect(await queued(c, "2026-10-16", { value: { outcome: "dropped" } }).run()).toEqual({ woken: 0 });
+    const [kept] = await c.db.select().from(settings).where(eq(settings.key, `milestone_risk:${m.id}`));
+    expect(kept!.value).toEqual({ status: null, managed: true });
+    // Next pass: this time it really starts; the CEO is woken and it goes quiet.
+    expect(await queued(c, "2026-10-17", { value: { outcome: "queued" } }).run()).toEqual({ woken: 1 });
+    expect(c.woken).toHaveLength(2);
+    expect(await queued(c, "2026-10-18", { value: { outcome: "queued" } }).run()).toEqual({ woken: 0 });
+    expect(c.woken).toHaveLength(2);
+  });
+
+  it("a wake that throws doesn't record the milestone as woken, so the next pass wakes the CEO", async () => {
+    const c = await setup();
+    const { m } = await lateNow(c);
+    await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
+    await expect(
+      queued(c, "2026-10-16", () => {
+        throw new Error("scheduler unavailable");
+      }).run(),
+    ).rejects.toThrow("scheduler unavailable");
+    const [kept] = await c.db.select().from(settings).where(eq(settings.key, `milestone_risk:${m.id}`));
+    expect(kept!.value).toMatchObject({ status: null });
+    // Nobody was recorded as woken, so turning the switch on is not silently lost: the next pass wakes.
+    expect(await sweep(c, "2026-10-17").run()).toEqual({ woken: 1 });
+  });
+
+  it("a pass skipped by an update hold wakes the CEO on the first pass after the hold, exactly once", async () => {
+    const c = await setup();
+    const { m } = await lateNow(c);
+    await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
+    // The sweep step is `if (!held && opts.milestoneRisk)`: while held, run() is never called, so nothing is recorded.
+    // The first pass after the hold sees wasManaged false and wakes once.
+    expect(await sweep(c, "2026-10-16").run()).toEqual({ woken: 1 });
+    expect(await sweep(c, "2026-10-17").run()).toEqual({ woken: 0 });
+    expect(c.woken).toHaveLength(1);
+  });
+
+  it("switching the switch on for an already At risk milestone wakes once, however long it has been At risk", async () => {
+    const c = await setup();
+    const o = await c.objective();
+    const m = await c.milestone(o.id, "Launch", "2026-10-30");
+    const made = await c.ticket("Left to build", { milestoneId: m.id, state: "in_progress" });
+    await c.db.update(ticketsTable).set({ size: 3 }).where(eq(ticketsTable.id, made.id));
+    // It has been At risk for days with nothing recorded; the owner turns the switch on now.
+    expect((await c.req("GET", "/api/roadmap?today=2026-10-16")).json()[0].objectives[0].milestones[0].status).toBe("at_risk");
+    await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
+    expect(await sweep(c, "2026-10-16").run()).toEqual({ woken: 1 });
+    expect(c.woken[0]!.note).toContain("is now At risk");
+  });
+});
+
+describe("milestone at risk: the CEO's plan line (BOS-2627)", () => {
+  it("is read by the roadmap under the reason, then cleared once the milestone leaves At risk/Late", async () => {
+    const c = await setup();
+    const { m } = await lateNow(c);
+    await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
+    const res = await c.req("PATCH", `/api/milestones/${m.id}`, { ceoPlan: "Move the two unbuilt tickets to Zippy on Monday." });
+    expect(res.statusCode).toBe(200);
+    const read = async (today: string) => (await c.req("GET", `/api/roadmap?today=${today}`)).json()[0].objectives[0].milestones[0] as { status: string; ceoPlan: string | null };
+    expect((await read("2026-10-16")).ceoPlan).toBe("Move the two unbuilt tickets to Zippy on Monday.");
+    // On track (the date moves well out), the sweep clears the plan: the line has nothing left to explain.
+    await c.db.update(msTable).set({ targetDate: "2027-03-01" }).where(eq(msTable.id, m.id));
+    expect((await read("2026-10-17")).status).toBe("on_track");
+    expect(await sweep(c, "2026-10-17").run()).toEqual({ woken: 0 });
+    expect((await read("2026-10-17")).ceoPlan).toBeNull();
+    expect((await c.db.select().from(msTable).where(eq(msTable.id, m.id)))[0]!.ceoPlan).toBeNull();
+  });
+
+  it("is refused on a milestone the CEO doesn't manage, or one that isn't At risk or Late", async () => {
+    const c = await setup();
+    const { m } = await lateNow(c);
+    // Managed switch off.
+    expect((await c.req("PATCH", `/api/milestones/${m.id}`, { ceoPlan: "A plan." })).statusCode).toBe(422);
+    // Managed but on track.
+    await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
+    await c.db.update(msTable).set({ targetDate: "2027-03-01" }).where(eq(msTable.id, m.id));
+    expect((await c.req("PATCH", `/api/milestones/${m.id}`, { ceoPlan: "A plan." })).statusCode).toBe(422);
+  });
+
+  it("the roadmap shows the plan only while the milestone needs one, whatever is stored", async () => {
+    const c = await setup();
+    const { m } = await lateNow(c);
+    await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
+    await c.req("PATCH", `/api/milestones/${m.id}`, { ceoPlan: "Hire a second pair of hands." });
+    // Flip the status to on track without the sweep: the page still hides it, so a stale plan can't show.
+    await c.db.update(msTable).set({ targetDate: "2027-03-01" }).where(eq(msTable.id, m.id));
+    const read = (await c.req("GET", "/api/roadmap?today=2026-10-16")).json()[0].objectives[0].milestones[0] as { status: string; ceoPlan: string | null };
+    expect(read.status).toBe("on_track");
+    expect(read.ceoPlan).toBeNull();
+  });
+});
+
 describe("milestone at risk: the rule (BOS-2581)", () => {
   it("At risk and Late are the statuses that need a plan; On track and the rest do not", () => {
     expect(needsCeoPlan("at_risk")).toBe(true);

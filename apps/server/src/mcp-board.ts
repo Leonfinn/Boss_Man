@@ -4,7 +4,7 @@
 import { and, asc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { describeRoles, HORIZONS, reviewRolesOf, SENIOR_DEV_TEMPLATE } from "@boss-man/shared";
+import { dateIn, describeRoles, HORIZONS, reviewRolesOf, SENIOR_DEV_TEMPLATE } from "@boss-man/shared";
 import type { Db } from "./db/client.js";
 import { agents, companies, milestones, objectives, projects, tickets } from "./db/schema.js";
 import { record } from "./services/activity.js";
@@ -15,14 +15,14 @@ import { fail, planningIn, refsOf, text, withNote, type Scope } from "./mcp-comm
 import type { McpHooks, Services } from "./mcp.js";
 
 /** The roadmap tool, in ticket runs and the owner chat alike. */
-export function registerRoadmap(server: McpServer, db: Db, work: Services["work"], scope: Scope) {
+export function registerRoadmap(server: McpServer, db: Db, work: Services["work"], planning: Services["planning"], scope: Scope) {
   server.registerTool(
     "roadmap",
     {
       description:
-        "For CEOs, managers and product managers: the company's roadmap, as the owner sees it on the Roadmap and Plan pages. action list (objectives with their ids, priority and milestones with dates), add_objective (title, priority 1 most important to 5, optional project by name or id), add_milestone (objectiveId, title, targetDate YYYY-MM-DD, optional horizon now, next or later) and set (ticketId, milestoneId or null: put a ticket in a milestone or take it out). Give a reason up to 240 characters for any change; it is kept in the activity log. List first, and reuse an objective or milestone that already fits rather than adding a near-duplicate.",
+        "For CEOs, managers and product managers: the company's roadmap, as the owner sees it on the Roadmap and Plan pages. action list (objectives with their ids, priority and milestones with dates, status and the CEO's plan where it has one), add_objective (title, priority 1 most important to 5, optional project by name or id), add_milestone (objectiveId, title, targetDate YYYY-MM-DD, optional horizon now, next or later), set (ticketId, milestoneId or null: put a ticket in a milestone or take it out) and set_plan (milestoneId, plan: the CEO's short remedy for a milestone the owner put in the CEO's hands, shown under its reason line on the owner's Roadmap while it is At risk or Late; null clears it). Give a reason up to 240 characters for any change; it is kept in the activity log. List first, and reuse an objective or milestone that already fits rather than adding a near-duplicate.",
       inputSchema: {
-        action: z.enum(["list", "add_objective", "add_milestone", "set"]),
+        action: z.enum(["list", "add_objective", "add_milestone", "set", "set_plan"]),
         title: z.string().trim().min(1).max(200).optional(),
         priority: z.number().int().min(1).max(5).optional(),
         project: z.string().min(1).optional(),
@@ -31,14 +31,28 @@ export function registerRoadmap(server: McpServer, db: Db, work: Services["work"
         horizon: z.enum(HORIZONS).optional(),
         ticketId: z.string().uuid().optional(),
         milestoneId: z.string().uuid().nullable().optional(),
+        plan: z.string().trim().min(1).max(240).nullable().optional(),
         reason: z.string().trim().min(1).max(240).optional(),
       },
     },
-    async ({ action, title, priority, project, objectiveId, targetDate, horizon, ticketId, milestoneId, reason }) => {
+    async ({ action, title, priority, project, objectiveId, targetDate, horizon, ticketId, milestoneId, plan, reason }) => {
       if (!(await planningIn(db, scope))) return fail("Only your company's CEO, a manager or a product manager can change the roadmap.");
       if (action === "list") {
         const tree = await work.objectivesTree(scope.companyId);
-        return text(JSON.stringify(tree.map((o) => ({ id: o.id, title: o.title, priority: o.priority, projectId: o.projectId, milestones: o.milestones.map((m) => ({ id: m.id, title: m.title, targetDate: m.targetDate, horizon: m.horizon })) }))));
+        // BOS-2627: the same status and plan the owner's Roadmap shows, so the CEO can see which managed milestones need a plan.
+        const road = await planning.roadmap(dateIn(new Date(), "UTC"));
+        const read = new Map(road.flatMap((c) => c.objectives.flatMap((o) => o.milestones.map((m) => [m.id, m] as const))));
+        return text(
+          JSON.stringify(
+            tree.map((o) => ({
+              id: o.id,
+              title: o.title,
+              priority: o.priority,
+              projectId: o.projectId,
+              milestones: o.milestones.map((m) => ({ id: m.id, title: m.title, targetDate: m.targetDate, horizon: m.horizon, status: read.get(m.id)?.status ?? null, ceoManagesRisk: m.ceoManagesRisk, ceoPlan: read.get(m.id)?.ceoPlan ?? null })),
+            })),
+          ),
+        );
       }
       if (!reason) return fail("Say why in reason (up to 240 characters); it goes in the activity log.");
       const [me] = scope.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
@@ -59,6 +73,16 @@ export function registerRoadmap(server: McpServer, db: Db, work: Services["work"
           const m = await work.addMilestone(objectiveId, { title, targetDate, horizon });
           await log(`added the milestone "${m.title}"${targetDate ? ` (${targetDate})` : ""} under "${o.title}"`);
           return text(`Added the milestone "${m.title}" (id ${m.id}) under "${o.title}".`);
+        }
+        if (action === "set_plan") {
+          if (!milestoneId) return fail("Give the milestoneId (roadmap list shows the ids).");
+          if (plan === undefined) return fail("Give the plan in plain words (up to 240 characters), or null to clear it.");
+          const [m] = await db.select({ id: milestones.id, title: milestones.title, objectiveId: milestones.objectiveId, companyId: objectives.companyId }).from(milestones).innerJoin(objectives, eq(objectives.id, milestones.objectiveId)).where(and(eq(milestones.id, milestoneId), eq(objectives.companyId, scope.companyId)));
+          if (!m) return fail("No milestone with that id in your company. Call roadmap list for the ids.");
+          const [o] = await db.select({ title: objectives.title }).from(objectives).where(eq(objectives.id, m.objectiveId));
+          await planning.updateMilestone(m.id, { ceoPlan: plan });
+          await log(plan ? `recorded the CEO's plan for the milestone "${m.title}"` : `cleared the CEO's plan for the milestone "${m.title}"`);
+          return text(plan ? `Recorded the plan for "${m.title}" under "${o?.title ?? "its objective"}". It shows under the milestone's reason line on the owner's Roadmap while it is At risk or Late.` : `Cleared the plan for "${m.title}".`);
         }
         if (!ticketId || milestoneId === undefined) return fail("Give ticketId and milestoneId (or null to take it out).");
         const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));

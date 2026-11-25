@@ -107,6 +107,30 @@ describe("CEO manages at risk (BOS-2581)", () => {
     expect(post.body).toEqual({ on: true });
   });
 
+  it("BOS-2627: the CEO's plan shows under the milestone's reason line, and nothing shows when there is none", async () => {
+    const calls = stub();
+    const planned = milestone({ id: "m1", title: "Launch", ceoManagesRisk: true, ceoPlan: "Move the two unbuilt tickets to Zippy on Monday." });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url: String(url), method: init?.method ?? "GET", body: init?.body ? JSON.parse(String(init.body)) : null });
+        if (String(url).includes("/api/roadmap/features")) return json([]);
+        if (String(url).includes("/api/roadmap")) return json([{ id: "c1", name: "App Co", objectives: [{ id: "o1", title: "Ship it", priority: 1, status: "active", keyResults: [], milestones: [planned, milestone({ id: "m2", title: "Beta" })] }] }]);
+        return json({});
+      }),
+    );
+    render(<Roadmap companies={[company]} tab="timeline" go={() => {}} />);
+    const r = await waitFor(() => row("Launch"));
+    const reason = within(r).getByTestId("rm-reason");
+    const plan = within(r).getByTestId("rm-plan");
+    expect(plan.textContent).toContain("Move the two unbuilt tickets to Zippy on Monday.");
+    expect(plan.textContent).toContain("CEO's plan:");
+    // Under the reason line: it comes after it in the row.
+    expect(reason.compareDocumentPosition(plan) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // A milestone with no plan has no plan line.
+    expect(within(row("Beta")).queryByTestId("rm-plan")).toBeNull();
+  });
+
   it("when every milestone is on, for all offers to turn them off", async () => {
     const calls = stub({ on: true, onForAll: true });
     render(<Roadmap companies={[company]} tab="timeline" go={() => {}} />);

@@ -50,6 +50,7 @@ import { NOTHING_CHANGED, ReviewError, type reviewService } from "./services/rev
 import type { notificationsService } from "./services/notifications.js";
 import type { chaptersService } from "./services/chapters.js";
 import { staleVersionMessage, startRefusal, WorkError, type workService } from "./services/work.js";
+import type { planningService } from "./services/planning.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
 import { acceptanceCriteriaSchema, afterMergeLint, criteriaForCard, criterionOverlap, criteriaText, criterionText, failedAfterMerge, isAfterMerge, missingVerdicts, optionVerdictsRefusal, pageClauseRefusal, readCriteria, unreportedAfterMerge, type Criterion } from "@boss-man/shared";
 import { TicketChatError, type ticketChatService } from "./services/ticket-chat.js";
@@ -172,6 +173,8 @@ export type Services = {
   notes: ReturnType<typeof notificationsService>;
   chapters: ReturnType<typeof chaptersService>;
   work: ReturnType<typeof workService>;
+  /** The roadmap's own status rule and plan line (BOS-2627), so the roadmap tool lists what the owner's page shows. */
+  planning: ReturnType<typeof planningService>;
   feedback: ReturnType<typeof feedbackService>;
   ticketChat: ReturnType<typeof ticketChatService>;
   wiki: ReturnType<typeof wikiService>;
@@ -250,7 +253,7 @@ function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, 
   }
   if (retroAgent) registerRetro(server, services.retro, scope);
   registerRunTools(server, db, services, scope, hooks, undefined, withServerStatus);
-  registerRoadmap(server, db, services.work, scope);
+  registerRoadmap(server, db, services.work, services.planning, scope);
   registerTicketMoves(server, db, { review: services.review, work: services.work, feedback: services.feedback, skillProposals: services.skillProposals, hostFacts: services.hostFacts, checkRequests: services.checkRequests }, scope, hooks, false);
   registerSharedTools(server, db, { notes: services.notes, wiki: services.wiki, skills: services.skills, skillProposals: services.skillProposals, review: services.review, agents: services.agents }, scope);
   registerViewImage(server, services.images, scope);
@@ -1621,7 +1624,7 @@ const CHAT_WORKER_RUN_TOOLS: ReadonlySet<string> = new Set(["ticket_reply", "sch
  * makes are the owner's, not an agent's, and go through the same checks as the board's own forms.
  */
 function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, withRunTools: boolean, workerTools = false) {
-  const { work, feedback, notes, wiki, skills, skillProposals, review, agents: team, images, ticketChat } = services;
+  const { work, planning, feedback, notes, wiki, skills, skillProposals, review, agents: team, images, ticketChat } = services;
   // Wrapped before any tool registers, or the registrars below keep the plain one (BOS-758).
   const server = traceCalls(new McpServer({ name: "bossman", version: "0.1.0" }), db, scope.runId, scope.companyId);
   // BOS-1300: an ordinary agent's chat also gets the ticket tools its runs have for its own tickets: reply, and book or clear a check.
@@ -1649,7 +1652,7 @@ function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHoo
   };
 
   registerBoard(server, db, scope);
-  registerRoadmap(server, db, work, scope);
+  registerRoadmap(server, db, work, services.planning, scope);
   registerTicketMoves(server, db, { review, work, feedback, skillProposals, hostFacts: services.hostFacts, checkRequests: services.checkRequests }, scope, hooks, true);
   registerNotes(server, db, scope, true, { ticketChat });
 

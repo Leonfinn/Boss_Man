@@ -158,7 +158,7 @@ export function roadmapRoutes(
   owner.get("/api/milestones/:id/tickets", async (req) => planning.milestoneTickets(IdParam.parse(req.params).id));
   owner.patch("/api/milestones/:id", async (req) => {
     const { id } = IdParam.parse(req.params);
-    const b = z.object({ title: z.string().trim().min(1).max(200), targetDate: DateStr.nullable(), objectiveId: Uuid, horizon: z.enum(HORIZONS).nullable(), ceoManagesRisk: z.boolean() }).partial().parse(req.body);
+    const b = z.object({ title: z.string().trim().min(1).max(200), targetDate: DateStr.nullable(), objectiveId: Uuid, horizon: z.enum(HORIZONS).nullable(), ceoManagesRisk: z.boolean(), ceoPlan: z.string().trim().min(1).max(240).nullable() }).partial().parse(req.body);
     return planning.updateMilestone(id, b);
   });
   owner.delete("/api/milestones/:id", async (req, reply) => {
