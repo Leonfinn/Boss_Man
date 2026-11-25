@@ -6,6 +6,8 @@
 // sideways, if a done milestone shows before its group is opened, if a row's status word disagrees with the summary line,
 // or if a row is under 44 px tall. It also opens a row and checks the chart's labels. Selectors list the old markup too
 // (`.rm-ms b`, `.rm-dot`), so the same test fails on the code from before BOS-2560 (titles printed over each other).
+// The ./real-page helper starts the real app under Vite, so apps/web/src/styles.css is loaded as shipped, and drives it in
+// playwright/chromium; every check below measures geometry with getBoundingClientRect.
 // Skipped, not failed, where no browser is installed.
 import { afterAll, describe, expect, it } from "vitest";
 import { API, launch, startVite, stubApi } from "./real-page";
