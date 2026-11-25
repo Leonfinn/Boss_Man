@@ -29,7 +29,7 @@ import { ownerWaitWatch } from "./owner-todo.js";
 import { reportDueInfoAnswers } from "./owner-result.js";
 import type { NotifyInput } from "./notifications.js";
 import { idleSlotsSweep } from "./idle-slots-alert.js";
-import { derivedSignoff, refreshSignoffCards, sweepMissingSignoffs, sweepSignedOffStuck, type SignoffCover } from "./signoff.js";
+import { derivedSignoff, refreshSignoffCards, sweepMissingSignoffs, sweepNoReviewerCards, sweepSignedOffStuck, type SignoffCover } from "./signoff.js";
 import { progressSweep } from "./progress.js";
 import { noProgressSweep } from "./no-progress.js";
 import { runTimeLimitSweep } from "./run-time-limit.js";
@@ -1828,6 +1828,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       // A card for older code is moved or replaced first, so the owner never holds one that is bound to fail (BOS-734).
       if (opts.branchHead && opts.signoffCovers) await step("refresh sign-off cards", () => refreshSignoffCards(db, { headOf: opts.branchHead!, covers: opts.signoffCovers!, withdraw: opts.signoffWithdraw ?? (async () => undefined) }), 0);
       const signoffCards = await sweepMissingSignoffs(db, tellCeo);
+      // BOS-2582: a review no agent can take is the owner's, and an owner task always has a card.
+      await step("no-reviewer cards", () => sweepNoReviewerCards(db, tellCeo), 0);
       // BOS-1879: a ticket stuck In progress or Blocked on a head the owner signed off goes back to review, where the gate merges.
       // BOS-1906: a ticket "Being checked" whose check ended without this process seeing it (a restart in between) is settled now.
       if (!held && opts.checkHold) await step("check hold", () => opts.checkHold!(), undefined);
