@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { companies, notifications, projects, settings } from "../src/db/schema.js";
-import { allowsPrivate, gitHostAddress, isLanHost, isStackAddress, resolvesStack, slugify, toolServerAddress } from "../src/services/launcher.js";
+import { allowsPrivate, gitHostAddress, isLanHost, isStackAddress, isStackService, resolvesStack, sendableAddress, slugify, toolServerAddress } from "../src/services/launcher.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -406,6 +406,33 @@ describe("isLanHost (BOS-777): whether a git host is trusted for private address
   it("trusts private IP literals and LAN-style names only", () => {
     for (const u of ["http://192.168.1.50:3003/o/r.git", "https://10.0.0.5/o/r", "git@git.lan:o/r.git", "ssh://git@h.local:2222/o/r", "http://gitea/o/r", "https://git.corp.internal/o/r", "http://nas.home/o/r"]) expect(isLanHost(u), u).toBe(true);
     for (const u of ["https://git.example.org/o/r.git", "https://github.com/o/r.git", "git@github.com:o/r.git", "http://8.8.8.8/o/r", "https://lan.example.org/o/r", "/srv/repos/r", "not a url"]) expect(isLanHost(u), u).toBe(false);
+  });
+});
+
+describe("isStackService (BOS-2566): a tool server aimed at Boss Man's own services", () => {
+  it("flags the stack's service names and leaves outside hosts alone", () => {
+    expect(isStackService("http://db:5432/")).toBe(true);
+    expect(isStackService("http://server-blue:3000/")).toBe(true);
+    expect(isStackService("http://runner-app-co:1234/")).toBe(true);
+    // Matched on the host name alone: the port and a trailing dot don't change the answer.
+    expect(isStackService("https://DB.:8443/mcp")).toBe(true);
+    expect(isStackService("https://example.com:8080/mcp")).toBe(false);
+    expect(isStackService("http://tools.lan:8080/mcp")).toBe(false);
+    // A bad URL is not a stack service, and doesn't throw.
+    expect(isStackService("not a url")).toBe(false);
+  });
+});
+
+describe("sendableAddress (BOS-2566): the host:port the launcher may be told to allow", () => {
+  it("passes a plain address and refuses what the launcher's allow entry would reject", () => {
+    expect(sendableAddress("http://tools.lan:8080/mcp")).toBe("tools.lan:8080");
+    expect(sendableAddress("https://tools.example.org/mcp")).toBe("tools.example.org:443");
+    // An IPv6 literal, a bad URL, an underscore, a trailing dot and port 0 are all unsendable.
+    expect(sendableAddress("http://[fd00::1]/mcp")).toBeNull();
+    expect(sendableAddress("not a url")).toBeNull();
+    expect(sendableAddress("http://my_git.lan/mcp")).toBeNull();
+    expect(sendableAddress("http://h.lan.:8080/mcp")).toBeNull();
+    expect(sendableAddress("http://h.lan:0/mcp")).toBeNull();
   });
 });
 
