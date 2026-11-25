@@ -117,4 +117,7 @@ grep -q "not in this repository" "$S/err" || fail "the refusal must say the comm
 grep -q "resolve-commit" .github/workflows/release.yml || fail "release.yml must call resolve-commit"
 grep -q 'inputs.commit' .github/workflows/release.yml || fail "release.yml must have the commit input"
 if grep -n 'GITHUB_SHA' .github/workflows/release.yml | grep -v 'resolve-commit' | grep -v '^[0-9]*: *#' >/dev/null; then fail "release.yml uses GITHUB_SHA outside resolve-commit"; fi
+# BOS-2590: the Release image check names every missing image and says to re-run Publish after PUBLISH_IMAGES grew.
+grep -qF "missing=\"\$missing \$name\"" .github/workflows/release.yml || fail "release.yml must collect every image missing for the commit"
+grep -q 'Re-run all jobs' .github/workflows/release.yml || fail "release.yml must tell the owner to re-run Publish images"
 echo "publish-images.test.sh: ok"

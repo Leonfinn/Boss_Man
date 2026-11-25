@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { agents, decisions, feedbackNotes, githubAlertTickets, githubWatches, projects, tickets as ticketsTable } from "../src/db/schema.js";
-import { githubWatchService, looksLikeSecurityReport } from "../src/services/github-watch.js";
+import { cardKey, githubWatchService, looksLikeSecurityReport } from "../src/services/github-watch.js";
 import { clearOwnerTodo } from "../src/services/decisions.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
@@ -123,6 +123,15 @@ async function setup(opts: { token?: string | undefined; support?: boolean } = {
 
 const notes = async (companyId: string) => (await t!.db.select().from(feedbackNotes).where(eq(feedbackNotes.companyId, companyId))).sort((a, b) => a.externalId!.localeCompare(b.externalId!));
 const iso = (ms: number) => new Date(ms).toISOString();
+
+describe("card key (BOS-2565)", () => {
+  it("is stable for the same project and differs when the project changes", () => {
+    expect(cardKey("project-a")).toBe(cardKey("project-a"));
+    expect(cardKey("project-a")).not.toBe(cardKey("project-b"));
+    // Two ids that only differ in case are different projects, so their keys differ too.
+    expect(cardKey("Project-A")).not.toBe(cardKey("project-a"));
+  });
+});
 
 describe("first sync", () => {
   it("files issues, discussions and their comments once, skips pull requests, and wakes Support once", async () => {

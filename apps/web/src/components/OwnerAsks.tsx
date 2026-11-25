@@ -3,11 +3,14 @@ import type { BoardTicket } from "../api";
 // BOS-2578: several tickets can wait on ONE decision card. The owner counts cards (the Decisions badge),
 // so the board says "questions" and "tasks" separately and tells each sharing ticket who it shares with.
 
-type Waiter = Pick<BoardTicket, "id" | "title" | "number" | "ownerQuestionId">;
+type Waiter = Pick<BoardTicket, "id" | "title" | "number" | "ownerQuestionId"> & { waitingDecisionId?: string | null };
+
+/** The Decisions card behind a waiting ticket: its question card, or its sign-off card (BOS-2582). */
+const cardOf = (t: Waiter): string | null => t.ownerQuestionId ?? t.waitingDecisionId ?? null;
 
 /** The distinct owner asks behind these tickets: tickets on one card count once; one with no card counts alone. */
 export function askCount(waiting: Waiter[]): number {
-  return new Set(waiting.map((t) => t.ownerQuestionId ?? t.id)).size;
+  return new Set(waiting.map((t) => cardOf(t) ?? t.id)).size;
 }
 
 export function asksWords(waiting: Waiter[]): string {
@@ -35,7 +38,7 @@ export function sameQuestionText(others: Array<{ number?: number | null; title: 
 /** Open Decisions cards that hold no task (the badge counts them, the board's tasks don't). */
 export function cardsWithoutTask(waiting: Waiter[], decisionsOpen: number | null | undefined): number {
   if (decisionsOpen == null) return 0;
-  const withTask = new Set(waiting.map((t) => t.ownerQuestionId).filter(Boolean)).size;
+  const withTask = new Set(waiting.map(cardOf).filter(Boolean)).size;
   return Math.max(0, decisionsOpen - withTask);
 }
 

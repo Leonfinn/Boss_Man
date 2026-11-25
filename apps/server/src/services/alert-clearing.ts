@@ -7,7 +7,7 @@
 import { and, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import { mergeContext } from "./decision-context.js";
 import type { Db } from "../db/client.js";
-import { decisions, features, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
+import { decisions, features, reviewRequests, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { record } from "./activity.js";
 import { signoffClearedReason } from "./signoff.js";
 import { allMergeOrder, commitIsLive } from "./go-live-wait.js";
@@ -55,6 +55,8 @@ export type ClearWhen =
    * cancelled or moved out of review, a new review round started, or its risk no longer needs the owner.
    */
   | { kind: "signoffNotWaiting"; ticketId: string }
+  /** BOS-2582: the owner's card for a review no agent could take: the ticket left review, or a reviewer now holds an open review. */
+  | { kind: "noReviewerGone"; ticketId: string }
   /**
    * An add-on's setup card (DR-023 D): the add-on reads running, seen working after the card was raised.
    * "Running" alone isn't enough: Tailscale stays running for a day after its last request and ntfy until
@@ -133,6 +135,9 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
         break;
       case "signoffNotWaiting":
         if (typeof c.ticketId === "string") out.push({ kind: "signoffNotWaiting", ticketId: c.ticketId });
+        break;
+      case "noReviewerGone":
+        if (typeof c.ticketId === "string") out.push({ kind: "noReviewerGone", ticketId: c.ticketId });
         break;
       case "addonRunning":
         if ((ADDONS as readonly unknown[]).includes(c.addon)) out.push({ kind: "addonRunning", addon: c.addon as Addon });
@@ -312,6 +317,13 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
       }
       case "signoffNotWaiting":
         return signoffClearedReason(db, c.ticketId);
+      case "noReviewerGone": {
+        const [t] = await db.select({ state: tickets.systemState, title: tickets.title }).from(tickets).where(eq(tickets.id, c.ticketId));
+        if (!t) return "the ticket is no longer on record";
+        if (t.state !== "review") return `the ticket "${t.title}" is ${t.state === "done" ? "finished" : `now ${t.state.replace("_", " ")}`}`;
+        const open = await db.select({ reviewer: reviewRequests.reviewerAgentId }).from(reviewRequests).where(and(eq(reviewRequests.ticketId, c.ticketId), inArray(reviewRequests.status, ["pending", "approved"])));
+        return open.length && open.every((r) => r.reviewer) ? "a reviewer now has the review" : null;
+      }
       case "addonRunning": {
         const f = (await addonFacts())?.[c.addon];
         if (f?.state !== "running" || !f.since) return null;

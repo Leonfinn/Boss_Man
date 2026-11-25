@@ -59,6 +59,25 @@ describe("Board: tickets that share one decision card (BOS-2578)", () => {
     expect(strip.textContent).toContain("1 more question has no task");
   });
 
+  it("BOS-2582: a review no agent can take and a derived sign-off each sit on their own card: 2 tasks, badge 2, nothing left over", async () => {
+    stub([
+      ticket(10, "No reviewer here", { waitingOnOwner: true, noReviewer: true, waitingDecisionId: "card-noreviewer" }),
+      ticket(11, "Passed every review", { waitingOnOwner: true, approvedBy: "Rex", waitingDecisionId: "card-signoff" }),
+    ]);
+    open(2); // the Decisions badge: one sign-off card per ticket
+    const strip = await screen.findByRole("link", { name: /2 tasks are waiting on you/ });
+    expect(strip.textContent).not.toContain("no task");
+    expect(document.querySelector('[data-testid="owner-asks-lane-hint"]')).toBeNull();
+    expect(document.querySelector('[data-testid="same-question-note"]')).toBeNull();
+  });
+
+  it("BOS-2582: if the badge had a card more than the tickets, the board says so (it can no longer be a cardless task the other way)", async () => {
+    stub([ticket(10, "No reviewer here", { waitingOnOwner: true, noReviewer: true, waitingDecisionId: "card-noreviewer" })]);
+    open(2);
+    const strip = await screen.findByRole("link", { name: /1 task is waiting on you/ });
+    expect(strip.textContent).toContain("1 more question has no task");
+  });
+
   it("separate cards, one task each: plain wording, no same-question notes, no extra line when the badge matches", async () => {
     stub([
       ticket(1, "First", { waitingOnOwner: true, ownerQuestion: "Q1", ownerQuestionId: "card-1" }),

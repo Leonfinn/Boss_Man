@@ -2,7 +2,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ImagePreviews, attachmentName, useImageAttach, withAttachments } from "../src/components/ImageAttach";
+import { ImagePreviews, attachmentName, useImageAttach, withAttachments, withImage } from "../src/components/ImageAttach";
 import { linked } from "../src/pages/Chat";
 
 afterEach(() => {
@@ -47,6 +47,22 @@ function Box({ saved = "Look:" }: { saved?: string }) {
     </>
   );
 }
+
+describe("withImage", () => {
+  const markdown = `![pic.png](/api/ticket-images/${ID})`;
+
+  it("puts a line for the image after the text", () => {
+    expect(withImage("Look:", markdown)).toBe(`Look:\n${markdown}\n`);
+  });
+
+  it("puts just the image line in an attachment-only message", () => {
+    expect(withImage("", markdown)).toBe(`${markdown}\n`);
+  });
+
+  it("does not add a blank line when the text already ends with a newline", () => {
+    expect(withImage("Look:\n", markdown)).toBe(`Look:\n${markdown}\n`);
+  });
+});
 
 describe("pasting images", () => {
   it("uploads a pasted screenshot, shows it below the box and leaves the text alone", async () => {

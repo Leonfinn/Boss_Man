@@ -207,6 +207,8 @@ jobs:
         env:
           DIGEST: ${{ steps.join.outputs.digest }}
         run: scripts/publish-images.sh copy "$NAME" "$TAG" "$DIGEST"
+      # BOS-2590: the signature lands as a tag sha256-<index digest>.sig, not sha-<commit>.sig, and the SBOM and provenance
+      # are attestation-manifest entries inside the index, not a .sbom tag. The next step enforces both, so green means present.
       - name: Sign it in every registry (keyless; the signature is stored per registry)
         env:
           DIGEST: ${{ steps.join.outputs.digest }}

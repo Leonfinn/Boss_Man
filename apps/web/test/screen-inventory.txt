@@ -171,6 +171,7 @@ reads:
 sections: 
   - Progress over the last 8 weeks
   - Roadmap
+  - What's left: …
 reads: 
   - /api/milestones/:id/tickets
   - /api/roadmap
