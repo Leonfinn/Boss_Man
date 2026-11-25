@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { ceoPlanWake, needsCeoPlan } from "@boss-man/shared";
-import { milestones as msTable, settings, tickets as ticketsTable } from "../src/db/schema.js";
+import { milestones as msTable, settings, tickets as ticketsTable, agents } from "../src/db/schema.js";
 import { milestoneRiskService } from "../src/services/milestone-risk.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
@@ -202,7 +202,7 @@ describe("milestone at risk: the wake goes through tellOnce (BOS-2633)", () => {
     return { logs, service };
   };
 
-  it("a wake that sent nothing (no CEO) counts as not told, is logged once, and the next pass tries again", async () => {
+  it("a wake that was not saved counts as not told, is logged once, and the next pass tries again", async () => {
     const c = await setup();
     const { m } = await lateNow(c);
     await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
@@ -216,6 +216,28 @@ describe("milestone at risk: the wake goes through tellOnce (BOS-2633)", () => {
     expect(kept!.value).toMatchObject({ status: null });
     expect(await through(c, "2026-10-17", async () => ({ id: "w1", outcome: "queued" })).service.run()).toEqual({ woken: 1 });
     expect(c.woken).toHaveLength(2);
+  });
+
+  it("a company with no CEO is not woken and nothing is logged every pass, and the wake happens once a CEO exists", async () => {
+    const c = await setup();
+    const { m } = await lateNow(c);
+    await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
+    // No CEO: there is nobody to tell, so no wake is attempted and the pass says nothing (BOS-2633, to keep a no-CEO
+    // company from logging a line, and risking an owner card through BOS-2160, on every pass for every managed milestone).
+    await c.db.update(agents).set({ retiredAt: new Date("2026-10-01T00:00:00Z") }).where(eq(agents.id, c.ceo.id));
+    const first = through(c, "2026-10-16", async () => ({ id: "never", outcome: "queued" }));
+    expect(await first.service.run()).toEqual({ woken: 0 });
+    expect(c.woken).toHaveLength(0);
+    expect(first.logs).toEqual([]);
+    // Two more passes stay quiet, and the row stays "not woken yet".
+    expect(await through(c, "2026-10-17", async () => ({ id: "never", outcome: "queued" })).service.run()).toEqual({ woken: 0 });
+    expect(first.logs).toEqual([]);
+    const [kept] = await c.db.select().from(settings).where(eq(settings.key, `milestone_risk:${m.id}`));
+    expect(kept!.value).toMatchObject({ status: null });
+    // A CEO is hired: the next pass wakes them, because the milestone was never marked woken.
+    await c.db.update(agents).set({ retiredAt: null }).where(eq(agents.id, c.ceo.id));
+    expect(await through(c, "2026-10-18", async () => ({ id: "w1", outcome: "queued" })).service.run()).toEqual({ woken: 1 });
+    expect(c.woken.map((w) => w.agentId)).toEqual([c.ceo.id]);
   });
 
   it("a wake that throws is logged by tellOnce, the pass carries on, and the next pass wakes the CEO", async () => {

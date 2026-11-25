@@ -67,25 +67,27 @@ export function milestoneRiskService(db: Db, deps: { planning: ReturnType<typeof
         const shouldWake = ceoPlanWake({ managed: true, wasManaged: prev?.managed ?? false, status, lastWoken: (prev?.status ?? null) as never });
         // What the next pass compares against: the status the milestone was last WOKEN about. It is cleared as soon as the
         // status leaves At risk/Late, so a return to that state is a new wake; otherwise the last woken status stays.
-        // BOS-2633: the send goes through tellOnce, so the wake counts only when it resolved with a real wake row. A throw, a
-        // null ("no CEO to wake", "not saved") or a dropped wake is logged by tellOnce and answers null, and the milestone is
-        // not marked woken, so the next pass tries again (BOS-2627 did this locally; this is now the sweeps' one shared rule).
-        const delivered = () =>
-          tellOnce(
+        // BOS-2633: the send goes through tellOnce, so the wake counts only when it resolved with a real wake row. A throw or a
+        // dropped wake is logged by tellOnce and answers null, and the milestone is not marked woken, so the next pass tries
+        // again (BOS-2627 did this locally; this is now the sweeps' one shared rule). A company with no CEO has nobody to tell:
+        // there is nothing to retry until one is hired, so this pass records "not woken yet" and says nothing, rather than
+        // logging (and, through BOS-2160, risking an owner card) on every pass for every managed milestone.
+        const delivered = async (): Promise<string | null> => {
+          const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, m.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+          if (!ceo) return null;
+          const what = m.targetDate ? `Its date is ${m.targetDate}.` : "It has no date.";
+          return tellOnce(
             `milestone at risk ${m.title} (${m.id})`,
-            async (): Promise<Told> => {
-              const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, m.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
-              if (!ceo) return null;
-              const what = m.targetDate ? `Its date is ${m.targetDate}.` : "It has no date.";
-              return (await deps.wake({
+            () =>
+              deps.wake({
                 agentId: ceo.id,
                 reason: MILESTONE_RISK_REASON,
                 priority: 3,
-                note: `The milestone "${m.title}" under the objective "${m.objective}" at ${m.company} is now ${status === "late" ? "Late" : "At risk"}: ${reasonForWake(m.reason)}. ${what} The owner asked you to manage this one: work out a short remedy for it and record it with the roadmap tool, action set_plan (milestoneId, plan), so it shows under the milestone's reason on the owner's Roadmap.`,
-              })) as Told;
-            },
+                note: `The milestone "${m.title}" under the objective "${m.objective}" at ${m.company} is now ${status === "late" ? "Late" : "At risk"}: ${reasonForWake(m.reason)}. ${what} The owner asked you to manage this one: plan a remedy for it in plain words, and say it to them when they next ask how it is going.`,
+              }) as Promise<Told>,
             log,
           );
+        };
         // BOS-2627: this pass writes a row BEFORE anything is sent, so a pass cut short (a deploy swap, a restart, a throw)
         // is tried again next pass rather than the milestone going quiet for good. That row says status: null ("woken about
         // nothing yet") when a wake is due, unless the status has now left At risk/Late, which is cleared as before. Only a
