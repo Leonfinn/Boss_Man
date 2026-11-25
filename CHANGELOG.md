@@ -39,6 +39,7 @@ Check before committing: pnpm --filter @boss-man/site build (it stops on a headi
 - A page waiting on an answer that never comes no longer sits on "Checking…" until you reload. The read gives up after 30 seconds and tries again by itself.
 - When you answer a card that asked you for information, such as a log, a screenshot or a value, the result and next step now reach your chat and feed without you asking. If nothing arrives within 30 minutes, the CEO is asked to post it.
 - Opening a milestone on the Roadmap shows a "What's left" list: every unfinished ticket in it, grouped as Waiting for you, Held up, Needs a look, Running or Being built, with who has it and what it waits on. A ticket held only by one of your cards has an Open card button.
+- Each milestone on the Roadmap has a "CEO manages At risk" button, off by default. Turn it on and, when that milestone turns At risk or Late, the CEO is woken once to plan a remedy. It is not woken again while the status stays the same. A milestone with it off never wakes the CEO. "CEO manages At risk for all" turns it on for every milestone at once, and tells you first that each remedy costs a CEO run.
 - After you answer a card and get its result, later corrections and updates about it also reach your chat, flagged, for 24 hours or until the matter is closed. A "still checking" note stays on the ticket.
 
 ## 24 November 2026
