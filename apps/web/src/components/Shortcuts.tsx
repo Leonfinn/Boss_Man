@@ -64,8 +64,8 @@ function openCard(): boolean {
  * nothing, while Ctrl/Cmd+K and Escape keep working. The list still opens from the menu button and says so.
  * onTurnKeysOn: the list's "Turn them on", saved per login.
  */
-export function Shortcuts({ go, hasProjects, singleLetterKeys = true, onTurnKeysOn }: { go: (to: string) => void; hasProjects: boolean; singleLetterKeys?: boolean; onTurnKeysOn?: () => void }) {
-  const [open, setOpen] = useState(false);
+export function Shortcuts({ go, hasProjects, singleLetterKeys = true, onTurnKeysOn, initialOpen = false }: { go: (to: string) => void; hasProjects: boolean; singleLetterKeys?: boolean; onTurnKeysOn?: () => void; /** Open on the first draw: for the rendering test, which reads the markup. */ initialOpen?: boolean }) {
+  const [open, setOpen] = useState(initialOpen);
   const gAt = useRef(0);
   const back = useRef<HTMLElement | null>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
@@ -152,7 +152,7 @@ export function Shortcuts({ go, hasProjects, singleLetterKeys = true, onTurnKeys
 
   if (!open) return null;
   const mod = isMac() ? "⌘" : "Ctrl";
-  const here = screenKeys(window.location.hash);
+  const here = screenKeys(typeof window === "undefined" ? "" : window.location.hash);
   return (
     <div className="search-back" onMouseDown={(e) => e.target === e.currentTarget && close()}>
       <div
