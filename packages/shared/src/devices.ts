@@ -85,6 +85,9 @@ export const OwnerPreferences = z.object({
   singleLetterKeys: z.boolean().default(true),
   /** BOS-2669 part 3: the menu shortcuts the owner pinned, in their order. Empty until they pin one. */
   pinnedPages: z.array(z.string().trim().min(1).max(80)).max(6).default([]),
+  /** BOS-2690 (BOS-2671 3e): the one-time tip for people already using the keyboard has been closed or
+   * opened once, so it never shows again on this login, in this or any other browser. */
+  keyboardTipSeen: z.boolean().default(false),
 });
 export type OwnerPreferences = z.infer<typeof OwnerPreferences>;
 
@@ -93,5 +96,6 @@ export type OwnerPreferences = z.infer<typeof OwnerPreferences>;
 export const OwnerPreferencesPatch = z.object({
   singleLetterKeys: z.boolean().optional(),
   pinnedPages: z.array(z.string().trim().min(1).max(80)).max(6).optional(),
+  keyboardTipSeen: z.boolean().optional(),
 });
 export type OwnerPreferencesPatch = z.infer<typeof OwnerPreferencesPatch>;

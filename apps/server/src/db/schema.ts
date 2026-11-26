@@ -2419,6 +2419,8 @@ export const ownerPreferences = pgTable(
     singleLetterKeys: boolean("single_letter_keys").notNull().default(true),
     /** BOS-2669 part 3: the page ids the owner pinned to the menu, in their order. */
     pinnedPages: jsonb("pinned_pages").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+    /** BOS-2690 (BOS-2671 3e): the one-time keyboard tip has been seen for this login; off until it is. */
+    keyboardTipSeen: boolean("keyboard_tip_seen").notNull().default(false),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
 );

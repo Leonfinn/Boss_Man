@@ -1,0 +1,1 @@
+ALTER TABLE "owner_preferences" ADD COLUMN "keyboard_tip_seen" boolean DEFAULT false NOT NULL;

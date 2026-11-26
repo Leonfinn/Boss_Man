@@ -22,8 +22,8 @@ const press = (key: string, extra: Record<string, unknown> = {}, target: Element
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 /** A provider with a saved choice, and a save that records what it was asked to save. */
-function preferences(singleLetterKeys: boolean, save: Preferences["save"] = async () => ({ singleLetterKeys, pinnedPages: [] })): Preferences {
-  return { prefs: { singleLetterKeys, pinnedPages: [] }, save };
+function preferences(singleLetterKeys: boolean, save: Preferences["save"] = async () => ({ singleLetterKeys, pinnedPages: [], keyboardTipSeen: true })): Preferences {
+  return { prefs: { singleLetterKeys, pinnedPages: [], keyboardTipSeen: true }, save };
 }
 
 describe("single-letter keys off (BOS-2689)", () => {
@@ -96,10 +96,10 @@ describe("Settings → Account: the switch (BOS-2689)", () => {
     let saved: boolean | null = null;
     const save = vi.fn(async (patch: { singleLetterKeys?: boolean }) => {
       saved = patch.singleLetterKeys ?? null;
-      return { singleLetterKeys: patch.singleLetterKeys ?? true, pinnedPages: [] };
+      return { singleLetterKeys: patch.singleLetterKeys ?? true, pinnedPages: [], keyboardTipSeen: false };
     });
     const { rerender } = render(
-      <PreferencesContext.Provider value={{ prefs: { singleLetterKeys: true, pinnedPages: [] }, save }}>
+      <PreferencesContext.Provider value={{ prefs: { singleLetterKeys: true, pinnedPages: [], keyboardTipSeen: true }, save }}>
         <KeyboardShortcuts companyId="c1" />
       </PreferencesContext.Provider>,
     );
@@ -109,7 +109,7 @@ describe("Settings → Account: the switch (BOS-2689)", () => {
     await waitFor(() => expect(saved).toBe(false));
     // The provider gives the saved answer back, the way App does once /api/preferences answers.
     rerender(
-      <PreferencesContext.Provider value={{ prefs: { singleLetterKeys: false, pinnedPages: [] }, save }}>
+      <PreferencesContext.Provider value={{ prefs: { singleLetterKeys: false, pinnedPages: [], keyboardTipSeen: true }, save }}>
         <KeyboardShortcuts companyId="c1" />
       </PreferencesContext.Provider>,
     );
@@ -122,7 +122,7 @@ describe("Settings → Account: the switch (BOS-2689)", () => {
       throw new Error("the server said no");
     });
     render(
-      <PreferencesContext.Provider value={{ prefs: { singleLetterKeys: true, pinnedPages: [] }, save }}>
+      <PreferencesContext.Provider value={{ prefs: { singleLetterKeys: true, pinnedPages: [], keyboardTipSeen: true }, save }}>
         <KeyboardShortcuts companyId="c1" />
       </PreferencesContext.Provider>,
     );
@@ -150,7 +150,7 @@ describe("Settings → Account: the switch (BOS-2689)", () => {
 describe("the choice follows the login (BOS-2689)", () => {
   it("the app reads the switch with the sign-in answer, so a later load (reload, restart, another browser) is off without a click", async () => {
     const company = { id: "c1", name: "App Co", agents: [], projects: [{ id: "p1", name: "Site", starred: false }] } as unknown as Company;
-    const prefs = { singleLetterKeys: false, pinnedPages: [] };
+    const prefs = { singleLetterKeys: false, pinnedPages: [], keyboardTipSeen: true };
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string) => {

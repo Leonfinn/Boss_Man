@@ -44,13 +44,14 @@ describe("isRenderableProfile", () => {
 });
 
 describe("OwnerPreferences (BOS-2689, shared with BOS-2669)", () => {
-  it("reads an empty answer as every default: single-letter keys on, no pinned pages", () => {
-    expect(OwnerPreferences.parse({})).toEqual({ singleLetterKeys: true, pinnedPages: [] });
+  it("reads an empty answer as every default: single-letter keys on, no pinned pages, the keyboard tip not seen", () => {
+    expect(OwnerPreferences.parse({})).toEqual({ singleLetterKeys: true, pinnedPages: [], keyboardTipSeen: false });
   });
 
   it("a change names only what it changes, so a pin save doesn't turn the keys back on and vice versa", () => {
     expect(OwnerPreferencesPatch.parse({ pinnedPages: ["updates"] })).toEqual({ pinnedPages: ["updates"] });
     expect(OwnerPreferencesPatch.parse({ singleLetterKeys: false })).toEqual({ singleLetterKeys: false });
+    expect(OwnerPreferencesPatch.parse({ keyboardTipSeen: true })).toEqual({ keyboardTipSeen: true });
   });
 
   it("refuses more than six pinned pages, and a key switch that isn't a yes or no", () => {

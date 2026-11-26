@@ -12,7 +12,7 @@ export type Preferences = {
 };
 
 /** Every default: what someone who never changed anything gets, so a screen works with no provider too. */
-export const DEFAULT_PREFERENCES: OwnerPreferences = { singleLetterKeys: true, pinnedPages: [] };
+export const DEFAULT_PREFERENCES: OwnerPreferences = { singleLetterKeys: true, pinnedPages: [], keyboardTipSeen: false };
 
 export const PreferencesContext = createContext<Preferences>({
   prefs: DEFAULT_PREFERENCES,
