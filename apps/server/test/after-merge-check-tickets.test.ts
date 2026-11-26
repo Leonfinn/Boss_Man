@@ -422,6 +422,18 @@ describe("BOS-2643: a watch of a day or more is opened as its own check ticket",
     expect(checks.map((x) => [x.checksCriterion, x.assigneeAgentId])).toEqual([[3, c.dev.id]]);
   });
 
+  it("an open ticket from before the change is left as it is: no sweep, and other edits and moves open nothing", async () => {
+    const c = await setup();
+    // A row as an older server left it: a code ticket in progress with a 3-day watch and no check ticket.
+    const [old] = await c.db.insert(tickets).values({ companyId: c.co.company.id, projectId: c.project.id, title: "Old build with a watch", systemState: "ready", assigneeAgentId: c.dev.id, acceptanceCriteria: [BEFORE, WATCH] }).returning();
+    const edited = await c.call(c.co.ceo.id, "update_ticket", { ticketId: old!.id, title: "Old build with a watch (renamed)", body: "More detail", reason: "tidy" });
+    expect(edited.isError, edited.text).toBe(false);
+    const moved = await c.setState(c.dev.id, { ticketId: old!.id, state: "in_progress" });
+    expect(moved.isError, moved.text).toBe(false);
+    expect(await checksOf(c, old!.id)).toEqual([]);
+    expect((await c.row(old!.id)).acceptanceCriteria).toEqual([BEFORE, WATCH]);
+  });
+
   it("nothing is opened for a no-code ticket, a merged one, a check ticket, or a watch checked before merge", async () => {
     const c = await setup();
     const base = { companyId: c.co.company.id, projectId: c.project.id, systemState: "ready" as const, assigneeAgentId: c.dev.id };
