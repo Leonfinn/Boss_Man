@@ -62,7 +62,7 @@ function problemLine(p: { missing: string[]; failing: string[]; addonsDown: stri
 }
 
 /** BOS-2674: the three plain lines under a warning: does it matter, what Boss Man is doing, does the owner need to act. */
-function AdviceLines({ k, d }: { k: string; d: HostFactsView }) {
+export function AdviceLines({ k, d }: { k: string; d: HostFactsView }) {
   const a = warningAdvice(k, d.impact, d.handling?.[k]);
   return (
     <ul data-testid="warning-advice" style={{ margin: "2px 0 6px", paddingLeft: 18, listStyle: "none" }}>
