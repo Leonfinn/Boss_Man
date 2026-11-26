@@ -68,6 +68,7 @@ import type { alertLadder } from "./services/alert-ladder.js";
 import type { retroService } from "./services/retro.js";
 import { sizingGuideText } from "./services/sizing.js";
 import { getHold, WRAP_UP } from "./services/maintenance.js";
+import { ownerTextReceiptRefusal } from "./services/host-fact-gate.js";
 import { ownerFactAnswered, ownerFactHeldLive, recordHeadLine, type GitTokenProbe, ownerSetupFacts, usesOwnerSetupToken } from "./services/owner-record.js";
 import { cleanSummary, SUMMARY_MAX } from "./services/phone-approve.js";
 import { getStandingRules, STANDING_RULES_MAX, StandingRulesError } from "./services/standing-rules.js";
@@ -374,6 +375,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       if (urgentHold) return fail(urgentHold);
       const factHold = await ownerFactHeldLive(db, scope.companyId, gitTokenProbe, [body]); // BOS-1596, R34
       if (factHold) return fail(factHold);
+      const receiptHold = ownerTextReceiptRefusal(body); // BOS-2741 (R2)
+      if (receiptHold) return fail(receiptHold);
       // Any agent's owner-ask is held, not posted, until a card covers it (BOS-901 for the CEO, BOS-1576 for everyone):
       // a hint after posting reaches only the writer, so the ask never got to the owner. notAnAsk lets a status reply through.
       // R53 (BOS-2084): a reply that names another ticket's open owner card is held for every agent, notAnAsk or not.
