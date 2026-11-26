@@ -85,7 +85,7 @@ INFRA='^(docker-compose[^/]*\.ya?ml$|deploy/|scripts/(deploy|rebuild-live|update
 NOT_INFRA='^deploy/(penpot|ntfy|ntfy-bluegreen)\.yml$'
 # Same rule as needs_runner in scripts/deploy.sh (scripts/host-deployer.test.sh keeps them equal) and RUNNER_CODE_PATHS in
 # packages/shared/src/go-live.ts: what the runner, launcher and netguard images COPY in, read from their Dockerfiles (BOS-1648).
-RUNNER_PATHS='^(apps/runner/Dockerfile$|apps/runner/package\.json$|apps/runner/src/|apps/runner/claude-pack/|apps/launcher/Dockerfile$|apps/launcher/package\.json$|apps/launcher/tsconfig\.json$|apps/launcher/tsconfig\.build\.json$|apps/launcher/src/|apps/netguard/Dockerfile$|apps/netguard/netguard\.sh$|packages/shared/package\.json$|packages/shared/src/|scripts/check-slot\.sh$|scripts/scan-added-lines\.mjs$|scripts/scan-allow\.txt$|package\.json$|pnpm-workspace\.yaml$|pnpm-lock\.yaml$|tsconfig\.base\.json$|NOTICE$)'
+RUNNER_PATHS='^(apps/runner/Dockerfile$|apps/runner/package\.json$|apps/runner/src/|apps/runner/claude-pack/|apps/launcher/Dockerfile$|apps/launcher/package\.json$|apps/launcher/tsconfig\.json$|apps/launcher/tsconfig\.build\.json$|apps/launcher/src/|apps/netguard/Dockerfile$|apps/netguard/netguard\.sh$|packages/shared/package\.json$|packages/shared/src/|packages/shared/src/secret-rules\.mjs$|scripts/check-slot\.sh$|scripts/scan-added-lines\.mjs$|scripts/scan-allow\.txt$|package\.json$|pnpm-workspace\.yaml$|pnpm-lock\.yaml$|tsconfig\.base\.json$|NOTICE$)'
 
 # Git as root must not run hooks from a checkout that agents' commits land in; deploy.sh inherits this.
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null GIT_TERMINAL_PROMPT=0
