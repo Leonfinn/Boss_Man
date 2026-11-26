@@ -233,6 +233,8 @@ An install from the published images (docs/35) looks at its own GitHub repositor
 
 The release list comes from the repository the install was set up with, so it works for a fork too. To read it from another address (an internal mirror), set `BOSSMAN_RELEASE_API` on the server.
 
+An image install made before this feature existed starts watching only after its next update made by the updater, because that is when the updater gives it the settings it checks with.
+
 Installing the release is still done as described in docs/35; this note only tells you it exists.
 
 ## Common problems
