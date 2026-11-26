@@ -70,11 +70,11 @@ Use 0.1.0-beta.3 or newer. The older 0.1.0-beta.1 has no `images.env`, because i
 
 Optional: check the signatures with [cosign](https://docs.sigstore.dev/cosign/installation/). Download `images.env.sigstore.json` and `docker-compose.images.yml.sigstore.json` from the same release into the same folder, then run these two commands there, one for each file:
 
-```sh Check images.env
+```sh Run in the folder with the files (checks images.env)
 cosign verify-blob --bundle images.env.sigstore.json --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity https://github.com/Leonfinn/Boss_Man/.github/workflows/release.yml@refs/heads/main images.env
 ```
 
-```sh Check docker-compose.images.yml
+```sh Run in the folder with the files (checks docker-compose.images.yml)
 cosign verify-blob --bundle docker-compose.images.yml.sigstore.json --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity https://github.com/Leonfinn/Boss_Man/.github/workflows/release.yml@refs/heads/main docker-compose.images.yml
 ```
 
