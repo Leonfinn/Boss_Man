@@ -162,6 +162,22 @@ describe("updateStatus: one row per state, first match wins", () => {
     expect(wrapUpBannerText({ runs: 0, wrapSince: iso(-20), wrapForUpdate: "runner" })).toMatch(/^Wrapping up for the runner update/);
   });
 
+  // BOS-2672 (RCA-011): the banner and the box are worded from the one tie record, so they agree in every state; "no update
+  // was waiting" only when nothing is tied. 26 Nov 11:45: the box said "no update was waiting" over "Runners will update at 11:47".
+  it("2c2. BOS-2672: the banner and the box say the same thing about the update a wrap-up is tied to", () => {
+    const mk = (wrapTie: Record<string, unknown>, n = 1) => ({ on: true, kind: "wrapup", deadline: iso(5), runs: n, companies: 1, wrapAsked: true, notRespondingAfter: 10, runsList: Array.from({ length: n }, () => run()), wrapSince: iso(-16), wrapForUpdate: "runner", wrapTie }) as unknown as MaintenanceView;
+    const e = mk({ since: iso(-16), server: { approvedAt: iso(-17), stage: "live-trial", liveAt: iso(-13), trialEndsAt: iso(2) }, runner: { queuedAt: iso(-5), stage: "queued", startsAt: iso(2) } });
+    const box = updateStatus(base({ trial: { endsAt: iso(2), seconds: 900 }, runnerQueue: { pressedAt: iso(-5), startsAt: iso(2), why: "the trial" } }), e, null, NOW);
+    const banner = wrapUpBannerText(e as unknown as Parameters<typeof wrapUpBannerText>[0]);
+    expect(box.tag).toBe("Wrapping up");
+    expect(box.say).toMatch(/^Wrapping up for the runner update at .+, after the server update you approved at .+ \(live since .+\)\. 1 agent is still finishing/);
+    expect(banner.startsWith(box.say.split(". 1 agent")[0]!)).toBe(true);
+    expect(`${box.say} ${box.more}`).not.toMatch(/no update was waiting/i);
+    const a = mk({ since: iso(-16), liftsAt: iso(44) }, 0);
+    expect(updateStatus(base(), a, null, NOW).say).toMatch(/^No update was waiting when you asked at .+\. Every agent has finished\.$/);
+    expect(wrapUpBannerText(a as unknown as Parameters<typeof wrapUpBannerText>[0])).toMatch(/^You asked agents to wrap up at .+\. No update was approved, going in or queued, so this lifts by itself at /);
+  });
+
   it("2d. BOS-2056: every Waiting row in Recent updates says what it waits on", () => {
     const row = (over: Partial<HistoryRow>) => ({ id: "h1", at: iso(-5), target: "server", result: "queued", changes: 2, message: "", ...over }) as unknown as HistoryRow;
     expect(historyTag(row({})).tag).toBe("Waiting");

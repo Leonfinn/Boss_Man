@@ -51,3 +51,4 @@ export * from "./step-text.js";
 export * from "./age.js";
 export * from "./owner-figures.js";
 export * from "./list-price.js";
+export * from "./wrap-up-words.js";

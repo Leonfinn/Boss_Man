@@ -14,7 +14,7 @@ import { SaveButton } from "../../components/SaveButton";
 import { Section, useAction } from "./shared";
 import { CheckWorkers, type CheckWorkerView } from "./CheckWorkers";
 import { DEFAULT_POLICY, policyLine, policyValid, SlotSplitFields, type SlotPolicy } from "./SlotSplit";
-import { LiveState, atTime, historyTag, historyWaitingOn, historyWhat, inAbout, runnerProgress, updateStatus, type RunnerProgress, type DeployWaitView, type HistoryRow, type MaintenanceView, type Report, type SelfDeployView, type UpdateStatus, type WrapUpRun, type WrapUpStatus } from "./updates";
+import { LiveState, RUNNER_QUEUED_REPLY, atTime, historyTag, historyWaitingOn, historyWhat, inAbout, runnerProgress, updateStatus, type RunnerProgress, type DeployWaitView, type HistoryRow, type MaintenanceView, type Report, type SelfDeployView, type UpdateStatus, type WrapUpRun, type WrapUpStatus } from "./updates";
 
 /** The company's workspace disk cap (R54, BOS-274): over it, the owner hears once a day; nothing is stopped. */
 export function WorkspaceDisk({ company, onChanged }: { company: Company; onChanged: () => void }) {
@@ -188,8 +188,9 @@ function WaitingChanges({ commits }: { commits: { subject?: string }[] | undefin
  * host's frozen text and never disagree with the BLUE/GREEN rows (the trial comes from the same colour probe).
  * Pure, so a layout test can render it on its own.
  */
-export function TrialLines({ trial, wait, now, queue, cancelled, held, failureHolds }: { trial?: { endsAt: string } | null; wait?: { until: string; target?: string } | null; now: number; queue?: { startsAt: string | null; why: string } | null; cancelled?: { why: string } | null; held?: { commit: string } | null; failureHolds?: { subject: string; words: string }[] }) {
-  const trialOver = trial ? Date.parse(trial.endsAt) <= now : false;
+export function TrialLines({ trial, wait, now, queue, cancelled, held, failureHolds, wrapNamesRunner }: { trial?: { endsAt: string } | null; wait?: { until: string; target?: string } | null; now: number; queue?: { startsAt: string | null; why: string } | null; cancelled?: { why: string } | null; held?: { commit: string } | null; failureHolds?: { subject: string; words: string }[]; /** BOS-2672: the wrap-up line above already names the runner update and its time, so it isn't said twice. */ wrapNamesRunner?: boolean }) {
+  const trialOver = wrapNamesRunner || (trial ? Date.parse(trial.endsAt) <= now : false);
+  if (wrapNamesRunner) queue = null;
   const waitOver = wait ? Date.parse(wait.until) <= now : false;
   return (
     <>
@@ -359,7 +360,7 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
           )}
           {st.more && <p className="muted" style={{ fontSize: 14 }}>{st.more}</p>}
           {st.next && <p style={{ fontSize: 14 }} data-testid="update-next">{st.next}</p>}
-          {v && <TrialLines trial={v.trial ?? null} wait={v.deployWait ?? null} now={now} queue={v.runnerQueue ?? null} cancelled={v.queueCancelled ?? null} held={v.heldDeploy ?? null} failureHolds={v.failureHolds ?? []} />}
+          {v && <TrialLines trial={v.trial ?? null} wait={v.deployWait ?? null} now={now} queue={v.runnerQueue ?? null} cancelled={v.queueCancelled ?? null} held={v.heldDeploy ?? null} failureHolds={v.failureHolds ?? []} wrapNamesRunner={!!wrap?.wrapTie?.runner} />}
           {st.raw && (
             <details>
               <summary className="muted" style={{ fontSize: 13 }}>What the host said</summary>
@@ -412,7 +413,8 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
                   // BOS-1086: a press that cannot run yet is queued, not refused; the status box says when it starts.
                   if (r?.queued) {
                     view.reload();
-                    return r.message ?? "The runner update is queued.";
+                    // BOS-2672: the status box above says when it starts; repeating the time here put it on screen twice.
+                    return r.note ? `${RUNNER_QUEUED_REPLY} ${r.note}` : RUNNER_QUEUED_REPLY;
                   }
                   // BOS-1644: Boss Man could not confirm a fix is live and went ahead; say why instead of moving on silently.
                   if (r?.note) return `${r.note} Its card is in Decisions.`;

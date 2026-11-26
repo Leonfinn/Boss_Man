@@ -1259,7 +1259,8 @@ describe("Ask agents to wrap up (BOS-929): a mode of the same hold", () => {
     expect(held.map((w) => [w.reason, w.statusReason])).toEqual([["nudge", WRAPUP_HOLD_REASON]]); // BOS-2610 names the wrap-up
   });
 
-  it("BOS-2058: a wrap-up pressed while a server update waits belongs to it and lifts when that wait is over", async () => {
+  // BOS-2672: it lifts when the update is live, not when it is sent to the host (RCA-011 cause 2).
+  it("BOS-2058: a wrap-up pressed while a server update waits belongs to it and lifts when that update is live", async () => {
     const c = (ctx = await setup());
     const a = await c.company("App Co", "app-co");
     await c.wake(a);
@@ -1272,8 +1273,11 @@ describe("Ask agents to wrap up (BOS-929): a mode of the same hold", () => {
     expect(await getHold(c.db)).not.toBeNull(); // the update still waits
     await c.db.update(settings).set({ value: { ...wait, phase: "sent" } }).where(eq(settings.key, "deploy_wait"));
     await c.maintenance.step();
+    expect(await getHold(c.db)).not.toBeNull(); // sent is not live
+    await c.db.update(settings).set({ value: { ...wait, phase: "window", windowUntil: new Date(c.now().getTime() + 15 * MIN).toISOString() } }).where(eq(settings.key, "deploy_wait"));
+    await c.maintenance.step();
     expect(await getHold(c.db)).toBeNull();
-    expect(await c.titles()).toContain("note: Wrap-up lifted");
+    expect(await c.titles()).toContain("note: Wrap-up over");
   });
 
   // BOS-2056: the screen names which update a wrap-up is for, and the owner is told once that it ended with the update.
@@ -1717,7 +1721,7 @@ describe("a wrap-up tied to a runner update lifts when the update fails (BOS-261
     expect(await getHold(c.db)).toMatchObject({ kind: "wrapup", forUpdate: "none" });
     await drainFile(c.dir, "building");
     await c.maintenance.step();
-    expect(await getHold(c.db)).toMatchObject({ kind: "wrapup", forUpdate: "runner", tiedSince: expect.any(String) });
+    expect(await getHold(c.db)).toMatchObject({ kind: "wrapup", forUpdate: "runner", tie: { runner: { stage: "building", buildingSince: expect.any(String) } } });
     expect(await c.maint()).toMatchObject({ kind: "wrapup", wrapForUpdate: "runner" });
     await c.wake(a);
     expect(await c.scheduler.tick()).toMatchObject({ launched: 0 });
@@ -1761,6 +1765,109 @@ describe("a wrap-up tied to a runner update lifts when the update fails (BOS-261
     // No runner is connected here, so the update finishes in the same pass; what matters is it was not ended as a "failed" wrap-up.
     expect(await getHold(c.db)).toBeNull();
     expect((await c.maint()).last?.title).not.toContain("Wrap-up lifted");
+  });
+});
+
+// BOS-2672 (RCA-011): 26 Nov 11:29 the owner pressed Ask agents to wrap up while the server update they had approved was
+// going in. It was filed as "no update was waiting", held work for an hour, and the box also said "Runners will update at
+// 11:47". The wrap-up is now tied to the whole chain: the server update at any stage and the runner update queued after it.
+describe("a wrap-up is tied to the whole update chain it was pressed for (BOS-2672)", () => {
+  const drainFile = (dir: string, reason?: string) => writeFile(path.join(dir, "inbox", "drain.json"), JSON.stringify({ by: "update-runner.sh", ...(reason ? { reason } : {}) }));
+  const report = (dir: string, s: { id: string; target: string; result: string }, at: Date) =>
+    writeFile(path.join(dir, "outbox", "status.json"), JSON.stringify({ ...s, message: "", from_commit: "a".repeat(40), to_commit: "b".repeat(40), started: at.toISOString(), ended: s.result === "running" ? "" : at.toISOString() }));
+  const serverWait = (c: { now: () => Date }, phase: string, extra: object = {}) => ({ decisionId: ID, commit: "b".repeat(40), fromCommit: "a".repeat(40), approvedAt: new Date(c.now().getTime() - MIN).toISOString(), phase, deadline: new Date(c.now().getTime() + 30 * MIN).toISOString(), minutes: 30, origin: "approve", ...extra });
+  const ID = "11111111-2222-4333-8444-555555555555";
+  const putWait = (c: { db: Awaited<ReturnType<typeof setup>>["db"] }, value: object) => c.db.insert(settings).values({ key: "deploy_wait", value }).onConflictDoUpdate({ target: settings.key, set: { value } });
+
+  it("replay of 26 Nov: pressed while the server update was going in, it holds through the trial for the queued runner update, names both, and ends with the swap", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    const a = await c.company("App Co", "app-co");
+    await putWait(c, serverWait(c, "sent"));
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    // Before BOS-2672 this was forUpdate "none": only a wait for a quiet machine counted.
+    expect(await getHold(c.db)).toMatchObject({ kind: "wrapup", forUpdate: "server", tie: { server: { decisionId: ID, stage: "going-in" } } });
+    // The owner presses Build and update runners while it goes in: the press is queued and joins the wrap-up.
+    const trialEnd = new Date(c.now().getTime() + 17 * MIN).toISOString();
+    await c.db.insert(settings).values({ key: "self_deploy_runner_due", value: { commit: "b".repeat(40), fromCommit: "a".repeat(40), after: trialEnd, offer: true, pressed: c.now().toISOString() } });
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toMatchObject({ forUpdate: "runner", tie: { runner: { stage: "queued" } } });
+    // Live, on trial: the wrap-up stays on (a runner update follows) and the screen names both steps, from one record.
+    c.advance(2 * MIN);
+    await putWait(c, serverWait(c, "window", { windowUntil: trialEnd }));
+    await c.maintenance.step();
+    const m = (await c.maint()) as { kind: string; wrapTie: { server?: { stage: string; liveAt: string }; runner?: { stage: string } } };
+    expect(m).toMatchObject({ kind: "wrapup", wrapForUpdate: "runner", wrapTie: { server: { stage: "live-trial", liveAt: expect.any(String) }, runner: { stage: "queued" } } });
+    // Work is held through the trial as "wrap-up pending".
+    await c.wake(a);
+    expect(await c.scheduler.tick()).toMatchObject({ launched: 0 });
+    // The trial ends; the runner request goes to the host and builds.
+    c.advance(15 * MIN);
+    await c.db.delete(settings).where(eq(settings.key, "deploy_wait"));
+    await c.db.delete(settings).where(eq(settings.key, "self_deploy_runner_due"));
+    await report(c.dir, { id: "runner-1", target: "runner", result: "running" }, c.now());
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toMatchObject({ kind: "wrapup", tie: { server: { doneAt: expect.any(String) }, runner: { stage: "building" } } });
+    await drainFile(c.dir, "building");
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toMatchObject({ kind: "wrapup", tie: { runner: { stage: "building", buildingSince: expect.any(String) } } });
+    // The image is built: the drain takes the wrap-up over and keeps its ask and its tie, so the screen still names the chain.
+    // (start() is what a drain.json "update" request calls; called directly so the hold can be read before the swap pass.)
+    await c.maintenance.start({ kind: "update" });
+    expect(await getHold(c.db)).toMatchObject({ kind: "update", wrapSince: expect.any(String), tie: { server: { decisionId: ID } } });
+    expect(await c.maint()).toMatchObject({ kind: "update", wrapAsked: true, wrapTie: { server: { approvedAt: expect.any(String) }, runner: { stage: "swapping" } } });
+    // No runner is connected here, so the swap finishes on the next pass; the notice says the wrap-up ended with it, naming both.
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    expect(((await c.maint()) as { last?: { body: string } }).last?.body).toContain("The wrap-up you asked for (for the server update and this runner update) ended with it");
+  });
+
+  it("pressed while the server update is going in, with nothing queued: lifts when it is live", async () => {
+    const c = (ctx = await setup());
+    await c.company("App Co", "app-co");
+    await putWait(c, serverWait(c, "sent"));
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    await c.maintenance.step();
+    expect(await getHold(c.db)).not.toBeNull();
+    await putWait(c, serverWait(c, "window", { windowUntil: new Date(c.now().getTime() + 15 * MIN).toISOString() }));
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    expect((await c.maint()).last).toMatchObject({ title: "Wrap-up over", body: expect.stringContaining("the server update is in") });
+  });
+
+  it("the server update fails on the host: lifts at once and says so", async () => {
+    const c = (ctx = await setup());
+    await c.company("App Co", "app-co");
+    await putWait(c, serverWait(c, "sent"));
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    await report(c.dir, { id: ID, target: "server", result: "failed" }, c.now());
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    expect((await c.maint()).last).toMatchObject({ title: "Wrap-up lifted: the server update failed", body: expect.stringContaining("Work has restarted.") });
+  });
+
+  it("pressed first, approved after: the server update joins and the wrap-up no longer lifts after an hour by itself", async () => {
+    const c = (ctx = await setup());
+    await c.company("App Co", "app-co");
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(await getHold(c.db)).toMatchObject({ forUpdate: "none" });
+    await putWait(c, serverWait(c, "waiting"));
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toMatchObject({ forUpdate: "server", tie: { server: { stage: "approved" } } });
+    c.advance(61 * MIN);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).not.toBeNull(); // tied to an update now: it waits for that, not the hour
+  });
+
+  it("a server update that ends with no record lifts the wrap-up and says it did not go in (an unreadable host report is no report)", async () => {
+    const c = (ctx = await setup());
+    await c.company("App Co", "app-co");
+    await putWait(c, serverWait(c, "sent"));
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    await writeFile(path.join(c.dir, "outbox", "status.json"), "{ not json");
+    await c.db.delete(settings).where(eq(settings.key, "deploy_wait"));
+    // An unreadable host report is no report (not a failure); the server step ended with no record, so it gave up.
+    await c.maintenance.step();
+    expect((await c.maint()).last).toMatchObject({ title: "Wrap-up lifted: the server update did not go in" });
   });
 });
 

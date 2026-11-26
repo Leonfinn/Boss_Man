@@ -1,3 +1,4 @@
+import { wrapUpWords, type WrapTieView } from "@boss-man/shared";
 import { when } from "../Runs";
 
 export type UpdateRow = { at: string; title: string; body: string; state: "ok" | "resolved" | "problem"; todo: string | null };
@@ -6,7 +7,7 @@ export type Report = { live: LiveRow[]; update: UpdateRow | null };
 export type LastUpdate = { at: string; startedAt: string | null; ok: boolean; title: string; body: string } | null;
 /** BOS-1600: a check on a runner that a swap waits on. Absent (`checks` undefined) from an older server. */
 export type RunnerCheckView = { ticket: string | null; kind: string; scope: string; startedAt: string | null; runningForMinutes: number; usuallyMinutes: number | null };
-export type MaintenanceView = ({ on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; deadline: string; runs: number; companies: number; blocking?: boolean; checks?: number; checksList?: RunnerCheckView[]; since?: string; phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean; /** BOS-2531: false only while a runner is being swapped, until chatBackBy at the latest. */ chatOpen?: boolean; chatBackBy?: string | null; /** BOS-1951 */ merges?: number; mergesList?: { ticket: string | null }[]; unknownWait?: boolean; /** BOS-2479: checks on a check worker (not waited for) and the latest go-ahead. */ workerChecksList?: WorkerCheckView[]; goAheadAt?: string | null; /** BOS-2056: the owner's wrap-up: since when, and which update it is for. */ wrapAsked?: boolean; wrapSince?: string; wrapForUpdate?: "server" | "runner" | "none" }) & { last?: LastUpdate };
+export type MaintenanceView = ({ on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; deadline: string; runs: number; companies: number; blocking?: boolean; checks?: number; checksList?: RunnerCheckView[]; since?: string; phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean; /** BOS-2531: false only while a runner is being swapped, until chatBackBy at the latest. */ chatOpen?: boolean; chatBackBy?: string | null; /** BOS-1951 */ merges?: number; mergesList?: { ticket: string | null }[]; unknownWait?: boolean; /** BOS-2479: checks on a check worker (not waited for) and the latest go-ahead. */ workerChecksList?: WorkerCheckView[]; goAheadAt?: string | null; /** BOS-2056: the owner's wrap-up: since when, and which update it is for. */ wrapAsked?: boolean; wrapSince?: string; wrapForUpdate?: "server" | "runner" | "none"; /** BOS-2672: the update chain it is tied to, worded by wrapUpWords. Absent from an older server. */ wrapTie?: WrapTieView }) & { last?: LastUpdate };
 
 /** "BOS-1525 merge check, started 19:41, usually about 15 min" (BOS-1600). */
 export function checkSentence(c: RunnerCheckView): string {
@@ -155,14 +156,21 @@ export function wrapUpFor(m: { kind?: string; wrapSince?: string; since?: string
   return { forUpdate, at: m.wrapSince ?? m.since ?? null };
 }
 
-/** The top banner for a standalone wrap-up hold: names the update it is for, or says none was waiting (BOS-2056). */
-export function wrapUpBannerText(m: { runs: number; wrapSince?: string; since?: string; wrapForUpdate?: "server" | "runner" | "none" }): string {
+/**
+ * The top banner for a standalone wrap-up hold: names the update it is for, or says none was waiting (BOS-2056). BOS-2672:
+ * worded from the chain it is tied to by the same function as the status box, so the two can't disagree.
+ */
+export function wrapUpBannerText(m: { runs: number; wrapSince?: string; since?: string; wrapForUpdate?: "server" | "runner" | "none"; wrapTie?: WrapTieView }): string {
+  if (m.wrapTie) return wrapUpWords(m.wrapTie, m.runs, atTime).banner;
   const { forUpdate, at } = wrapUpFor({ ...m, kind: "wrapup" });
   const runs = m.runs > 0 ? ` Waiting for ${plural(m.runs, "run", "runs")} to finish.` : "";
   if (forUpdate === "server") return `Wrapping up for the server update${at ? ` (asked at ${atTime(at)})` : ""}. Nothing new starts until it goes in; this lifts by itself then.${runs}`;
   if (forUpdate === "runner") return `Wrapping up for the runner update${at ? ` (asked at ${atTime(at)})` : ""}. Nothing new starts until it goes in; this lifts by itself when it does, fails or is cancelled.${runs}`;
   return `You asked agents to wrap up${at ? ` at ${atTime(at)}` : ""} (no update was waiting). It lifts by itself after an hour, or sooner if you cancel it on Settings → Server and runner.${runs}`;
 }
+
+/** BOS-2672: the reply to a Build and update runners press that was queued. The status box says when it starts, once. */
+export const RUNNER_QUEUED_REPLY = "Runner update queued; the status above says when it starts.";
 
 /** What a "Waiting" row in Recent updates waits on, in plain words (BOS-2056). Null when the row is not waiting. */
 export function historyWaitingOn(r: HistoryRow, wait: DeployWaitView | null, maint: MaintenanceView | null, queued: boolean): string | null {
@@ -350,6 +358,11 @@ export function updateStatus(view: SelfDeployView | null, maint: MaintenanceView
   }
   if (wrap && maint && maint.on && maint.kind === "wrapup") {
     const n = wrap.runsList.length;
+    // BOS-2672: the box's words are the banner's, from the one tie record.
+    if (wrap.wrapTie) {
+      const words = wrapUpWords(wrap.wrapTie, n, atTime);
+      return { tone: "amber", tag: "Wrapping up", say: words.say, more: words.more, next: null, primary: null, normal: [] };
+    }
     const { forUpdate, at } = wrapUpFor(wrap);
     const forServer = forUpdate !== "none";
     const who = forUpdate === "server" ? "Wrapping up for the server update. " : forUpdate === "runner" ? "Wrapping up for the runner update. " : "";
