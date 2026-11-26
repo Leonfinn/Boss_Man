@@ -18,7 +18,7 @@ import { z } from "zod";
 import { goLiveWaitWords, type GoLiveWait, FEATURE_STATUSES, HORIZONS, IMPORTANCE, planFirstByDefault, portalVerdict, RISK_TIERS, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, stateNoteLine, untrusted, isTaskSize, SIZE_SCALE, type TaskSize } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
-import { agents, companies, costEvents, decisions as decisionsTable, engagements as engagementsTable, features, keyResults, objectives, projects, runs as runsTable, runTokens, ticketDependencies, ticketImages, tickets, wakes, workflowColumns } from "./db/schema.js";
+import { agents, companies, costEvents, decisions as decisionsTable, engagements as engagementsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, ticketDependencies, ticketImages, tickets, wakes, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
 import { wipQueuedNote } from "./services/agent-wip.js";
 import { goLiveLine, goLiveWaitOf, liveClaimWarning } from "./services/go-live-wait.js";
@@ -50,7 +50,8 @@ import { NOTHING_CHANGED, ReviewError, type reviewService } from "./services/rev
 import type { notificationsService } from "./services/notifications.js";
 import type { chaptersService } from "./services/chapters.js";
 import { staleVersionMessage, startRefusal, WorkError, type workService } from "./services/work.js";
-import type { planningService } from "./services/planning.js";
+import { effectiveSize, notInPointsLeft, type planningService } from "./services/planning.js";
+import { findMilestone, milestoneOfTicket, milestoneOut, sizeOut } from "./mcp-ticket-plan.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
 import { acceptanceCriteriaSchema, afterMergeLint, criteriaForCard, criterionOverlap, criteriaText, criterionText, failedAfterMerge, isAfterMerge, missingVerdicts, optionVerdictsRefusal, pageClauseRefusal, readCriteria, unreportedAfterMerge, type Criterion } from "@boss-man/shared";
 import { TicketChatError, type ticketChatService } from "./services/ticket-chat.js";
@@ -1326,10 +1327,10 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
     "tickets",
     {
       description:
-        "Look up your company's tickets. Each has a reference like HOL-12, which you can use anywhere this tool takes a ticketId. find (optional q to search titles and descriptions, or a reference, optional state, optional assignee: an agent's name, exact, any case, optional since: an ISO time, only tickets created at or after it or finished (merged, or done) at or after it, each row's \"since\" says created and/or finished, optional noFeature: true, only tickets with no feature) lists matches, 40 a page, newest activity first, with their ids and references, createdAt and feature (id and title, or null); a line after the list gives the total and, when more exist, \"continue with tickets find offset=N\" (pass offset for the next page); read (ticketId) gives one ticket: description (long ones are cut; pass offset to continue), state, assignee, its branch, what it produced (wiki pages, repo files, links) and its recent conversation; file (ticketId, path, optional offset) reads a file from that ticket's work in the repo, such as a document it wrote, even if it was never merged; long files come in parts of 40000 characters; check_log (ticketId, optional jobId, optional offset) without a jobId lists the ticket's failed checks (job id, kind, time, first failing line); with a jobId it reads that job's whole redacted log, kept 14 days.",
-      inputSchema: { action: z.enum(["find", "read", "file", "check_log"]), q: z.string().max(200).optional(), state: z.enum(STATES).optional(), ticketId: z.string().max(40).optional(), path: z.string().max(500).optional(), offset: z.number().int().min(0).optional(), jobId: z.string().uuid().optional(), assignee: z.string().max(100).optional(), since: z.string().max(40).optional(), noFeature: z.boolean().optional() },
+        "Look up your company's tickets. Each has a reference like HOL-12, which you can use anywhere this tool takes a ticketId. find (optional q to search titles and descriptions, or a reference, optional state, optional assignee: an agent's name, exact, any case, optional since: an ISO time, only tickets created at or after it or finished (merged, or done) at or after it, each row's \"since\" says created and/or finished, optional noFeature: true, only tickets with no feature, optional milestone: a milestone's id or exact title, only its tickets, its own or through their feature, open and merged-not-done unless you give a state, each with merged and countsTowardPointsLeft (and notCountedBecause), plus a line with the milestone's points left) lists matches, 40 a page, newest activity first, with their ids and references, createdAt, size (points, or \"no size\"), milestone (id and title, or null; a ticket's own, else its feature's) and feature (id and title, or null); a line after the list gives the total and, when more exist, \"continue with tickets find offset=N\" (pass offset for the next page); read (ticketId) gives one ticket: description (long ones are cut; pass offset to continue), state, assignee, its branch, what it produced (wiki pages, repo files, links) and its recent conversation; file (ticketId, path, optional offset) reads a file from that ticket's work in the repo, such as a document it wrote, even if it was never merged; long files come in parts of 40000 characters; check_log (ticketId, optional jobId, optional offset) without a jobId lists the ticket's failed checks (job id, kind, time, first failing line); with a jobId it reads that job's whole redacted log, kept 14 days.",
+      inputSchema: { action: z.enum(["find", "read", "file", "check_log"]), q: z.string().max(200).optional(), state: z.enum(STATES).optional(), ticketId: z.string().max(40).optional(), path: z.string().max(500).optional(), offset: z.number().int().min(0).optional(), jobId: z.string().uuid().optional(), assignee: z.string().max(100).optional(), since: z.string().max(40).optional(), noFeature: z.boolean().optional(), milestone: z.string().max(200).optional() },
     },
-    async ({ action, q, state, ticketId: given, path, offset, jobId, assignee, since, noFeature }) => {
+    async ({ action, q, state, ticketId: given, path, offset, jobId, assignee, since, noFeature, milestone }) => {
       const asRef = given ? REF.exec(given) : null;
       const ref = await refsOf(db, scope.companyId);
       const idStartsWith = (p: string) => sql`${tickets.id}::text like ${`${p.toLowerCase()}%`}`;
@@ -1379,32 +1380,56 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
         }
         const finishedAtSql = sql`coalesce(${tickets.mergedAt}, ${tickets.lastActivityAt})`;
         const finishedSince = sinceAt ? sql`(${tickets.systemState} = 'done' and ${finishedAtSql} >= ${sinceAt.toISOString()}::timestamptz)` : undefined;
-        const where = and(eq(tickets.companyId, scope.companyId), state ? eq(tickets.systemState, state) : undefined, sinceAt ? or(sql`${tickets.createdAt} >= ${sinceAt.toISOString()}::timestamptz`, finishedSince) : undefined, noFeature ? isNull(tickets.featureId) : undefined, who ? sql`lower(${agents.name}) = ${who.toLowerCase()}` : undefined, byRef ? eq(tickets.number, Number(byRef[1])) : undefined, like ? or(ilike(tickets.title, like), ilike(tickets.body, like), byPrefix ? idStartsWith(byPrefix) : undefined) : undefined);
+        // BOS-2720: milestone lists a milestone's tickets (its own or through their feature, as the Roadmap counts them),
+        // open and merged-not-done unless a state is given, cancelled left out, each saying whether it counts toward points left.
+        let ms: { id: string; title: string } | null = null;
+        if (milestone?.trim()) {
+          const found = await findMilestone(db, scope.companyId, milestone);
+          if ("error" in found) return fail(found.error);
+          ms = found;
+        }
+        const inMilestone = ms ? and(sql`${milestoneOfTicket} = ${ms.id}`, sql`${tickets.outcome} is distinct from 'cancelled'`) : undefined;
+        const where = and(eq(tickets.companyId, scope.companyId), inMilestone, ms && !state ? ne(tickets.systemState, "done") : undefined, state ? eq(tickets.systemState, state) : undefined, sinceAt ? or(sql`${tickets.createdAt} >= ${sinceAt.toISOString()}::timestamptz`, finishedSince) : undefined, noFeature ? isNull(tickets.featureId) : undefined, who ? sql`lower(${agents.name}) = ${who.toLowerCase()}` : undefined, byRef ? eq(tickets.number, Number(byRef[1])) : undefined, like ? or(ilike(tickets.title, like), ilike(tickets.body, like), byPrefix ? idStartsWith(byPrefix) : undefined) : undefined);
         if (who) {
           const named = await db.select({ name: agents.name }).from(agents).where(and(eq(agents.companyId, scope.companyId), sql`lower(${agents.name}) = ${who.toLowerCase()}`));
           if (!named.length) return fail(`No agent called "${who}" in your company. Give the name exactly as the board shows it (any case).`);
         }
         const start = offset ?? 0;
         const rows = await db
-          .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, version: tickets.version, outcome: tickets.outcome, assignee: agents.name, createdAt: tickets.createdAt, finishedAt: sql<Date | null>`case when ${tickets.systemState} = 'done' then ${finishedAtSql} end`, featureId: tickets.featureId, featureTitle: features.title, recurring: tickets.recurring, urgent: tickets.urgent, lastActivityAt: tickets.lastActivityAt, stateNote: tickets.stateNote, stateNoteAt: tickets.stateNoteAt, stateNoteStaleAt: tickets.stateNoteStaleAt, stateNoteStaleReason: tickets.stateNoteStaleReason })
+          .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, version: tickets.version, outcome: tickets.outcome, assignee: agents.name, createdAt: tickets.createdAt, finishedAt: sql<Date | null>`case when ${tickets.systemState} = 'done' then ${finishedAtSql} end`, featureId: tickets.featureId, featureTitle: features.title, recurring: tickets.recurring, urgent: tickets.urgent, lastActivityAt: tickets.lastActivityAt, stateNote: tickets.stateNote, stateNoteAt: tickets.stateNoteAt, stateNoteStaleAt: tickets.stateNoteStaleAt, stateNoteStaleReason: tickets.stateNoteStaleReason, size: tickets.size, milestoneId: milestoneOfTicket, milestoneTitle: milestones.title, mergeCommit: tickets.mergeCommit, goLiveWait: tickets.goLiveWait })
           .from(tickets)
           .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
           .leftJoin(features, eq(features.id, tickets.featureId))
+          .leftJoin(milestones, sql`${milestones.id} = ${milestoneOfTicket}`)
           .where(where)
           .orderBy(desc(tickets.lastActivityAt))
           .limit(40)
           .offset(start);
         const json = JSON.stringify(
-          rows.map(({ featureId, featureTitle, finishedAt, recurring, urgent, ...r }) => {
+          rows.map(({ featureId, featureTitle, finishedAt, recurring, urgent, size, milestoneId, milestoneTitle, mergeCommit, goLiveWait, ...r }) => {
             const out = withNote(ref(r));
             const fin = finishedAt ? new Date(finishedAt) : null;
             const madeSince = sinceAt ? [...(r.createdAt >= sinceAt ? ["created"] : []), ...(fin && fin >= sinceAt ? ["finished"] : [])] : undefined;
-            return { ...out, feature: featureId ? { id: featureId, title: featureTitle } : null, ...(recurring ? { recurring: true } : {}), ...(urgent ? { urgent: true } : {}), ...(madeSince ? { since: madeSince } : {}) };
+            const notCounted = ms ? notInPointsLeft({ size, state: r.state, mergeCommit, goLiveWait }) : null;
+            const plan = ms ? { ...(mergeCommit && r.state !== "done" ? { merged: true } : {}), countsTowardPointsLeft: notCounted === null, ...(notCounted ? { notCountedBecause: notCounted } : {}) } : {};
+            return { ...out, size: sizeOut(size), milestone: milestoneOut(milestoneId, milestoneTitle), feature: featureId ? { id: featureId, title: featureTitle } : null, ...plan, ...(recurring ? { recurring: true } : {}), ...(urgent ? { urgent: true } : {}), ...(madeSince ? { since: madeSince } : {}) };
           }),
         );
-        const [{ n: total } = { n: 0 }] = await db.select({ n: sql<number>`count(*)::int` }).from(tickets).leftJoin(agents, eq(agents.id, tickets.assigneeAgentId)).where(where);
+        const [{ n: total } = { n: 0 }] = await db.select({ n: sql<number>`count(*)::int` }).from(tickets).leftJoin(agents, eq(agents.id, tickets.assigneeAgentId)).leftJoin(features, eq(features.id, tickets.featureId)).where(where);
         const end = start + rows.length;
-        return text(`${json}\n\nShowing ${rows.length ? `${start + 1} to ${end}` : "none"} of ${total} matching tickets (newest activity first).${end < total ? ` More exist: continue with tickets find offset=${end} (same q, state, assignee, since and noFeature).` : ""}`);
+        // The milestone's whole open set, whatever the other filters or page, so the line matches the Roadmap's points left.
+        let msLine = "";
+        if (ms) {
+          const open = await db
+            .select({ size: tickets.size, state: tickets.systemState, mergeCommit: tickets.mergeCommit, goLiveWait: tickets.goLiveWait })
+            .from(tickets)
+            .leftJoin(features, eq(features.id, tickets.featureId))
+            .where(and(eq(tickets.companyId, scope.companyId), inMilestone, ne(tickets.systemState, "done")));
+          const counted = open.filter((t) => notInPointsLeft(t) === null);
+          const unsized = open.filter((t) => notInPointsLeft(t) === "no size").length;
+          msLine = `\nMilestone "${ms.title}" (id ${ms.id}): ${counted.reduce((n, t) => n + effectiveSize(t.size), 0)} points left in ${counted.length} sized open tickets${unsized ? `; ${unsized} open ${unsized === 1 ? "ticket has" : "tickets have"} no size and ${unsized === 1 ? "adds" : "add"} nothing` : ""}.${state ? "" : " Done tickets are left out; pass state=done to list them."}`;
+        }
+        return text(`${json}\n\nShowing ${rows.length ? `${start + 1} to ${end}` : "none"} of ${total} matching tickets (newest activity first).${end < total ? ` More exist: continue with tickets find offset=${end} (same q, state, assignee, since, noFeature and milestone).` : ""}${msLine}`);
       }
       if (!ticketId) return fail("Give the ticketId to read.");
       const [row] = await db
@@ -1414,6 +1439,15 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
         .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
         .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
       if (!row) return fail("No ticket with that ID in your company.");
+      // BOS-2720: its milestone as the Roadmap counts it (its own, else its feature's).
+      const [msRow] = await db
+        .select({ id: milestones.id, title: milestones.title })
+        .from(tickets)
+        .leftJoin(features, eq(features.id, tickets.featureId))
+        .innerJoin(milestones, sql`${milestones.id} = ${milestoneOfTicket}`)
+        .where(eq(tickets.id, ticketId));
+      const size = sizeOut(row.t.size);
+      const sizeMilestone = `Size: ${size === "no size" ? "no size" : `${size} ${size === 1 ? "point" : "points"}`}. Milestone: ${msRow ? `"${msRow.title}" (id ${msRow.id})` : "none"}.`;
       const made = await wiki.artifacts(ticketId);
       const talk = await conversationLines(db, ticketId);
       const pics = await db.select({ id: ticketImages.id, name: ticketImages.name, caption: ticketImages.caption }).from(ticketImages).where(and(eq(ticketImages.ticketId, ticketId), eq(ticketImages.companyId, scope.companyId), sql`${ticketImages.type} like 'image/%'`)).orderBy(asc(ticketImages.createdAt));
@@ -1432,7 +1466,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
       // followed rather than cut; the whole text is paged by offset, and a long line is split and continued.
       const head = [
         `# ${t.title}`,
-        `Ticket ${ref(t).ref ?? ""} (id ${t.id}) in project "${row.project}". State: ${t.systemState}${t.outcome ? ` (${t.outcome})` : ""}. Version: ${t.version}. Assigned to: ${row.assignee ?? (t.assignedToOwner ? "the owner" : "nobody")}. Risk: ${t.risk ?? "medium"}.${t.recurring ? " Recurring: yes." : ""}${t.urgent ? " Urgent: yes." : ""}`,
+        `Ticket ${ref(t).ref ?? ""} (id ${t.id}) in project "${row.project}". State: ${t.systemState}${t.outcome ? ` (${t.outcome})` : ""}. Version: ${t.version}. Assigned to: ${row.assignee ?? (t.assignedToOwner ? "the owner" : "nobody")}. Risk: ${t.risk ?? "medium"}. ${sizeMilestone}${t.recurring ? " Recurring: yes." : ""}${t.urgent ? " Urgent: yes." : ""}`,
         ...(note ? [note] : []),
         ...(signoff ? [signoff] : []),
         ...(signoffLog ? [signoffLog] : []),
