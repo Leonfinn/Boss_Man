@@ -9,7 +9,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { projects, ticketDependencies, ticketMessages, tickets } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
-import { handOffPhrase } from "../src/services/hand-offs.js";
+import { edgeCasePhrase, handOffPhrase } from "../src/services/hand-offs.js";
 import { openBlockers } from "../src/services/ticket-links.js";
 
 let server: Awaited<ReturnType<typeof boot>>;
@@ -141,6 +141,22 @@ describe("set_ticket_state done with hand-off wording", () => {
     const c = await ctx.agent(ctx.dev.id);
     const r = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "Finished." } });
     expect((r as { isError?: boolean }).isError).toBe(true);
+  });
+
+  it("BOS-2679: a known edge case in the last reply refuses done; a ticket id, followUps or a reason clears it", async () => {
+    const t = await ctx.ticket();
+    await ctx.db.insert(ticketMessages).values({ companyId: ctx.co.company.id, ticketId: t.id, author: "agent", agentId: ctx.dev.id, text: "Done. Known edge case: a weekly-limit stop's own reading may hide other limits until the next report." });
+    const c = await ctx.agent(ctx.dev.id);
+    const refused = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "Finished." } });
+    expect((refused as { isError?: boolean }).isError).toBe(true);
+    expect(JSON.stringify(refused)).toContain("known edge case");
+    const ok = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "Finished.", noFollowUpReason: "Covered by the weekly-limit ticket." } });
+    expect((ok as { isError?: boolean }).isError).toBeFalsy();
+  });
+
+  it("BOS-2679: edge-case wording", () => {
+    for (const s of ["Known limitation: stale rows stay.", "Edge case: two reviewers at once.", "Renames are not handled yet.", "It doesn't handle empty feeds.", "This may hide other limits."]) expect(edgeCasePhrase(s), s).not.toBeNull();
+    for (const s of ["Edge case tracked in BOS-2680.", "Wrote the page; every criterion passes.", "Tests pass; the build is green."]) expect(edgeCasePhrase(s), s).toBeNull();
   });
 
   it("noFollowUpReason lets it through", async () => {
