@@ -169,27 +169,41 @@ describe("windowLabel", () => {
   });
 });
 
-describe("currentReportSamples (BOS-1916)", () => {
-  const at = (iso: string, window: string) => ({ window, observedAt: new Date(iso) });
+describe("currentReportSamples (BOS-1916, BOS-2676)", () => {
+  const NOW = new Date("2026-11-21T09:00:00.000Z");
+  const at = (iso: string, window: string, resetsAt: string | null = null) => ({ window, observedAt: new Date(iso), resetsAt: resetsAt ? new Date(resetsAt) : null });
 
   it("keeps nothing when there are no samples", () => {
-    expect(currentReportSamples([])).toEqual([]);
+    expect(currentReportSamples([], NOW)).toEqual([]);
   });
 
   it("keeps a single sample, which is always the newest report", () => {
     const one = at("2026-11-21T08:00:00.000Z", "five_hour");
-    expect(currentReportSamples([one])).toEqual([one]);
+    expect(currentReportSamples([one], NOW)).toEqual([one]);
   });
 
   it("keeps every sample when they all came from the same report", () => {
     const samples = [at("2026-11-21T08:00:00.000Z", "five_hour"), at("2026-11-21T08:00:00.000Z", "seven_day")];
-    expect(currentReportSamples(samples)).toEqual(samples);
+    expect(currentReportSamples(samples, NOW)).toEqual(samples);
   });
 
-  it("drops windows left out of the newest report, keeping the current ones in order", () => {
+  it("drops a window left out of the newest report once its own reset has passed", () => {
     const current = [at("2026-11-21T08:00:00.000Z", "five_hour"), at("2026-11-21T08:00:00.000Z", "seven_day")];
-    const old = at("2026-11-21T07:00:00.000Z", "fable");
-    expect(currentReportSamples([old, ...current])).toEqual(current);
+    const old = at("2026-11-21T07:00:00.000Z", "fable", "2026-11-21T08:30:00.000Z");
+    expect(currentReportSamples([old, ...current], NOW)).toEqual(current);
+  });
+
+  it("drops a left-out window that had no reset time", () => {
+    const current = at("2026-11-21T08:00:00.000Z", "seven_day");
+    expect(currentReportSamples([at("2026-11-21T07:00:00.000Z", "fable"), current], NOW)).toEqual([current]);
+  });
+
+  it("keeps a window left out of the newest report until its own reset", () => {
+    const current = at("2026-11-21T08:00:00.000Z", "seven_day");
+    const fable = at("2026-11-21T07:00:00.000Z", "fable", "2026-11-28T14:00:00.000Z");
+    expect(currentReportSamples([fable, current], NOW)).toEqual([fable, current]);
+    // After its reset, with no report bringing it back, it goes.
+    expect(currentReportSamples([fable, current], new Date("2026-11-28T14:00:00.000Z"))).toEqual([current]);
   });
 
   // BOS-2670: a weekly-limit stop writes one made-up reading (resets exactly an hour on); it must not hide Fable.
@@ -210,6 +224,6 @@ describe("currentReportSamples (BOS-1916)", () => {
   it("keeps a whole newer batch even when an older one had more windows", () => {
     const older = [at("2026-11-21T07:00:00.000Z", "five_hour"), at("2026-11-21T07:00:00.000Z", "seven_day")];
     const newest = at("2026-11-21T08:00:00.000Z", "five_hour");
-    expect(currentReportSamples([...older, newest])).toEqual([newest]);
+    expect(currentReportSamples([...older, newest], NOW)).toEqual([newest]);
   });
 });

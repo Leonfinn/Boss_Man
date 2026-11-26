@@ -50,6 +50,8 @@ export type ServerStatusDeps = {
   permissions?: (companyId: string) => unknown;
   /** Synthetic's cached quota reading, its age, history and this company's agents paid from it (BOS-239). */
   syntheticUsage?: (companyId: string) => Promise<unknown>;
+  /** Each Claude subscription's newest stored quota reports, window by window, read-only (funding.claudeQuotaReports, BOS-2676). */
+  claudeQuota?: () => Promise<unknown>;
   /** Which add-ons are running (addons.ts, DR-023): server-wide, like commit. Absent: null. */
   addons?: () => Promise<AddonFacts>;
   /** The host's settings record (host-facts.ts, BOS-419): each fact's value, source and any conflict. Absent: null. */
@@ -290,6 +292,8 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         // it are scoped to this company (see funding.syntheticUsage). A failed reading is unknown,
         // never an error, and never blocks this view.
         syntheticUsage: deps.syntheticUsage ? await deps.syntheticUsage(companyId).catch(() => []) : [],
+        // The newest stored reports per Claude account (BOS-2676): which windows each real report carried, to tell "Anthropic stopped reporting a limit" from "one report carries only some".
+        claudeQuota: deps.claudeQuota ? await deps.claudeQuota().catch(() => []) : [],
         // ntfy, Tailscale and Penpot: state (not_set_up, stopped, needs_login, running, unknown), since and source (DR-023).
         // Only "running" means the add-on is up; never tell the owner otherwise.
         addons: deps.addons ? await deps.addons() : null,
