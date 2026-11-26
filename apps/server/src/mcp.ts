@@ -78,6 +78,7 @@ import { registerAgentAdminTools } from "./mcp-agent-admin.js";
 import { buildPaServer } from "./mcp-pa.js";
 import { registerRetro, registerWatchdog } from "./mcp-watchdog.js";
 import { traceCalls } from "./mcp-trace.js";
+import { guardSecrets } from "./mcp-secret-guard.js";
 import { registerBoard, registerListMyWork, registerNotes, registerRequestNote, registerRoadmap } from "./mcp-board.js";
 import { registerDecisionTools } from "./mcp-decisions.js";
 import { registerMergeLineExport } from "./mcp-merge-line.js";
@@ -245,7 +246,8 @@ function restrictTo(server: McpServer, only: ReadonlySet<string>) {
 }
 
 function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, only?: ReadonlySet<string>, retroAgent = false, withServerStatus = true) {
-  const server = new McpServer({ name: "bossman", version: "0.1.0" });
+  // BOS-2731: an agent's text for the wiki, tickets, replies and cards is refused if it holds a secret. Wrapped first so every registrar below is covered.
+  const server = guardSecrets(new McpServer({ name: "bossman", version: "0.1.0" }));
   if (only) restrictTo(server, only);
   if (only === SCRUM_MASTER_TOOLS) {
     registerBoard(server, db, scope);
