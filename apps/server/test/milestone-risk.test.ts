@@ -361,6 +361,56 @@ describe("milestone at risk: the wake is never lost (BOS-2627, kept through tell
     expect(await sweep(c, "2026-10-16").run()).toEqual({ woken: 1 });
     expect(c.woken[0]!.note).toContain("is now At risk");
   });
+
+  it("doesn't wake twice while the status stays the same, once the wake has really started (BOS-2650)", async () => {
+    const c = await setup();
+    const { m } = await lateNow(c);
+    await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
+    const started = new Map<string, { status: string }>([["wake-1", { status: "queued" }]]);
+    const at = (now: string) =>
+      milestoneRiskService(c.db, {
+        planning: c.planning,
+        wake: async (input) => (c.woken.push(input), { id: `wake-${c.woken.length}`, outcome: "queued" }),
+        wakeStatus: async (id) => started.get(id) ?? null,
+        now: () => new Date(`${now}T09:00:00Z`),
+      });
+    expect(await at("2026-10-16").run()).toEqual({ woken: 1 });
+    // The CEO's run started: the wake's row left "queued". Later passes stay quiet.
+    started.set("wake-1", { status: "running" });
+    expect(await at("2026-10-16").run()).toEqual({ woken: 0 });
+    expect(await at("2026-10-16").run()).toEqual({ woken: 0 });
+    expect(c.woken).toHaveLength(1);
+  });
+
+  it("a wake saved but still waiting to start is not left quiet for good: it is sent again (BOS-2650)", async () => {
+    const c = await setup();
+    const { m } = await lateNow(c);
+    await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
+    // The scheduler held it (quiet hours, or a quota hold): the row says "queued" and nothing ever started.
+    const at = (now: string) =>
+      milestoneRiskService(c.db, {
+        planning: c.planning,
+        wake: async (input) => (c.woken.push(input), { id: `wake-${c.woken.length}`, outcome: "queued" }),
+        wakeStatus: async (id) => (id === "wake-1" ? { status: "queued" } : { status: "running" }),
+        now: () => new Date(`${now}T09:00:00Z`),
+      });
+    expect(await at("2026-10-16").run()).toEqual({ woken: 1 });
+    // Half an hour on, the first wake is still waiting: send again, and the note says why.
+    expect(await at("2026-10-16").run()).toEqual({ woken: 1 });
+    expect(c.woken).toHaveLength(2);
+    expect(c.woken[1]!.note).toContain("still plan it and record it");
+    // The second one started, so it goes quiet.
+    expect(await at("2026-10-16").run()).toEqual({ woken: 0 });
+  });
+
+  it("with no way to read the wake's row, a status change is still sent exactly once (BOS-2650)", async () => {
+    const c = await setup();
+    const { m } = await lateNow(c);
+    await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
+    expect(await sweep(c, "2026-10-16").run()).toEqual({ woken: 1 });
+    expect(await sweep(c, "2026-10-16").run()).toEqual({ woken: 0 });
+    expect(c.woken).toHaveLength(1);
+  });
 });
 
 describe("milestone at risk: the CEO's plan line (BOS-2627)", () => {
