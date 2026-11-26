@@ -473,6 +473,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         criterion: criterionArg,
         // What choosing each option means for that criterion (BOS-1155): pass, fail or none. Required with criterion.
         optionVerdicts: z.record(z.string().max(200), z.enum(["pass", "fail", "none"])).optional(),
+        // BOS-2742: options the owner can only press with a screenshot attached on the card.
+        needsAttachment: z.array(z.string().min(1).max(200)).max(6).optional().describe("Options (their exact text) the owner may only press with a screenshot or file attached, e.g. [\"Done, screenshot of the result attached\"]. The card then shows a paste/attach area, refuses the option with nothing attached, and your wake lists the image ids to open with open_attachment. An option whose words promise one (\"attached\", \"I'll attach\", \"screenshot\") is treated the same without this; pass it anyway when the ask is for a file or picture worded otherwise."),
         // BOS-1161: the condition that makes this card moot, so Boss Man closes it by itself and records why. Each key is an
         // alternative (any one closes it); only conditions Boss Man can check are accepted. Without it the card is only flagged "may be out of date".
         clearsWhen: z.object({
@@ -483,7 +485,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         }).strict().optional(),
       },
     },
-    async ({ replaces: givenReplaces, ownerOnly, ownerOnlyWhy, question, options, recommended, blocksTicketId, alsoBlocks, holdsMerge, triedFirst, ownerMustDo, steps, stillNeeded, goLive, rollback, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, why, minutes, criterion, optionVerdicts, clearsWhen }) => {
+    async ({ replaces: givenReplaces, ownerOnly, ownerOnlyWhy, question, options, recommended, blocksTicketId, alsoBlocks, holdsMerge, triedFirst, ownerMustDo, steps, stillNeeded, goLive, rollback, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, why, minutes, criterion, optionVerdicts, needsAttachment, clearsWhen }) => {
       // R38: a go-live card states its undo with its source, and (below) waits for its ticket's preview proof.
       if (goLive) {
         const bad = rollbackRefusal(rollback);
@@ -516,6 +518,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         clearWhen = made.clearWhen;
       }
       if (!options.includes(recommended)) return fail("The recommended answer must be one of the options.");
+      const notAnOption = needsAttachment?.filter((o) => !options.includes(o)) ?? [];
+      if (notAnOption.length) return fail(`needsAttachment names ${notAnOption.map((o) => `"${o}"`).join(", ")}, which ${notAnOption.length === 1 ? "is not one of the options" : "are not among the options"}: give each option's exact text.`);
       // BOS-1596: owner-facing text the record contradicts (an installed check worker when none ever connected) is held with the live value.
       const factHold = await ownerFactHeldLive(db, scope.companyId, gitTokenProbe, [question, ...options, ...(steps ?? [])]);
       if (factHold) return fail(factHold);
@@ -541,6 +545,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         const filledAs = new Map(options.map((o, i) => [o, ask.options![i]!]));
         recommended = filledAs.get(recommended) ?? recommended;
         if (optionVerdicts) optionVerdicts = Object.fromEntries(Object.entries(optionVerdicts).map(([k, v]) => [filledAs.get(k) ?? k, v]));
+        if (needsAttachment) needsAttachment = needsAttachment.map((o) => filledAs.get(o) ?? o);
         options = ask.options;
       }
       question = ask.question ?? question;
@@ -609,7 +614,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       }
       let d: { id: string; droppedLinks?: DroppedOrderLink[]; withCeo?: boolean };
       try {
-        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question: [recordLine, question, notLiveLine].filter(Boolean).join("\n\n"), recordSays: !!recordAnswer, options, recommended, blocksTicketId, ...(alsoIds.length ? { alsoBlocksTicketIds: alsoIds } : {}), holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, ...(steps?.length && stepSources ? { stepSources } : {}), ...(steps?.length && ask.opening ? { opening: ask.opening } : {}), stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(goLive ? { goLive: true, releasesCommit: releasedCommitOf(question, ...(steps ?? [])) } : {}), ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
+        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question: [recordLine, question, notLiveLine].filter(Boolean).join("\n\n"), recordSays: !!recordAnswer, options, recommended, blocksTicketId, ...(alsoIds.length ? { alsoBlocksTicketIds: alsoIds } : {}), holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, ...(steps?.length && stepSources ? { stepSources } : {}), ...(steps?.length && ask.opening ? { opening: ask.opening } : {}), stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, ...(needsAttachment?.length ? { attachOptions: needsAttachment } : {}), doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(goLive ? { goLive: true, releasesCommit: releasedCommitOf(question, ...(steps ?? [])) } : {}), ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
       } catch (err) {
         if (err instanceof WorkError || err instanceof AnswerError) return fail(err.message);
         throw err;

@@ -46,7 +46,7 @@ Work is tied to objectives. An objective is a goal with key results you can meas
 
 One company can hire another through an engagement. An engagement is a formal request that sets out the scope, what to deliver, how to check it and a budget limit.
 
-The decision queue holds everything that needs you, including blockers that have gone stale. Items that hold up the most work, or are due soonest, come first.
+The decision queue holds everything that needs you, including blockers that have gone stale. Items that hold up the most work, or are due soonest, come first. When a card's answer promises a screenshot ("Done, screenshot attached"), paste the picture into the box under the answers (or use Attach file), then press the answer; the card won't take that answer without one, and the agent gets the picture straight away.
 
 Each agent is paid for by a funding source, such as an API key or a subscription plan. Boss Man tracks spend against each source, including a subscription's usage limits.
 
