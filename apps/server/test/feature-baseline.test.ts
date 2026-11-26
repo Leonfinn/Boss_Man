@@ -103,6 +103,21 @@ describe("a released feature is baselined", () => {
     expect(res.statusCode).toBe(409);
     expect((res.json() as { message: string }).message).toContain("baselined");
   });
+
+  it("a ticket already on a released feature keeps its feature: existing links are not changed by this ticket", async () => {
+    const f = await ctx.feature({ status: "released", releasedAt: new Date() });
+    const t = await ctx.ticket({ featureId: f.id });
+    // An ordinary edit of such a ticket goes through untouched, and the feature is still there (existing data is not moved).
+    const ceo = await ctx.agent(ctx.co.ceo.id);
+    const edited = await ceo.callTool({ name: "update_ticket", arguments: { ticketId: t.id, title: "Backfill the features (renamed)", reason: "clearer title" } });
+    expect((edited as { isError?: boolean }).isError, textOf(edited)).toBeFalsy();
+    expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.featureId).toBe(f.id);
+    // Pointing it at a DIFFERENT released feature is a join, so it needs a reason, and the ticket stays where it was.
+    const other = await ctx.feature({ status: "released", releasedAt: new Date() });
+    const refused = await ceo.callTool({ name: "update_ticket", arguments: { ticketId: t.id, featureId: other.id, reason: "move it" } });
+    expect((refused as { isError?: boolean }).isError).toBe(true);
+    expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.featureId).toBe(f.id);
+  });
 });
 
 describe("follow-ups and auto-opened tickets do not join the feature (BOS-2682)", () => {
