@@ -26,7 +26,7 @@ const show = () =>
 describe("the menu's keyboard button", () => {
   it("opens the list, and closing puts focus back on the button", () => {
     show();
-    const button = screen.getByRole("button", { name: "Keyboard shortcuts (?)" });
+    const button = screen.getByRole("button", { name: "Keyboard shortcuts" });
     expect(button.getAttribute("title")).toBe("Keyboard shortcuts (?)");
     fireEvent.click(button);
     const dialog = screen.getByRole("dialog", { name: "Keyboard shortcuts" });
@@ -37,9 +37,9 @@ describe("the menu's keyboard button", () => {
 
   it("sits between Settings and Log out", () => {
     show();
-    const row = screen.getByRole("button", { name: "Keyboard shortcuts (?)" }).parentElement!;
+    const row = screen.getByRole("button", { name: "Keyboard shortcuts" }).parentElement!;
     const names = [...row.children].map((c) => c.getAttribute("aria-label") ?? c.textContent?.trim());
-    expect(names.map((n) => n?.replace(/\s+/g, " "))).toEqual(["Settings", "Keyboard shortcuts (?)", "Log out"]);
+    expect(names.map((n) => n?.replace(/\s+/g, " "))).toEqual(["Settings", "Keyboard shortcuts", "Log out"]);
   });
 });
 
@@ -57,7 +57,7 @@ describe("the list's order", () => {
   it("puts this page's keys before Everywhere", () => {
     window.location.hash = "#/board/p1";
     show();
-    fireEvent.click(screen.getByRole("button", { name: "Keyboard shortcuts (?)" }));
+    fireEvent.click(screen.getByRole("button", { name: "Keyboard shortcuts" }));
     const heads = [...screen.getByRole("dialog").querySelectorAll("h3")].map((h) => h.textContent);
     expect(heads).toEqual(["On the Board", "Everywhere"]);
   });
@@ -65,7 +65,7 @@ describe("the list's order", () => {
   it("starts with the everywhere keys on a page with no keys of its own", () => {
     window.location.hash = "#/wiki";
     show();
-    fireEvent.click(screen.getByRole("button", { name: "Keyboard shortcuts (?)" }));
+    fireEvent.click(screen.getByRole("button", { name: "Keyboard shortcuts" }));
     const dialog = screen.getByRole("dialog");
     expect(dialog.querySelectorAll("h3")).toHaveLength(0);
     expect(dialog.querySelector("dl")?.getAttribute("aria-label")).toBe("Everywhere");

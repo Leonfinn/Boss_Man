@@ -93,7 +93,7 @@ describe.skipIf(!browser)("the menu's keyboard button in a real browser (BOS-268
       try {
         await p.setContent(page(d.collapsed), { waitUntil: "load" });
         const m = await p.evaluate(measure);
-        expect(m.name).toBe("Keyboard shortcuts (?)");
+        expect(m.name).toBe("Keyboard shortcuts");
         expect(m.title).toBe("Keyboard shortcuts (?)");
         expect(m.hint).toBe("Decisions (g then i)");
         if (d.name.startsWith("phone")) {

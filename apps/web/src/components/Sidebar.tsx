@@ -381,7 +381,7 @@ export function Sidebar(props: {
         <div className="side-pinned foot">
           {itemLink(SETTINGS)}
           {/* BOS-2688: opens the "?" list for people who never press "?". Hidden on a phone (styles.css). */}
-          <button type="button" className="shortcuts-button" onClick={() => window.dispatchEvent(new Event(SHOW_SHORTCUTS_EVENT))} title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts (?)">
+          <button type="button" className="shortcuts-button" onClick={() => window.dispatchEvent(new Event(SHOW_SHORTCUTS_EVENT))} title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">
             <Keyboard size={18} strokeWidth={1.75} aria-hidden="true" />
           </button>
           <button type="button" className="logout" onClick={props.onLogout} title="Log out" aria-label="Log out">
