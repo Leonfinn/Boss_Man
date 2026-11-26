@@ -147,7 +147,7 @@ function footer(vars) {
   <div class="wrap">
     <div>
       <a class="brand" href="/"><img src="/img/boss-mark-64.png" srcset="/img/boss-mark-64.png 1x, /img/boss-mark-256.png 4x" width="40" height="40" alt="">Boss Man</a>
-      <p>Boss Man is in alpha. Its own agents build it, and some parts are still rough. Free and open source under the Apache 2.0 licence.</p>
+      <p>Boss Man is in beta. Its own agents build it, and some parts are still rough. Free and open source under the Apache 2.0 licence.</p>
     </div>
     <nav aria-label="Footer">
       <a href="/guides/">Guides</a><a href="/whats-new">What's new</a>${roadmap}<a href="/about">About</a><a href="/faq">FAQ</a><a href="${vars.repo}">GitHub</a><a href="${vars.issues}">Report a problem</a><a href="${vars.licence}">Licence</a>
