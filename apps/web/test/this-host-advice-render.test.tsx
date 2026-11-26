@@ -49,7 +49,7 @@ const d: HostFactsView = {
   ownerFacts: [],
   facts: {},
   impact: { runnersTotal: 1, runnersConnected: 1, runsGoing: 2 },
-  handling: { "check.container_status.unhealthy": { state: "ceo_told", reports: 3, since: "2026-11-26T11:40:00Z" } },
+  handling: { "check.container_status.unhealthy": { state: "ceo_told", reports: 3, since: "2026-11-26T11:40:00Z", ticket: { ref: "BOS-9", title: "Fix the unhealthy container" } } },
 };
 const html = `<!doctype html><html><head><meta charset="utf-8"><style>${css}</style></head><body><main class="main"><div class="muted" style="font-size:13px"><ul style="margin:0;padding-left:18px"><li>1 container is restarting or unhealthy: example-app. a container that keeps restarting is failing its own health check. The next update restarts the stack.${renderToStaticMarkup(<AdviceLines k="check.container_status.unhealthy" d={d} />)}</li></ul></div></main></body></html>`;
 
@@ -72,7 +72,8 @@ describe.skipIf(!browser)("This host warning advice in a real browser (BOS-2674)
         const got = await page.evaluate(read);
         expect(got.rows).toBe(3);
         expect(got.text).toContain("Does it matter?");
-        expect(got.text).toContain("agents are working normally");
+        expect(got.text).toContain("No runner is affected");
+        expect(got.text).toContain("Ticket BOS-9 is open for it");
         expect(got.text).toContain("The CEO has been told");
         expect(got.text).toContain("Do you need to do anything? No.");
         expect(got.overflow).toBeLessThanOrEqual(1);
