@@ -263,7 +263,7 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       // A review that nobody can do must not leave a proposal stuck: check before storing.
       const reviewer = needsReview ? await securityReviewer(input.companyId, input.byAgentId) : null;
       const projectId = needsReview ? await reviewProject(input.companyId) : null;
-      if (needsReview && !reviewer) throw new SkillError(409, "This skill needs a security review, but the company has no Security Reviewer available. Ask the owner to name one in Settings > Reviews (Security review), or to hire one.");
+      if (needsReview && !reviewer) throw new SkillError(409, "This skill needs a security review, but the company has no Security Reviewer available. Ask the owner to name one in Settings → Reviews → Security review, or to hire one.");
       if (needsReview && !projectId) throw new SkillError(409, "This skill needs a security review, but the company has no open project to put the review task in.");
 
       let row;
