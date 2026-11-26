@@ -1,5 +1,28 @@
 import { describe, expect, it } from "vitest";
-import { apiBaseFor, parseRepoUrl, repoUrlAllowed } from "../src/git-host.js";
+import { apiBaseFor, isLanHost, parseRepoUrl, repoUrlAllowed } from "../src/git-host.js";
+
+describe("isLanHost", () => {
+  it("is true for private IPv4 addresses, localhost and .local/.lan names", () => {
+    expect(isLanHost("192.168.1.50")).toBe(true);
+    expect(isLanHost("10.0.0.5")).toBe(true);
+    expect(isLanHost("localhost")).toBe(true);
+    expect(isLanHost("nas.local")).toBe(true);
+    expect(isLanHost("gitea.lan")).toBe(true);
+  });
+
+  it("ignores case and a trailing dot", () => {
+    expect(isLanHost("LOCALHOST")).toBe(true);
+    expect(isLanHost("NAS.LOCAL")).toBe(true);
+    expect(isLanHost("GITEA.LAN.")).toBe(true);
+    expect(isLanHost("192.168.1.50.")).toBe(true);
+  });
+
+  it("is false for a public name or a public address", () => {
+    expect(isLanHost("example.com")).toBe(false);
+    expect(isLanHost("203.0.113.7")).toBe(false);
+    expect(isLanHost("172.32.0.1")).toBe(false);
+  });
+});
 
 describe("repo addresses (R59)", () => {
   it("allows plain http only to a LAN host", () => {
