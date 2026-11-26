@@ -396,7 +396,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
         <PrivateDetails />
       </>
     ),
-    account: <Account />,
+    account: <Account companyId={company?.id ?? companyId} />,
     notifications: <NotificationSettings companies={companies} companyId={company?.id} />,
     transfer: (
       <>

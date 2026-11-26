@@ -13,7 +13,9 @@ cat >"$S/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 case "$1 $2" in
   "release list") cat "$FAKE/releases.json" | jq -r 'if length > 0 then .[0].tagName else "" end' ;;
-  "api repos/acme/boss-man") cat "$FAKE/about" ;;
+  "api repos/acme/boss-man")
+    if [ -e "$FAKE/about-fail" ]; then echo "gh: HTTP 401: Bad credentials" >&2; exit 1; fi
+    cat "$FAKE/about" ;;
   "api repos/acme/boss-man/releases/tags/"*) cat "$FAKE/target" ;;
   *) echo "fake gh: unexpected: $*" >&2; exit 99 ;;
 esac
@@ -100,6 +102,14 @@ echo "An alpha tool for running a company of agents" >"$S/fake/about"
 out="$(run 0.1.0-beta.3 "$FIXED" "$PREV")" && fail "an About text with an old stage must fail"
 echo "$out" | grep -q "Only the owner can change it" || fail "About failure must say only the owner can change it: $out"
 echo "A tool for running a company of agents" >"$S/fake/about"
+# An About text that can't be read (no token, bad token) is skipped, and the line says so, why, and that nothing was checked.
+touch "$S/fake/about-fail"
+out="$(run 0.1.0-beta.3 "$FIXED" "$PREV")" || fail "an unreadable About text must skip that check, not fail the gate: $out"
+echo "$out" | grep -q "SKIPPED the GitHub About check" || fail "the skip line must say the About check was skipped: $out"
+echo "$out" | grep -q "Bad credentials" || fail "the skip line must carry gh's reason: $out"
+echo "$out" | grep -q "no GH_TOKEN or GITHUB_TOKEN is set" || fail "the skip line must say the token is missing: $out"
+echo "$out" | grep -q "was NOT checked" || fail "the skip line must say the About text was not checked: $out"
+rm -f "$S/fake/about-fail"
 
 # --- 4. empty What's new --------------------------------------------------------------------------------------------
 changelog "$CODE" ""

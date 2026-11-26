@@ -1,7 +1,7 @@
 // The close gate for after-merge criteria that name a host fact (BOS-1586). A ticket closed on its assignee's "pass"
 // while the This host panel still showed a failing check (BOS-986). The host's own newest report, taken after the
 // work went live, decides instead: neither a "pass" nor an owner card answer overrides it.
-import { allowsCardInstead, criterionText, evalFactClause, factClauses, isAfterMerge, normQuote, pageClauses, readVerdicts, type Criterion } from "@boss-man/shared";
+import { allowsCardInstead, criterionText, evalFactClause, factClauses, isAfterMerge, normQuote, pageClauses, readVerdicts, zeroErrorsWithoutReadDate, type Criterion } from "@boss-man/shared";
 import type { HostFactsRecord } from "./host-facts.js";
 
 const at = (iso: string): string => `${iso.slice(0, 16).replace("T", " ")} UTC`;
@@ -95,6 +95,7 @@ export function outsideServiceEvidenceRefusal(
   const own = ownHosts.map((h) => h.toLowerCase());
   const lines: string[] = [];
   const receipts: string[] = [];
+  const noDate: string[] = [];
   for (const [i, c] of criteria.entries()) {
     const text = criterionText(c);
     // BOS-2598 (G2): any criterion that names an outside service, before or after merge.
@@ -109,6 +110,11 @@ export function outsideServiceEvidenceRefusal(
       receipts.push(`"${text}"`);
       continue;
     }
+    // BOS-2740: "0 errors" only counts a file the service has read; with no read date it can mean never read.
+    if (zeroErrorsWithoutReadDate(mine)) {
+      noDate.push(`"${text}"`);
+      continue;
+    }
     const lower = mine.toLowerCase();
     const hasLink = [...mine.matchAll(/https?:\/\/([^\s/"”)]+)\S*/gi)].some((m) => m[0].length >= 11 && !own.includes(m[1]!.toLowerCase().replace(/:\d+$/, "")));
     const hasQuote = /["“][^"”]{6,}["”]/.test(mine);
@@ -117,6 +123,7 @@ export function outsideServiceEvidenceRefusal(
   }
   const out: string[] = [];
   if (receipts.length) out.push(`${receipts.join(", ")}: ${RECEIPT_REFUSAL}`);
+  if (noDate.length) out.push(`${noDate.join(", ")}: ${ZERO_ERRORS_REFUSAL}`);
   if (lines.length)
     out.push(
       `A pass on a check about an outside service needs evidence on its own line: ${lines.join(", ")}. Add a link to what you looked at (not a link to our own site), a screenshot (attach_image, put its id on that line) or the reading quoted in double quotes, e.g. "Sitemap read, 12 pages discovered". If the service doesn't show it yet, report the criterion as fail: the ticket still closes and Boss Man opens the follow-up for it.`,
@@ -127,6 +134,8 @@ export function outsideServiceEvidenceRefusal(
 /** Words of a service's receipt: it took the request, nothing more (BOS-2598, BOS-2073). */
 const RECEIPT = /\b(pending|submitted|accepted|queued|processing|202|204)\b/i;
 export const RECEIPT_REFUSAL = `That's a receipt, not the outcome. Move to Blocked with a dated re-check (schedule_check), or report fail. Use set_ticket_state blocked with blocked_until at the service's normal turnaround (a sitemap read: 48 hours) and watching_for one line saying what the service must show, then schedule_check at that time; on the re-check, quote what the service now shows. A ticket with no merge can wait in Blocked on blocked_until alone.`;
+
+export const ZERO_ERRORS_REFUSAL = `"0 errors" or "no errors" with no read date is not a reading: the count only covers a file the service has read, so it is also what an unread file shows. Quote the date the service read it (for the Search Console sitemap: lastDownloaded, with isPending false and submitted above 0), or move to Blocked with a dated re-check. The readings per service are in the wiki page "Outside-service readings" (packages/shared/src/outside-service-readings.ts).`;
 
 /** The part of the note about criterion `n`: the segment (split on ; and newlines) that starts with its number, else the one that best repeats its words. */
 export function ownLine(note: string, n: number, text: string): string | null {

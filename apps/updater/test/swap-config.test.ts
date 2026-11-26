@@ -23,6 +23,7 @@ describe("swap settings", () => {
   test.each([
     ["a colour set in the spec env", { UPDATER_SPEC_ENV: "BOSSMAN_COLOUR=blue" }, /must not set BOSSMAN_COLOUR/],
     ["a role set in the spec env", { UPDATER_SPEC_ENV: "BOSSMAN_ROLE=auto" }, /must not set BOSSMAN_COLOUR or BOSSMAN_ROLE/],
+    ["a release version set in the spec env", { UPDATER_SPEC_ENV: "BOSSMAN_VERSION=9.9.9" }, /must not set BOSSMAN_IMAGE_INSTALL, BOSSMAN_RELEASE_REPO or BOSSMAN_VERSION/],
     ["a line that is not KEY=value", { UPDATER_SPEC_ENV: "not a pair" }, /not KEY=value/],
     ["a mount that is not volume:/path", { UPDATER_SPEC_MOUNTS: "/etc:/etc" }, /not volume:\/path/],
     ["a mount with an odd mode", { UPDATER_SPEC_MOUNTS: "vol:/x:rw" }, /not volume:\/path/],

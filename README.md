@@ -128,6 +128,11 @@ Without `DATABASE_URL` the server keeps its data in an embedded Postgres (PGlite
 | [docs/08-v1.2-plan.md](docs/08-v1.2-plan.md) | Planning record: the runner launcher, the setup wizard, merge checks, pull requests, the Agents page and more |
 | [docs/13-team-plan.md](docs/13-team-plan.md) | Planning record: the CEO proposing a team for a project |
 
+## Credits
+
+- [Paperclip](https://github.com/paperclipai/paperclip) by [@paperclipai](https://github.com/paperclipai) for inspiring the idea of a company of AI agents that works through tickets.
+- [Hermes Agent](https://github.com/NousResearch/hermes-agent) by [@NousResearch](https://github.com/NousResearch) for inspiring agents that learn from their own work, which shaped Boss Man's workflow retros.
+
 ## Licence
 
 Apache-2.0. See [LICENSE](LICENSE).

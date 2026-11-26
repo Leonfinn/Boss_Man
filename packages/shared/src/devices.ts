@@ -70,3 +70,28 @@ export function isRenderableProfile(p: Pick<DeviceReport, "readings">): boolean 
   const flat = p.readings.some((r) => r.units.vh === r.units.dvh);
   return scrolled || flat;
 }
+
+/**
+ * The owner's per-login preferences (BOS-2689, and BOS-2669 reuses them): settings that follow the login
+ * to every browser rather than living in one. One row per login on the server, so they survive a reload, a
+ * server restart and a new browser. Today it holds the single-letter-key switch (BOS-2671 part 3d).
+ *
+ * Every field defaults to what someone who never changed anything gets, so the answer is the same whether
+ * or not a row has ever been saved, and an older row missing a newer field reads that field's default.
+ */
+export const OwnerPreferences = z.object({
+  /** "Use single-letter keys" (BOS-2671 3d): off turns off "?", the g-sequences, g 1 to g 6 and the j/k/Enter
+   * card keys. Ctrl/Cmd+K, Escape and normal Tab/Enter stay. On for everyone until they turn it off. */
+  singleLetterKeys: z.boolean().default(true),
+  /** BOS-2669 part 3: the menu shortcuts the owner pinned, in their order. Empty until they pin one. */
+  pinnedPages: z.array(z.string().trim().min(1).max(80)).max(6).default([]),
+});
+export type OwnerPreferences = z.infer<typeof OwnerPreferences>;
+
+/** What a page asks to change: any of the fields, and nothing else. Each checks its own rules when sent, and a
+ * field left out keeps its saved value (so a pin save must not turn the keys back on). */
+export const OwnerPreferencesPatch = z.object({
+  singleLetterKeys: z.boolean().optional(),
+  pinnedPages: z.array(z.string().trim().min(1).max(80)).max(6).optional(),
+});
+export type OwnerPreferencesPatch = z.infer<typeof OwnerPreferencesPatch>;

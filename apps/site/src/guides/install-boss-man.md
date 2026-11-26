@@ -68,13 +68,17 @@ Use 0.1.0-beta.3 or newer. The older 0.1.0-beta.1 has no `images.env`, because i
 
 `images.env` holds the registry and the exact digest of every image. Do not edit the digests.
 
-Optional: check the signatures with [cosign](https://docs.sigstore.dev/cosign/installation/). Download `images.env.sigstore.json` and `docker-compose.images.yml.sigstore.json` from the same release, then run:
+Optional: check the signatures with [cosign](https://docs.sigstore.dev/cosign/installation/). Download `images.env.sigstore.json` and `docker-compose.images.yml.sigstore.json` from the same release into the same folder, then run these two commands there, one for each file:
 
-```sh Run in the folder with the files
+```sh Run in the folder with the files (checks images.env)
 cosign verify-blob --bundle images.env.sigstore.json --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity https://github.com/Leonfinn/Boss_Man/.github/workflows/release.yml@refs/heads/main images.env
 ```
 
-Run it again with `docker-compose.images.yml.sigstore.json` and `docker-compose.images.yml` in place of the two `images.env` names.
+```sh Run in the folder with the files (checks docker-compose.images.yml)
+cosign verify-blob --bundle docker-compose.images.yml.sigstore.json --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity https://github.com/Leonfinn/Boss_Man/.github/workflows/release.yml@refs/heads/main docker-compose.images.yml
+```
+
+Each prints `Verified OK` when the file is the one the release signed.
 
 :::worked
 `ls` in the folder shows `docker-compose.images.yml` and `images.env`.
@@ -117,14 +121,13 @@ BOSSMAN_INSECURE_COOKIES=1
 
 Keep the port off the internet. Skip this step if you only open Boss Man in a browser on the same machine.
 
-### 5. Download the images and start
+### 5. Start Boss Man
 
 ```sh Run in the folder with the files
-docker compose --env-file images.env --profile images pull
 docker compose --env-file images.env up -d
 ```
 
-The first command downloads every image, including the runner images the launcher starts for each company. The second starts Boss Man.
+This starts Boss Man. Compose starts only the database, a small proxy and the updater; the updater then downloads the server, launcher, runner and network-guard images by their digests and makes the server and the launcher itself, so the first start takes a few minutes longer than later ones.
 
 :::worked
 `docker compose --env-file images.env ps` shows `db`, `server` and `launcher` running, and `http://<this machine>:3100` opens a Boss Man page. (Expected from the compose file; not yet seen on a real install.)
@@ -151,13 +154,9 @@ The runner image does not contain Claude Code. The first time a runner starts, B
 
 ### Updating to a new release
 
-Nothing updates by itself. You do not need to take every release. For each one you choose to take, in the folder with your two files:
+Nothing updates by itself. Take a release from Boss Man's own update screen: the updater checks the signed release, downloads every image of it by digest, backs up the database, switches the server over, watches it for 15 minutes (going back by itself if it fails), and then moves the rest of the release. Your data and keys stay, because they are in volumes.
 
-1. Download the new `docker-compose.images.yml` and `images.env` over the old ones. If you added your own lines to `images.env` (step 4, or a registry), copy them into the new file first.
-2. Run `docker compose --env-file images.env --profile images pull`.
-3. Run `docker compose --env-file images.env up -d`. Your data and keys stay, because they are in volumes.
-
-Do not run `setup` again. Runners that are already running keep the old image until the launcher starts them again. The **Build and update runners** button in Settings builds images from source, so it does not apply to this install.
+You do not run `docker compose pull` or `up -d` for a release any more. Do not run `setup` again: it is only for the first install. The **Build and update runners** button in Settings builds images from source, so it does not apply to this install.
 
 ### If something goes wrong
 
@@ -270,7 +269,7 @@ Run every `docker compose` command from `$B/src`.
 
 ```sh Run on the Linux machine, as root
 cd $B/src
-docker compose build server launcher netguard
+docker compose build server launcher
 scripts/update-runner.sh
 ```
 

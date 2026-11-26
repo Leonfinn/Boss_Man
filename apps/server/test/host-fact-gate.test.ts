@@ -200,6 +200,17 @@ describe("outsideServiceEvidenceRefusal", () => {
     expect(outsideServiceEvidenceRefusal([SITEMAP], [], LIVE, '1 pass: "accepted (pending, 0 errors)" https://bossman.website/sitemap.xml', ["bossman.website"])).toContain("That's a receipt");
     expect(outsideServiceEvidenceRefusal([SITEMAP], [], LIVE, '1 pass: "Success, last read 21 Nov, 7 discovered"', ["bossman.website"])).toBeNull();
   });
+  it("refuses \"0 errors\" or \"no errors\" with no read date (BOS-2740)", () => {
+    for (const reading of ['"Sitemap shows 0 errors"', '"Sitemap read, no errors"', '"Success, zero errors, 7 discovered"']) {
+      const out = outsideServiceEvidenceRefusal([SITEMAP], [], LIVE, `1 pass: ${reading} https://search.google.com/x`);
+      expect(out, reading).toContain("with no read date is not a reading");
+    }
+    // with a read date it is accepted
+    expect(outsideServiceEvidenceRefusal([SITEMAP], [], LIVE, '1 pass: "Success, last read 26 Nov, 0 errors, 7 discovered"')).toBeNull();
+    expect(outsideServiceEvidenceRefusal([SITEMAP], [], LIVE, '1 pass: "Success, lastDownloaded 2026-11-26, no errors"')).toBeNull();
+    // a field name is not a date
+    expect(outsideServiceEvidenceRefusal([SITEMAP], [], LIVE, '1 pass: "lastDownloaded set, 0 errors"')).toContain("with no read date");
+  });
   it("checks before-merge criteria too, each on its own line", () => {
     const two = [SITEMAP, "Bing lists the sitemap"];
     expect(outsideServiceEvidenceRefusal(two, [], LIVE, '1 pass: "Sitemap read, 12 pages discovered"; 2 pass')).toContain('"Bing lists the sitemap"');
