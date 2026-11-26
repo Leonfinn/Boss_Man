@@ -11,7 +11,7 @@ import { setOwnerTodoFacts } from "../src/services/decisions.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { openPglite } from "../src/db/client.js";
 import { commandProblem, lintOwnerSteps, parseStep, sh, step } from "../src/services/steps.js";
-import { agents, companies, activity, decisions, notifications, ownerHolds, projects, runners, runs, settings, tickets, wakes } from "../src/db/schema.js";
+import { agents, companies, activity, decisions, notifications, ownerHolds, projects, runners, runs, settings, tickets, updateHolds, wakes } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -261,6 +261,38 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     await c.available({ checkedAt: "2026-10-20T12:00:00Z" });
     await c.selfDeploy.sync();
     expect(await c.open()).toHaveLength(0);
+  });
+
+  // BOS-2755: on 26 Nov a server update with a wrap-up went in and woke none of the tickets watching for one.
+  it("wakes the server_update watchers once when a server update ends, naming it and the wrap-up pressed for it", async () => {
+    const c = (ctx = await setup());
+    const [co] = await c.db.select().from(companies).limit(1);
+    const [ceo] = await c.db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, co!.id), eq(agents.role, "ceo")));
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Dev" }).returning();
+    const watch = (number: number, watchingFor: string, watchTrigger: string | null) => c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: `watcher ${number}`, number, assigneeAgentId: ceo!.id, systemState: "blocked", mergeCommit: A, watchingFor, watchTrigger }).returning();
+    const [byTrigger] = await watch(801, "the next server update", "server_update");
+    // A watch set before the trigger existed names the update only in words.
+    const [byWords] = await watch(802, "the next real server update where the owner presses Ask agents to wrap up", null);
+    const [runnerOnly] = await watch(803, "the runner swap", "runner_update");
+    await watch(804, "a week with no new stuck alerts", null);
+    await watch(805, "GitHub on main", "github_main_failed");
+    // The owner's wrap-up for it had already lifted (it lifts when the server is in) before the host's "ended" is read.
+    await c.db.insert(updateHolds).values({ startedAt: new Date("2026-10-20T12:00:30Z"), kind: "wrapup", reason: "asking agents to wrap up for the server update", endedAt: new Date("2026-10-20T12:02:40Z") });
+    const woken = async () => (await c.db.select().from(wakes)).filter((x) => x.reason === "watch trigger");
+    await c.status({ id: randomUUID(), result: "deployed", to_commit: B });
+    await c.selfDeploy.sync();
+    await c.selfDeploy.sync();
+    const first = await woken();
+    expect(first.map((w) => w.ticketId).sort()).toEqual([byTrigger!.id, byWords!.id].sort());
+    expect(first[0]!.note).toContain('a server update ended (server update to bbbbbbbb ended "deployed" from 12:01 UTC to 12:03 UTC on 2026-10-20; a wrap-up was pressed for it (asked 12:00 UTC))');
+    // A failed runner build ends the runner update: its watchers are woken; a refused one is not an update.
+    await c.status({ id: randomUUID(), target: "runner", result: "rejected", to_commit: B, ended: "2026-10-20T13:00:00Z" });
+    await c.selfDeploy.sync();
+    expect((await woken()).some((w) => w.ticketId === runnerOnly!.id)).toBe(false);
+    await c.status({ id: randomUUID(), target: "runner", result: "failed", to_commit: B, started: "2026-10-20T14:00:00Z", ended: "2026-10-20T14:05:00Z" });
+    await c.selfDeploy.sync();
+    const runnerWake = (await woken()).find((w) => w.ticketId === runnerOnly!.id);
+    expect(runnerWake?.note).toContain('runner update to bbbbbbbb ended "failed" from 14:00 UTC to 14:05 UTC on 2026-10-20; no wrap-up was pressed for it');
   });
 
   it("raises one owner decision when main moves, and approving it writes the request file", async () => {

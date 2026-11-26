@@ -200,6 +200,26 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     expect(c.commands.map((x) => x.company).sort()).toEqual(["App Co", "App Co", "Home Lab"]);
   });
 
+  // BOS-2755: the swap's end is the runner update's end; the tickets watching for one are woken with which update it was.
+  it("wakes the runner_update watchers (and an untriggered watch that names a runner update) when the swap ends", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const [p] = await c.db.insert(projects).values({ companyId: a.id, name: "Dev" }).returning();
+    const watch = (number: number, watchingFor: string, watchTrigger: string | null) => c.db.insert(tickets).values({ companyId: a.id, projectId: p!.id, title: `watcher ${number}`, number, assigneeAgentId: a.ceo, systemState: "blocked", mergeCommit: "a".repeat(40), watchingFor, watchTrigger }).returning();
+    const [byTrigger] = await watch(901, "the next runner update", "runner_update");
+    const [byWords] = await watch(902, "the next real runner update ends by itself", null);
+    await watch(903, "a server update", "server_update");
+    await watch(904, "a week with no new stuck alerts", null);
+    await c.db.update(runners).set({ imageCommit: "c".repeat(40) }).where(eq(runners.companyId, a.id));
+    expect((await c.req("POST", "/api/maintenance/start", {})).statusCode).toBe(200);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    const woken = (await c.db.select().from(wakes)).filter((w) => w.reason === "watch trigger");
+    expect(woken.map((w) => w.ticketId).sort()).toEqual([byTrigger!.id, byWords!.id].sort());
+    expect(woken[0]!.note).toContain("a runner update ended (runner update to cccccccc ended \"deployed\"");
+    expect(woken[0]!.note).toContain("no wrap-up was pressed for it");
+  });
+
   it("counts only work runs, so the chat page's banner matches what really holds the swap", async () => {
     const c = (ctx = await setup());
     const a = await c.company("App Co", "app-co");
