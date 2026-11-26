@@ -4,11 +4,26 @@
 // inside a row's own date strip.
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { BurnupPoint, MilestoneStatus, RoadmapCompany, RoadmapMilestone } from "../api";
+import { ownerTerm } from "@boss-man/shared";
 import { api } from "../api";
 import { POINTS_EXPLAINED } from "@boss-man/shared";
 import { dayOf, short } from "../short-date";
 
 const DAY = 86_400_000;
+
+/** BOS-2709: the Boss Man words this screen uses, each with its meaning from the shared owner terms list, so none stands unexplained. */
+export function OwnerWords({ ids }: { ids: readonly string[] }) {
+  const terms = ids.map((id) => ownerTerm(id)).filter((t): t is NonNullable<typeof t> => !!t);
+  return (
+    <dl className="rm-words muted" data-testid="owner-words">
+      {terms.map((t) => (
+        <div key={t.id}>
+          <dt>{t.term}</dt> <dd>{t.meaning}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
 
 export const STATUS: Record<MilestoneStatus, { label: string; tone: string; icon: string; colour: string }> = {
   done: { label: "Done", tone: "green", icon: "✓", colour: "var(--green-ink)" },
@@ -341,6 +356,7 @@ export function MilestoneRows({ ms, range, now, selected, onSelect, detail, onCh
           </p>
         </>
       )}
+      <OwnerWords ids={["points", "no-size", "pace"]} />
       <details className="rm-rules">
         <summary>How the status is worked out</summary>
         <ul>
@@ -350,7 +366,7 @@ export function MilestoneRows({ ms, range, now, selected, onSelect, detail, onCh
           <li><b>● On track:</b> At its pace it finishes by its date. A merged, live ticket counts as built.</li>
           <li><b>▲ At risk:</b> At its pace the unbuilt work finishes after its date; or nothing was finished in the last 4 weeks and its date is within 4 weeks; or an unbuilt ticket waits on your card or looks stuck. A blocked ticket alone does not make it at risk.</li>
           <li><b>■ Late:</b> Its date has passed and work is not yet built and live. The date means built and live.</li>
-          <li><b>Its pace:</b> Points of this milestone finished in the last 4 weeks, per week. Tickets of its features count too.</li>
+          <li><b>Its pace:</b> {ownerTerm("pace")!.meaning} Tickets of its features count too.</li>
         </ul>
       </details>
       {done.length > 0 && (

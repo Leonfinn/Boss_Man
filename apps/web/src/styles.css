@@ -573,6 +573,10 @@ code { font-family: var(--mono); font-size: 0.92em; }
 .rm-strip .bar.late { background: var(--red-ink); opacity: 0.6; }
 .rm-strip .finish { top: 3px; bottom: auto; z-index: 1; width: 10px; height: 10px; margin-left: -5px; box-sizing: border-box; border: 2px solid var(--ink); border-radius: 50%; background: var(--ground); }
 .rm-strip .due { top: 3px; bottom: auto; z-index: 2; width: 9px; height: 9px; margin-left: -4.5px; background: var(--ink); transform: rotate(45deg); }
+.rm-words { margin: 0; font-size: 12px; display: flex; flex-direction: column; gap: 2px; }
+.rm-words dt, .rm-words dd { display: inline; margin: 0; }
+.rm-words dt { font-weight: 600; }
+.rm-words dt::after { content: ":"; }
 .rm-key { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 0; font-size: 12px; }
 .rm-key i { display: inline-block; vertical-align: middle; margin-right: 6px; }
 .rm-key i.due { width: 8px; height: 8px; background: var(--ink); transform: rotate(45deg); }

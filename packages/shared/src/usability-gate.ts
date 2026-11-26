@@ -22,7 +22,7 @@ export const OUTGOING_LINE =
   "For anything Boss Man or a third party sends out because of this change (an email, a push, a page, a GitHub notice), say who finally receives it and what they see.";
 
 export const REAL_USE_ASK =
-  'walk the owner\'s life with it: day 1, after the next "Build and update runners" or server update, after a restart, a week on, and the owner away. Name every step the owner repeats and how often. For anything that comes in from outside (an alert, an issue, a message), say who reads it, who acts and who closes it where it came from. ' + OUTGOING_LINE + ' A step they must repeat routinely, or one that only works while someone watches it, fails: request changes.';
+  'walk the owner\'s life with it: day 1, after the next "Build and update runners" or server update, after a restart, a week on, and the owner away. Name every step the owner repeats and how often. For anything that comes in from outside (an alert, an issue, a message), say who reads it, who acts and who closes it where it came from. ' + OUTGOING_LINE + ' Walk it as a new owner: every Boss Man word on a screen is explained where it first appears (BOS-2709). A step they must repeat routinely, or one that only works while someone watches it, fails: request changes.';
 
 /** The criteria cap (acceptanceCriteriaSchema). */
 const MAX_CRITERIA = 10;
