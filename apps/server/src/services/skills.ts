@@ -236,9 +236,11 @@ async function giveBuiltinsToTemplates(db: Db, companyId: string, names: string[
  */
 export async function giveBuiltinsToAgent(db: Db, companyId: string, agentId: string, template: string | null | undefined) {
   if (!template) return;
-  await seedBuiltins(db, companyId);
   for (const skill of BUILTIN_SKILLS) {
     if (skill.template !== template) continue;
+    // Seeding is per matching skill, not the whole built-in set: hiring an engineer must not pull the
+    // product manager's skills into the company's library.
+    if (!(await ensureBuiltin(db, companyId, skill.name))) continue;
     const [row] = await db.select({ id: skills.id }).from(skills).where(and(eq(skills.companyId, companyId), eq(skills.name, skill.name)));
     if (!row) continue;
     await db.insert(agentSkills).values({ agentId, skillId: row.id, assignedByAgentId: null }).onConflictDoNothing();
