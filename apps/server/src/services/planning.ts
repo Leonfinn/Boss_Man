@@ -92,6 +92,17 @@ type MilestoneRow = typeof milestones.$inferSelect;
  */
 const delivered = (t: { state: string; mergeCommit: string | null; goLiveWait: string | null }) => (t.state === "blocked" || t.state === "in_progress") && !!t.mergeCommit && !t.goLiveWait;
 
+/**
+ * BOS-2720: why a milestone's ticket adds nothing to its points left, or null when its size does count. The same rules
+ * as the forecast above (no size; done; merged and live, which counts as done), so an agent's list and the Roadmap agree.
+ */
+export function notInPointsLeft(t: { size: number | null; state: string; mergeCommit: string | null; goLiveWait: string | null }): string | null {
+  if (effectiveSize(t.size) === 0) return "no size";
+  if (t.state === "done") return "done";
+  if (delivered(t)) return "merged and live: counts as done";
+  return null;
+}
+
 const QUIET_DAYS = 3;
 
 /**
