@@ -8,6 +8,7 @@
 // and pins the card's text with decision_rev (rule 5). A tap claims it, answers with the stored option
 // and finishes or releases it (rule 6), and every tap on a real token gets a reply push (rule 4).
 import { createHash, randomBytes } from "node:crypto";
+import { optionNeedsAttachment } from "@boss-man/shared";
 import { and, count, eq, gt, isNull, lt, lte, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { approveTokens, decisions, owners, phoneActionHits, ticketDependencies } from "../db/schema.js";
@@ -31,7 +32,8 @@ export const SUMMARY_MAX = 120;
  * doAfter (BOS-551) says another owner card must be done first: a lock-screen tap would skip that order.
  * doBefore and resetsOnRestart only order other cards around this one, so they don't block Approve.
  */
-export const RULE1_KEYS = ["steps", "ownerMustDo", "ticketId", "stillNeeded", "advice", "ladder", "setsUp", "clearWhen", "plan", "doAfter"] as const;
+// attachOptions (BOS-2742): a card with an option that needs a screenshot is answered on the card, where it can be attached.
+export const RULE1_KEYS = ["steps", "ownerMustDo", "ticketId", "stillNeeded", "advice", "ladder", "setsUp", "clearWhen", "plan", "doAfter", "attachOptions"] as const;
 
 /**
  * Text as the phone shows it (rules 2 and N4): the stored text with control and format characters
@@ -97,6 +99,8 @@ export function phoneApprovable(d: Decision, isBlocker: boolean): boolean {
   const options = d.options;
   if (!Array.isArray(options) || options.length < 2 || options.length > 4 || !options.every((o) => typeof o === "string")) return false;
   if (!options.includes(d.recommendedOption)) return false;
+  // BOS-2742: a phone Approve can't carry a screenshot, and the server refuses that answer without one.
+  if (optionNeedsAttachment(d.recommendedOption)) return false;
   const summary = summaryOf(d);
   if (!summary || cleanSummary(summary) !== summary || summary.length > SUMMARY_MAX) return false;
   if (d.status !== "open" || d.tier !== "owner" || d.forAgentId || (d.staleAt && d.recheckStage !== "lapsed")) return false;
