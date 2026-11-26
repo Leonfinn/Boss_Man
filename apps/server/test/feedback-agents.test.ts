@@ -67,9 +67,11 @@ describe("features and tickets", () => {
     expect((await c.req("GET", `/api/features/${f.id}`)).json().feature.releasedAt).not.toBeNull();
     expect(await c.db.select({ title: notifications.title, link: notifications.link }).from(notifications)).toEqual([{ title: "Released: Dark mode", link: `#/features/${c.company.id}/${f.id}` }]);
 
-    // A ticket can be pointed at a feature from the board too, within the company.
-    const t2 = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Polish", featureId: f.id })).json();
-    expect(t2.featureId).toBe(f.id);
+    // BOS-2682: the feature is released now, so it is baselined and a new ticket is refused rather than filed on it.
+    const refused = await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Polish", featureId: f.id });
+    expect(refused.statusCode).toBe(409);
+    expect((refused.json() as { message: string }).message).toContain("baselined");
+    const t2 = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Polish" })).json();
     const foreign = (await c.req("POST", `/api/companies/${other.company.id}/features`, { title: "Theirs" })).json();
     expect((await c.req("PATCH", `/api/tickets/${t2.id}`, { featureId: foreign.id })).statusCode).toBe(422);
   });

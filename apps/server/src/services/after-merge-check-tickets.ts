@@ -70,7 +70,7 @@ export async function openLongWatchChecks(db: Db, work: Work, buildId: string, o
       "",
       `This ticket waits on ${ref}'s merge and starts by itself then. Once ${ref} is live, move this ticket to Blocked with blocked_until the end of the watch. When the watch is over, close it with a numbered result ("1 pass: <what you saw>" or "1 fail: <why>"): Boss Man writes it on criterion ${n} of ${ref} ([${ref}](#/tickets/${t.id})).`,
     ].join("\n");
-    const c = await work.createTicket(t.projectId, { title: fitTitle(`Watch for ${ref} criterion ${n}: ${text}`), body, risk: t.risk ?? "medium", size: 1, state: "backlog", featureId: t.featureId, createdByAgentId: opts.byAgentId, noCode: true, acceptanceCriteria: [text] });
+    const c = await work.createTicket(t.projectId, { title: fitTitle(`Watch for ${ref} criterion ${n}: ${text}`), body, risk: t.risk ?? "medium", size: 1, state: "backlog", featureId: null, createdByAgentId: opts.byAgentId, noCode: true, acceptanceCriteria: [text] });
     await db.update(tickets).set({ checksTicketId: t.id, checksCriterion: n }).where(eq(tickets.id, c.id));
     await work.addDependency(c.id, { ticketId: t.id, until: "merged" }, opts.byAgentId);
     await systemMoveTicket(db, { ticketId: c.id, from: ["backlog"], to: "blocked", reason: `Boss Man: waits on ${ref}'s merge (BOS-2643)`, now: new Date() });
