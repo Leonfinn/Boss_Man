@@ -242,7 +242,7 @@ describe("review", () => {
       c.db.update(companies).set({ reviewPolicy: { ...DEFAULT_REVIEW_POLICY, high: { ...DEFAULT_REVIEW_POLICY.high, kinds: { security } } } }).where(eq(companies.id, c.company.id));
     // A cell naming the CEO names nobody here: the CEO proposes skills. The error points to Settings.
     await setSecurity("ceo");
-    await expect(withScript(c)).rejects.toThrow(/name one in Settings > Reviews/);
+    await expect(withScript(c)).rejects.toThrow(/name one in Settings → Reviews → Security review/);
     await setSecurity(c.reviewer.id);
     const p = await withScript(c);
     const [t] = await c.db.select().from(tickets).where(eq(tickets.id, p.reviewTicketId!));

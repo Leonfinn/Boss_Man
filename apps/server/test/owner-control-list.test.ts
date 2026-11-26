@@ -250,7 +250,8 @@ const SETTINGS_WRAPPERS = new Set(["Section", "JumpLinks", "HTMLHeadingElement",
 /** Entries no <button> text shows, each with where it comes from; the test checks those sources instead. */
 const NOT_FROM_BUTTONS: Partial<Record<OwnerScreen, string[]>> = {
   // window.confirm's own buttons.
-  "Any screen": ["OK", "Cancel"],
+  // The menu's keyboard button is an icon: its name is its aria-label, not button text (BOS-2688).
+  "Any screen": ["OK", "Cancel", "Keyboard shortcuts"],
   // The command block's copy button: its label is a variable ("Copy", then "Copied").
   Decisions: ["Copy"],
   // The sign-off button: its label is a variable that depends on how the project lands work (BOS-471).

@@ -3,7 +3,7 @@
 // Mounted once in App.tsx beside the search box. Ctrl/Cmd+K itself stays the search box's own listener;
 // this only lists it.
 import { useEffect, useRef, useState } from "react";
-import { G_WINDOW_MS, HELP_KEY, JUMPS, JUMP_PREFIX, cardActionFor, screenKeys } from "../shortcut-list";
+import { G_WINDOW_MS, HELP_KEY, JUMPS, JUMP_PREFIX, SHOW_SHORTCUTS_EVENT, cardActionFor, screenKeys } from "../shortcut-list";
 
 // The keys themselves live in ../shortcut-list.ts (BOS-2687); re-exported so existing imports keep working.
 export { G_WINDOW_MS, JUMPS, screenKeys };
@@ -117,8 +117,17 @@ export function Shortcuts({ go, hasProjects }: { go: (to: string) => void; hasPr
       }
       if (action === "open" && openCard()) e.preventDefault();
     };
+    // The menu's keyboard button (BOS-2688). Focus goes back to it on close; Safari doesn't focus a clicked button.
+    const onShow = () => {
+      back.current = document.querySelector<HTMLElement>(".shortcuts-button") ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+      setOpen(true);
+    };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener(SHOW_SHORTCUTS_EVENT, onShow);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener(SHOW_SHORTCUTS_EVENT, onShow);
+    };
   }, []);
 
   useEffect(() => {
@@ -148,35 +157,40 @@ export function Shortcuts({ go, hasProjects }: { go: (to: string) => void; hasPr
             Close
           </button>
         </div>
-        <dl className="shortcuts-list">
-          <div className="shortcuts-row">
-            <dt><kbd>{mod}</kbd> <kbd>K</kbd></dt>
-            <dd>Search tickets, wiki, chats, features, decisions, runs, agents, skills and feedback</dd>
-          </div>
-          <div className="shortcuts-row">
-            <dt><kbd>{HELP_KEY}</kbd></dt>
-            <dd>Show this list</dd>
-          </div>
-          {JUMPS.map((j) => (
-            <div key={j.key} className="shortcuts-row">
-              <dt><kbd>{JUMP_PREFIX}</kbd> then <kbd>{j.key}</kbd></dt>
-              <dd>Go to {j.key === "b" ? "the Board (or Projects if there is none)" : j.label}</dd>
+        {/* The middle scrolls on a short window; the title above and the note below stay in view (BOS-2688). */}
+        <div className="shortcuts-scroll">
+          {here && (
+            <>
+              <h3 className="shortcuts-section first">{here.title}</h3>
+              <dl className="shortcuts-list" aria-label={here.title}>
+                {here.rows.map((r) => (
+                  <div key={r.keys.join()} className="shortcuts-row">
+                    <dt>{r.keys.map((k) => <kbd key={k}>{k}</kbd>)}</dt>
+                    <dd>{r.what}</dd>
+                  </div>
+                ))}
+              </dl>
+            </>
+          )}
+          {/* With no keys of this page's own, the whole list is "everywhere", so it needs no heading. */}
+          {here && <h3 className="shortcuts-section">Everywhere</h3>}
+          <dl className="shortcuts-list" aria-label="Everywhere">
+            <div className="shortcuts-row">
+              <dt><kbd>{mod}</kbd> <kbd>K</kbd></dt>
+              <dd>Search tickets, wiki, chats, features, decisions, runs, agents, skills and feedback</dd>
             </div>
-          ))}
-        </dl>
-        {here && (
-          <>
-            <h3 className="shortcuts-section">{here.title}</h3>
-            <dl className="shortcuts-list" aria-label={here.title}>
-              {here.rows.map((r) => (
-                <div key={r.keys.join()} className="shortcuts-row">
-                  <dt>{r.keys.map((k) => <kbd key={k}>{k}</kbd>)}</dt>
-                  <dd>{r.what}</dd>
-                </div>
-              ))}
-            </dl>
-          </>
-        )}
+            <div className="shortcuts-row">
+              <dt><kbd>{HELP_KEY}</kbd></dt>
+              <dd>Show this list</dd>
+            </div>
+            {JUMPS.map((j) => (
+              <div key={j.key} className="shortcuts-row">
+                <dt><kbd>{JUMP_PREFIX}</kbd> then <kbd>{j.key}</kbd></dt>
+                <dd>Go to {j.key === "b" ? "the Board (or Projects if there is none)" : j.label}</dd>
+              </div>
+            ))}
+          </dl>
+        </div>
         <p className="muted shortcuts-note">Shortcuts don't work while you're typing in a box.</p>
       </div>
     </div>
