@@ -28,6 +28,12 @@ case "$3" in
         '{{json .Manifest}}') printf '{"digest":"%s"}\n' "$d" ;;
         '{{json .SBOM}}') if [ -n "${FAKE_SBOM:-}" ]; then echo "$FAKE_SBOM"; else echo '{"linux/amd64":{"x":1},"linux/arm64":{"x":1}}'; fi ;;
         '{{json .Provenance}}') echo '{"linux/amd64":{"x":1},"linux/arm64":{"x":1}}' ;;
+        # The image config per platform; its revision label comes from a rev_ file beside the reference (none: no label).
+        '{{json .Image}}')
+          [ -f "$FAKE_STATE/$(key "$ref")" ] || { echo "ERROR: not found" >&2; exit 1; }
+          r=$(cat "$FAKE_STATE/rev_$(key "$ref")" 2>/dev/null || true)
+          if [ -n "$r" ]; then l=$(printf '{"org.opencontainers.image.revision":"%s"}' "$r"); else l='{}'; fi
+          printf '{"linux/amd64":{"config":{"Labels":%s}},"linux/arm64":{"config":{"Labels":%s}}}\n' "$l" "$l" ;;
         *) exit 98 ;; esac ;;
       *) exit 97 ;;
     esac ;;
@@ -113,6 +119,22 @@ grep -q "40-character" "$S/err" || fail "the refusal must say 40 characters"
 if rc "$(printf 'A%.0s' {1..40})" "$HEAD_SHA" 2>/dev/null; then fail "non-hex-lowercase must be refused"; fi
 if rc "$(printf '0%.0s' {1..40})" "$HEAD_SHA" 2>"$S/err"; then fail "an unknown commit must be refused"; fi
 grep -q "not in this repository" "$S/err" || fail "the refusal must say the commit is unknown"
+# version-commit (BOS-2602): the commit whose images already carry a version, from their revision label.
+C1=$(printf 'c%.0s' {1..40}); C2=$(printf 'd%.0s' {1..40})
+vc() { run IMAGE_PREFIXES="ghcr.io/vc" $P version-commit "$@"; }
+[ -z "$(vc 0.1.0-beta.2)" ] || fail "a version no image carries must give nothing (main's newest is used)"
+for n in server launcher netguard; do echo "$D1" >"$S/state/ghcr.io_vc_boss-man-${n}_0.1.0-beta.2"; echo "$C1" >"$S/state/rev_ghcr.io_vc_boss-man-${n}_0.1.0-beta.2"; done
+[ "$(vc 0.1.0-beta.2)" = "$C1" ] || fail "a half-finished release must resume on the commit its images were tagged from"
+echo "$C2" >"$S/state/rev_ghcr.io_vc_boss-man-launcher_0.1.0-beta.2"
+if vc 0.1.0-beta.2 >/dev/null 2>"$S/err"; then fail "images of one version naming two commits must fail"; fi
+grep -q "different commits" "$S/err" || fail "the disagreement must be explained"
+rm "$S/state/rev_ghcr.io_vc_boss-man-launcher_0.1.0-beta.2"
+if vc 0.1.0-beta.2 >/dev/null 2>"$S/err"; then fail "a tagged image with no revision label must fail, not guess"; fi
+grep -q "no org.opencontainers.image.revision label" "$S/err" || fail "the missing label must be named"
+# release.yml resolves the commit after the registry login (private images), and a blank box uses version-commit.
+awk '/registry: ghcr.io/{l=NR} /version-commit/{v=NR} END{exit !(l && v && l < v)}' .github/workflows/release.yml || fail "release.yml must call version-commit after the ghcr login"
+# Every refusal before tagging is an annotation (the job log is not readable by agents).
+if grep -nE 'echo "[^"]*Pick a new version[^"]*"; exit 1' .github/workflows/release.yml >/dev/null; then fail "a release.yml refusal is printed to the log only"; fi
 # release.yml must take its commit from resolve-commit, never trust the raw input or use GITHUB_SHA past it.
 grep -q "resolve-commit" .github/workflows/release.yml || fail "release.yml must call resolve-commit"
 grep -q 'inputs.commit' .github/workflows/release.yml || fail "release.yml must have the commit input"

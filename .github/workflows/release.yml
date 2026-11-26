@@ -61,20 +61,13 @@ jobs:
         run: scripts/install-cosign.sh v2.4.1
       - name: Read and check the publishing settings (fails loudly when Docker Hub is on and a secret is missing)
         id: s
-        env:
-          COMMIT_INPUT: ${{ inputs.commit }}
         run: |
           set -euo pipefail
-          # Refuses a commit that is not 40 hex or not on main, before anything is tagged.
-          SHA="$(scripts/publish-images.sh resolve-commit "$COMMIT_INPUT" "$GITHUB_SHA")"
-          echo "Releasing commit $SHA"
           prefixes="$(scripts/publish-images.sh prefixes)"
           scripts/publish-images.sh images > /dev/null
           {
-            echo "sha=$SHA"
             echo "ghcr=$(if echo "$prefixes" | grep -q '^ghcr.io/'; then echo true; else echo false; fi)"
             echo "hub=$(if echo "$prefixes" | grep -q '^docker.io/'; then echo true; else echo false; fi)"
-            echo "tag=$(scripts/publish-images.sh tag "$SHA")"
           } >> "$GITHUB_OUTPUT"
       - uses: docker/login-action@v3
         if: ${{ steps.s.outputs.ghcr == 'true' }}
@@ -87,22 +80,52 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: The version is new, and the commit being released has its images
+      - name: Pick the commit to release (a half-finished release of this version resumes on its own commit)
+        id: c
         env:
-          TAG: ${{ steps.s.outputs.tag }}
+          COMMIT_INPUT: ${{ inputs.commit }}
         run: |
           set -euo pipefail
-          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "Version '$VERSION' is not like 0.1.0 or 0.1.0-beta.1."; exit 1; }
-          if gh release view "v$VERSION" > /dev/null 2>&1; then echo "Version $VERSION is already released. Pick a new version."; exit 1; fi
+          # BOS-2602: run #6 of 0.1.0-beta.2 was pressed with the commit box blank after runs #3/#4 had tagged commit
+          # c94ebeb3's images. Blank meant main's newest commit, so the next step refused, in the log only (agents can't
+          # read it). After the registry login, so private images can be read: a blank box now takes the commit the
+          # version's images were built from (their revision label). A new version has no such images: main's newest.
+          if ! held="$(scripts/publish-images.sh version-commit "$VERSION" 2> "$RUNNER_TEMP/err")"; then
+            echo "::error title=Can't tell which commit $VERSION is on::$(tr '\n' ' ' < "$RUNNER_TEMP/err" | cut -c1-400)"; exit 1
+          fi
+          input="$COMMIT_INPUT"
+          if [ -n "$held" ] && [ -z "$input" ]; then
+            input="$held"
+            echo "::notice title=Resuming $VERSION::Its images were already tagged from commit $held, so this run finishes that release (the commit box was blank)."
+          fi
+          # Refuses a commit that is not 40 hex or not on main, before anything is tagged.
+          if ! SHA="$(scripts/publish-images.sh resolve-commit "$input" "$GITHUB_SHA" 2> "$RUNNER_TEMP/err")"; then
+            echo "::error title=Commit refused::$(tr '\n' ' ' < "$RUNNER_TEMP/err" | cut -c1-400)"; exit 1
+          fi
+          echo "Releasing commit $SHA"
+          {
+            echo "sha=$SHA"
+            echo "held=$held"
+            echo "tag=$(scripts/publish-images.sh tag "$SHA")"
+          } >> "$GITHUB_OUTPUT"
+      - name: The version is new, and the commit being released has its images
+        env:
+          TAG: ${{ steps.c.outputs.tag }}
+          SHA: ${{ steps.c.outputs.sha }}
+          HELD: ${{ steps.c.outputs.held }}
+        run: |
+          set -euo pipefail
+          # Every refusal is an annotation too: annotations are readable without the job log (BOS-2602).
+          refuse() { echo "$1"; echo "::error title=Release refused::$(echo "$1" | tr '\n' ' ' | cut -c1-400)"; exit 1; }
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || refuse "Version '$VERSION' is not like 0.1.0 or 0.1.0-beta.1."
+          if gh release view "v$VERSION" > /dev/null 2>&1; then refuse "Version $VERSION is already released. Pick a new version."; fi
           first="$(scripts/publish-images.sh prefixes | head -n 1)"
           missing=""
           for name in $(scripts/publish-images.sh images); do
             docker buildx imagetools inspect "$first/$name:$TAG" > /dev/null 2>&1 || missing="$missing $name"
           done
           if [ -n "$missing" ]; then
-            echo "No image for commit ${{ steps.s.outputs.sha }} ($TAG) for:$missing."
-            echo "Either the 'Publish images' run for that commit has not finished (wait, then run this again), or an image was added to PUBLISH_IMAGES after that commit was published: re-run 'Publish images' for the commit (Actions > Publish images > the run > Re-run all jobs), or type the sha of an older green main commit in the commit box."
-            exit 1
+            refuse "No image for commit $SHA ($TAG) for:$missing. Either the 'Publish images' run for that commit has not finished (wait, then run this again), or an image was added to PUBLISH_IMAGES after that commit was published: re-run 'Publish images' for the commit (Actions > Publish images > the run > Re-run all jobs), or type the sha of an older green main commit in the commit box."
           fi
           # A version tag that is already on an image is fine only when it is this commit's own image (same digest): a
           # half-finished run (tags added, GitHub release not made, checked above) resumes. Tagging again is a no-op.
@@ -112,13 +135,13 @@ jobs:
               existing="$(docker buildx imagetools inspect "$p/$name:$VERSION" --format '{{json .Manifest}}' 2> /dev/null | jq -r .digest || true)"
               [ -n "$existing" ] || continue
               want="$(docker buildx imagetools inspect "$first/$name:$TAG" --format '{{json .Manifest}}' | jq -r .digest)"
-              if [ "$existing" != "$want" ]; then echo "$p/$name:$VERSION already exists and is not this commit's image. Pick a new version."; exit 1; fi
+              if [ "$existing" != "$want" ]; then refuse "$p/$name:$VERSION already exists and is not the image of commit $SHA (it is on commit ${HELD:-unknown}). Leave the commit box blank to finish $VERSION on that commit, or pick a new version."; fi
               echo "::notice::$p/$name:$VERSION is already on this commit's image: resuming a half-finished release."
             done
           done
       - name: Check every image in every registry (identical digest, signature, SBOM, provenance)
         env:
-          TAG: ${{ steps.s.outputs.tag }}
+          TAG: ${{ steps.c.outputs.tag }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -133,7 +156,7 @@ jobs:
           done
       - name: Add the version and beta tags (the same digests, nothing is rebuilt)
         env:
-          TAG: ${{ steps.s.outputs.tag }}
+          TAG: ${{ steps.c.outputs.tag }}
         run: |
           set -euo pipefail
           for p in $(scripts/publish-images.sh prefixes); do
@@ -144,7 +167,7 @@ jobs:
       - name: Write release.json from what the registries now hold, and sign it
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
-          SHA: ${{ steps.s.outputs.sha }}
+          SHA: ${{ steps.c.outputs.sha }}
         run: |
           set -euo pipefail
           # Reading the version tag back proves it landed, with the same digest, in every registry.
@@ -179,7 +202,7 @@ jobs:
           done
       - name: Publish release.json as a pre-release (beta)
         env:
-          SHA: ${{ steps.s.outputs.sha }}
+          SHA: ${{ steps.c.outputs.sha }}
         run: |
           set -euo pipefail
           assets=(release.json release.json.sigstore.json)
