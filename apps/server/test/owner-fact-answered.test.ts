@@ -14,6 +14,7 @@ import { issueRunToken } from "../src/mcp.js";
 import { DEFAULT_NOTIFY_SETTINGS, PHONE_TEST_KEY, type PhoneTestRecord } from "../src/services/notifications.js";
 import { HOST_FACTS_KEY, type HostFactsRecord } from "../src/services/host-facts.js";
 import { answerFromRecord, PHONE_PROOF_FRESH_MS, type AskRecord } from "../src/services/owner-record.js";
+import { askedQuestion, similarQuestion } from "../src/services/stale-requests.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 
 const PUBLIC = "https://bossman.example.com";
@@ -193,6 +194,43 @@ describe("raise_decision against the record (BOS-1797)", () => {
     expect((d!.context as { ladder?: { hops: Array<{ why: string }> } }).ladder?.hops[0]?.why).toMatch(/record already has a value/);
     // Without the record line the same owner-steps card would have stayed with the owner.
     expect((await ctx.db.select().from(wakes).where(eq(wakes.agentId, ctx.ceo.id))).some((w) => (w.note ?? "").includes(d!.id))).toBe(true);
+  });
+
+  // BOS-2739 (cock-ups round 7, G3): two raises of one question at once left two cards on 26 Nov 12:04. The second card
+  // carried the record line at its head, so the repeat check (which compared the whole stored text) missed it; the check
+  // and the insert were also apart, so two raises at once could both find no older card. Two raises now leave one open
+  // card, whichever is stored first, and the card still says how it reads on the screen.
+  for (const recordFirst of [true, false]) {
+    it(`two raises at once of one question leave one open card (record line raised ${recordFirst ? "first" : "second"})`, async () => {
+      await ctx.put(PHONE_TEST_KEY, confirmed("https://old.example.net"));
+      const c = await ctx.mcp(ctx.dev.id);
+      const options = ["Keep it", "Change it"];
+      // Both raises are the same ask: same question, options and recommended, neither naming a ticket. One carries the
+      // record line at its head (the phone proof is stale), the other is plain: only the record line differs, as on 26 Nov.
+      // Every other word is a made-up name, so the earlier card's words never read as "already answered" to the other
+      // raise (checkOwnerAsk's word search): only the record line differs, and only the repeat check can catch it.
+      const ask = "Keep the zorblax address on the flimquat and close the snazzle?";
+      const plain = { name: "raise_decision", arguments: { question: ask, options, recommended: "Keep it", triedFirst: TRIED } };
+      const withRecord = { name: "raise_decision", arguments: { question: `Boss Man's record says: the phone reached Boss Man at https://old.example.net. The record may be out of date, so this is asked.\n\n${ask}`, options, recommended: "Keep it", triedFirst: TRIED } };
+      const [first, second] = await Promise.all(recordFirst ? [c.callTool(plain), c.callTool(withRecord)] : [c.callTool(withRecord), c.callTool(plain)]);
+      expect([textOf(first), textOf(second)].some((t) => /already in the owner's queue|went to the CEO first|Decision [0-9a-f-]{36}/.test(t))).toBe(true);
+      const open = await openCards();
+      expect(open).toHaveLength(1);
+      expect(askedQuestion(open[0]!.question)).toBe(ask);
+      // Exactly one of the two raises is left open, and the other closed itself: the owner keeps one card either way.
+      const raisedIds = [idOf(textOf(first)), idOf(textOf(second))];
+      expect(raisedIds).toContain(open[0]!.id);
+      const [other] = await ctx.db.select().from(decisions).where(eq(decisions.id, raisedIds.find((id) => id !== open[0]!.id)!));
+      expect(other?.status).toBe("withdrawn");
+    });
+  }
+
+  it("a raised card that borrows the record line is still the same ask for the repeat check", () => {
+    const plain = CARD1.question;
+    const withRecord = `Boss Man's record says: the phone reached Boss Man at ${PUBLIC}. Asked because: a new phone was bought.\n\n${CARD1.question}`;
+    expect(similarQuestion(withRecord, plain)).toBe(true);
+    expect(similarQuestion(plain, withRecord)).toBe(true);
+    expect(askedQuestion(withRecord)).toBe(CARD1.question);
   });
 
   it("notify_owner asking the owner what the record answers is refused too", async () => {
