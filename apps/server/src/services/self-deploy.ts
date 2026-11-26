@@ -8,6 +8,7 @@ import path from "node:path";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ticketRef } from "@boss-man/shared";
+import { wakeWatchers } from "./watch-triggers.js";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, ownerHolds, owners, projects, settings, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
@@ -140,6 +141,8 @@ const SERVICE_KEY = "self-deploy:services:";
 /** BOS-990: the one open card for a host deployer script that is behind, its settings record and how long a deploy's own copy step is given. */
 const DEPLOYER_SCRIPT_CARD = "self-deploy:deployer-script";
 const DEPLOYER_SCRIPT_KEY = "deployer_script_state";
+/** The script sha last seen current, so a change to a new matching sha raises the host-script go-live event once. */
+const DEPLOYER_SCRIPT_SEEN_KEY = "deployer_script_seen";
 const DEPLOYER_COPY_GRACE_MS = 15 * 60_000;
 export type DeployerScriptState = { state: "current" | "behind" | "unknown" | "none"; since?: string };
 // Never a guide's folder (BOS-417): docs/06 is TrueNAS-only, and an owner card must not send them to a doc.
@@ -1560,6 +1563,14 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const prev = await getSetting<{ state: string; since: string }>(DEPLOYER_SCRIPT_KEY);
     if (state === "current") {
       if (prev) await putSetting(DEPLOYER_SCRIPT_KEY, null);
+      // The host script went live: it was behind, or the script it runs changed to the repo's copy since the last look.
+      const seen = (await getSetting<{ sha: string }>(DEPLOYER_SCRIPT_SEEN_KEY))?.sha;
+      if (seen !== rep.scriptSha) {
+        await putSetting(DEPLOYER_SCRIPT_SEEN_KEY, { sha: rep.scriptSha });
+        if ((prev || seen) && deps.wake) {
+          await wakeWatchers(db, deps.wake, "host_script_live", `deployer script ${rep.scriptSha.slice(0, 8)}`).catch((err: Error) => deps.log?.(`self-deploy: waking the host-script watchers failed: ${err.message}`));
+        }
+      }
       return { state };
     }
     const since = prev?.state === state ? prev.since : new Date().toISOString();
@@ -1917,7 +1928,8 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         await putSetting(RUNNER_DUE, { commit: old?.commit ?? a.deployed, fromCommit: old?.fromCommit ?? a.deployed, after: trial ? trial.endsAt : old?.after ?? pressed, offer: true, needs: old?.needs ?? a.deployed, pressed, priorOffer: old?.pressed ? old.priorOffer ?? false : old?.offer ?? false } satisfies RunnerDue);
         await putSetting(QUEUE_CANCELLED, null);
         const message = trial ? `Runners will update at ${clock(trial.endsAt)}, when this server update's ${trialWords(soakSeconds(a))} trial ends. You don't need to press again.` : `${notNow![0]!.toUpperCase()}${notNow!.slice(1)} The runner update is queued and starts by itself as soon as that is over.`;
-        return { queued: true, startsAt: trial?.endsAt ?? null, message: unconfirmed ? `${message} ${unconfirmed}` : message } as const;
+        // BOS-2672: `note` alone too, so the Settings press can show it without repeating the time the status box already gives.
+        return { queued: true, startsAt: trial?.endsAt ?? null, message: unconfirmed ? `${message} ${unconfirmed}` : message, note: unconfirmed ?? null } as const;
       }
       const open = (await openFor("runner")).find((d) => (d.context as SelfDeployContext).commit === a.deployed);
       if (open) {
@@ -2198,6 +2210,24 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
           at: c.result?.at ?? at,
         };
       });
+    },
+
+    /**
+     * BOS-2672: the runner step of the update chain and the host's last report, for the owner's wrap-up (update-chain.ts).
+     * Queued: the owner's press (or the combined button's wish before its deploy lands). Under way: a runner request in the
+     * host's inbox or running on the host.
+     */
+    async chainFacts() {
+      const a = await available();
+      const queue = await runnerQueueState(a, await trialState(a));
+      const wish = queue ? null : await getSetting<{ commit: string }>(RUNNERS_AFTER);
+      const s = await status();
+      return {
+        runnerQueued: queue ? { pressedAt: queue.pressedAt, startsAt: queue.startsAt, why: queue.why } : wish ? { pressedAt: null, startsAt: null, why: "the server update to go in and finish its trial" } : null,
+        runnerUnderWay: (await pendingRunnerRequest()) || (s?.result === "running" && s.target === "runner"),
+        last: s ? { id: s.id, target: s.target, result: s.result, ended: s.ended || s.started } : null,
+        queueCancelled: await getSetting<{ at: string; why: string }>(QUEUE_CANCELLED),
+      };
     },
 
     /** "Cancel" on the queued runner update (BOS-1086): the owner's press is taken back and the hold goes back to what it was. */

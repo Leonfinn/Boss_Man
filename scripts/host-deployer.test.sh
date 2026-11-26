@@ -217,6 +217,18 @@ if [[ $1 == ps && $2 == -a && $3 == --filter && $4 == label=com.docker.compose.p
   printf 'fff\tbm-cache-1\trestarting\tRestarting (255) 1 second ago\t1 minute ago\tbm\tcache\n'
   printf 'ggg\tbm-db-1\texited\tExited (0) 10 minutes ago\t10 minutes ago\tbm\tdb\n'
   printf 'hhh\tbm-worker-1\texited\tExited (%s) 2 hours ago\t2 hours ago\tbm\tworker\n' "${FAKE_EXIT:-137}" # the same container again: counted once
+  # BOS-2680: FAKE_RUNNERS=1 adds the launcher's runners. The staging runner's image was built by Compose, so it
+  # carries the service label runner-app-co and a project (columns 8 and 9: stack and company; `-` is an empty label).
+  [[ -n ${FAKE_RUNNERS:-} ]] && printf 'rs1\tboss-man-staging-runner-staging-co\trunning\tUp 4 hours (unhealthy)\t4 hours ago\tstagingproj\trunner-app-co\tstaging\tstaging-co\n'
+  exit 0
+fi
+# BOS-2680: the launcher's runners by label. A production runner has no compose labels, no stack and a company.
+if [[ $1 == ps && $2 == -a && $3 == --filter && $4 == label=boss-man.launcher=1 && $5 == --format ]]; then
+  if [[ -n ${FAKE_RUNNERS:-} ]]; then
+    printf 'rs1\tboss-man-staging-runner-staging-co\trunning\tUp 4 hours (unhealthy)\t4 hours ago\tstagingproj\trunner-app-co\tstaging\tstaging-co\n'
+    printf 'rp1\tboss-man-runner-prod-co\trunning\tUp 4 hours (unhealthy)\t4 hours ago\t-\t-\t-\tprod-co\n'
+    printf 'rp2\tboss-man-runner-fine-co\trunning\tUp 4 hours (healthy)\t4 hours ago\t-\t-\t-\tfine-co\n'
+  fi
   exit 0
 fi
 # inspect -f <format> <ids...>: the exit code, and the restart policy, per container id.
@@ -249,6 +261,11 @@ if [[ $1 == inspect && $2 == -f && $3 == *StartPeriod* ]]; then
   [[ -n ${FAKE_STARTED_AGO:-} ]] && echo "$(date -u -d "-${FAKE_STARTED_AGO} seconds" +%Y-%m-%dT%H:%M:%SZ)|60000000000"
   exit 0
 fi
+if [[ $1 == inspect && $2 == -f && $3 == *Health.FailingStreak* ]]; then
+  # BOS-2680: the failing streak, then one "<exit> <json output>" line per probe; the last one is the newest.
+  printf '3\n0 ""\n1 "cannot stat /home/node/runner-data/connected\\nsecond line"'
+  exit 0
+fi
 if [[ $1 == ps && $2 == -aq ]]; then exit 0; fi
 exit 0
 FAKE
@@ -275,10 +292,24 @@ node -e 'const c=require(process.argv[1]).checks.container_status;if(!c.stopped.
 FAKE_STATUS="Up 3 minutes (unhealthy)" "$T/fd/hd.sh" >"$T/out" 2>&1 || fail "host-deployer (unhealthy running) exited non-zero"
 node -e 'const c=require(process.argv[1]).checks.container_status;if(c.unhealthy!==2)process.exit(1)' "$D/outbox/host.json" || fail "a running (unhealthy) container must count"
 # BOS-2481: the report names them, by service name only.
-node -e 'const c=require(process.argv[1]).checks.container_status;if(c.unhealthyNames!=="srv; cache")process.exit(1)' "$D/outbox/host.json" || fail "unhealthy containers must be named by service: $(cat "$D/outbox/host.json")"
+node -e 'const c=require(process.argv[1]).checks.container_status;if(c.unhealthyNames!=="srv; bm-cache-1")process.exit(1)' "$D/outbox/host.json" || fail "unhealthy containers must be named by container name: $(cat "$D/outbox/host.json")"
+# BOS-2680: the last health probe (exit code, streak, first line, no paths) is reported for the running unhealthy one.
+node -e 'const c=require(process.argv[1]).checks.container_status;if(c.unhealthyReason!=="srv (exit 1, 3 failed in a row: cannot stat <path>)")process.exit(1)' "$D/outbox/host.json" || fail "unhealthy reason missing or wrong: $(cat "$D/outbox/host.json")"
 # BOS-2481: inside its health-check start period it is settling, not unhealthy (the restarting one still counts).
 FAKE_STATUS="Up 20 seconds (unhealthy)" FAKE_STARTED_AGO=20 "$T/fd/hd.sh" >"$T/out" 2>&1 || fail "host-deployer (start period) exited non-zero"
-node -e 'const c=require(process.argv[1]).checks.container_status;if(c.unhealthy!==1||c.unhealthyNames!=="cache")process.exit(1)' "$D/outbox/host.json" || fail "a container inside its start period must not count: $(cat "$D/outbox/host.json")"
+node -e 'const c=require(process.argv[1]).checks.container_status;if(c.unhealthy!==1||c.unhealthyNames!=="bm-cache-1")process.exit(1)' "$D/outbox/host.json" || fail "a container inside its start period must not count: $(cat "$D/outbox/host.json")"
+# BOS-2680: a staging runner whose image carries the service label runner-app-co is reported under its own name, with
+# its project, stack and company; a production runner (no compose labels) is checked too; a healthy one is not named.
+FAKE_RUNNERS=1 FAKE_STATUS="Up 2 hours" "$T/fd/hd.sh" >"$T/out" 2>&1 || fail "host-deployer (runners) exited non-zero"
+node -e '
+const c=require(process.argv[1]).checks.container_status;
+const bad=m=>{console.error(m, JSON.stringify(c));process.exit(1)};
+if(c.unhealthyNames!=="bm-cache-1; boss-man-staging-runner-staging-co; boss-man-runner-prod-co")bad("names");
+if(/runner-app-co/.test(c.unhealthyNames+c.unhealthyWhere+c.unhealthyReason))bad("the inherited service label must not be used");
+if(!c.unhealthyWhere.includes("boss-man-staging-runner-staging-co (project stagingproj, stack staging, company staging-co); boss-man-runner-prod-co (company prod-co)"))bad("where");
+if(!c.unhealthyReason.includes("boss-man-runner-prod-co (exit 1, 3 failed in a row: cannot stat <path>)"))bad("reason");
+if(c.total!==10)bad("total should count the three launcher runners once each (7 + 3)");
+' "$D/outbox/host.json" || fail "runner naming wrong: $(cat "$D/outbox/host.json")"
 # Past the start period it counts again.
 FAKE_STATUS="Up 5 minutes (unhealthy)" FAKE_STARTED_AGO=300 "$T/fd/hd.sh" >"$T/out" 2>&1 || fail "host-deployer (after start period) exited non-zero"
 node -e 'const c=require(process.argv[1]).checks.container_status;if(c.unhealthy!==2)process.exit(1)' "$D/outbox/host.json" || fail "a container past its start period must count"
