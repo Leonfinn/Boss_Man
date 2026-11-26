@@ -5,7 +5,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, ne } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agentSkills, companies, decisions, skillProposals, skills, ticketReviews, tickets, workflowChanges } from "../src/db/schema.js";
@@ -100,8 +100,9 @@ describe("BOS-172: retro playbooks through the add-a-skill flow", () => {
     expect(card!.tier).toBe("owner");
     const ceo = await c.mcp(c.ceo.id);
     expect(isError(await tool(ceo, "decisions", { action: "answer", id: card!.id, answer: SKILL_ADD }))).toBe(true);
-    expect(await c.db.select().from(skills)).toHaveLength(0);
-    expect(await c.db.select().from(agentSkills)).toHaveLength(0);
+    // Boss Man's own built-in skills are in the library from the start; the proposal must not be.
+    expect(await c.db.select().from(skills).where(ne(skills.source, "builtin"))).toHaveLength(0);
+    expect(await c.db.select().from(agentSkills).innerJoin(skills, eq(agentSkills.skillId, skills.id)).where(ne(skills.source, "builtin"))).toHaveLength(0);
   });
 
   // The crash state cannot be built by clearing an id by hand: BOS-182 records the proposal id on the change BEFORE propose() writes anything.
@@ -146,7 +147,7 @@ describe("BOS-172: retro playbooks through the add-a-skill flow", () => {
     const ch = await applyIt(c);
     await c.retro.check(await markDue(c, ch.id));
     const [check] = await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `workflow-check:${ch.id}`));
-    expect(await c.db.select().from(skills)).toHaveLength(0);
+    expect(await c.db.select().from(skills).where(ne(skills.source, "builtin"))).toHaveLength(0);
     // Either the card is not offered yet, or Revert on it works. It must not be an open card whose Revert gives a 422.
     if (check && check.status === "open") {
       const res = await c.req("POST", `/api/decisions/${check.id}/answer`, { answer: "Revert" });
