@@ -134,13 +134,16 @@ cmd_check() {
   # The GitHub About text, only when the API gives it (a public repo does). Only the owner can change it.
   repo="${GITHUB_REPOSITORY:-}"
   if [ -n "$repo" ] && [ -n "$words" ] && command -v gh > /dev/null 2>&1; then
-    if desc="$(gh api "repos/$repo" --jq '.description // ""' 2>/dev/null)"; then
+    # stderr is kept (2>&1) so a skip can say why; on success gh prints nothing on stderr.
+    if desc="$(gh api "repos/$repo" --jq '.description // ""' 2>&1)"; then
       if [ -n "$desc" ] && echo "$desc" | grep -qiwE "$words"; then
         echo "GitHub repository About: \"$(echo "$desc" | cut -c1-100)\": still says an older stage. Only the owner can change it (repository page, the gear next to About); the CEO raises that card."
         problems+=("the GitHub About description names an older stage (the owner must change it)")
       fi
     else
-      echo "release-docs-gate: could not read the GitHub About description; skipping that part" >&2
+      why="$(printf '%s' "$desc" | head -c 200 | tr '\n' ' ')"
+      [ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ] || why="no GH_TOKEN or GITHUB_TOKEN is set for this step. ${why}"
+      echo "release-docs-gate: SKIPPED the GitHub About check: could not read the About description (${why:-no reason given}). The About text was NOT checked." >&2
     fi
   fi
 
