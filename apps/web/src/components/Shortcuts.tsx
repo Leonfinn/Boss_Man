@@ -5,6 +5,9 @@
 import { useEffect, useRef, useState } from "react";
 import { G_WINDOW_MS, HELP_KEY, JUMPS, JUMP_PREFIX, cardActionFor, screenKeys } from "../shortcut-list";
 
+/** The event that opens the list from outside the menu (BOS-2689), fired by Settings → Account's "Show all keyboard shortcuts". */
+export const OPEN_SHORTCUTS_EVENT = "bossman:open-shortcuts";
+
 // The keys themselves live in ../shortcut-list.ts (BOS-2687); re-exported so existing imports keep working.
 export { G_WINDOW_MS, JUMPS, screenKeys };
 
@@ -57,15 +60,18 @@ function openCard(): boolean {
 /**
  * hasProjects: whether the company on screen has a project, so "g b" opens its board (Board picks the
  * current project from the address, else the first) or, with none, the Projects list.
+ * singleLetterKeys (BOS-2689): with it off, "?", the g-sequences, g 1 to g 6 and the j/k/Enter card keys do
+ * nothing, while Ctrl/Cmd+K and Escape keep working. The list still opens from the menu button and says so.
+ * onTurnKeysOn: the list's "Turn them on", saved per login.
  */
-export function Shortcuts({ go, hasProjects }: { go: (to: string) => void; hasProjects: boolean }) {
+export function Shortcuts({ go, hasProjects, singleLetterKeys = true, onTurnKeysOn }: { go: (to: string) => void; hasProjects: boolean; singleLetterKeys?: boolean; onTurnKeysOn?: () => void }) {
   const [open, setOpen] = useState(false);
   const gAt = useRef(0);
   const back = useRef<HTMLElement | null>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
   // The listener is added once; it reads the latest props through this ref.
-  const latest = useRef({ go, hasProjects, open });
-  latest.current = { go, hasProjects, open };
+  const latest = useRef({ go, hasProjects, open, singleLetterKeys });
+  latest.current = { go, hasProjects, open, singleLetterKeys };
 
   const close = () => {
     setOpen(false);
@@ -83,10 +89,18 @@ export function Shortcuts({ go, hasProjects }: { go: (to: string) => void; hasPr
         return;
       }
       if (e.key === HELP_KEY) {
-        e.preventDefault();
         gAt.current = 0;
+        // Single-letter keys off (BOS-2689): "?" does nothing; the menu button still opens the list.
+        if (!latest.current.singleLetterKeys) return;
+        e.preventDefault();
         back.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
         setOpen(true);
+        return;
+      }
+      // Everything below is a single-letter key (a letter, "g", a number, j/k/Enter), so with them off
+      // the event is left alone: Tab, Escape and Enter on a button stay the browser's.
+      if (!latest.current.singleLetterKeys) {
+        gAt.current = 0;
         return;
       }
       if (e.shiftKey) {
@@ -125,6 +139,17 @@ export function Shortcuts({ go, hasProjects }: { go: (to: string) => void; hasPr
     if (open) closeButton.current?.focus();
   }, [open]);
 
+  // "Show all keyboard shortcuts" on Settings → Account (BOS-2689) opens the list, the way the menu's
+  // keyboard button does, so a page with keys off can still reach it.
+  useEffect(() => {
+    const onOpen = () => {
+      back.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      setOpen(true);
+    };
+    window.addEventListener(OPEN_SHORTCUTS_EVENT, onOpen);
+    return () => window.removeEventListener(OPEN_SHORTCUTS_EVENT, onOpen);
+  }, []);
+
   if (!open) return null;
   const mod = isMac() ? "⌘" : "Ctrl";
   const here = screenKeys(window.location.hash);
@@ -148,6 +173,16 @@ export function Shortcuts({ go, hasProjects }: { go: (to: string) => void; hasPr
             Close
           </button>
         </div>
+        {!singleLetterKeys && (
+          <p className="shortcuts-off" role="status">
+            Single-letter keys are off, so only the ones with {mod} work.{" "}
+            {onTurnKeysOn && (
+              <button type="button" className="linkish" onClick={() => void onTurnKeysOn()}>
+                Turn them on
+              </button>
+            )}
+          </p>
+        )}
         <dl className="shortcuts-list">
           <div className="shortcuts-row">
             <dt><kbd>{mod}</kbd> <kbd>K</kbd></dt>
@@ -177,7 +212,17 @@ export function Shortcuts({ go, hasProjects }: { go: (to: string) => void; hasPr
             </dl>
           </>
         )}
-        <p className="muted shortcuts-note">Shortcuts don't work while you're typing in a box.</p>
+        <p className="muted shortcuts-note">
+          Shortcuts don't work while you're typing in a box.
+          {singleLetterKeys && onTurnKeysOn && (
+            <>
+              {" "}
+              <button type="button" className="linkish" onClick={() => void onTurnKeysOn()}>
+                Turn off single-letter keys
+              </button>
+            </>
+          )}
+        </p>
       </div>
     </div>
   );

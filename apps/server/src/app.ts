@@ -53,6 +53,7 @@ import { hostFactsService, OWNER_FACTS } from "./services/host-facts.js";
 import { gitTokenActionsProbe } from "./services/owner-record.js";
 import { netguardAllowReport } from "./services/netguard-allow.js";
 import { deviceProfilesService } from "./services/device-profiles.js";
+import { ownerPreferencesService } from "./services/owner-preferences.js";
 import { releaseLogService } from "./services/release-log.js";
 import { ownerSetupFacts } from "./services/owner-setup-check.js";
 import { closeStallAlertForRun, sweepService, type SweepLimits } from "./services/sweeps.js";
@@ -151,7 +152,7 @@ import { spendReportRoutes } from "./routes/spend-report.js";
 import { featureRoutes } from "./routes/features.js";
 import { DateStr, companyExists, objectiveRoutes, roadmapRoutes } from "./routes/roadmap.js";
 import { searchRoutes } from "./routes/search.js";
-import { deviceRoutes, notificationRoutes, notificationSettingsRoutes, ntfySetupSaver, phoneApproveRoutes } from "./routes/devices-notifications.js";
+import { deviceRoutes, notificationRoutes, notificationSettingsRoutes, ntfySetupSaver, phoneApproveRoutes, preferenceRoutes } from "./routes/devices-notifications.js";
 import { agentRunsRoutes } from "./routes/agents-runs.js";
 import { ticketRecordRoutes } from "./routes/ticket-record.js";
 import { createMemorySampler, readRssAndPeak } from "./services/memory-sampler.js";
@@ -473,6 +474,7 @@ export async function buildApp(opts: AppOptions) {
   // BOS-2336: Boss Man's own owner cards (raiseOwnerTodo) are checked against this host's reported facts before they go out.
   setOwnerTodoFacts(() => ownerSetupFacts(hostFacts));
   const deviceProfiles = deviceProfilesService(db);
+  const ownerPreferences = ownerPreferencesService(db);
   const selfDeploy = selfDeployService(db, { dir: opts.deployerDir, notify: (n) => notes.notify(n), releaseLog, hosts: () => hostFacts.hosts(), deployerScript: () => hostFacts.deployerScript(), facts: async () => Object.fromEntries(Object.entries((await hostFacts.sync()).facts).map(([k, f]) => [k, f.value])), log: (m) => app.log.warn(m),
     // BOS-1648: the CEO is woken once when Boss Man can't tell whether a runner update is needed.
     wake: (agentId, input) => scheduler.notify(agentId, input),
@@ -1728,6 +1730,9 @@ export async function buildApp(opts: AppOptions) {
 
     // Device profiles (BOS-641): the owner's browsers report their measured screens.
     deviceRoutes(owner, { deviceProfiles, currentOwnerId });
+
+    // The owner's per-login preferences (BOS-2689, shared with BOS-2669): they follow the login.
+    preferenceRoutes(owner, { ownerPreferences, currentOwnerId });
 
     // Companies: creating one always creates its CEO (R18).
     const CompanyInput = z.object({

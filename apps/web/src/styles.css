@@ -1974,6 +1974,8 @@ details.pushes[open] > summary { margin-bottom: 8px; }
 .shortcuts-list kbd { font-family: var(--mono); font-size: 12px; padding: 1px 6px; border: 1px solid var(--line-strong); border-radius: 4px; }
 .shortcuts-note { margin: 0; padding: 4px 16px 12px; font-size: 13px; }
 .shortcuts-section { margin: 0; padding: 8px 16px 0; font-size: 14px; border-top: 1px solid var(--line); }
+/* BOS-2689: the list says single-letter keys are off, and offers "Turn them on". */
+.shortcuts-off { margin: 0; padding: 8px 16px; font-size: 14px; border-bottom: 1px solid var(--line); }
 /* BOS-2330: the card j/k moved to. Inside the outline, as a lane's scroll box would clip one drawn outside. */
 [data-shortcut-card]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .search-snippet { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
