@@ -55,6 +55,35 @@ const OTHER: Array<[string, string]> = [
   ["empty", ""],
 ];
 
+// BOS-2696: GitHub's 500 inside a push. The first lines are the real runner errors of BOS-2559 (24 Nov 23:30) and
+// BOS-2601 (25 Nov 15:59) from the merge-line records (cut there at 200 chars); the ref line after "To" is git's
+// report of the host's 500, which the records cut off, so each is tested with and without it.
+const GH500_MAIN = "Couldn't push the merge to main: remote: Internal Server Error        \nremote: Request ID 1F46:3E8C3:12F6D4:1D73DB:6B061E09        \nremote: Time 2026-11-24T23:30:18Z";
+const GH500_CI = "Couldn't push the merge commit to bossman-ci/7685c793-e4e0-47ba-91c4-9b48e81bd318 for the git host's CI: remote: Internal Server Error        \nremote: Request ID FE0A:31B8A6:1A2B3C:4D5E6F:6B06D1A4        \nremote: Time 2026-11-25T15:59:48Z";
+const refLine = (ref: string, why: string) => `\nTo ${URL}\n ! [remote rejected] ${ref} -> ${ref} (${why})\nerror: failed to push some refs to '${URL}'`;
+const HOST_5XX: Array<[string, string]> = [
+  ["BOS-2559 push to main, as recorded", GH500_MAIN],
+  ["BOS-2559 push to main, with git's ref line", GH500_MAIN + refLine("main", "Internal Server Error")],
+  ["BOS-2601 push to the CI branch, as recorded", GH500_CI],
+  ["BOS-2601 push to the CI branch, with git's ref line", GH500_CI + refLine("bossman-ci/7685c793-e4e0-47ba-91c4-9b48e81bd318", "Internal Server Error")],
+  ["ref line alone", refLine("main", "Internal Server Error")],
+  ["502 Bad Gateway", "Couldn't push the merge to main: remote: Bad Gateway" + refLine("main", "Bad Gateway")],
+  ["503 Service Unavailable", "Couldn't push the merge to main: remote: Service Unavailable" + refLine("main", "Service Unavailable")],
+  ["504 Gateway Time-out", "Couldn't push the merge to main: remote: Gateway Time-out" + refLine("main", "Gateway Time-out")],
+];
+/** A host 5xx beside a real refusal stays a refusal. */
+const HOST_5XX_BUT_REFUSED: Array<[string, string]> = [
+  ["a second ref rejected for a protected branch", `${GH500_MAIN}${refLine("main", "Internal Server Error")}\n ! [remote rejected] release -> release (protected branch hook declined)`],
+  ["GH006 protected branch text beside the 500", `remote: error: GH006: Protected branch update failed for refs/heads/main.\n${GH500_MAIN}${refLine("main", "Internal Server Error")}`],
+  ["a non-fast-forward ref beside the 500", `${GH500_MAIN}${refLine("main", "Internal Server Error")}\n ! [rejected]        dev -> dev (non-fast-forward)`],
+  ["a 500 named only inside another refusal's reason", `${refLine("main", "pre-receive hook declined: Internal Server Error")}`],
+];
+
+describe("isGitTransportFault: the git host's 5xx inside a push (BOS-2696)", () => {
+  it.each(HOST_5XX)("retries: %s", (_name, text) => expect(isGitTransportFault(text)).toBe(true));
+  it.each(HOST_5XX_BUT_REFUSED)("never retries: %s", (_name, text) => expect(isGitTransportFault(text)).toBe(false));
+});
+
 describe("isGitTransportFault (BOS-1860)", () => {
   it.each(TRANSPORT)("retries: %s", (_name, text) => expect(isGitTransportFault(text)).toBe(true));
   it.each(REFUSED)("never retries a refusal: %s", (_name, text) => expect(isGitTransportFault(text)).toBe(false));
