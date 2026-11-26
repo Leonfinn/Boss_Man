@@ -587,7 +587,7 @@ describe("proposing a change", () => {
     const [card] = await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `skill:${proposal!.id}`));
     expect((await answer(c, card!.id, SKILL_REJECT)).statusCode).toBe(200);
     expect(await c.db.select().from(skills).where(eq(skills.name, "null-checks"))).toHaveLength(0);
-    expect(await c.db.select().from(agentSkills)).toHaveLength(0);
+    expect(await c.db.select().from(agentSkills).innerJoin(skills, eq(agentSkills.skillId, skills.id)).where(ne(skills.source, "builtin"))).toHaveLength(0);
     expect((await c.db.select().from(skillProposals).where(eq(skillProposals.id, proposal!.id)))[0]!.status).toBe("rejected");
     // The change never reached anyone, so it no longer reads as applied (and part 4 will not ask Keep/Revert).
     expect((await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch.id)))[0]).toMatchObject({ status: "skipped", checkDueAt: null });
@@ -954,14 +954,14 @@ describe("checking a change's result (part 4)", () => {
     expect(await c.retro.checkSweep()).toBe(1);
     const d = await decisionRow(c, (await changeRow(c, ch!.id)).checkDecisionId!);
     expect(d.question).toContain("cancels the pending skill nomination");
-    expect(await c.db.select().from(skills)).toHaveLength(0);
+    expect(await c.db.select().from(skills).where(ne(skills.source, "builtin"))).toHaveLength(0);
     expect((await answer(c, d.id, "Revert")).statusCode).toBe(200);
     expect((await decisionRow(c, d.id)).status).toBe("answered");
     expect((await changeRow(c, ch!.id)).status).toBe("reverted");
     const [proposal] = await c.db.select().from(skillProposals).where(eq(skillProposals.name, "null-checks"));
     expect(proposal!.status).toBe("rejected");
-    expect(await c.db.select().from(skills)).toHaveLength(0);
-    expect(await c.db.select().from(agentSkills)).toHaveLength(0);
+    expect(await c.db.select().from(skills).where(ne(skills.source, "builtin"))).toHaveLength(0);
+    expect(await c.db.select().from(agentSkills).innerJoin(skills, eq(agentSkills.skillId, skills.id)).where(ne(skills.source, "builtin"))).toHaveLength(0);
   });
 
   it("closes a playbook change as skipped, with no card, when its nomination ends without installing", async () => {
@@ -981,7 +981,7 @@ describe("checking a change's result (part 4)", () => {
     expect(await c.retro.checkSweep()).toBe(0);
     expect((await changeRow(c, ch!.id)).status).toBe("skipped");
     expect(await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `workflow-check:${ch!.id}`))).toHaveLength(0);
-    expect(await c.db.select().from(agentSkills)).toHaveLength(0);
+    expect(await c.db.select().from(agentSkills).innerJoin(skills, eq(agentSkills.skillId, skills.id)).where(ne(skills.source, "builtin"))).toHaveLength(0);
   });
 
   it("goes to the owner when the CEO ran the retro", async () => {

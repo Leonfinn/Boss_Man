@@ -600,6 +600,8 @@ export async function buildApp(opts: AppOptions) {
     updateChain: (tied) => readUpdateChain(db, { wait: () => deployWait.get(), trialUntil: () => selfDeploy.trialUntil(), facts: () => selfDeploy.chainFacts() }, tied),
     tick: () => scheduler.tick(),
     notify: (n) => notes.notify(n),
+    // BOS-2755: a runner update's end wakes the tickets watching for one.
+    wake: (agentId, input) => scheduler.notify(agentId, input),
     // BOS-1377: the per-run Stop (runsSvc is built further down; this only runs when the owner answers a card).
     cancelRun: (runId) => runsSvc.cancel(runId, undefined, undefined),
     tellRunning: async (text) => {
@@ -1182,14 +1184,20 @@ export async function buildApp(opts: AppOptions) {
     card: async (dedupeKey) => (await db.select({ status: decisions.status, createdAt: decisions.createdAt, answer: decisions.answer }).from(decisions).where(eq(decisions.dedupeKey, dedupeKey)).limit(1))[0] ?? null,
     ticketFor: async (key) => {
       const [t] = await db
-        .select({ title: tickets.title, number: tickets.number, prefix: companies.ticketPrefix })
+        .select({ id: tickets.id, title: tickets.title, number: tickets.number, prefix: companies.ticketPrefix, agentId: tickets.assigneeAgentId, agent: agents.name })
         .from(tickets)
         .innerJoin(companies, eq(companies.id, tickets.companyId))
+        .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
         .where(and(ne(tickets.systemState, "done"), or(sql`position(${key} in ${tickets.title}) > 0`, sql`position(${key} in coalesce(${tickets.body}, '')) > 0`)))
         .orderBy(desc(tickets.createdAt))
         .limit(1);
       const ref = t ? ticketRef(t.prefix, t.number) : null;
-      return t && ref ? { ref, title: t.title } : null;
+      if (!t || !ref) return null;
+      // BOS-2737: the assignee and their first work run on it, so the panel's actionClaim line says who is on it, from facts.
+      const [run] = t.agentId
+        ? await db.select({ at: runsTable.startedAt }).from(runsTable).where(and(eq(runsTable.ticketId, t.id), eq(runsTable.agentId, t.agentId), sql`${runsTable.purpose} is distinct from 'chat'`)).orderBy(asc(runsTable.startedAt)).limit(1)
+        : [];
+      return { ref, title: t.title, agent: t.agent ?? null, ...(run ? { startedAt: run.at.toISOString() } : {}) };
     },
     raise: async (input) => {
       const r = await alerts.raise(input as Parameters<typeof alerts.raise>[0]);

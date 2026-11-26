@@ -2232,7 +2232,7 @@ export const watchdogActions = pgTable(
 
 // ---------- Skills (R71) ----------
 
-export const skillSource = pgEnum("skill_source", ["written", "link", "upload", "retro"]);
+export const skillSource = pgEnum("skill_source", ["written", "link", "upload", "retro", "builtin"]);
 
 /**
  * A company's skill library: Agent Skills folders (a SKILL.md and any supporting files) that

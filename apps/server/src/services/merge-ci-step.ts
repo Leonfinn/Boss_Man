@@ -8,7 +8,7 @@ import { agents, checkJobs, checkResults, companies, projects, ticketMessages, t
 import { RunnerGone } from "./runners.js";
 import { DIFFERENT_APPROACH } from "./loop-guards.js";
 import { CiPublishError, ciStops, publishAndWait as ciPublishAndWait, RERUN_REFUSED, withActionsToken, type CiOutcome, type CiStop, type CiTarget, type FlakeAnswer } from "./ci-publish.js";
-import { BASELINE_RUNS, CANT_RERUN_EXIT, describeSlow, FLAKE_RETRY_KIND, flakeDecision, gateRerunCommand, namedTestFiles, RETRIES_PER_WEEK, RETRY_WINDOW_MS, retryCounts, SLOW_RETRIES_PER_WEEK, SLOW_ROW_PREFIX, slowJobs, slowRetryCounts, type SlowEvidence, type SlowJob } from "./ci-flake.js";
+import { BASELINE_RUNS, CANT_RERUN_EXIT, describeSlow, FLAKE_RETRY_KIND, flakeDecision, gateRerunCommand, namedTestFiles, RETRIES_PER_WEEK, RETRY_WINDOW_MS, retryCounts, SLOW_RETRIES_PER_WEEK, SLOW_ROW_PREFIX, slowJobs, slowRetryCounts, TOUCHED_EXIT, type SlowEvidence, type SlowJob } from "./ci-flake.js";
 import type { CancelAnswer, CiRun, CiStatus } from "./git-hosts.js";
 import { CHECK_AGAIN } from "./decisions.js";
 import { ensureCiIdentityCard } from "./ci-identity-card.js";
@@ -278,6 +278,11 @@ export async function ciStep(this: ReviewSelf, ctx: ReviewCtx, a: MergeAttempt) 
     }
     if (cur.state === "passed") return { retry: true, files };
     const tail = cur.logTail ?? "";
+    // BOS-2758: the repo's own rule says the branch touches a shell test that failed: the failure is the branch's.
+    if (cur.state === "failed" && cur.exitCode === TOUCHED_EXIT) {
+      const said = [...tail.matchAll(/^boss-man re-run: (.+): the branch changes what it tests/gm)].pop()?.[1];
+      return { retry: false, why: `the branch changes what ${said ?? files.join(", ")} tests (the same rule the quick check uses to pick shell tests)` };
+    }
     if (cur.state === "failed" && cur.exitCode !== CANT_RERUN_EXIT && !/timed out/i.test(cur.reason ?? "")) {
       return { retry: false, why: `${files.join(", ")} failed again when Boss Man re-ran ${files.length > 1 ? "them" : "it"} on the same merge commit, so the failure is real`, gateOutput: tail.slice(-3000) };
     }

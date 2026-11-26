@@ -1,5 +1,5 @@
 {
-  "id": "9fe516bd-f7ab-4a4f-9514-48bf95c879eb",
+  "id": "ee318b15-41c3-4a91-9bc9-78d914f0274b",
   "prevId": "e2be94d4-b0df-40f0-8fb9-1b86fdf4a6e7",
   "version": "7",
   "dialect": "postgresql",
@@ -6866,13 +6866,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'[]'::jsonb"
-        },
-        "keyboard_tip_seen": {
-          "name": "keyboard_tip_seen",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
         },
         "updated_at": {
           "name": "updated_at",
@@ -14134,7 +14127,8 @@
         "written",
         "link",
         "upload",
-        "retro"
+        "retro",
+        "builtin"
       ]
     },
     "public.system_state": {
