@@ -54,3 +54,4 @@ export * from "./owner-figures.js";
 export * from "./list-price.js";
 export * from "./wrap-up-words.js";
 export { findSecretKind } from "./secret-rules.mjs";
+export * from "./outside-service-readings.js";

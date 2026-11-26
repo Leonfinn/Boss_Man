@@ -15,6 +15,8 @@ import { untrusted, wrapUpEndWords, type WrapEnd, type WrapTieView } from "@boss
 import { EMPTY_CHAIN, forUpdateOf, stepTie, tieView, type UpdateChain, type WrapTie } from "./update-chain.js";
 import { chatRunsByCompany, runnerBusy, runnerChecks, runsByCompany, updateWaitCountsRun, workerChecks, type RunnerCheck } from "./runner-busy.js";
 import { updateHoldHistory } from "./update-hold-history.js";
+import { runnerImageCommit } from "./runner-image.js";
+import { wakeUpdateWatchers, type WatchNotify } from "./watch-triggers.js";
 import { drainEndsAt, STANDALONE_WRAPUP_MS, SWAP_WHEN_DONE_CAP_MINUTES, WAIT_RULES } from "./update-waits.js";
 
 export const MAINTENANCE_KEY = "maintenance";
@@ -313,6 +315,8 @@ export type MaintenanceDeps = {
   wakeCeo?: (companyId: string, note: string) => Promise<unknown>;
   /** The hold has lifted: wake the agents who ended their runs for it, as WRAP_UP promised (BOS-574). */
   afterHold?: (since: Date) => Promise<unknown>;
+  /** BOS-2755: wakes one agent on a ticket; a runner update's end wakes the tickets watching for one. */
+  wake?: WatchNotify;
   /** The deployer folder; update-runner.sh drops inbox/drain.json there to ask for a drain. */
   dir?: string;
   drainMinutes?: number;
@@ -487,7 +491,8 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     return ` Check workers are not swapped by this update and take no checks until they match (${names}). On each worker host: in its compose.yaml, replace the 40-character commit on the two lines marked "CHANGE THIS (commit)" with the new runner commit, and run docker compose up -d next to it (it rebuilds the worker by itself). The steps are in docs/34-check-workers.md; the Checks panel shows which workers are out of date.`;
   }
 
-  async function end(title: string, level: NotifyInput["level"], bodyIn: string) {
+  /** `update`: set when a runner update (an image swap) ended, to how it ended; its watchers are woken (BOS-2755). */
+  async function end(title: string, level: NotifyInput["level"], bodyIn: string, update?: "deployed" | "partial" | "failed") {
     let body = bodyIn;
     const h = await getHold(db);
     // BOS-2056: a wrap-up that joined this update's hold ends with it, and the owner is told so once, here.
@@ -499,6 +504,12 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     await db.delete(settings).where(eq(settings.key, MAINTENANCE_KEY));
     await withdrawQuestion();
     await deps.notify({ companyId: null, level, title, body, link: "#/settings/updates" });
+    // BOS-2755: after the hold is gone, so the watchers' wakes are not held by it. The commit is the home runner's image.
+    if (update && deps.wake) {
+      const [home] = await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1);
+      const commit = home ? ((await runnerImageCommit(db, home.id).catch(() => null)) ?? "") : "";
+      await wakeUpdateWatchers(db, deps.wake, { what: "runner", commit, result: update, started: h ? new Date(h.since) : null, ended: now(), ...(h?.wrapSince ? { wrapUpAt: new Date(h.wrapSince) } : {}) }, deps.log);
+    }
     // The agents that wrapped up for the update are woken again, as they were told they would be (BOS-574).
     if (h && deps.afterHold) await deps.afterHold(new Date(h.since)).catch((err) => deps.log?.(`waking agents after the update failed: ${(err as Error).message}`));
     // Held wakes were only waiting; one pass starts them.
@@ -980,7 +991,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         const downSince = h.launcherDownSince ?? t.toISOString();
         if (t.getTime() - Date.parse(downSince) >= WAIT_RULES["runner-launcher"].endMin * 60_000) {
           const minutes = Math.round((t.getTime() - Date.parse(downSince)) / 60_000);
-          await end("Runner update gave up: the launcher does not answer", "page", `The runner launcher has not answered for ${minutes} minutes, so the update stopped waiting and new runs start again on the runners as they are. Once the launcher is back, start the update again from Settings > Server and runner > Updates.`);
+          await end("Runner update gave up: the launcher does not answer", "page", `The runner launcher has not answered for ${minutes} minutes, so the update stopped waiting and new runs start again on the runners as they are. Once the launcher is back, start the update again from Settings > Server and runner > Updates.`, h.kind === "settings" ? undefined : "failed");
           if (deps.wakeCeo) {
             for (const co of await db.select({ id: companies.id }).from(companies).where(eq(companies.paused, false))) {
               await deps.wakeCeo(co.id, `The runner update gave up: the runner launcher did not answer for ${minutes} minutes, so the hold lifted and new runs start again on the old runner image. Nothing was stopped. The owner was told; the update needs starting again once the launcher answers.`).catch((e) => deps.log?.(`drain: waking the CEO failed: ${(e as Error).message}`));
@@ -993,7 +1004,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       }
       if (h.launcherDownSince) h = { ...h, launcherDownSince: undefined };
       if (fleet.some((r) => r.current === undefined)) {
-        await end("Runner update stopped", "page", "The launcher is older than the server and cannot say which runners are on the new image. Update the launcher (scripts/deploy.sh --runner), then start the update again.");
+        await end("Runner update stopped", "page", "The launcher is older than the server and cannot say which runners are on the new image. Update the launcher (scripts/deploy.sh --runner), then start the update again.", h.kind === "settings" ? undefined : "failed");
         return;
       }
       const t = now();
@@ -1185,9 +1196,9 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       const bad = [...Object.entries(failed).map(([s, m]) => `${s}: ${m}`), ...slow.map((s) => `${s}: has not reconnected`)];
       // The hold lifts either way: keeping every company stopped for one runner would cost more than it protects.
       const settingsDone = h.kind === "settings";
-      if (bad.length) await end(settingsDone ? "Runner restart for a setting change finished with problems" : "Runner update finished with problems", "page", `${bad.join("; ")}. New runs have started again. Check Settings > Runner for those companies.`);
+      if (bad.length) await end(settingsDone ? "Runner restart for a setting change finished with problems" : "Runner update finished with problems", "page", `${bad.join("; ")}. New runs have started again. Check Settings > Runner for those companies.`, settingsDone ? undefined : "partial");
       else if (settingsDone) await end("Runners restarted with the new settings", "note", `${after.length ? `All ${after.length} runner${after.length === 1 ? " was" : "s were"}` : "No runners were"} recreated after their runs finished. New runs have started again.`);
-      else await end("Runners updated", "note", `${after.length ? `All ${after.length} runner${after.length === 1 ? " is" : "s are"}` : "No runners were"} on the new image. New runs have started again.${await workerUpdateSteps()}`);
+      else await end("Runners updated", "note", `${after.length ? `All ${after.length} runner${after.length === 1 ? " is" : "s are"}` : "No runners were"} on the new image. New runs have started again.${await workerUpdateSteps()}`, "deployed");
     },
   };
   return self;

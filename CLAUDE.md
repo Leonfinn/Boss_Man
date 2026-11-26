@@ -40,6 +40,8 @@ Changing a screen? If your branch changes `apps/web/src/styles.css`, `App.tsx` o
 
 The move to review also runs three list guards on your changed files (BOS-2522): a button or field label in a changed `apps/web/src` `.tsx` that `packages/shared/src/owner-controls.ts` doesn't hold, or a file with buttons missing from FILE_SCREEN; a new wake reason missing from WAKE_CLASS; a server file that newly reads an update hold and isn't in READERS. A miss refuses the move with the exact lines to add. It refuses only when the name is nowhere in the list, so the quick check still runs the full guards, and screen-inventory runs only there. If a refusal is wrong, move again with `listGuardWrong: "<why>"`.
 
+A branch that changes owner-facing code (a non-test file under `apps/web/src`, or a server file in `OWNER_CARD_FILES` in `apps/server/src/services/surfaces-gate.ts`) also needs `surfaces: "<one line, up to 300 characters>"` on the move to review (BOS-2733): every screen, card or command form where you checked the change applies. It is kept in the state note as "Surfaces: …" and the reviewer judges whether the list is complete.
+
 ## Writing tests: they must pass on GitHub's runners too
 
 A pass at the merge gate is not enough: GitHub CI runs every test again on main, on machines 2.5 to 5 times slower, with a newer git and a cold browser. Authors follow this rule and reviewers check every new or changed test against it:

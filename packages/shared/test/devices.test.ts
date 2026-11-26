@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DeviceReport, isRenderableProfile, tallestReading, type DeviceMeasures } from "../src/devices.js";
+import { DeviceReport, isRenderableProfile, OwnerPreferences, OwnerPreferencesPatch, tallestReading, type DeviceMeasures } from "../src/devices.js";
 
 // Device profiles (BOS-641): the shape a browser reports, and the two rules a layout test reads.
 
@@ -40,5 +40,21 @@ describe("isRenderableProfile", () => {
 
   it("is false when no reading was after a scroll and the units disagree (a half report to trust nothing from)", () => {
     expect(isRenderableProfile({ readings: [reading({ units: { vh: 900, dvh: 800, svh: 800, lvh: 900, visual: 800 } })] })).toBe(false);
+  });
+});
+
+describe("OwnerPreferences (BOS-2689, shared with BOS-2669)", () => {
+  it("reads an empty answer as every default: single-letter keys on, no pinned pages", () => {
+    expect(OwnerPreferences.parse({})).toEqual({ singleLetterKeys: true, pinnedPages: [] });
+  });
+
+  it("a change names only what it changes, so a pin save doesn't turn the keys back on and vice versa", () => {
+    expect(OwnerPreferencesPatch.parse({ pinnedPages: ["updates"] })).toEqual({ pinnedPages: ["updates"] });
+    expect(OwnerPreferencesPatch.parse({ singleLetterKeys: false })).toEqual({ singleLetterKeys: false });
+  });
+
+  it("refuses more than six pinned pages, and a key switch that isn't a yes or no", () => {
+    expect(OwnerPreferencesPatch.safeParse({ pinnedPages: ["a", "b", "c", "d", "e", "f", "g"] }).success).toBe(false);
+    expect(OwnerPreferencesPatch.safeParse({ singleLetterKeys: "off" }).success).toBe(false);
   });
 });

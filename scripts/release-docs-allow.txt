@@ -1,0 +1,3 @@
+# Mentions of an older stage that are right to keep (scripts/release-docs-gate.sh, rule 1).
+# One per line: path | text the line contains (any case) | why it is fine. Lines starting with # are notes.
+# A line in a guide can also carry the words "release-docs-ok" instead.

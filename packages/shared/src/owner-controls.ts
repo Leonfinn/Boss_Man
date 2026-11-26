@@ -20,7 +20,7 @@ export const OWNER_CONTROLS = {
   "Any screen": [
     "Dashboard", "Decisions", "Notifications", "Chat", "Projects", "Roadmap", "Plan", "Wiki", "Features", "Feedback",
     "Agents", "Skills", "Runs", "Merge queue", "Scrum Master log", "Workflow report", "Engagements", "Settings",
-    "Switch company", "Create", "Creating", "New company", "Close menu", "Menu …", "Log out",
+    "Switch company", "Create", "Creating", "New company", "Close menu", "Menu …", "Log out", "Keyboard shortcuts",
     "Save", "Saving", "Saved", "Attach file", "Attaching", "Remove", "Try again", "OK", "Cancel",
     // The error line a page shows when its first load fails (Features, Chat).
     "Retry",
@@ -41,6 +41,8 @@ export const OWNER_CONTROLS = {
     // The search box (Ctrl+K) and its sidebar button (BOS-2192).
     // "Clear" empties the recent searches listed when the box is empty (BOS-2433).
     "Search", "Close", "Clear",
+    // The "?" list's single-letter-key links (BOS-2689, BOS-2671 part 3d), on any screen it opens from.
+    "Turn them on", "Turn off single-letter keys",
   ],
   "Log in": ["Create owner account", "Log in"],
   Setup: [
@@ -234,7 +236,6 @@ export const OWNER_CONTROLS = {
   // The Scrum Master's watchdog: its limits, its record-only rehearsal and its safety cap.
   Watchdog: ["Switch off", "Switch back on", "Switch on", "Run the test", "Download CSV"],
   "Import and export": ["Check name", "Import as a new company", "Open …"],
-  // The owner's password and other logins (BOS-2159).
   Account: ["Change password", "Sign out other devices"],
   // Spend, the hold and the Claude accounts' order, and adding or editing a funding source.
   Funding: ["Save", "Add funding source", "Add limit", "Edit", "Delete", "Cancel", "Download CSV"],
@@ -362,6 +363,7 @@ export const OWNER_FIELDS = {
   ],
   "Scrum Master": ["Filter", "Undone only", "With you only"],
   "Server and runner": [
+    "Tell me about new releases", "Also send it to my phone",
     "Across all companies (1 to 32)", "In one company (1 to 16, no more than the number above)",
     "Background agents at once (0 to 16)",
     // Settings → Server and runner → Private details to block (BOS-979).
@@ -422,7 +424,7 @@ export const OWNER_FIELDS = {
     // The "Try a command" box can include the rule being typed (BOS-2188).
     "Try it with the rule I'm typing under \"Add a rule\" first (nothing is saved)",
   ],
-  Account: ["Current password", "New password", "New password again"],
+  Account: ["Current password", "New password", "New password again", "Use single-letter keys"],
   "Import and export": [
     "Include the wiki", "Tickets", "Package", "Company name", "Funding for every agent",
     // The import preview's opt-in for a tool server that reaches the stack or the private network (BOS-335 follow-up).
@@ -480,6 +482,6 @@ export const OWNER_SECTIONS = {
   "This server": ["Server", "This host", "Facts only you can give", "Network guard", "Allowed automatically", "Extra lines from your .env"],
   "Devices and privacy": ["Your devices", "Private details to block"],
   "Import and export": ["Import a company"],
-  Account: ["Change password", "Sign out other devices"],
+  Account: ["Change password", "Keyboard shortcuts", "Sign out other devices"],
   Budget: ["Spending limit", "Pay-as-you-go spend", "On your subscriptions", "Tokens", "Costliest tasks"],
 } as const satisfies Record<string, readonly string[]>;

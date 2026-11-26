@@ -167,12 +167,15 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "pages/settings/Runner.tsx": "Server and runner",
   "pages/settings/System.tsx": "Server and runner",
   "pages/settings/CheckWorkers.tsx": "Server and runner",
+  "pages/settings/ReleaseNotice.tsx": "Server and runner",
   "pages/settings/SlotSplit.tsx": "Server and runner",
   "pages/settings/Team.tsx": "Team and CEO",
   "pages/settings/ThisHost.tsx": "Server and runner",
   "pages/settings/Tools.tsx": "Tools and deploys",
   "pages/settings/Transfer.tsx": "Import and export",
   "pages/settings/Account.tsx": "Account",
+  // The single-letter-key switch on Settings → Account (BOS-2689, BOS-2671 part 3d).
+  "pages/settings/KeyboardShortcuts.tsx": "Account",
   "pages/settings/Watchdog.tsx": "Watchdog",
   "pages/settings/shared.tsx": "Any screen",
   "pages/Setup.tsx": "Setup",
@@ -250,7 +253,8 @@ const SETTINGS_WRAPPERS = new Set(["Section", "JumpLinks", "HTMLHeadingElement",
 /** Entries no <button> text shows, each with where it comes from; the test checks those sources instead. */
 const NOT_FROM_BUTTONS: Partial<Record<OwnerScreen, string[]>> = {
   // window.confirm's own buttons.
-  "Any screen": ["OK", "Cancel"],
+  // The menu's keyboard button is an icon: its name is its aria-label, not button text (BOS-2688).
+  "Any screen": ["OK", "Cancel", "Keyboard shortcuts"],
   // The command block's copy button: its label is a variable ("Copy", then "Copied").
   Decisions: ["Copy"],
   // The sign-off button: its label is a variable that depends on how the project lands work (BOS-471).

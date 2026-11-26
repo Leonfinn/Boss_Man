@@ -85,7 +85,9 @@ p { margin: 0; }
 
 /* ---------- Layout ---------- */
 .app { min-height: 100vh; display: flex; flex-wrap: wrap; }
-.app > nav { flex: 1 1 232px; max-width: 100%; }
+/* One width for the expanded menu on every screen (BOS-2745); 240px is what it measured on Chat, where the footer's Settings label fits. */
+:root { --side-width: 240px; }
+.app > nav { flex: 1 1 var(--side-width); max-width: 100%; }
 .app > main { flex: 999 1 560px; min-width: 0; padding: 32px 40px 56px; display: flex; flex-direction: column; gap: 24px; }
 /* Pages that fill the window (Chat, BOS-270) pin the shell to the window height, so the panel can
    take what the heading leaves. The menu sits beside the page on a desktop and above it on a phone;
@@ -99,6 +101,8 @@ p { margin: 0; }
 @media (min-width: 641px) {
   .app:has(> main > .chat-page > .messenger) { flex-wrap: nowrap; }
   .app:has(> main > .chat-page > .messenger) > nav { flex: 0 0 auto; height: auto; align-self: auto; }
+  /* The expanded menu takes its width from --side-width here too, so Chat and every other page match (BOS-2745). */
+  .app:not(.side-collapsed):has(> main > .chat-page > .messenger) > nav { flex: 0 0 var(--side-width); }
 }
 /* A phone (below the 641px where the menu becomes a bar above the page) stacks the menu above the
    chat: the bar keeps its full width and natural height, and the page takes what is left of the
@@ -1577,7 +1581,7 @@ p.dash-line { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0;
   /* From just above the phone bar the menu keeps its own column beside the page, so it never wraps onto a full-width row that the full-height rule would then stretch over the whole screen. */
   .app { flex-wrap: nowrap; }
   /* A phone browser's toolbar showing makes 100dvh shorter than the window, leaving a blank strip under a menu that only fills 100dvh. So the menu fills the window with 100vh instead and scrolls its own contents inside that: it always reaches the bottom edge, and Notifications can still be scrolled into view from behind the toolbar. */
-  .app > nav.side { flex: 0 0 232px; position: sticky; top: 0; align-self: flex-start; height: 100vh; min-height: 0; overflow-y: auto; }
+  .app > nav.side { flex: 0 0 var(--side-width); position: sticky; top: 0; align-self: flex-start; height: 100vh; min-height: 0; overflow-y: auto; }
   .app > main { flex: 1 1 0; }
   /* The icon-only strip (BOS-290): the page keeps the width the labels gave up. */
   .app.side-collapsed > nav.side { flex: 0 0 64px; padding-left: 8px; padding-right: 8px; overflow-x: hidden; }
@@ -1606,7 +1610,7 @@ p.dash-line { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0;
 }
 /* A narrow screen's expanded menu opens over the page instead of pushing it (BOS-290). */
 @media (min-width: 641px) and (max-width: 1180px) {
-  .app:not(.side-collapsed) > nav.side { position: fixed; z-index: 30; left: 0; top: 0; bottom: 0; width: 232px; box-shadow: 8px 0 24px rgb(0 0 0 / 0.4); }
+  .app:not(.side-collapsed) > nav.side { position: fixed; z-index: 30; left: 0; top: 0; bottom: 0; width: var(--side-width); box-shadow: 8px 0 24px rgb(0 0 0 / 0.4); }
   .app:not(.side-collapsed) > main { padding-left: 64px; }
 }
 .related { display: flex; flex-direction: column; gap: 8px; }
@@ -1849,6 +1853,7 @@ details.pushes[open] > summary { margin-bottom: 8px; }
 .side .side-pinned { margin-top: 0; padding: 10px 0 0; border-top: 1px solid #2a3544; flex: none; flex-direction: row; align-items: center; gap: 8px; }
 .side .side-pinned a.nav { flex: 1; min-width: 0; }
 .side .side-pinned .logout { flex: none; width: 44px; min-height: 44px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+.side .side-pinned .shortcuts-button { flex: none; width: 44px; min-height: 44px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
 .side .side-pinned .label-full { display: none; }
 .side .side-pinned .logout-icon { display: block; }
 /* A group's pages in a small panel beside its row (the icon strip, and a window too short to unfold them). */
@@ -1876,7 +1881,11 @@ details.pushes[open] > summary { margin-bottom: 8px; }
   .side.collapsed .nav-scroll { gap: 8px; }
   .side.collapsed .side-pinned { flex-direction: column; padding-top: 8px; }
   .side.collapsed .side-pinned a.nav { flex: none; width: 100%; }
-  .side.collapsed .side-pinned .logout { width: 100%; }
+  .side.collapsed .side-pinned .logout, .side.collapsed .side-pinned .shortcuts-button { width: 100%; }
+}
+/* A phone's Menu sheet keeps Settings and Log out only; "?" still works with a keyboard plugged in (BOS-2688). */
+@media (max-width: 640px) {
+  .side .side-pinned .shortcuts-button { display: none; }
 }
 .side .brand span { white-space: nowrap; }
 /* A window too short for the list at the normal spacing (1667x724): tighter gaps so ten rows and the pinned row fit without scrolling. */
@@ -1971,13 +1980,18 @@ details.pushes[open] > summary { margin-bottom: 8px; }
 .search-title .search-state { margin-right: 6px; font-weight: 500; vertical-align: 1px; }
 /* Keyboard shortcuts list (BOS-2321): reuses the search box's back and panel. */
 .shortcuts-title { flex: 1; margin: 0; font-size: 16px; }
-.shortcuts-list { margin: 0; padding: 8px 16px; overflow-y: auto; }
+.shortcuts-list { margin: 0; padding: 8px 16px; }
+.shortcuts-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.shortcuts-note { flex: none; border-top: 1px solid var(--line); }
 .shortcuts-row { display: flex; gap: 12px; align-items: baseline; padding: 6px 0; }
 .shortcuts-row dt { flex: 0 0 120px; margin: 0; }
 .shortcuts-row dd { margin: 0; }
 .shortcuts-list kbd { font-family: var(--mono); font-size: 12px; padding: 1px 6px; border: 1px solid var(--line-strong); border-radius: 4px; }
 .shortcuts-note { margin: 0; padding: 4px 16px 12px; font-size: 13px; }
 .shortcuts-section { margin: 0; padding: 8px 16px 0; font-size: 14px; border-top: 1px solid var(--line); }
+/* BOS-2689: the list says single-letter keys are off, and offers "Turn them on". */
+.shortcuts-off { margin: 0; padding: 8px 16px; font-size: 14px; border-bottom: 1px solid var(--line); }
+.shortcuts-section.first { border-top: 0; }
 /* BOS-2330: the card j/k moved to. Inside the outline, as a lane's scroll box would clip one drawn outside. */
 [data-shortcut-card]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .search-snippet { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

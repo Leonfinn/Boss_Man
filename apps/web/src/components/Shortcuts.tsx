@@ -3,7 +3,10 @@
 // Mounted once in App.tsx beside the search box. Ctrl/Cmd+K itself stays the search box's own listener;
 // this only lists it.
 import { useEffect, useRef, useState } from "react";
-import { G_WINDOW_MS, HELP_KEY, JUMPS, JUMP_PREFIX, cardActionFor, screenKeys } from "../shortcut-list";
+import { G_WINDOW_MS, HELP_KEY, JUMPS, JUMP_PREFIX, SHOW_SHORTCUTS_EVENT, cardActionFor, screenKeys } from "../shortcut-list";
+
+/** The event that opens the list from outside the menu (BOS-2689), fired by Settings → Account's "Show all keyboard shortcuts". */
+export const OPEN_SHORTCUTS_EVENT = "bossman:open-shortcuts";
 
 // The keys themselves live in ../shortcut-list.ts (BOS-2687); re-exported so existing imports keep working.
 export { G_WINDOW_MS, JUMPS, screenKeys };
@@ -57,15 +60,18 @@ function openCard(): boolean {
 /**
  * hasProjects: whether the company on screen has a project, so "g b" opens its board (Board picks the
  * current project from the address, else the first) or, with none, the Projects list.
+ * singleLetterKeys (BOS-2689): with it off, "?", the g-sequences, g 1 to g 6 and the j/k/Enter card keys do
+ * nothing, while Ctrl/Cmd+K and Escape keep working. The list still opens from the menu button and says so.
+ * onTurnKeysOn: the list's "Turn them on", saved per login.
  */
-export function Shortcuts({ go, hasProjects }: { go: (to: string) => void; hasProjects: boolean }) {
-  const [open, setOpen] = useState(false);
+export function Shortcuts({ go, hasProjects, singleLetterKeys = true, onTurnKeysOn, initialOpen = false }: { go: (to: string) => void; hasProjects: boolean; singleLetterKeys?: boolean; onTurnKeysOn?: () => void; /** Open on the first draw: for the rendering test, which reads the markup. */ initialOpen?: boolean }) {
+  const [open, setOpen] = useState(initialOpen);
   const gAt = useRef(0);
   const back = useRef<HTMLElement | null>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
   // The listener is added once; it reads the latest props through this ref.
-  const latest = useRef({ go, hasProjects, open });
-  latest.current = { go, hasProjects, open };
+  const latest = useRef({ go, hasProjects, open, singleLetterKeys });
+  latest.current = { go, hasProjects, open, singleLetterKeys };
 
   const close = () => {
     setOpen(false);
@@ -83,10 +89,18 @@ export function Shortcuts({ go, hasProjects }: { go: (to: string) => void; hasPr
         return;
       }
       if (e.key === HELP_KEY) {
-        e.preventDefault();
         gAt.current = 0;
+        // Single-letter keys off (BOS-2689): "?" does nothing; the menu button still opens the list.
+        if (!latest.current.singleLetterKeys) return;
+        e.preventDefault();
         back.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
         setOpen(true);
+        return;
+      }
+      // Everything below is a single-letter key (a letter, "g", a number, j/k/Enter), so with them off
+      // the event is left alone: Tab, Escape and Enter on a button stay the browser's.
+      if (!latest.current.singleLetterKeys) {
+        gAt.current = 0;
         return;
       }
       if (e.shiftKey) {
@@ -117,17 +131,37 @@ export function Shortcuts({ go, hasProjects }: { go: (to: string) => void; hasPr
       }
       if (action === "open" && openCard()) e.preventDefault();
     };
+    // The menu's keyboard button (BOS-2688). Focus goes back to it on close; Safari doesn't focus a clicked button.
+    const onShow = () => {
+      back.current = document.querySelector<HTMLElement>(".shortcuts-button") ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+      setOpen(true);
+    };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener(SHOW_SHORTCUTS_EVENT, onShow);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener(SHOW_SHORTCUTS_EVENT, onShow);
+    };
   }, []);
 
   useEffect(() => {
     if (open) closeButton.current?.focus();
   }, [open]);
 
+  // "Show all keyboard shortcuts" on Settings → Account (BOS-2689) opens the list, the way the menu's
+  // keyboard button does, so a page with keys off can still reach it.
+  useEffect(() => {
+    const onOpen = () => {
+      back.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      setOpen(true);
+    };
+    window.addEventListener(OPEN_SHORTCUTS_EVENT, onOpen);
+    return () => window.removeEventListener(OPEN_SHORTCUTS_EVENT, onOpen);
+  }, []);
+
   if (!open) return null;
   const mod = isMac() ? "⌘" : "Ctrl";
-  const here = screenKeys(window.location.hash);
+  const here = screenKeys(typeof window === "undefined" ? "" : window.location.hash);
   return (
     <div className="search-back" onMouseDown={(e) => e.target === e.currentTarget && close()}>
       <div
@@ -148,36 +182,61 @@ export function Shortcuts({ go, hasProjects }: { go: (to: string) => void; hasPr
             Close
           </button>
         </div>
-        <dl className="shortcuts-list">
-          <div className="shortcuts-row">
-            <dt><kbd>{mod}</kbd> <kbd>K</kbd></dt>
-            <dd>Search tickets, wiki, chats, features, decisions, runs, agents, skills and feedback</dd>
-          </div>
-          <div className="shortcuts-row">
-            <dt><kbd>{HELP_KEY}</kbd></dt>
-            <dd>Show this list</dd>
-          </div>
-          {JUMPS.map((j) => (
-            <div key={j.key} className="shortcuts-row">
-              <dt><kbd>{JUMP_PREFIX}</kbd> then <kbd>{j.key}</kbd></dt>
-              <dd>Go to {j.key === "b" ? "the Board (or Projects if there is none)" : j.label}</dd>
-            </div>
-          ))}
-        </dl>
-        {here && (
-          <>
-            <h3 className="shortcuts-section">{here.title}</h3>
-            <dl className="shortcuts-list" aria-label={here.title}>
-              {here.rows.map((r) => (
-                <div key={r.keys.join()} className="shortcuts-row">
-                  <dt>{r.keys.map((k) => <kbd key={k}>{k}</kbd>)}</dt>
-                  <dd>{r.what}</dd>
-                </div>
-              ))}
-            </dl>
-          </>
+        {!singleLetterKeys && (
+          <p className="shortcuts-off" role="status">
+            Single-letter keys are off, so only the ones with {mod} work.{" "}
+            {onTurnKeysOn && (
+              <button type="button" className="linkish" onClick={() => void onTurnKeysOn()}>
+                Turn them on
+              </button>
+            )}
+          </p>
         )}
-        <p className="muted shortcuts-note">Shortcuts don't work while you're typing in a box.</p>
+        {/* The middle scrolls on a short window; the title above and the note below stay in view (BOS-2688). */}
+        <div className="shortcuts-scroll">
+          {here && (
+            <>
+              <h3 className="shortcuts-section first">{here.title}</h3>
+              <dl className="shortcuts-list" aria-label={here.title}>
+                {here.rows.map((r) => (
+                  <div key={r.keys.join()} className="shortcuts-row">
+                    <dt>{r.keys.map((k) => <kbd key={k}>{k}</kbd>)}</dt>
+                    <dd>{r.what}</dd>
+                  </div>
+                ))}
+              </dl>
+            </>
+          )}
+          {/* With no keys of this page's own, the whole list is "everywhere", so it needs no heading. */}
+          {here && <h3 className="shortcuts-section">Everywhere</h3>}
+          <dl className="shortcuts-list" aria-label="Everywhere">
+            <div className="shortcuts-row">
+              <dt><kbd>{mod}</kbd> <kbd>K</kbd></dt>
+              <dd>Search tickets, wiki, chats, features, decisions, runs, agents, skills and feedback</dd>
+            </div>
+            <div className="shortcuts-row">
+              <dt><kbd>{HELP_KEY}</kbd></dt>
+              <dd>Show this list</dd>
+            </div>
+            {JUMPS.map((j) => (
+              <div key={j.key} className="shortcuts-row">
+                <dt><kbd>{JUMP_PREFIX}</kbd> then <kbd>{j.key}</kbd></dt>
+                <dd>Go to {j.key === "b" ? "the Board (or Projects if there is none)" : j.label}</dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+        <p className="muted shortcuts-note">
+          Shortcuts don't work while you're typing in a box.
+          {singleLetterKeys && onTurnKeysOn && (
+            <>
+              {" "}
+              <button type="button" className="linkish" onClick={() => void onTurnKeysOn()}>
+                Turn off single-letter keys
+              </button>
+            </>
+          )}
+        </p>
       </div>
     </div>
   );

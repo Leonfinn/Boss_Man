@@ -230,6 +230,22 @@ describe("in progress waiting on the check queue (BOS-1760)", () => {
   it("a check that ended before the ticket last moved doesn't restart anything", () => {
     expect(rules([ticket({ stateChangedAt: ago(15), checks: [{ from: ago(300), to: ago(20) }] })])).toEqual(["t1:idle_agent"]);
   });
+
+  // BOS-2714: the hand-in path. Handed in to review as "Being checked", then the check failed and the hold sent it back.
+  it("Being checked, then a failed check sends it back: quiet in review, and the clock starts again from the bounce", () => {
+    const handedIn = run({ startedAt: ago(200), endedAt: ago(190) });
+    // In review, check queued for over an hour (under the 3 h "line backed up" note): nobody is chased.
+    expect(rules([ticket({ state: "review", stateChangedAt: ago(170), checks: [{ from: ago(170), to: null, position: 3 }] })], [run({ startedAt: ago(180), endedAt: ago(170) })])).toEqual([]);
+    // Bounced to In progress when the check failed, and the bounce wake has not started a run: its last run was before the
+    // move, so the long rule applies, counted from the bounce (the 3 hours in review are not idle time).
+    const bounced = (min: number) => ticket({ stateChangedAt: ago(min), checks: [{ from: ago(190), to: ago(min) }] });
+    expect(rules([bounced(119)], [handedIn])).toEqual([]);
+    const trip = evaluate({ tickets: [bounced(120)], runs: [handedIn], holds: [] }, s, NOW);
+    expect(trip.map((x) => x.rule)).toEqual(["stale_in_progress"]);
+    expect(trip[0]!.detail.idleMs).toBe(120 * 60_000);
+    // The bounce wake started a run that ended without moving it: the short rules, from that run's end, as for any run.
+    expect(rules([bounced(60)], [handedIn, run({ id: "r2", startedAt: ago(59), endedAt: ago(15) })])).toEqual(["t1:idle_agent"]);
+  });
 });
 
 describe("review tickets 'Being checked' (BOS-2416)", () => {

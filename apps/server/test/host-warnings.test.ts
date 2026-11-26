@@ -57,6 +57,47 @@ describe("host warning watch", () => {
     expect((await t.svc.handling())["check.container_status.unhealthy"]).toMatchObject({ state: "ceo_told", reports: 3 });
   });
 
+  it("tells the owner once when the CEO's card is still unanswered after 30 minutes, and reports answered cards (BOS-2721)", async () => {
+    const raised: Array<Record<string, unknown>> = [];
+    let status = "open";
+    const cardAt = new Date(NOW.getTime() - 31 * 60_000);
+    let reportAt = "2026-11-26T11:58:00Z";
+    const svc = hostWarningService(db, {
+      now: () => NOW,
+      facts: async () => rec(reportAt, { "addon.ntfy": "stopped" }),
+      homeCompany: async () => "co-1",
+      isOpen: async (k) => (k.includes("owner") ? raised.length > 0 : status === "open"),
+      card: async () => ({ status, createdAt: cardAt, answer: status === "open" ? null : "On it: restarted ntfy." }),
+      raise: async (i) => (raised.push(i), { id: "n" }),
+    });
+    await svc.check();
+    reportAt = "2026-11-26T11:59:00Z"; // a second host report: the warning has lasted
+    await svc.check();
+    await svc.check();
+    expect(raised).toHaveLength(1);
+    expect(raised[0]).toMatchObject({ kind: "host_warning_owner", from: "owner", dedupeKey: "alert:host-warning-owner:addon.ntfy" });
+    expect((await svc.handling())["addon.ntfy"]).toMatchObject({ state: "ceo_told", alertedAt: cardAt.toISOString() });
+    status = "answered";
+    expect((await svc.handling())["addon.ntfy"]).toMatchObject({ state: "ceo_answered", answer: "On it: restarted ntfy." });
+  });
+
+  it("does not tell the owner before 30 minutes", async () => {
+    const raised: Array<Record<string, unknown>> = [];
+    let reportAt = "2026-11-26T11:58:00Z";
+    const svc = hostWarningService(db, {
+      now: () => NOW,
+      facts: async () => rec(reportAt, { "addon.ntfy": "stopped" }),
+      homeCompany: async () => "co-1",
+      isOpen: async () => true,
+      card: async () => ({ status: "open", createdAt: new Date(NOW.getTime() - 20 * 60_000), answer: null }),
+      raise: async (i) => (raised.push(i), { id: "n" }),
+    });
+    await svc.check();
+    reportAt = "2026-11-26T11:59:00Z";
+    await svc.check();
+    expect(raised).toEqual([]);
+  });
+
   it("starts the count again when the warning goes away between reports", async () => {
     const t = setup();
     t.report("2026-11-26T11:50:00Z", { "addon.ntfy": "stopped" });
