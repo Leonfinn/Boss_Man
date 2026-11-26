@@ -386,8 +386,20 @@ const askWords = (s: string) =>
       .filter((w) => w.length > 2),
   );
 
+/**
+ * The ask itself, without the record line a card may carry at its head (BOS-2739): two raises of one question are the
+ * same ask whether or not Boss Man's record answered it when they were raised, so the repeat check compares this.
+ */
+export function askedQuestion(s: string): string {
+  const i = s.indexOf("\n\n");
+  if (i < 0) return s;
+  return s.slice(0, i).startsWith("Boss Man's record says:") ? s.slice(i + 2) : s;
+}
+
 /** True when two asks are close enough to be the same one repeated (BOS-123). */
 export function similarQuestion(a: string, b: string): boolean {
+  a = askedQuestion(a);
+  b = askedQuestion(b);
   const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
   if (norm(a) === norm(b)) return true;
   const x = askWords(a);

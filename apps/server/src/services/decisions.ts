@@ -89,7 +89,7 @@ import { agents, budgetPolicies, companies, decisions, deploys, engagementMessag
 import type { ClearWhen } from "./alert-clearing.js";
 import { unlinkedWaiters } from "./owner-todo.js";
 import { openAlertsLine } from "./go-live-card.js";
-import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer, similarQuestion } from "./stale-requests.js";
+import { askedQuestion, decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer, similarQuestion } from "./stale-requests.js";
 import { infoAskOf, ownContentOf, reportBackNote, startedInfoAnswer } from "./owner-result.js";
 import { openReviewProposal } from "./skill-proposals.js";
 import { lineEvent } from "./merge-line.js";
@@ -2193,7 +2193,23 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // BOS-1219: a plan on a ticket whose plan the owner already approved amends it; the approval stays.
       const [approvedOf] = input.plan && input.blocksTicketId ? await db.select({ at: tickets.planApprovedAt }).from(tickets).where(eq(tickets.id, input.blocksTicketId)) : [];
       const questionText = `${input.question}${amendsText(approvedOf?.at)}`;
+      // BOS-2739: the older card asking the same thing, found under a lock taken before this card is written, so two
+      // raises at once can't both find no older card. A card that offers other choices, or recommends another, is a
+      // different ask (BOS-195): it stays. The record line at a card's head is not part of the ask.
+      let repeated: Array<{ id: string; question: string; companyId: string }> = [];
       const raised = await db.transaction(async (tx) => {
+        if (!input.plan && input.agentId) {
+          await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`decision-raise:${input.agentId}`}))`);
+          const same = await tx
+            .select({ id: decisions.id, question: decisions.question, companyId: decisions.companyId, options: decisions.options, recommendedOption: decisions.recommendedOption })
+            .from(decisions)
+            .where(and(eq(decisions.companyId, input.companyId), eq(decisions.status, "open"), eq(decisions.raisedByAgentId, input.agentId), eq(decisions.kind, "question"), sql`${decisions.context}->>'type' = 'question'`, sql`${decisions.context}->>'plan' is null`, input.blocksTicketId ? sql`${decisions.context}->>'ticketId' = ${input.blocksTicketId}` : sql`${decisions.context}->>'ticketId' is null`));
+          const sameChoices = (o: (typeof same)[number]) => o.recommendedOption === input.recommended && [...((o.options as string[] | null) ?? [])].sort().join("\u0000") === [...input.options].sort().join("\u0000");
+          // The older card is kept, so the owner isn't handed a card they already have; by id when two are open (the
+          // early low id), so every racer picks the same one.
+          const older = same.filter((o) => similarQuestion(o.question, input.question) && sameChoices(o)).sort((a, b) => a.id.localeCompare(b.id));
+          if (older.length && (!replaced || !older.some((o) => o.id === replaced!.id))) repeated = [older[0]!];
+        }
         const [row] = await tx
           .insert(decisions)
           .values({
@@ -2238,18 +2254,17 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (input.plan && input.blocksTicketId) await supersedePlanCards(db, { companyId: input.companyId, ticketId: input.blocksTicketId, newCardId: raised.id, now: now(), release: (id) => releaseIfFree(id, false), ...(await supersedeExtras(input.companyId, input.blocksTicketId, raised.id, input.agentId)) }).catch((err) => log(`closing older plan cards for ${input.blocksTicketId} failed: ${(err as Error).message}`));
       // BOS-1193: the older card closes as superseded. Explicitly (replaces), or when the same agent asks the same thing
       // again on the same ticket (similarQuestion). Two different questions from one agent both stay open.
+      // BOS-2739: the repeat is found by comparing the ask without the record line, on either side, and the check runs
+      // from the lock taken before this card's row is written, so two raises at once can't both find no older card.
       if (!input.plan) {
         const closeDeps = { markRead: (id: string, when: Date) => markDecisionNotificationRead(db, id, when), release: (id: string) => releaseIfFree(id, false), now, notify: feed };
         const note = `superseded by ${raised.id}`;
         if (replaced) await closeCardBySystem(db, replaced, note, closeDeps).catch((err) => log(`closing the replaced card ${replaced!.id} failed: ${(err as Error).message}`));
-        else if (input.agentId) {
-          const same = await db
-            .select({ id: decisions.id, question: decisions.question, companyId: decisions.companyId, options: decisions.options, recommendedOption: decisions.recommendedOption })
-            .from(decisions)
-            .where(and(eq(decisions.companyId, input.companyId), eq(decisions.status, "open"), ne(decisions.id, raised.id), eq(decisions.raisedByAgentId, input.agentId), eq(decisions.kind, "question"), sql`${decisions.context}->>'type' = 'question'`, sql`${decisions.context}->>'plan' is null`, input.blocksTicketId ? sql`${decisions.context}->>'ticketId' = ${input.blocksTicketId}` : sql`${decisions.context}->>'ticketId' is null`));
-          // A card that offers other choices, or recommends another, is a different ask (BOS-195): it stays.
-          const sameChoices = (o: (typeof same)[number]) => o.recommendedOption === input.recommended && [...((o.options as string[] | null) ?? [])].sort().join("\u0000") === [...input.options].sort().join("\u0000");
-          for (const o of same) if (similarQuestion(o.question, input.question) && sameChoices(o)) await closeCardBySystem(db, o, note, closeDeps).catch((err) => log(`closing the repeated card ${o.id} failed: ${(err as Error).message}`));
+        for (const o of repeated) {
+          // Close this card rather than the one already in the queue: the owner keeps the card they already have, and a
+          // racer that lost the lock closes its own card by the one the winner left open.
+          if (o.id.localeCompare(raised.id) > 0) await closeCardBySystem(db, raised, `superseded by ${o.id}`, closeDeps).catch((err) => log(`closing the repeated card ${raised.id} failed: ${(err as Error).message}`));
+          else await closeCardBySystem(db, o, note, closeDeps).catch((err) => log(`closing the repeated card ${o.id} failed: ${(err as Error).message}`));
         }
       }
       await record(db, { companyId: input.companyId, agentId: input.agentId, ticketId: input.blocksTicketId, kind: "decision_raised", summary: `${route.tier === "ceo" ? "Asked the CEO first" : "Asked the owner"}: ${input.question}`, at: now() });
