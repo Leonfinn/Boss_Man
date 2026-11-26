@@ -23,6 +23,7 @@ export function stripYouSaidLines(text: string): string {
 import { runCapabilities } from "./run-capabilities.js";
 import type { ChatTraceService } from "./chat-trace.js";
 import { reportBackSection, settleReports } from "./chat-report-back.js";
+import { ownerTextReceiptRefusal } from "./host-fact-gate.js";
 
 export const CHAT_REASON = "owner_chat";
 /** Why the scheduler's launch() leaves a wake queued while its company's runner isn't connected (a swap, a restart). */
@@ -345,7 +346,9 @@ export function chatService(
       const links = await missingPageNote(db, r.companyId, text);
       // What the run actually changed is checked against its claims, in code (BOS-758).
       const done = await doneInThisReply(db, runId, text, changesAtReply.get(runId));
-      const notes = [links, done].filter(Boolean);
+      // BOS-2741 (R2): a chat reply is the run's closing message, so it can't be held; the receipt check's rewrite is named under it.
+      const receipt = ownerTextReceiptRefusal(text)?.replace(/^Not sent\. /, "Boss Man check: ") ?? null;
+      const notes = [links, done, receipt].filter(Boolean);
       const saved = notes.length ? `${text}\n\n${notes.join("\n\n")}` : text;
       // The Thinking trace so far is saved with the reply (BOS-1368), so a reload shows it; a reply
       // with no steps saves nothing, so it shows no trace. Taken before the insert can fail, so its

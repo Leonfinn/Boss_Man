@@ -137,6 +137,26 @@ export const RECEIPT_REFUSAL = `That's a receipt, not the outcome. Move to Block
 
 export const ZERO_ERRORS_REFUSAL = `"0 errors" or "no errors" with no read date is not a reading: the count only covers a file the service has read, so it is also what an unread file shows. Quote the date the service read it (for the Search Console sitemap: lastDownloaded, with isPending false and submitted above 0), or move to Blocked with a dated re-check. The readings per service are in the wiki page "Outside-service readings" (packages/shared/src/outside-service-readings.ts).`;
 
+export const OWNER_TEXT_RECEIPT_REFUSAL = `Not sent. This text names an outside service and reports its receipt as the result ("pending", "submitted", "accepted", 204, or "0 errors" with no read date). A receipt only shows the service took the request. Say what the owner's screen shows, from the readings table (wiki page "Outside-service readings", packages/shared/src/outside-service-readings.ts): the reading with its date (e.g. "Search Console shows Couldn't fetch" or "Last read 26 Nov, 7 discovered"). If nothing has been read yet, say "not read yet, re-check on <date>".`;
+
+/**
+ * BOS-2741 (R2): the G3 receipt check on text the owner reads (ticket replies, state notes, CEO chat), not only on done
+ * moves. Looks at each sentence that names an outside service and the one after it, using the same receipt words and
+ * the same "0 errors" rule as the done gate. `allowReceipt` is for a Blocked note, where "submitted, pending, re-check
+ * on 28 Nov" is the right way to say it is waiting; "0 errors" with no date is still refused there. Returns the hold
+ * text, or null.
+ */
+export function ownerTextReceiptRefusal(text: string, opts: { allowReceipt?: boolean } = {}): string | null {
+  const parts = text.split(/(?<=[.!?])\s+|[\n;]+/).map((s) => s.trim()).filter(Boolean);
+  for (const [i, part] of parts.entries()) {
+    const prev = parts[i - 1] ?? "";
+    if (!namesOutsideService(part) && !namesOutsideService(prev)) continue;
+    if (!opts.allowReceipt && RECEIPT.test(part)) return OWNER_TEXT_RECEIPT_REFUSAL;
+    if (zeroErrorsWithoutReadDate(`${prev} ${part}`)) return OWNER_TEXT_RECEIPT_REFUSAL;
+  }
+  return null;
+}
+
 /** The part of the note about criterion `n`: the segment (split on ; and newlines) that starts with its number, else the one that best repeats its words. */
 export function ownLine(note: string, n: number, text: string): string | null {
   const segs = note.split(/[;\n]/).map((s) => s.trim()).filter(Boolean);
