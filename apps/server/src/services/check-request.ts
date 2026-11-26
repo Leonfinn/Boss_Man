@@ -27,12 +27,16 @@ export type CheckRequestDeps = {
 
 /**
  * BOS-1922: the move to review waits for the quick check on the ticket's current head. Refused while the newest
- * pre-review check of that commit is queued, running or failed (a pass of any width on it lifts the hold). A head with
- * no check at all, a no-code ticket, or a runner that can't say what the head is: no hold.
+ * pre-review check of that commit failed (a pass of any width on it lifts the hold). A head with no check at all, a
+ * no-code ticket, or a runner that can't say what the head is: no hold.
+ * BOS-2714: a queued or running check is refused only when the move can't be held as "Being checked" (BOS-1906): the
+ * mover is not the assignee, or the ticket is not In progress. Otherwise the move goes ahead and holdForReview holds it on
+ * that same job, which already keeps the reviews closed until it passes. Refusing it left finished work In progress.
  */
-export async function quickCheckRefusal(db: Db, ticketId: string, diff: (t: typeof tickets.$inferSelect) => Promise<Pick<WorkspaceDiff, "head">>): Promise<string | null> {
+export async function quickCheckRefusal(db: Db, ticketId: string, diff: (t: typeof tickets.$inferSelect) => Promise<Pick<WorkspaceDiff, "head">>, mover?: string | null): Promise<string | null> {
   const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
   if (!t || t.noCode) return null;
+  const holdable = !!mover && t.assigneeAgentId === mover && t.systemState === "in_progress";
   let head: string;
   try {
     head = (await diff(t)).head;
@@ -48,6 +52,7 @@ export async function quickCheckRefusal(db: Db, ticketId: string, diff: (t: type
   if (!jobs.length || jobs.some((j) => j.state === "passed")) return null;
   const state = jobs[0]!.state;
   if (state !== "queued" && state !== "running" && state !== "failed") return null;
+  if (state !== "failed" && holdable) return null;
   return `the quick check on ${head.slice(0, 8)} hasn't passed yet (${state}). It wakes you when it finishes; move to review then.`;
 }
 
@@ -141,6 +146,9 @@ export function checkRequestService(db: Db, deps: CheckRequestDeps) {
           requestedBy: null,
         });
         if (reused === "passed") return no;
+        // BOS-2714: the live job the agent asked for (request_check) now answers the hand-in. Its result belongs to the hold:
+        // a pass opens the reviews with no agent run, and a failure wakes the agent once, from the hold's bounce.
+        if (reused === "live" && job.requestedBy) await db.update(checkJobs).set({ requestedBy: null }).where(eq(checkJobs.id, job.id));
         return { held: true, where: await checkPlace(queue, input.companyId, job) };
       } catch {
         return no;
@@ -148,7 +156,7 @@ export function checkRequestService(db: Db, deps: CheckRequestDeps) {
     },
 
     /** BOS-1664: the move to review is refused while GitHub's CI jobs for a CI or image change haven't passed (or been marked not applicable). */
-    async reviewRefusal(companyId: string, ticketId: string): Promise<string | null> {
+    async reviewRefusal(companyId: string, ticketId: string, mover?: string | null): Promise<string | null> {
       // With the queue off, request_check refuses, so a hold on it could never be lifted: no hold.
       if ((await queue.mode()) !== "server") return null;
       const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, companyId));
@@ -158,7 +166,7 @@ export function checkRequestService(db: Db, deps: CheckRequestDeps) {
         if (!head.has(t.id)) head.set(t.id, deps.diff(runner.id, t.projectId, t.id));
         return head.get(t.id)!;
       };
-      const quick = await quickCheckRefusal(db, ticketId, diff);
+      const quick = await quickCheckRefusal(db, ticketId, diff, mover);
       if (quick) return quick;
       return deps.preflight ? deps.preflight.reviewRefusal(ticketId, diff) : null;
     },
