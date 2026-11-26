@@ -6,7 +6,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { dateIn, describeRoles, HORIZONS, reviewRolesOf, SENIOR_DEV_TEMPLATE } from "@boss-man/shared";
 import type { Db } from "./db/client.js";
-import { agents, companies, milestones, objectives, projects, tickets } from "./db/schema.js";
+import { agents, companies, features, milestones, objectives, projects, tickets } from "./db/schema.js";
+import { milestoneOfTicket, milestoneOut, sizeOut } from "./mcp-ticket-plan.js";
 import { record } from "./services/activity.js";
 import { WorkError } from "./services/work.js";
 import { ageText, describeNote, MIN_QUOTE, NOTE_LIMITS, NoteError, notesService, originOf, REQUEST_LIMITS, requestLines } from "./services/agent-notes.js";
@@ -223,7 +224,7 @@ export function registerRequestNote(server: Pick<McpServer, "registerTool">, db:
 export function registerBoard(server: Pick<McpServer, "registerTool">, db: Db, scope: Scope) {
   server.registerTool(
     "board",
-    { description: "See the company's board: projects, objectives with their milestones, agents (with the reviews each does under the company's Settings > Reviews, e.g. \"Code (all levels), Security (High+)\"; a project can override them), and open tickets with their ids (the oldest 300; past that, an openTicketsNote says how many exist, and tickets find state=… lists the rest).", inputSchema: {} },
+    { description: "See the company's board: projects, objectives with their milestones, agents (with the reviews each does under the company's Settings > Reviews, e.g. \"Code (all levels), Security (High+)\"; a project can override them), and open tickets with their ids, size (points, or \"no size\") and milestone (id and title, or null; a ticket's own, else its feature's; tickets find milestone=… lists one milestone's tickets) (the oldest 300; past that, an openTicketsNote says how many exist, and tickets find state=… lists the rest).", inputSchema: {} },
     async () => {
       const ps = await db.select({ id: projects.id, name: projects.name }).from(projects).where(and(eq(projects.companyId, scope.companyId), isNull(projects.archivedAt))).orderBy(asc(projects.name));
       const os = await db.select({ id: objectives.id, title: objectives.title, priority: objectives.priority }).from(objectives).where(and(eq(objectives.companyId, scope.companyId), eq(objectives.status, "active")));
@@ -235,8 +236,10 @@ export function registerBoard(server: Pick<McpServer, "registerTool">, db: Db, s
         return r.length ? { ...a, reviews: describeRoles(r) } : a;
       };
       const ts = await db
-        .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, projectId: tickets.projectId, milestoneId: tickets.milestoneId, assigneeAgentId: tickets.assigneeAgentId, risk: tickets.risk })
+        .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, projectId: tickets.projectId, milestoneId: milestoneOfTicket, milestoneTitle: milestones.title, size: tickets.size, assigneeAgentId: tickets.assigneeAgentId, risk: tickets.risk })
         .from(tickets)
+        .leftJoin(features, eq(features.id, tickets.featureId))
+        .leftJoin(milestones, sql`${milestones.id} = ${milestoneOfTicket}`)
         .where(and(eq(tickets.companyId, scope.companyId), ne(tickets.systemState, "done")))
         .orderBy(asc(tickets.createdAt))
         .limit(300);
@@ -244,7 +247,7 @@ export function registerBoard(server: Pick<McpServer, "registerTool">, db: Db, s
       // BOS-2262: past 300 open tickets the newest drop off; say so rather than cut silently.
       const [{ n: openTotal } = { n: 0 }] = ts.length < 300 ? [{ n: ts.length }] : await db.select({ n: sql<number>`count(*)::int` }).from(tickets).where(and(eq(tickets.companyId, scope.companyId), ne(tickets.systemState, "done")));
       const cutNote = openTotal > ts.length ? { openTicketsNote: `showing the oldest ${ts.length} of ${openTotal} open tickets; use tickets find state=… for the rest` } : {};
-      return text(JSON.stringify({ projects: ps, objectives: os.map((o) => ({ ...o, milestones: ms.filter((m) => m.objectiveId === o.id) })), agents: as.map(withReviews), openTickets: ts.map(ref), ...cutNote }));
+      return text(JSON.stringify({ projects: ps, objectives: os.map((o) => ({ ...o, milestones: ms.filter((m) => m.objectiveId === o.id) })), agents: as.map(withReviews), openTickets: ts.map(({ milestoneId, milestoneTitle, size, ...t }) => ({ ...ref(t), size: sizeOut(size), milestone: milestoneOut(milestoneId, milestoneTitle) })), ...cutNote }));
     },
   );
 }
