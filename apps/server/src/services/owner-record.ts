@@ -245,8 +245,10 @@ const ASK_TABLE: AskRow[] = [
     key: "ntfy.phoneReachesAddress",
     asks: (t) =>
       /\bphones?\b/i.test(t) &&
-      /\b(?:tailscale|tailnet|ts\.net|address|url|reach(?:es)?|open(?:s)?)\b/i.test(t) &&
-      /\b(?:keep|can|could|does|do you|works?|working|still|right value|reach(?:es)?)\b/i.test(t) &&
+      // BOS-2685: a bare "address", "url", "open" or "can" matched a keyboard-shortcuts plan question that mentioned a phone.
+      // The question must be about how the phone reaches Boss Man: Tailscale, the address the phone uses, push or ntfy.
+      /\b(?:tailscale|tailnet|ts\.net|ntfy|(?:public|boss man'?s|phone'?s|server) (?:address|url)|address on your phone|reach(?:es)? boss man)\b/i.test(t) &&
+      /\b(?:keep|does|do you|works?|working|right value|reach(?:es)?)\b/i.test(t) &&
       isQuestion(t),
     answer: (r) => {
       const p = r.phoneTest;

@@ -7,7 +7,18 @@ name: Release
 # gives them the version tag and the moving "beta" tag in every registry, and signs and
 # publishes release.json, the list of exact image digests per architecture that the updater (BOS-941) trusts.
 # Settings are the same as publish.yml (docs/25-published-images.md).
+#
+# The weekly beta (BOS-2662): GitHub starts this workflow by itself once a week (the cron line below), with no one pressing
+# anything. A scheduled run picks the newest commit of main that passed CI and has every image published, signed and
+# built for amd64 and arm64 (scripts/release-pick.sh), takes the next beta number after the newest release, and writes the
+# release notes from the CHANGELOG.md lines added since the last beta (scripts/release-notes.sh). With no such commit, or
+# nothing new since the last beta, it ends green with a one-line reason and releases nothing. It never retries; a failed
+# run is picked up by Boss Man's main-CI watcher, which tells the CEO. A pressed (manual) run works exactly as before.
 on:
+  schedule:
+    # THE WEEKLY TIME: minute hour day-of-month month day-of-week, in UTC. "0 10 * * 2" is Tuesday 10:00 UTC. Change this one
+    # line to move it (or delete the two lines of this schedule to switch the weekly release off).
+    - cron: "0 10 * * 2"
   workflow_dispatch:
     inputs:
       version:
@@ -50,8 +61,9 @@ jobs:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
       GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
-      VERSION: ${{ inputs.version }}
       GH_TOKEN: ${{ github.token }}
+      # VERSION, RELEASE_SHA, RELEASE_TAG, RELEASE_PREV_SHA and RELEASE_SKIP are set for the later steps through
+      # $GITHUB_ENV: VERSION by the step below for a pressed run, all of them by "Pick the commit" for a scheduled one.
     steps:
       - uses: actions/checkout@v7
         with:
@@ -61,6 +73,8 @@ jobs:
         run: scripts/install-cosign.sh v2.4.1
       - name: Read and check the publishing settings (fails loudly when Docker Hub is on and a secret is missing)
         id: s
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
         run: |
           set -euo pipefail
           prefixes="$(scripts/publish-images.sh prefixes)"
@@ -69,6 +83,16 @@ jobs:
             echo "ghcr=$(if echo "$prefixes" | grep -q '^ghcr.io/'; then echo true; else echo false; fi)"
             echo "hub=$(if echo "$prefixes" | grep -q '^docker.io/'; then echo true; else echo false; fi)"
           } >> "$GITHUB_OUTPUT"
+          # A scheduled run has no typed version: "Pick the commit and the version" below decides it.
+          if [ "$GITHUB_EVENT_NAME" != schedule ]; then
+            # The typed version goes into $GITHUB_ENV: a newline in it would add env lines (RELEASE_SHA, BASH_ENV), so
+            # refuse anything but a plain one-line version first.
+            if [ "$(printf '%s' "$VERSION_INPUT" | grep -cE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$')" != 1 ] || [ "$(printf '%s' "$VERSION_INPUT" | wc -l)" != 0 ]; then
+              echo "::error::version must look like 0.1.0-beta.4 (one line, no spaces)"
+              exit 1
+            fi
+            echo "VERSION=$VERSION_INPUT" >> "$GITHUB_ENV"
+          fi
       - uses: docker/login-action@v3
         if: ${{ steps.s.outputs.ghcr == 'true' }}
         with:
@@ -80,8 +104,36 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Pick the commit and the version (scheduled runs only; a skip ends the run green with its reason)
+        if: ${{ github.event_name == 'schedule' }}
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          out="$(scripts/release-pick.sh pick)"
+          echo "$out"
+          skip="$(printf '%s\n' "$out" | sed -n 's/^skip=//p')"
+          if [ -z "$skip" ]; then
+            sha="$(printf '%s\n' "$out" | sed -n 's/^sha=//p')"
+            # GitHub refuses the release (HTTP 403) on a commit whose workflow files differ from main's: skip, say why.
+            if ! scripts/publish-images.sh workflows-match "$sha" 2> "$RUNNER_TEMP/err"; then
+              skip="Commit $sha can't be released by this workflow: $(tr '\n' ' ' < "$RUNNER_TEMP/err" | cut -c1-300)"
+            fi
+          fi
+          if [ -n "$skip" ]; then
+            echo "::notice title=Weekly release skipped::$skip"
+            echo "RELEASE_SKIP=$skip" | tr -d '\r' | head -n 1 >> "$GITHUB_ENV"
+            exit 0
+          fi
+          {
+            echo "RELEASE_SHA=$sha"
+            echo "RELEASE_TAG=$(printf '%s\n' "$out" | sed -n 's/^tag=//p')"
+            echo "VERSION=$(printf '%s\n' "$out" | sed -n 's/^version=//p')"
+            echo "RELEASE_PREV_SHA=$(printf '%s\n' "$out" | sed -n 's/^prev_sha=//p')"
+          } >> "$GITHUB_ENV"
       - name: Pick the commit to release (a half-finished release of this version resumes on its own commit)
         id: c
+        if: ${{ github.event_name != 'schedule' }}
         env:
           COMMIT_INPUT: ${{ inputs.commit }}
         run: |
@@ -114,10 +166,12 @@ jobs:
             echo "held=$held"
             echo "tag=$(scripts/publish-images.sh tag "$SHA")"
           } >> "$GITHUB_OUTPUT"
+          { echo "RELEASE_SHA=$SHA"; echo "RELEASE_TAG=$(scripts/publish-images.sh tag "$SHA")"; } >> "$GITHUB_ENV"
       - name: The version is new, and the commit being released has its images
+        if: ${{ env.RELEASE_SKIP == '' }}
         env:
-          TAG: ${{ steps.c.outputs.tag }}
-          SHA: ${{ steps.c.outputs.sha }}
+          TAG: ${{ env.RELEASE_TAG }}
+          SHA: ${{ env.RELEASE_SHA }}
           HELD: ${{ steps.c.outputs.held }}
         run: |
           set -euo pipefail
@@ -146,8 +200,9 @@ jobs:
             done
           done
       - name: Check every image in every registry (identical digest, signature, SBOM, provenance)
+        if: ${{ env.RELEASE_SKIP == '' }}
         env:
-          TAG: ${{ steps.c.outputs.tag }}
+          TAG: ${{ env.RELEASE_TAG }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -161,8 +216,9 @@ jobs:
             echo "$name $digest" >> "$RUNNER_TEMP/verified-digests"
           done
       - name: Add the version and beta tags (the same digests, nothing is rebuilt)
+        if: ${{ env.RELEASE_SKIP == '' }}
         env:
-          TAG: ${{ steps.c.outputs.tag }}
+          TAG: ${{ env.RELEASE_TAG }}
         run: |
           set -euo pipefail
           for p in $(scripts/publish-images.sh prefixes); do
@@ -171,9 +227,10 @@ jobs:
             done < "$RUNNER_TEMP/verified-digests"
           done
       - name: Write release.json from what the registries now hold, and sign it
+        if: ${{ env.RELEASE_SKIP == '' }}
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
-          SHA: ${{ steps.c.outputs.sha }}
+          SHA: ${{ env.RELEASE_SHA }}
         run: |
           set -euo pipefail
           # Reading the version tag back proves it landed, with the same digest, in every registry.
@@ -185,10 +242,14 @@ jobs:
             --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/heads/main" \
             release.json
       - name: Make the image install files from the signed release.json, and sign them too (BOS-974)
+        if: ${{ env.RELEASE_SKIP == '' }}
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
+          # A scheduled run may release a commit older than main's head, which is what is checked out: take the compose
+          # file as it was at the released commit, so it matches that release's images. (A pressed run is unchanged.)
+          if [ "$GITHUB_EVENT_NAME" = schedule ]; then git checkout "$RELEASE_SHA" -- docker-compose.images.yml; fi
           # The image install needs all four images. Until the runner image is published (BOS-972) a release has no images.env;
           # say so and carry on, so the existing beta release is not held up.
           # BOS-1227: the updater is in the default stack, so the install files need it too.
@@ -207,10 +268,18 @@ jobs:
               "$f"
           done
       - name: Publish release.json as a pre-release (beta)
+        if: ${{ env.RELEASE_SKIP == '' }}
         env:
-          SHA: ${{ steps.c.outputs.sha }}
+          SHA: ${{ env.RELEASE_SHA }}
         run: |
           set -euo pipefail
+          # A pressed run keeps its fixed one-sentence body. A scheduled run's body is that week's CHANGELOG lines
+          # (scripts/release-notes.sh), the same lines the website's "What's new" page shows.
+          if [ "$GITHUB_EVENT_NAME" = schedule ]; then
+            scripts/release-notes.sh "${RELEASE_PREV_SHA:-}" "$SHA" > "$RUNNER_TEMP/notes.md"
+          else
+            printf '%s\n' "Beta release. The images are listed, by digest and architecture, in release.json, which is signed (release.json.sigstore.json)." > "$RUNNER_TEMP/notes.md"
+          fi
           assets=(release.json release.json.sigstore.json)
           if [ -f images.env ]; then assets+=(images.env images.env.sigstore.json docker-compose.images.yml docker-compose.images.yml.sigstore.json); fi
           # BOS-2601: this step failed in 1 s on release #3 and the job log is not readable by agents. Name any missing
@@ -219,7 +288,7 @@ jobs:
             [ -s "$f" ] || { echo "::error title=Release file missing::$f is missing or empty, nothing was published. Files here: $(ls | tr '\n' ' ')"; exit 1; }
           done
           if ! out="$(gh release create "v$VERSION" "${assets[@]}" --prerelease --target "$SHA" \
-            --title "Boss Man $VERSION" --notes "Beta release. The images are listed, by digest and architecture, in release.json, which is signed (release.json.sigstore.json)." 2>&1)"; then
+            --title "Boss Man $VERSION" --notes-file "$RUNNER_TEMP/notes.md" 2>&1)"; then
             echo "$out"
             echo "::error title=gh release create failed::$(echo "$out" | tr '\n' ' ' | cut -c1-400)"
             exit 1

@@ -172,6 +172,9 @@ describe("release log: the Release Manager is woken when the live commit changes
     // BOS-1809: the second release says to republish the site too, not just the first.
     const [wakeToSecond] = await c.db.select().from(wakes).where(eq(wakes.ticketId, logTickets[0]!.id));
     expect(wakeToSecond!.note).toContain("republish the website");
+    // BOS-2673: the folded ticket is named for the newest commit, and its waiting wake says B -> C, not A -> B.
+    expect(logTickets[0]!.title).toBe(`Release log: record ${C.slice(0, 8)}`);
+    expect(wakeToSecond!.note).toContain(`changed from ${B.slice(0, 8)} to ${C.slice(0, 8)}`);
     const said = (await c.db.select().from(ticketMessages).where(eq(ticketMessages.ticketId, logTickets[0]!.id))).map((x) => x.text).join("\n");
     expect(said).toContain("republish the website");
     // A repeat pass doesn't list the commit twice.
