@@ -160,3 +160,37 @@ describe("review refusal for the quick check", () => {
     expect(await s.svc.reviewRefusal(s.co, s.ticket)).toBeNull();
   });
 });
+
+// BOS-2714: finished work whose check is already queued goes to review as "Being checked", not refused and left In progress.
+describe("hand-in while the agent's own quick check is queued or running", () => {
+  for (const state of ["queued", "running"] as const) {
+    it(`${state}: the assignee's move is not refused, and the hold reuses that job with its result going to the hold`, async () => {
+      const s = await setup();
+      await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
+      const [asked] = await s.db.select().from(checkJobs);
+      await s.db.update(checkJobs).set({ state }).where(eq(checkJobs.id, asked!.id));
+      expect(await s.svc.reviewRefusal(s.co, s.ticket, s.agent)).toBeNull();
+      const hold = await s.svc.holdForReview({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
+      expect(hold.held).toBe(true);
+      const jobs = await s.db.select().from(checkJobs);
+      // Same job, same place in line: nothing re-queued, nothing cancelled.
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]).toMatchObject({ id: asked!.id, state, queuedAt: asked!.queuedAt });
+      // No "check passed" wake for the agent: a pass opens the reviews, a failure wakes them from the hold's bounce.
+      expect(jobs[0]!.requestedBy).toBeNull();
+    });
+  }
+  it("a failed check on the head is still refused for the assignee", async () => {
+    const s = await setup();
+    await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
+    await s.db.update(checkJobs).set({ state: "failed" });
+    expect(await s.svc.reviewRefusal(s.co, s.ticket, s.agent)).toBe("the quick check on headcomm hasn't passed yet (failed). It wakes you when it finishes; move to review then.");
+  });
+  it("still refused when the move can't be held: another mover, or a ticket not In progress", async () => {
+    const s = await setup();
+    await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
+    expect(await s.svc.reviewRefusal(s.co, s.ticket, "00000000-0000-4000-8000-000000000000")).toMatch(/hasn't passed yet \(queued\)/);
+    await s.db.update(tickets).set({ systemState: "blocked" }).where(eq(tickets.id, s.ticket));
+    expect(await s.svc.reviewRefusal(s.co, s.ticket, s.agent)).toMatch(/hasn't passed yet \(queued\)/);
+  });
+});

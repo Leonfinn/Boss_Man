@@ -810,7 +810,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       if (state === "review" && (await review.needsChanges(ticketId, scope.companyId).catch(() => false))) return fail(NOTHING_CHANGED);
       // BOS-1664: a branch that changes CI or image files needs GitHub's own jobs green (or marked not applicable) first.
       if (state === "review" && !sameState && checkRequests) {
-        const ciHold = await checkRequests.reviewRefusal(scope.companyId, ticketId).catch(() => null);
+        const ciHold = await checkRequests.reviewRefusal(scope.companyId, ticketId, scope.agentId).catch(() => null);
         if (ciHold) return fail(ciHold);
       }
       // BOS-2511: a layout change needs a geometry render test and before/after screenshots, or noVisualChange. A runner
