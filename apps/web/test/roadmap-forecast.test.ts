@@ -28,7 +28,7 @@ describe("metaLines", () => {
   it("names blocked and unsized tickets", () => {
     const l = metaLines(m({ blocked: 2, status: "at_risk" }, { unsized: 1 }), now);
     expect(l.line2).toContain("2 tickets blocked");
-    expect(l.line2).toContain("1 ticket has no size");
+    expect(l.line2).toContain("1 ticket has no size yet, so it isn't counted (the CEO sizes it)");
     expect(l.warn).toBe(true);
   });
   it("says so when nothing was finished in 4 weeks, and when it is past its date", () => {

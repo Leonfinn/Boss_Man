@@ -317,15 +317,18 @@ export function recordHeadLine(a: AskAnswered, stillNeeded?: string): string {
 export function answerFromRecord(texts: Array<string | null | undefined>, r: AskRecord): AskAnswered | null {
   const text = texts.filter(Boolean).join("\n");
   if (!text) return null;
-  const answers = ASK_TABLE.filter((row) => row.asks(text)).flatMap((row) => row.answer(r, text));
+  const fired = ASK_TABLE.filter((row) => row.asks(text));
+  const answers = fired.flatMap((row) => row.answer(r, text));
   if (!answers.length) return null;
+  // BOS-2700: say which row matched, so a wrong match (BOS-2685) can be traced without the refused text, which isn't kept.
+  const rules = ` (matched rule: ${fired.filter((row) => row.answer(r, text).length).map((row) => row.key).join(", ")})`;
   const fresh = answers.filter((a) => a.fresh);
   if (fresh.length) {
     const line = fresh.map((a) => `${a.value} (${a.source})`).join("; ");
-    return { kind: "settled", line, message: `Not raised. Boss Man already knows the answer to this question: ${line}. Use that and carry on without asking the owner. If you believe the record is out of date, raise it again with stillNeeded saying why: the card then goes to the CEO first, with this record line at its head.` };
+    return { kind: "settled", line, message: `Not raised. Boss Man already knows the answer to this question: ${line}${rules}. Use that and carry on without asking the owner. If you believe the record is out of date, raise it again with stillNeeded saying why: the card then goes to the CEO first, with this record line at its head.` };
   }
   const line = answers.map((a) => `${a.value} (${a.source}; may be out of date: ${a.staleWhy})`).join("; ");
-  return { kind: "stale", line, message: `Boss Man's record has a value for this question but can't vouch for it now: ${line}. The card carries that line at its head and goes to the CEO first.` };
+  return { kind: "stale", line, message: `Boss Man's record has a value for this question but can't vouch for it now: ${line}${rules}. The card carries that line at its head and goes to the CEO first.` };
 }
 
 /** Reads the record the ask rows need and answers the card's question from it (BOS-1797). Only for owner asks: raise_decision and notify_owner. */

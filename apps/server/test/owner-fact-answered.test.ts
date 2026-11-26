@@ -40,6 +40,10 @@ describe("which questions the record answers (pure)", () => {
     expect(a!.line).toContain(`${p.confirmedAt!.slice(0, 16).replace("T", " ")} UTC`);
     expect(a!.message).toMatch(/^Not raised\. Boss Man already knows/);
     expect(a!.message).toMatch(/stillNeeded/);
+    // BOS-2700: the refusal names the row that matched, so a wrong match can be traced without the refused text.
+    expect(a!.message).toContain("(matched rule: ntfy.phoneReachesAddress)");
+    const stale = answerFromRecord(texts(CARD1), rec({ phoneTest: confirmed("https://old.example.net") }));
+    expect(stale!.message).toContain("(matched rule: ntfy.phoneReachesAddress)");
   });
 
   it("card 1 is stale (a warning) when the tap went to an old address, is too old, or kept no address; silent with no tap", () => {
