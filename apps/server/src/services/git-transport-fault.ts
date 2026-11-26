@@ -47,14 +47,29 @@ const TRANSPORT: RegExp[] = [
   /kex_exchange_identification/i,
   /network is unreachable/i,
   /temporary failure in name resolution/i,
+  // BOS-2696: the git host's 5xx sent in the push's side channel (BOS-2559, BOS-2601).
+  // The runner's error puts its own prefix on the first line ("Couldn't push the merge to main: remote: ..."), so no ^.
+  /\bremote:\s+(internal server error|bad gateway|service unavailable|gateway time-?out)\b/i,
 ];
+
+/** The git host's own 5xx wording, as GitHub sends it over the push's side channel ("remote: Internal Server Error"). */
+const HOST_5XX = String.raw`internal server error|bad gateway|service unavailable|gateway time-?out`;
+
+/**
+ * BOS-2696: the git host failing inside a push it had already accepted. GitHub then sends
+ * "remote: Internal Server Error" lines and git reports the ref as " ! [remote rejected] main -> main (Internal Server
+ * Error)". The "[remote rejected]" there is the host's 500, not a refusal, so such a ref line is dropped before the
+ * refusal check; any other refusal in the same message (another ref, a hook, a protected branch) still wins.
+ */
+const HOST_5XX_REF_LINE = new RegExp(String.raw`^.*!\s*\[remote rejected\][^\n]*\((${HOST_5XX})\)[^\S\n]*$`, "gim");
 
 /** True when the message is a network or HTTP failure to the git host and shows no refusal (BOS-1860). */
 export function isGitTransportFault(message: string | null | undefined): boolean {
   const text = String(message ?? "");
   if (!text) return false;
-  if (REFUSED.some((re) => re.test(text))) return false;
-  return TRANSPORT.some((re) => re.test(text));
+  const rest = text.replace(HOST_5XX_REF_LINE, "");
+  if (REFUSED.some((re) => re.test(rest))) return false;
+  return rest !== text || TRANSPORT.some((re) => re.test(text));
 }
 
 /** The stale-note reason while the retry waits (shown as "after this was written, <reason>, N min ago"). */
