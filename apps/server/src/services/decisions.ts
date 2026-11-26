@@ -3885,7 +3885,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         // no ticket, the CEO's own card, and a ticket in review or done (the raiser may be its reviewer) wake the raiser as before.
         const [assignedNow] = onTicket?.id ? await db.select({ assignee: tickets.assigneeAgentId, state: tickets.systemState, number: tickets.number }).from(tickets).where(eq(tickets.id, onTicket.id)) : [];
         const [raisedBy] = await db.select({ role: agents.role, name: agents.name }).from(agents).where(eq(agents.id, d.raisedByAgentId));
-        const moved = !!assignedNow?.assignee && assignedNow.assignee !== d.raisedByAgentId && raisedBy?.role !== "ceo" && assignedNow.state !== "review" && assignedNow.state !== "done";
+        // Handed over means the raiser worked the ticket before (a run of theirs on it): an architect, PM or QA agent asking
+        // about a peer's ticket never owned it, and still hears its answer.
+        const couldHaveMoved = !!assignedNow?.assignee && !!d.raisedByAgentId && assignedNow.assignee !== d.raisedByAgentId && raisedBy?.role !== "ceo" && assignedNow.state !== "review" && assignedNow.state !== "done";
+        const [workedIt] = couldHaveMoved && onTicket?.id ? await db.select({ id: runs.id }).from(runs).where(and(eq(runs.ticketId, onTicket.id), eq(runs.agentId, d.raisedByAgentId!))).limit(1) : [];
+        const moved = couldHaveMoved && !!workedIt;
         if (moved && onTicket) {
           // A released or kept ticket's assignee is already woken below ("unblocked" / "Not your card"); wake only when neither applies.
           if (![...unblocked, ...kept].some((t) => t.id === onTicket!.id)) await wake({ agentId: assignedNow!.assignee!, reason: "decision answered", ticketId: onTicket.id, note: `Not your card (${raisedBy?.name ?? "another agent"} raised it, and this ticket is yours now): you need to act only if the answer changes your work.\nThe card "${d.question}" was answered: ${answer}${extra.note ? ` — their note: ${extra.note}` : ""}${pictures}${reportBack}` });
