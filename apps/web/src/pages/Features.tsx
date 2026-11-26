@@ -1000,7 +1000,7 @@ const TASK_FILTERS: Array<{ key: string; label: string; match: (t: FeatureTask) 
 ];
 
 /** A feature's tasks with status chips and counts. The list arrives whole, so it is filtered here. */
-function TaskList({ tasks }: { tasks: FeatureTask[] }) {
+export function TaskList({ tasks }: { tasks: FeatureTask[] }) {
   const [pick, setPick] = useState("all");
   const filters = TASK_FILTERS.filter((f) => f.key !== "cancelled" || tasks.some(f.match));
   const active = filters.find((f) => f.key === pick) ?? filters[0]!;
