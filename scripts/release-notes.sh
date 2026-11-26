@@ -20,9 +20,16 @@ if [ -n "$prev" ] && git cat-file -e "$prev^{commit}" 2>/dev/null; then
   lines="$(git diff --no-color -U0 "$prev" "$cur" -- "$FILE" | sed -n 's/^+\(- .*\)$/\1/p')"
 fi
 
-if [ -n "$lines" ]; then
-  printf "## What's new in this beta\n\n%s\n\n" "$lines"
-else
-  printf "No changes you will notice in this beta.\n\n"
+# The stage word (beta, rc, ...) comes from the one helper that knows it (BOS-2666); no version given means beta.
+stage=beta
+if [ -n "${RELEASE_VERSION:-}" ]; then
+  stage="$("$(dirname "${BASH_SOURCE[0]}")/release-docs-gate.sh" stage-of "$RELEASE_VERSION")"
 fi
-printf "Beta release. The images are listed, by digest and architecture, in release.json, which is signed (release.json.sigstore.json).\n"
+if [ "$stage" = stable ]; then label="release"; else label="$stage"; fi
+if [ -n "$lines" ]; then
+  printf "## What's new in this %s\n\n%s\n\n" "$label" "$lines"
+else
+  printf "No changes you will notice in this %s.\n\n" "$label"
+fi
+first="$(printf '%s' "${label:0:1}" | tr '[:lower:]' '[:upper:]')"
+printf "%s%s. The images are listed, by digest and architecture, in release.json, which is signed (release.json.sigstore.json).\n" "$first" "${label:1}"

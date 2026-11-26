@@ -1,0 +1,12 @@
+# Files whose change cannot alter what Boss Man does, so a commit touching only these never needs a new docs check
+# (scripts/release-docs-gate.sh, rule 3). A shell glob per line; * also matches "/". Anything not here counts as code.
+CHANGELOG.md
+README.md
+CONTRIBUTING.md
+SECURITY.md
+SUPPORT.md
+LICENSE
+NOTICE
+docs/*
+apps/site/src/*
+apps/site/public/*

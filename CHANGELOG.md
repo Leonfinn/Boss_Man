@@ -27,6 +27,15 @@ Release step: adding to this file is part of every release (Release Manager, on 
    `create_ticket` (project Development, risk high, size 1), saying which release failed. In the log entry say what the
    test gave (pass or fail, minutes) and whether the site was republished.
 
+7. Record your docs check (BOS-2666). Before a release can go out, compare the docs with the code: README.md, the
+   guides in docs/, the website pages and the stage word everywhere (a beta says "beta", never "alpha"). Fix what is
+   wrong, then keep exactly one line of this shape just under the "# What's new" heading, outside this comment: an HTML
+   comment that reads "Docs checked up to", a space, the full sha of the newest commit you compared the docs with, and
+   the closing arrows. Replace the sha each time; never add a second line. The Release workflow (the weekly one and the
+   button) refuses any commit that is after that sha and touched anything but docs (scripts/release-docs-paths.txt), has
+   an older stage word in the docs, or has no new "What's new" entry, and it stops with a one-line reason.
+   The weekly run is Tuesday 10:00 UTC: record the check before then, or that week's release is refused.
+
 Check before committing: pnpm --filter @boss-man/site build (it stops on a heading that is not a date, or one out of order).
 -->
 
