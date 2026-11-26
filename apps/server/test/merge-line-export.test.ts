@@ -6,10 +6,11 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, checkJobs, tickets } from "../src/db/schema.js";
+import { activity, checkJobs, decisions, tickets } from "../src/db/schema.js";
 import { CHECK_REUSED_KIND } from "../src/services/check-request.js";
+import { ceoFirstLadder } from "../src/services/decisions.js";
 import { issueRunToken } from "../src/mcp.js";
-import { exportRow } from "../src/mcp-merge-line.js";
+import { cardRow, exportRow } from "../src/mcp-merge-line.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
 
@@ -145,6 +146,60 @@ describe("merge_line_records", () => {
     expect(all.split("\n")).toHaveLength(4);
     for (const leak of ["secret", "Other Co"]) expect(all).not.toContain(leak);
     await c.close();
+  });
+
+  it('what: "cards" returns merge and check cards by raise time, with rung, answerer and minutes, never the question or output (BOS-2763)', async () => {
+    const card = (co: typeof ctx.mine, at: string, over: Record<string, unknown>, context: Record<string, unknown>) =>
+      ctx.db.insert(decisions).values({ companyId: co.company.id, kind: "question", question: "secret question", options: [], recommendedOption: "x", tier: "ceo", createdAt: new Date(at), context: { type: "check_stuck", ticketId: co.ticket.id, command: "secret-cmd", output: "secret output", ...context }, ...over } as never);
+    const t = ctx.mine.ticket.id;
+    // A CEO-first merge card the CEO settled after 12 minutes.
+    await card(ctx.mine, "2026-11-20T10:00:00Z", { status: "answered", answer: "Run the check again", answeredAt: new Date("2026-11-20T10:12:00Z") }, { command: "", ladder: ceoFirstLadder(t, "why", "2026-11-20T10:00:00.000Z"), settled: { agentId: ctx.mine.ceo.id, name: "Ceo Bot", note: "secret note", at: "2026-11-20T10:12:00Z" } });
+    // A CEO-first check card handed to the owner after an hour, who answered 90 minutes after it was raised.
+    const handed = { ...ceoFirstLadder(t, "why", "2026-11-20T11:00:00.000Z"), rung: "owner" };
+    handed.hops = [...handed.hops, { to: "owner", at: "2026-11-20T12:00:00.000Z", why: "the CEO left it" }];
+    await card(ctx.mine, "2026-11-20T11:00:00Z", { status: "answered", answer: "Send it back", answeredAt: new Date("2026-11-20T12:30:00Z") }, { ladder: handed });
+    // An owner-first card (the token), still open; then one Boss Man replaced.
+    await card(ctx.mine, "2026-11-20T13:00:00Z", { tier: "owner" }, {});
+    await card(ctx.mine, "2026-11-20T14:00:00Z", { status: "withdrawn", answeredAt: new Date("2026-11-20T14:03:00Z") }, { ladder: ceoFirstLadder(t, "why", "2026-11-20T14:00:00.000Z") });
+    // Not exported: another kind of card, another company's card, a card before since.
+    await ctx.db.insert(decisions).values({ companyId: ctx.mine.company.id, kind: "question", question: "q", options: [], recommendedOption: "x", createdAt: new Date("2026-11-20T10:30:00Z"), context: { type: "question" } });
+    await card(ctx.other, "2026-11-20T10:30:00Z", {}, {});
+    await card(ctx.mine, "2026-11-01T00:00:00Z", {}, {});
+    const c = await asCeo(ctx.mine);
+    const out = JSON.parse(textOf(await call(c, { since: "2026-11-19T00:00:00Z", what: "cards" }))) as { note: string; rows: Array<Record<string, unknown>> };
+    expect(out.rows.map((r) => ({ ...r, card_id: undefined }))).toEqual([
+      { card_id: undefined, ticket_id: t, card: "merge", raised: "2026-11-20T10:00:00.000Z", first_rung: "ceo", rung: "ceo", to_owner: null, outcome: "answered", answer: "Run the check again", answered_by: "Ceo Bot", closed: "2026-11-20T10:12:00.000Z", minutes: 12 },
+      { card_id: undefined, ticket_id: t, card: "check", raised: "2026-11-20T11:00:00.000Z", first_rung: "ceo", rung: "owner", to_owner: "2026-11-20T12:00:00.000Z", outcome: "answered", answer: "Send it back", answered_by: "owner", closed: "2026-11-20T12:30:00.000Z", minutes: 90 },
+      { card_id: undefined, ticket_id: t, card: "check", raised: "2026-11-20T13:00:00.000Z", first_rung: "owner", rung: "owner", to_owner: "2026-11-20T13:00:00.000Z", outcome: "open", answer: null, answered_by: null, closed: null, minutes: null },
+      { card_id: undefined, ticket_id: t, card: "check", raised: "2026-11-20T14:00:00.000Z", first_rung: "ceo", rung: "ceo", to_owner: null, outcome: "withdrawn", answer: null, answered_by: "withdrawn", closed: "2026-11-20T14:03:00.000Z", minutes: 3 },
+    ]);
+    expect(out.rows.every((r) => typeof r.card_id === "string")).toBe(true);
+    const cut = JSON.parse(textOf(await call(c, { since: "2026-11-19T00:00:00Z", what: "cards", limit: 1 }))) as { note: string; rows: unknown[] };
+    expect(cut.rows).toHaveLength(1);
+    expect(cut.note).toContain("since=2026-11-20T10:00:00.000Z");
+    const all = textOf(await call(c, { since: "2026-11-01T00:00:00Z", what: "cards", format: "csv" }));
+    expect(all.split("\n")[0]).toBe("card_id,ticket_id,card,raised,first_rung,rung,to_owner,outcome,answer,answered_by,closed,minutes");
+    expect(all.split("\n")).toHaveLength(7);
+    for (const leak of ["secret", "Other Co"]) expect(all).not.toContain(leak);
+    await c.close();
+  });
+
+  it("cardRow reads a card with a broken context as far as it can", () => {
+    expect(cardRow({ id: "d-1", createdAt: new Date(0), status: "answered", answer: "a", answeredAt: new Date(30_000), context: { ticketId: 5, ladder: { rung: 7, hops: "x" }, settled: { name: 3 } } })).toEqual({
+      card_id: "d-1",
+      ticket_id: null,
+      card: "check",
+      raised: "1970-01-01T00:00:00.000Z",
+      first_rung: null,
+      rung: null,
+      to_owner: null,
+      outcome: "answered",
+      answer: "a",
+      answered_by: "owner",
+      closed: "1970-01-01T00:00:30.000Z",
+      minutes: 0.5,
+    });
+    expect(cardRow({ id: "d-2", createdAt: new Date(0), status: "open", answer: null, answeredAt: null, context: null })).toMatchObject({ first_rung: "owner", rung: "owner", to_owner: "1970-01-01T00:00:00.000Z" });
   });
 
   it("exportRow ignores values of the wrong type", () => {
