@@ -85,32 +85,24 @@ describe("pickupWords: who is diagnosing the failure", () => {
     ...over,
   });
 
-  it("says nobody is assigned, with and without a woken time", () => {
-    expect(pickupWords(pickup({ ticketId: null, ref: null, agent: null }))).toBe(
-      "Not picked up yet: nobody is assigned to diagnose it.",
-    );
+  // BOS-2737: worded by actionClaim (its own test has every case; action-claim-agreement.test.ts checks they agree).
+  it("says nobody has picked it up, with and without the CEO's wake time", () => {
+    expect(pickupWords(pickup({ ticketId: null, ref: null, agent: null }))).toBe("Nobody has picked it up yet: the CEO has not been alerted.");
     expect(pickupWords(pickup({ ticketId: null, ref: null, agent: null, wokenAt: at("09:05") }))).toBe(
-      "Not picked up yet: nobody is assigned to diagnose it; the CEO was woken at 09:05 UTC.",
+      "The CEO was alerted: raised at 09:05 UTC, nobody has picked it up yet.",
     );
   });
 
   it("uses the card form, which stays true, when not read live", () => {
-    expect(pickupWords(pickup({ startedAt: at("09:05") }), false)).toBe("The diagnosis is APP-19, assigned to Nova.");
-    expect(pickupWords(pickup({ startedAt: at("09:05") }), false)).not.toMatch(/being looked into/i);
+    expect(pickupWords(pickup({ startedAt: at("09:05") }), false)).toBe("APP-19 is assigned to Nova.");
   });
 
-  it("says it is being looked into only once a run has started, with the time in UTC", () => {
-    expect(pickupWords(pickup({ startedAt: at("09:05") }))).toBe(
-      "Being looked into by Nova on APP-19 (started 09:05 UTC).",
-    );
+  it("says work has started only once a run has, with the time in UTC", () => {
+    expect(pickupWords(pickup({ startedAt: at("09:05") }))).toBe("Nova started work on it on APP-19 at 09:05 UTC.");
   });
 
-  it("says assigned but not picked up, with and without a woken time, and never claims work is under way", () => {
-    const plain = pickupWords(pickup());
-    expect(plain).toBe("Not picked up yet: Nova assigned (APP-19).");
-    expect(plain).not.toMatch(/being looked into/i);
-    const woken = pickupWords(pickup({ wokenAt: at("09:05") }));
-    expect(woken).toBe("Not picked up yet: Nova woken at 09:05 UTC (APP-19).");
-    expect(woken).not.toMatch(/being looked into/i);
+  it("says assigned but no run yet, with and without a woken time, and never claims work is under way", () => {
+    expect(pickupWords(pickup())).toBe("APP-19 is assigned to Nova; no run has started on it yet.");
+    expect(pickupWords(pickup({ wokenAt: at("09:05") }))).toBe("APP-19 is assigned to Nova, woken at 09:05 UTC; no run has started on it yet.");
   });
 });

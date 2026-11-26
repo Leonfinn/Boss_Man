@@ -982,14 +982,16 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         const byCeo = me?.role === "ceo";
         const planned = unexpiredPlan(withCriteria, now) && leavesPlan(withCriteria.prev, state);
         const backwards = withCriteria.urgent && urgentBackwards(withCriteria.prev, state);
+        // BOS-2737: the reply says the CEO was alerted only when this wake was actually sent.
+        let ceoWokenAt: Date | null = null;
         if ((planned || backwards) && !byCeo && hooks.wake) {
           const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, scope.companyId), eq(agents.role, "ceo")));
           if (ceo && ceo.id !== scope.agentId) {
             const plan = planned ? ceoPlanText(withCriteria, now, 1000) : null;
-            await Promise.resolve(hooks.wake(ceo.id, { reason: "ticket moved off plan", ticketId, causedByRunId: scope.runId, note: ceoMoveNote({ title: withCriteria.title, ref: null, from: withCriteria.prev, to: state, mover: me?.name ?? "An agent", summary: summary?.trim() || null, plan, urgent: !!backwards }) })).catch(() => undefined);
+            ceoWokenAt = await Promise.resolve(hooks.wake(ceo.id, { reason: "ticket moved off plan", ticketId, causedByRunId: scope.runId, note: ceoMoveNote({ title: withCriteria.title, ref: null, from: withCriteria.prev, to: state, mover: me?.name ?? "An agent", summary: summary?.trim() || null, plan, urgent: !!backwards }) })).then(() => now, () => null);
           }
         }
-        if (planned) planNote = planMoveWarning(ceoPlanText(withCriteria, now, 1000)!, withCriteria.prev, state, !byCeo);
+        if (planned) planNote = planMoveWarning(ceoPlanText(withCriteria, now, 1000)!, withCriteria.prev, state, byCeo, ceoWokenAt);
         if (state === "blocked" && withCriteria.prev === "in_progress" && waitsOnMergeOnly && (await db.select({ id: reviewRequests.id }).from(reviewRequests).where(eq(reviewRequests.ticketId, ticketId)).limit(1)).length) planNote += `\n\n${IN_PROGRESS_BLOCKED_WARNING}`;
       }
       // BOS-2288: a watch names the event that wakes it; with none named, a daily re-read is booked so it can't go silent.

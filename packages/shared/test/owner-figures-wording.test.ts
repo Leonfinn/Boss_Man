@@ -58,6 +58,8 @@ export type Hit = { file: string; line: number; region: string; text: string };
 
 /** Blank out comments so a phrase in a comment is not a hit: block comments outright, `//` and JSX `{/* … *\/}` to the line end. */
 function codeOf(line: string): string {
+  // A line inside a multi-line block comment (" * …", or one opening "/**" or "/*") is all comment (BOS-2737).
+  if (/^\s*(\*(?!\/)|\/\*)/.test(line) && !/\*\/./.test(line)) return " ".repeat(line.length);
   return line
     .replace(/\/\*[\s\S]*?\*\//g, (m) => " ".repeat(m.length))
     .replace(/(^|[^:"'`])\/\/.*$/, "$1");
@@ -100,12 +102,12 @@ function regionOf(code: string, at: number): string {
 }
 
 /** Every phrase occurrence in one file's source, outside comments, deduped by line and run. */
-export function scanSource(file: string, source: string): Hit[] {
+export function scanSource(file: string, source: string, phrases: RegExp[] = PHRASES): Hit[] {
   const hits: Hit[] = [];
   const seen = new Set<string>();
   source.split("\n").forEach((raw, i) => {
     const code = codeOf(raw);
-    for (const phrase of PHRASES) {
+    for (const phrase of phrases) {
       for (const m of code.matchAll(new RegExp(phrase.source, "gi"))) {
         const at = m.index ?? 0;
         if (!wordBoundary(code, at, m[0].length)) continue;
@@ -120,21 +122,24 @@ export function scanSource(file: string, source: string): Hit[] {
   return hits;
 }
 
-const isAllowed = (hit: Hit) => ALLOWED.find((a) => a.file === hit.file && hit.region.includes(a.text));
+const isAllowed = (hit: Hit, allowed: Allowed[]) => allowed.find((a) => a.file === hit.file && hit.region.includes(a.text));
 
 /** The hits that are neither allowed nor produced through the registry. Kept pure so a fixture can exercise it. */
-export function unaccountedHits(files: Array<{ file: string; source: string }>): Hit[] {
-  return files.flatMap((f) => scanSource(f.file, f.source)).filter((h) => !isAllowed(h));
+export function unaccountedHits(files: Array<{ file: string; source: string }>, phrases: RegExp[] = PHRASES, allowed: Allowed[] = ALLOWED): Hit[] {
+  return files.flatMap((f) => scanSource(f.file, f.source, phrases)).filter((h) => !isAllowed(h, allowed));
 }
 
 const WEB = fileURLToPath(new URL("../../../apps/web/src/", import.meta.url));
+const APPS = fileURLToPath(new URL("../../../apps/", import.meta.url));
+const SHARED = fileURLToPath(new URL("../src/", import.meta.url));
 
-function webSources(dir: string = WEB): Array<{ file: string; source: string }> {
+/** Every .ts/.tsx file under `dir`, named relative to `base` (apps/web/src by default, as the R43 list names them). */
+function webSources(dir: string = WEB, base: string = WEB): Array<{ file: string; source: string }> {
   return readdirSync(dir, { withFileTypes: true })
     .flatMap((e) => {
       const p = join(dir, e.name);
-      if (e.isDirectory()) return webSources(p);
-      return /\.tsx?$/.test(e.name) ? [{ file: relative(WEB, p).replace(/\\/g, "/"), source: readFileSync(p, "utf8") }] : [];
+      if (e.isDirectory()) return webSources(p, base);
+      return /\.tsx?$/.test(e.name) ? [{ file: relative(base, p).replace(/\\/g, "/"), source: readFileSync(p, "utf8") }] : [];
     })
     .sort((a, b) => a.file.localeCompare(b.file));
 }
@@ -176,5 +181,62 @@ describe("no owner-led 'waiting on you' figure is built inline in apps/web/src (
     const hits = webSources().flatMap((f) => scanSource(f.file, f.source));
     const stale = ALLOWED.filter((a) => !hits.some((h) => h.file === a.file && h.region.includes(a.text))).map((a) => a.file);
     expect(stale, "remove the ALLOWED entry, or fix its file/text: it no longer matches any line").toEqual([]);
+  });
+});
+
+// BOS-2737 (R60): the same lint for "someone is on it" claims. Cock-ups round 7 (BOS-2736, L1) found five screens
+// saying someone was acting when no run or ticket existed, each a fixed string. Every such line now comes from
+// actionClaim (packages/shared/src/action-claim.ts), which words it from a started run, a ticket's assignee or an alert
+// time. These phrases are refused anywhere else in apps/web/src, apps/server/src and packages/shared/src, outside
+// comments. The uses listed below are agent-facing text or say something that was done in the same step (a card or
+// wake sent there and then), each with why; a new fixed claim fails.
+
+/** The fixed claim phrases. "on it" only as "is/are/'s on it", since "act on it" or "work on it" claim nothing. */
+export const CLAIM_PHRASES = [/being looked into/i, /looking into/i, /looked into/i, /has been told/i, /have been told/i, /is handling/i, /(?:is|are|'s) on it/i];
+
+export const CLAIM_ALLOWED: Allowed[] = [
+  { file: "web/src/pages/Ticket.tsx", text: "the reviewer has been told that", why: "the review request carries the missing criteria in the same step that shows this; it names no one as acting" },
+  { file: "web/src/pages/ProjectBudget.tsx", text: "The CEO has been told", why: "an out-of-band cost raises the CEO's cost alert in the same pass that marks the run (cost-check.ts raiseCostAlert); it says the alert went out, not that anyone is acting" },
+  { file: "server/src/mcp-decisions.ts", text: "", why: "the decisions tool's description and replies, read by agents, not shown on an owner screen" },
+  { file: "server/src/services/owner-todo.ts", text: "", why: "a refusal sent to the agent who wrote the note, not an owner screen" },
+  { file: "server/src/services/review-common.ts", text: "The CEO has been told", why: "the merge gate's foreign-files result, written when its card goes to the CEO in the same step; not a claim that anyone is acting" },
+  { file: "server/src/services/owner-holds.ts", text: "looked into it", why: "past tense, after the hold was released: names who released it with their own words, which is a fact" },
+  { file: "server/src/services/loop-guards.ts", text: "It has been told to try a different approach", why: "the looping agent's note is sent in the same step; it says the agent was sent a note, not that anyone is acting" },
+  { file: "server/src/services/no-progress.ts", text: "own CEO has been told too", why: "the home company's card is raised in the same step (raise, homeKey); it says the alert went out" },
+  { file: "server/src/services/host-warnings.ts", text: "nobody is handling it yet", why: "the card's why: a negative, saying nobody acts yet" },
+  { file: "server/src/services/line-holder.ts", text: "", why: "a note to the agent that holds the merge line, not an owner screen" },
+];
+
+const claimSources = () => [...webSources(join(APPS, "web/src"), APPS), ...webSources(join(APPS, "server/src"), APPS), ...webSources(SHARED, join(SHARED, "../.."))];
+
+describe("no fixed 'someone is on it' claim outside actionClaim (R60, BOS-2737)", () => {
+  const unaccounted = (file: string, source: string) => unaccountedHits([{ file, source }], CLAIM_PHRASES, CLAIM_ALLOWED).map(describeHit);
+
+  it("fails on a fixed 'has been told' / 'looking into' / 'is handling' / 'on it' and names the file and line", () => {
+    expect(unaccounted("web/src/pages/Board.tsx", "<span>No movement for 2 hours. The Scrum Master has been told.</span>")).toEqual([
+      'web/src/pages/Board.tsx:1: "<span>No movement for 2 hours. The Scrum Master has been told.</span>"',
+    ]);
+    expect(unaccounted("web/src/host-facts-display.ts", 'const doing = "The CEO has been told and is looking into it.";')).toEqual([
+      `web/src/host-facts-display.ts:1: "${'const doing = "The CEO has been told and is looking into it.";'}"`,
+    ]);
+    expect(unaccounted("server/src/services/ceo-plan.ts", "const s = `${who} is handling it.`;\nconst t = 'Dougal is on it';")).toEqual([
+      'server/src/services/ceo-plan.ts:1: "const s = `${who} is handling it.`;"',
+      `server/src/services/ceo-plan.ts:2: "const t = 'Dougal is on it';"`,
+    ]);
+  });
+
+  it("lets through a comment and wording that claims nobody ('act on it', 'work on it')", () => {
+    expect(unaccounted("server/src/services/x.ts", "// the CEO has been told\nconst a = 'Act on it now.';\nconst b = `Pick a run to work on it`;")).toEqual([]);
+  });
+
+  it("every current use in the app's source is actionClaim's or listed above with a reason", () => {
+    const bad = unaccountedHits(claimSources(), CLAIM_PHRASES, CLAIM_ALLOWED);
+    expect(bad.map(describeHit), "word the line with actionClaim (packages/shared/src/action-claim.ts) from the run, ticket or alert it is about; or, if it claims nobody is acting, add it to CLAIM_ALLOWED with why").toEqual([]);
+  });
+
+  it("every CLAIM_ALLOWED entry still matches a real line, so the list can't rot", () => {
+    const hits = claimSources().flatMap((f) => scanSource(f.file, f.source, CLAIM_PHRASES));
+    const stale = CLAIM_ALLOWED.filter((a) => !hits.some((h) => h.file === a.file && h.region.includes(a.text))).map((a) => a.file);
+    expect(stale, "remove the CLAIM_ALLOWED entry, or fix its file/text: it no longer matches any line").toEqual([]);
   });
 });
