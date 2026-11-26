@@ -2,7 +2,7 @@
 // never a "pass" in the note or an owner card answer. These tests pin the gate's pure helpers.
 import { describe, expect, it } from "vitest";
 import type { Criterion } from "@boss-man/shared";
-import { CARD_CITE_REFUSAL, citedOpenCard, hostFactRefusal, noCriteriaOutsideServiceRefusal, outsideServiceEvidenceRefusal, ownSiteHosts, pageShotRefusal, uncitedCardPasses } from "../src/services/host-fact-gate.js";
+import { CARD_CITE_REFUSAL, citedOpenCard, hostFactRefusal, namesOutsideService, noCriteriaOutsideServiceRefusal, outsideServiceEvidenceRefusal, ownLine, ownSiteHosts, pageShotRefusal, uncitedCardPasses } from "../src/services/host-fact-gate.js";
 import type { HostFact } from "../src/services/host-facts.js";
 
 const after = (text: string): Criterion => ({ text, after: "merge" });
@@ -274,5 +274,62 @@ describe("pageShotRefusal: a page-clause pass needs a fresh screenshot and a quo
   it("counts any screenshot when no go-live time is recorded", () => {
     const note = '1 pass: shot abcd1234; page shows "Your roadmap"';
     expect(pageShotRefusal([PAGE], [shot("2020-01-01T00:00:00.000Z")], null, note)).toBeNull();
+  });
+});
+
+// BOS-2639: the part of the note about one criterion. A numbered segment wins; otherwise the segment that repeats the
+// criterion's words is the best guess, so a note can be checked line by line.
+describe("ownLine (BOS-2639)", () => {
+  const text = "The sitemap was read and shows no errors";
+
+  it("picks the segment that starts with the criterion's number", () => {
+    expect(ownLine("1 pass; 2 pass; 3 fail", 2, text)).toBe("2 pass");
+  });
+
+  it("accepts the C2 and 'criterion 2' prefixes", () => {
+    expect(ownLine("C2 ok", 2, text)).toBe("C2 ok");
+    expect(ownLine("criterion 2 fail", 2, text)).toBe("criterion 2 fail");
+  });
+
+  it("does not take a sub-number like 2.1 for criterion 2", () => {
+    expect(ownLine("2.1 pass", 2, "Sitemap read")).toBeNull();
+  });
+
+  it("skips a numbered segment that says neither pass, ok nor fail", () => {
+    expect(ownLine("2 ready; 2 ok", 2, text)).toBe("2 ok");
+    expect(ownLine("2 ready", 2, text)).toBeNull();
+  });
+
+  it("falls back to the segment repeating at least three of the criterion's words", () => {
+    expect(ownLine("something else; sitemap read shows fine", 2, text)).toBe("sitemap read shows fine");
+  });
+
+  it("needs all the words when the criterion has fewer than three", () => {
+    expect(ownLine("the sitemap was read", 2, "Sitemap read")).toBe("the sitemap was read");
+  });
+
+  it("splits segments on semicolons and newlines", () => {
+    expect(ownLine("1 pass\n2 pass", 2, text)).toBe("2 pass");
+  });
+
+  it("returns null when nothing is close enough", () => {
+    expect(ownLine("unrelated; still unrelated", 2, text)).toBeNull();
+  });
+});
+
+// BOS-2639: a criterion about a service outside Boss Man is recognised by the service's name, not by any word that
+// happens to contain it.
+describe("namesOutsideService (BOS-2639)", () => {
+  it("matches named services in any case", () => {
+    expect(namesOutsideService("Google Search Console shows the sitemap read")).toBe(true);
+    expect(namesOutsideService("pushed to GitHub")).toBe(true);
+    expect(namesOutsideService("A STRIPE payment")).toBe(true);
+    expect(namesOutsideService("Docker Hub has the image")).toBe(true);
+  });
+
+  it("does not match plain text or a word that only contains a name", () => {
+    expect(namesOutsideService("The panel loads and the page shows the roadmap")).toBe(false);
+    expect(namesOutsideService("The build writes an npmrc file")).toBe(false);
+    expect(namesOutsideService("a bingo card")).toBe(false);
   });
 });

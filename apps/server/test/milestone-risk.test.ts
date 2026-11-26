@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { ceoPlanWake, needsCeoPlan } from "@boss-man/shared";
 import { milestones as msTable, settings, tickets as ticketsTable, agents } from "../src/db/schema.js";
-import { milestoneRiskService } from "../src/services/milestone-risk.js";
+import { milestoneRiskService, reasonForWake } from "../src/services/milestone-risk.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
 let t: TestApp | undefined;
@@ -420,5 +420,26 @@ describe("milestone at risk: the rule (BOS-2581)", () => {
     expect(ceoPlanWake({ managed: true, wasManaged: true, status: "at_risk", lastWoken: "on_track" })).toBe(true);
     // Off never wakes.
     expect(ceoPlanWake({ managed: false, wasManaged: false, status: "late", lastWoken: null })).toBe(false);
+  });
+});
+
+// BOS-2639: the wake quotes the reason line the Roadmap shows, without repeating its status heading or its last full stop.
+describe("reasonForWake (BOS-2639)", () => {
+  it("gives an empty string when there is no reason", () => {
+    expect(reasonForWake(null)).toBe("");
+    expect(reasonForWake("")).toBe("");
+  });
+
+  it("strips the At risk or Late heading and the final full stop", () => {
+    expect(reasonForWake("At risk: Nothing finished in 4 weeks, due in 9 days.")).toBe("Nothing finished in 4 weeks, due in 9 days");
+    expect(reasonForWake("Late: its date passed 6 days ago.")).toBe("its date passed 6 days ago");
+  });
+
+  it("keeps a full stop inside the line", () => {
+    expect(reasonForWake("At risk: one ticket is late. Two more are unstarted.")).toBe("one ticket is late. Two more are unstarted");
+  });
+
+  it("leaves a line without a heading or final stop unchanged, trimmed", () => {
+    expect(reasonForWake("  Nothing finished yet  ")).toBe("Nothing finished yet");
   });
 });
