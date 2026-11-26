@@ -4,7 +4,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
 import { checkDoneOnText, runningOnText, slotSplitText } from "../src/check-place";
-import { MergeQueue } from "../src/pages/MergeQueue";
+import { MergeQueue, quickCheckPlaces } from "../src/pages/MergeQueue";
 
 afterEach(() => {
   cleanup();
@@ -79,6 +79,70 @@ describe("Merges tab says where each running merge check runs (BOS-1942)", () =>
     const { container } = render(<MergeQueue companies={[company]} companyId="c1" />);
     await screen.findByText(/Merging APP-1/);
     expect(container.textContent).toContain("5 check slots in all (3 on this server (docker-01), 2 on the check worker Truenas), shared with quick checks");
+  });
+});
+
+// BOS-2638: the number beside a waiting quick check is its place in the line shown, not the server's
+// position (which counts merge checks too). Rows are made up; no server or clock is involved.
+type CheckRow = Parameters<typeof quickCheckPlaces>[0][number];
+const check = (over: Partial<CheckRow> & { id: string }): CheckRow => ({
+  ticketId: `ticket-${over.id}`,
+  ref: "APP-1",
+  title: `Made-up check ${over.id}`,
+  kind: "quick",
+  requestedBy: "an agent",
+  state: "waiting",
+  position: null,
+  minutes: 3,
+  fixesMain: false,
+  heldBy: null,
+  heldByMain: false,
+  ...over,
+});
+
+describe("quickCheckPlaces (BOS-2507, BOS-2638)", () => {
+  it("leaves running checks unnumbered and numbers waiting checks after them, in list order", () => {
+    const rows = [
+      check({ id: "run-1", state: "running", position: 1 }),
+      check({ id: "wait-1", state: "waiting", position: 9 }),
+      check({ id: "run-2", state: "running" }),
+      check({ id: "wait-2", state: "waiting", position: 2 }),
+    ];
+    const places = quickCheckPlaces(rows);
+    expect([...places.keys()]).toEqual(["wait-1", "wait-2"]);
+    expect(places.get("wait-1")).toBe(3);
+    expect(places.get("wait-2")).toBe(4);
+    expect(places.has("run-1")).toBe(false);
+    expect(places.has("run-2")).toBe(false);
+  });
+
+  it("gives a held waiting check with no position no number", () => {
+    const rows = [
+      check({ id: "run-1", state: "running" }),
+      check({ id: "held", state: "waiting", position: null }),
+      check({ id: "wait-1", state: "waiting", position: 1 }),
+    ];
+    const places = quickCheckPlaces(rows);
+    expect([...places.keys()]).toEqual(["wait-1"]);
+    expect(places.get("wait-1")).toBe(2);
+  });
+
+  it("makes the last number running checks plus numbered waiting checks", () => {
+    const rows = [
+      check({ id: "run-1", state: "running" }),
+      check({ id: "run-2", state: "running" }),
+      check({ id: "held", state: "waiting", position: null }),
+      check({ id: "wait-1", state: "waiting", position: 5 }),
+      check({ id: "wait-2", state: "waiting", position: 1 }),
+    ];
+    const places = quickCheckPlaces(rows);
+    const numbered = [...places.values()];
+    expect(numbered).toEqual([3, 4]);
+    expect(Math.max(...numbered)).toBe(2 + 2);
+  });
+
+  it("has no places for an empty queue", () => {
+    expect(quickCheckPlaces([]).size).toBe(0);
   });
 });
 
