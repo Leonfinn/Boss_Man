@@ -163,10 +163,24 @@ describe("failingCheckText: what a failing check says (BOS-986)", () => {
 
   it("says a warning does not matter while every runner is connected, from the live counts (BOS-2674)", () => {
     const a = warningAdvice("check.container_status.unhealthy", { runnersTotal: 1, runnersConnected: 1, runsGoing: 3 }, undefined);
-    expect(a.matters).toContain("Not right now");
+    expect(a.matters).toContain("No runner is affected");
     expect(a.matters).toContain("3 runs are going");
     expect(a.doing).toContain("the CEO is told");
     expect(a.needs).toMatch(/^No\./);
+  });
+
+  it("words the impact per kind of warning and does not over-promise (BOS-2674)", () => {
+    const impact = { runnersTotal: 1, runnersConnected: 1, runsGoing: 0 };
+    expect(warningAdvice("repo.probe", impact, undefined).matters).toContain("code host");
+    expect(warningAdvice("addon.example", impact, undefined).matters).toContain("add-on provides");
+    expect(warningAdvice("repo.probe", impact, undefined).matters).not.toContain("Not right now");
+  });
+
+  it("links the open ticket by its number, or says there is none yet (BOS-2674)", () => {
+    const base = { state: "ceo_told" as const, reports: 3, since: "2026-11-26T11:00:00Z" };
+    const withTicket = warningAdvice("check.container_status.unhealthy", undefined, { ...base, ticket: { ref: "BOS-9", title: "Fix the unhealthy container" } });
+    expect(withTicket.doing).toContain("Ticket BOS-9 is open for it: Fix the unhealthy container.");
+    expect(warningAdvice("check.container_status.unhealthy", undefined, base).doing).toContain("no ticket for it yet");
   });
 
   it("says it may matter when a runner is not connected, and names who is handling it once the CEO is told (BOS-2674)", () => {

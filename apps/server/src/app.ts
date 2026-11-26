@@ -1170,6 +1170,17 @@ export async function buildApp(opts: AppOptions) {
     facts: () => hostFacts.sync(),
     homeCompany: async () => (await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1))[0]?.id ?? null,
     isOpen: async (dedupeKey) => (await db.select({ id: decisions.id }).from(decisions).where(and(eq(decisions.dedupeKey, dedupeKey), eq(decisions.status, "open"))).limit(1)).length > 0,
+    ticketFor: async (key) => {
+      const [t] = await db
+        .select({ title: tickets.title, number: tickets.number, prefix: companies.ticketPrefix })
+        .from(tickets)
+        .innerJoin(companies, eq(companies.id, tickets.companyId))
+        .where(and(ne(tickets.systemState, "done"), or(sql`position(${key} in ${tickets.title}) > 0`, sql`position(${key} in coalesce(${tickets.body}, '')) > 0`)))
+        .orderBy(desc(tickets.createdAt))
+        .limit(1);
+      const ref = t ? ticketRef(t.prefix, t.number) : null;
+      return t && ref ? { ref, title: t.title } : null;
+    },
     raise: async (input) => {
       const r = await alerts.raise(input as Parameters<typeof alerts.raise>[0]);
       if (r) await notes.syncDecisions();

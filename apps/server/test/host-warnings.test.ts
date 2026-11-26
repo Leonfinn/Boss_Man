@@ -67,6 +67,21 @@ describe("host warning watch", () => {
     expect(await t.svc.check()).toEqual([]);
   });
 
+  it("carries the open ticket that names the warning into what the panel shows", async () => {
+    const svc = hostWarningService(db, {
+      now: () => NOW,
+      facts: async () => rec("2026-11-26T11:59:00Z", { "addon.ntfy": "stopped", "check.container_status.unhealthy": "1" }),
+      homeCompany: async () => "co-1",
+      isOpen: async () => false,
+      ticketFor: async (k) => (k === "addon.ntfy" ? { ref: "BOS-7", title: "Restart ntfy" } : null),
+      raise: async () => null,
+    });
+    await svc.check();
+    const h = await svc.handling();
+    expect(h["addon.ntfy"]!.ticket).toEqual({ ref: "BOS-7", title: "Restart ntfy" });
+    expect(h["check.container_status.unhealthy"]!.ticket).toBeUndefined();
+  });
+
   it("ignores a report that is too old to trust", async () => {
     const t = setup();
     t.report("2026-11-26T09:00:00Z", { "addon.ntfy": "stopped" });

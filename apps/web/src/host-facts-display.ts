@@ -105,7 +105,7 @@ export function failingCheckText(key: string, d: HostFactsView, names: string[],
 /** What Boss Man knows about itself that decides whether a warning matters (the server works it out, BOS-2674). */
 export type HostImpact = { runnersTotal: number; runnersConnected: number; runsGoing: number };
 /** What Boss Man is doing about one warning: watching it, or the CEO has been told (the server's host-warnings.ts). */
-export type WarningHandling = { state: "watching" | "ceo_told"; reports: number; since: string };
+export type WarningHandling = { state: "watching" | "ceo_told"; reports: number; since: string; ticket?: { ref: string; title: string } };
 
 /** The three plain lines under every warning: does it matter, what Boss Man is doing, whether the owner needs to act. */
 export function warningAdvice(key: string, impact: HostImpact | undefined, handling: WarningHandling | undefined, reportedGap = "a few minutes"): { matters: string; doing: string; needs: string } {
@@ -120,13 +120,18 @@ export function warningAdvice(key: string, impact: HostImpact | undefined, handl
   } else if (impact.runnersTotal === 0) {
     matters = "No runner is set up yet, so no agent work is running that this could hold up.";
   } else {
-    matters = `Not right now. ${impact.runnersTotal === 1 ? "The runner is" : `All ${impact.runnersTotal} runners are`} connected and ${impact.runsGoing === 0 ? "no runs are going" : `${impact.runsGoing} run${impact.runsGoing === 1 ? " is" : "s are"} going`}, so agents are working normally.`;
+    const runners = `${impact.runnersTotal === 1 ? "The runner is" : `All ${impact.runnersTotal} runners are`} connected and ${impact.runsGoing === 0 ? "no runs are going" : `${impact.runsGoing} run${impact.runsGoing === 1 ? " is" : "s are"} going`}`;
+    // Never promise more than the data shows: the runner link says nothing about the code host or an add-on.
+    if (key === "repo.probe") matters = `Possibly. ${runners}, but Boss Man can't read the code host, so checks of what is waiting to deploy may be out of date.`;
+    else if (key.startsWith("addon.")) matters = `Only the feature that add-on provides. ${runners}, so agent work itself is not held up by this.`;
+    else matters = `No runner is affected. ${runners}. Boss Man can't tell more than that from this warning alone.`;
   }
   if (key in OWNER_FACT_HELP) return { matters, doing: "Nothing to do on Boss Man's side: only you can give this fact.", needs: `Yes: ${OWNER_FACT_HELP[key]!.where}.` };
-  const doing =
-    handling?.state === "ceo_told"
-      ? "The CEO has been told and is looking into it. You'll hear from them if it needs you."
-      : `Boss Man is watching it. If the next host report (in ${reportedGap}) still shows it, the CEO is told straight away.`;
+  const doing = handling?.ticket
+    ? `Ticket ${handling.ticket.ref} is open for it: ${handling.ticket.title}.${handling.state === "ceo_told" ? " The CEO has been told." : ""}`
+    : handling?.state === "ceo_told"
+      ? "The CEO has been told and is looking into it. There is no ticket for it yet."
+      :`Boss Man is watching it. If the next host report (in ${reportedGap}) still shows it, the CEO is told straight away.`;
   return { matters, doing, needs: "No. Boss Man will ask you with a card if that changes." };
 }
 

@@ -47,11 +47,14 @@ export type HostWarningDeps = {
   facts: () => Promise<HostFactsRecord>;
   homeCompany: () => Promise<string | null>;
   isOpen: (dedupeKey: string) => Promise<boolean>;
+  /** The open ticket that names this warning key, if any. */
+  ticketFor?: (key: string) => Promise<{ ref: string; title: string } | null>;
   raise: (input: Record<string, unknown>) => Promise<unknown>;
   log?: (m: string) => void;
 };
 
-export type WarningHandling = { state: "watching" | "ceo_told"; reports: number; since: string };
+/** `ticket` is the open ticket that names this warning's key in its title or body (the card asks the CEO to put it there). */
+export type WarningHandling = { state: "watching" | "ceo_told"; reports: number; since: string; ticket?: { ref: string; title: string } };
 
 export function hostWarningService(db: Db, deps: HostWarningDeps) {
   return {
@@ -84,7 +87,7 @@ export function hostWarningService(db: Db, deps: HostWarningDeps) {
         const card = await deps.raise({
           companyId,
           kind: "host_warning",
-          question: `Settings → This host has shown "${k}" = "${value}" in ${next[k]!.reports} host reports in a row (since ${next[k]!.since}). The owner has not been asked to do anything. Find out what is behind it (host facts, the runner and server status, the open tickets), say on Settings → This host whether it matters, and open a ticket if it needs work. This card closes by itself when the host stops reporting it.`,
+          question: `Settings → This host has shown "${k}" = "${value}" in ${next[k]!.reports} host reports in a row (since ${next[k]!.since}). The owner has not been asked to do anything. Find out what is behind it (host facts, the runner and server status, the open tickets), say on Settings → This host whether it matters, and open a ticket if it needs work (put the exact key "${k}" in the ticket's title or body: the panel links the ticket by it). This card closes by itself when the host stops reporting it.`,
           from: "ceo",
           why: "a host warning has lasted across reports and nobody is handling it yet",
           dedupeKey: hostWarningAlertKey(k),
@@ -103,7 +106,10 @@ export function hostWarningService(db: Db, deps: HostWarningDeps) {
     async handling(): Promise<Record<string, WarningHandling>> {
       const s = await readStreak(db);
       const out: Record<string, WarningHandling> = {};
-      for (const [k, w] of Object.entries(s.warnings)) out[k] = { state: (await deps.isOpen(hostWarningAlertKey(k))) ? "ceo_told" : "watching", reports: w.reports, since: w.since };
+      for (const [k, w] of Object.entries(s.warnings)) {
+        const ticket = (await deps.ticketFor?.(k).catch(() => null)) ?? undefined;
+        out[k] = { state: (await deps.isOpen(hostWarningAlertKey(k))) ? "ceo_told" : "watching", reports: w.reports, since: w.since, ...(ticket ? { ticket } : {}) };
+      }
       return out;
     },
   };
