@@ -481,6 +481,67 @@ describe("a ticket merged twice keeps both merges (BOS-2653)", () => {
     expect(await c.db.select().from(ticketMerges).where(eq(ticketMerges.ticketId, t.id))).toHaveLength(1);
   });
 
+  // BOS-2654: merged once, reopened, merged again, and the gate's answer to the second merge lost (a runner restart).
+  // Before: the sweep only added the second merge to the ticket's merges; the ticket stayed open as "not merged".
+  it("a reopened ticket whose second merge wasn't recorded is closed by the sweep, its assignee told; never twice", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Merged again");
+    await c.db.update(tickets).set({ mergeCommit: sha("a"), mergedAt: new Date("2026-11-16T11:00:00Z"), touchesRunner: true }).where(eq(tickets.id, t.id));
+    // Its first merge is older than main's log read: the newer one is told by its time.
+    const far = await c.ticket("Merged again, long ago", "in_progress");
+    await c.db.update(tickets).set({ mergeCommit: sha("9"), mergedAt: new Date("2026-11-01T09:00:00Z") }).where(eq(tickets.id, far.id));
+    c.main.push(
+      { sha: sha("b"), subject: `Merge "Merged again" (${t.id})`, at: "2026-11-16T12:00:00Z", files: ["apps/server/src/x.ts"] },
+      { sha: sha("8"), subject: `Merge "Merged again, long ago" (${far.id})`, at: "2026-11-16T11:30:00Z", files: ["apps/server/src/y.ts"] },
+      { sha: sha("a"), subject: `Merge "Merged again" (${t.id})`, at: "2026-11-16T11:00:00Z", files: ["apps/runner/src/workspace.ts"] },
+    );
+
+    expect((await c.review.recordMissedMerges()).recorded.sort()).toEqual([t.id, far.id].sort());
+    const r = await c.row(t.id);
+    expect([r.mergeCommit, r.mergedAt?.toISOString(), r.systemState, r.touchesRunner]).toEqual([sha("b"), "2026-11-16T12:00:00.000Z", "done", false]);
+    const f = await c.row(far.id);
+    expect([f.mergeCommit, f.systemState]).toEqual([sha("8"), "done"]);
+    // Both merges of each are kept, the first with its own runner change, so merge order places both.
+    const kept = await c.db.select().from(ticketMerges).where(eq(ticketMerges.ticketId, t.id));
+    expect(kept.map((m) => [m.commit, m.touchesRunner, m.mergedAt.toISOString()]).sort()).toEqual([
+      [sha("a"), true, "2026-11-16T11:00:00.000Z"],
+      [sha("b"), false, "2026-11-16T12:00:00.000Z"],
+    ]);
+    expect(await allMergeOrder(c.db, c.company.id)).toEqual([sha("9"), sha("a"), sha("8"), sha("b")]);
+    expect(await c.wakesOf(c.worker.id, "merge recorded late")).toHaveLength(2);
+
+    // The next sweep finds nothing new.
+    expect((await c.review.recordMissedMerges()).recorded).toEqual([]);
+    expect(await c.db.select().from(activity).where(and(eq(activity.ticketId, t.id), eq(activity.kind, "merge_recorded_late")))).toHaveLength(1);
+    expect(await c.wakesOf(c.worker.id, "merge recorded late")).toHaveLength(2);
+  });
+
+  it("a reopened ticket with no newer merge on main, and a done one, are left as they are", async () => {
+    const c = (ctx = await setup());
+    // Reopened after its merge, not merged again: its recorded merge is still main's newest for it.
+    const open = await c.ticket("Reopened, not merged again");
+    await c.db.update(tickets).set({ mergeCommit: sha("c"), mergedAt: new Date("2026-11-16T12:00:00Z") }).where(eq(tickets.id, open.id));
+    // Reopened; its recorded merge is older than the log read, and the only one on main is older still.
+    const old = await c.ticket("Recorded merge is newer", "in_progress");
+    await c.db.update(tickets).set({ mergeCommit: sha("5"), mergedAt: new Date("2026-11-16T13:00:00Z") }).where(eq(tickets.id, old.id));
+    // Done: a newer merge is only added to its merges, never "closes" it again.
+    const done = await c.ticket("Done already", "done");
+    await c.db.update(tickets).set({ mergeCommit: sha("d"), mergedAt: new Date("2026-11-16T10:00:00Z") }).where(eq(tickets.id, done.id));
+    c.main.push(
+      { sha: sha("e"), subject: `Merge "Done already" (${done.id})`, at: "2026-11-16T12:30:00Z", files: [] },
+      { sha: sha("c"), subject: `Merge "Reopened, not merged again" (${open.id})`, at: "2026-11-16T12:00:00Z", files: [] },
+      { sha: sha("6"), subject: `Merge "Recorded merge is newer" (${old.id})`, at: "2026-11-16T11:00:00Z", files: [] },
+      { sha: sha("d"), subject: `Merge "Done already" (${done.id})`, at: "2026-11-16T10:00:00Z", files: [] },
+    );
+
+    expect((await c.review.recordMissedMerges()).recorded).toEqual([]);
+    expect([(await c.row(open.id)).mergeCommit, (await c.row(open.id)).systemState]).toEqual([sha("c"), "review"]);
+    expect([(await c.row(old.id)).mergeCommit, (await c.row(old.id)).systemState]).toEqual([sha("5"), "in_progress"]);
+    expect([(await c.row(done.id)).mergeCommit, (await c.row(done.id)).systemState]).toEqual([sha("d"), "done"]);
+    expect((await c.db.select().from(ticketMerges).where(eq(ticketMerges.ticketId, done.id))).map((m) => m.commit)).toEqual([sha("e")]);
+    expect(await c.wakesOf(c.worker.id, "merge recorded late")).toHaveLength(0);
+  });
+
   it("the migration backfills each ticket's merge and the earlier merges the merge line recorded", async () => {
     const c = (ctx = await setup());
     const t = await c.ticket("BOS-2627 stand-in", "done");
