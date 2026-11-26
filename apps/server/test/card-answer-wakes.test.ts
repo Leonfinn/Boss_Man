@@ -84,3 +84,27 @@ describe("a card answer and the ticket's assignee (BOS-2291)", () => {
     for (const w of ws) expect(w.note).toContain("Not your card");
   });
 });
+
+// BOS-2655: a reissued card keeps its first raiser, who may no longer own the ticket.
+describe("a card answer after the ticket changed hands (BOS-2655)", () => {
+  const second = async () => (await ctx.req("POST", `/api/companies/${ctx.co.company.id}/agents`, { name: "Brian" })).json() as { id: string };
+  const wakesOf = async (id: string) => (await ctx.db.select().from(wakes).where(eq(wakes.agentId, id)));
+
+  it("wakes the current assignee, not the raiser who handed the ticket over, and tells the CEO", async () => {
+    const brian = await second();
+    const t = await ctx.ticket("Look into the failing release", { systemState: "blocked" });
+    const d = await card(t, { type: "question" }, brian.id, true);
+    await ctx.req("POST", `/api/decisions/${d.id}/answer`, { answer: "Yes" });
+    expect(await wakesOf(brian.id)).toEqual([]);
+    expect((await devWakes()).some((w) => w.ticketId === t.id)).toBe(true);
+    const ceoWake = (await wakesOf(ctx.co.ceo.id)).find((w) => w.note?.includes("no longer owns"));
+    expect(ceoWake).toBeTruthy();
+  });
+
+  it("still wakes the raiser while they are the assignee", async () => {
+    const t = await ctx.ticket("Look into the failing release", { systemState: "blocked" });
+    const d = await card(t, { type: "question" }, ctx.dev.id, true);
+    await ctx.req("POST", `/api/decisions/${d.id}/answer`, { answer: "Yes" });
+    expect((await devWakes()).some((w) => w.reason === "decision answered" && w.note?.includes("your question"))).toBe(true);
+  });
+});
