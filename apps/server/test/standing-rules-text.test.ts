@@ -6,6 +6,7 @@ import {
   normalizeStandingRules,
   STANDING_RULES_MAX,
   standingRulesError,
+  standingRulesLineCounts,
   standingRulesSection,
   type StandingRules,
 } from "../src/services/standing-rules.js";
@@ -52,6 +53,29 @@ describe("standingRulesError", () => {
   it("counts the text as given, not after trimming", () => {
     // Normalising happens first in the service; a raw string's outer spaces still count here.
     expect(standingRulesError(` ${"x".repeat(STANDING_RULES_MAX)}`)).toContain(String(STANDING_RULES_MAX + 1));
+  });
+});
+
+describe("standingRulesLineCounts", () => {
+  it("counts the lines added and removed between two texts", () => {
+    expect(standingRulesLineCounts("First.\nSecond.", "First.\nSecond.\nThird.")).toEqual({ added: 1, removed: 0 });
+    expect(standingRulesLineCounts("First.\nSecond.\nThird.", "First.\nThird.")).toEqual({ added: 0, removed: 1 });
+    expect(standingRulesLineCounts("First.\nSecond.", "First.\nThird.")).toEqual({ added: 1, removed: 1 });
+  });
+
+  it("counts an empty text as having no lines", () => {
+    expect(standingRulesLineCounts("", "")).toEqual({ added: 0, removed: 0 });
+    expect(standingRulesLineCounts("", "First.\nSecond.")).toEqual({ added: 2, removed: 0 });
+    expect(standingRulesLineCounts("Only one.", "")).toEqual({ added: 0, removed: 1 });
+  });
+
+  it("counts a moved line as neither added nor removed", () => {
+    expect(standingRulesLineCounts("First.\nSecond.", "Second.\nFirst.")).toEqual({ added: 0, removed: 0 });
+  });
+
+  it("counts repeated lines by how many there are", () => {
+    expect(standingRulesLineCounts("Same.\nSame.", "Same.")).toEqual({ added: 0, removed: 1 });
+    expect(standingRulesLineCounts("Same.", "Same.\nSame.")).toEqual({ added: 1, removed: 0 });
   });
 });
 

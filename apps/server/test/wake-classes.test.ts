@@ -9,7 +9,7 @@ import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { costEvents, decisions, runs, tickets, wakes } from "../src/db/schema.js";
-import { reasonsOfClass, WAKE_CLASS, wakeClass } from "../src/services/wake-classes.js";
+import { passesForTicket, reasonsOfClass, WAKE_CLASS, wakeClass } from "../src/services/wake-classes.js";
 import type { Limits } from "../src/services/scheduler.js";
 import { HELD_COMPANY } from "../src/services/fair-share.js";
 import { NOT_WAKE_CODES, wakeReasonsIn } from "../src/services/guard-scan.js";
@@ -400,6 +400,36 @@ describe("wake classes: callers of wake() and notify()", () => {
       .filter((f) => f !== "services/maintenance.ts" && f !== "services/self-deploy.ts" && f !== "services/runner-watch.ts" && f !== "services/deploy-wait.ts" && f !== "services/merge-jam.ts");
     const unlisted = callers.filter((f) => !(f in CALLERS));
     expect(unlisted).toEqual([]);
+  });
+});
+
+describe("wake classes: a wake about an open urgent or fixes-live ticket passes the hold (BOS-2088)", () => {
+  const facts = (over: Partial<{ urgent: boolean; fixesLive: string | null; systemState: string; mergeCommit: string | null }> = {}) => ({
+    urgent: false,
+    fixesLive: null,
+    systemState: "in_progress",
+    mergeCommit: null,
+    ...over,
+  });
+
+  it("passes nothing when there is no ticket", () => {
+    expect(passesForTicket(null)).toBe(false);
+    expect(passesForTicket(undefined)).toBe(false);
+  });
+
+  it("passes an open urgent ticket", () => {
+    expect(passesForTicket(facts({ urgent: true }))).toBe(true);
+  });
+
+  it("passes an open ticket that fixes a live problem, but not one whose fixesLive is only spaces", () => {
+    expect(passesForTicket(facts({ fixesLive: "the server freezes as memory climbs" }))).toBe(true);
+    expect(passesForTicket(facts({ fixesLive: "   " }))).toBe(false);
+  });
+
+  it("never passes a done or merged ticket, even when it is urgent", () => {
+    expect(passesForTicket(facts({ urgent: true, systemState: "done" }))).toBe(false);
+    expect(passesForTicket(facts({ urgent: true, mergeCommit: "a1b2c3d4" }))).toBe(false);
+    expect(passesForTicket(facts({ fixesLive: "the server freezes", systemState: "done" }))).toBe(false);
   });
 });
 

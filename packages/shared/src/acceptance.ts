@@ -301,6 +301,37 @@ export function carryFailedOver(criteria: readonly Criterion[], note: string | n
   return { criteria: next, carried: verdicts.filter((r) => r.verdict === "fail").map((r) => r.criterion), note: passed.length ? `${passed.join("; ")}. ${rest}` : rest };
 }
 
+/**
+ * BOS-2643: a watch of a day or more, the fixed set of phrases that opens an after-merge criterion as its own check
+ * ticket. A duration (a number, "one" to "fourteen", or "a"/"an", then day, week or hour; hours count only from 24) is a
+ * watch only with watch wording around it: before it over, for, across, during, throughout, after (each optionally with
+ * "the", "the first", "the next"), or "in the first"/"in the next"; or right after it on, after, of, live, running, later
+ * or watch. So "over 3 days live", "a week after go-live", "for 48 hours" match, and "within 2 days", "for 12 hours" and
+ * "older than 30 days" don't: a one-time reading stays on the build ticket.
+ */
+const WORD_NUMBERS: Record<string, number> = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14 };
+const LONG_WATCH = new RegExp(
+  "(\\b(?:(?:over|for|across|during|throughout|after)(?:\\s+the(?:\\s+(?:first|next))?)?|in\\s+the\\s+(?:first|next))\\s+)?" +
+    `\\b(\\d{1,3}|${Object.keys(WORD_NUMBERS).join("|")})[\\s-]+(day|week|hour)s?\\b` +
+    "(\\s+(?:on|after|of|live|running|later|watch)\\b)?",
+  "gi",
+);
+
+/** BOS-2643: the phrase that makes a criterion's text a watch of a day or more, or null (see LONG_WATCH). */
+export function longWatchPhrase(text: string): string | null {
+  for (const m of text.matchAll(LONG_WATCH)) {
+    if (!m[1] && !m[4]) continue;
+    const n = WORD_NUMBERS[m[2]!.toLowerCase()] ?? Number(m[2]);
+    if (m[3]!.toLowerCase() === "hour" && n < 24) continue;
+    if (n < 1) continue;
+    return m[0].trim();
+  }
+  return null;
+}
+
+/** BOS-2643: 0-based indexes of the after-merge criteria that name a watch of a day or more. */
+export const longWatchIndexes = (criteria: readonly Criterion[]): number[] => criteria.flatMap((c, i) => (isAfterMerge(c) && longWatchPhrase(criterionText(c)) ? [i] : []));
+
 /** Words that mean a check can only be settled once the work is live, not in a review. */
 const LIVE = /\b(after (the )?merg(?:e|ing)|once (it'?s |it is )?(merged|live|deployed|in production)|post-?merge|standby window|live deploy|on a real host|on the (real|production) host|on your (own )?(host|machine|server)|on the (owner'?s )?(host|machine|server))\b/i;
 

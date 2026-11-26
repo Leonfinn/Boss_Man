@@ -289,9 +289,10 @@ describe("decision rules", () => {
     serve(() => new Response(JSON.stringify({ cards: [card] }), { status: 200 }));
     render(<Rules companies={[company]} companyId="c1" go={() => {}} />);
     expect(await screen.findByText("Most-asked cards (last 30 days)")).toBeTruthy();
-    expect(screen.getByText("docker exec web (a.b)")).toBeTruthy();
-    expect(screen.getByText("2 allowed, 1 refused, 1 still open")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Make a rule" }));
+    // The heading can show before the cards arrive: wait for each card's own text, not just the heading.
+    expect(await screen.findByText("docker exec web (a.b)")).toBeTruthy();
+    expect(await screen.findByText("2 allowed, 1 refused, 1 still open")).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: "Make a rule" }));
     await waitFor(() => expect((screen.getByLabelText("Tool title matches (regex)") as HTMLInputElement).value).toBe("^docker exec web \\(a\\.b\\)$"));
     expect((screen.getByLabelText("execute") as HTMLInputElement).checked).toBe(true);
     expect((screen.getByLabelText("New rule") as HTMLInputElement).value).toBe("");
@@ -309,6 +310,6 @@ describe("decision rules", () => {
     serve(() => new Response(JSON.stringify({ error: "Boom" }), { status: 500 }));
     render(<Rules companies={[company]} companyId="c1" go={() => {}} />);
     expect(await screen.findByText(/most-asked cards/i, { selector: "p, p *" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: /retry/i })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: /retry/i })).toBeTruthy();
   });
 });
