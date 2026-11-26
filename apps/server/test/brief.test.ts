@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, checkWorkers, decisions, runners, runs, ticketDependencies, tickets } from "../src/db/schema.js";
+import { activity, agents, checkWorkers, decisions, reviewRequests, runners, runs, ticketDependencies, tickets } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { record } from "../src/services/activity.js";
 import { buildBrief } from "../src/services/brief.js";
@@ -226,6 +226,31 @@ describe("ticket agent brief (R84)", () => {
     const b = await brief(ctx.dev.id, "worker");
     expect(b).toContain('- Ops: "Deploy staging" (in_progress)');
     expect(b.match(/^- (Ops|Dev|CEO)[^\n]*: /gm)).toHaveLength(1);
+    expect(b).not.toContain("not assigned");
+  });
+
+  it("marks a run on a ticket the agent neither owns, reviews nor raised a card about, and leaves linked runs and ticketless runs plain (BOS-2657)", async () => {
+    const owned = await ctx.ticket("Owned work", { assigneeAgentId: ctx.ops.id });
+    const reviewed = await ctx.ticket("Reviewed work", { systemState: "review", assigneeAgentId: ctx.co.ceo.id });
+    const carded = await ctx.ticket("Carded work", { assigneeAgentId: ctx.co.ceo.id });
+    const stray = await ctx.ticket("Stray work", { assigneeAgentId: ctx.co.ceo.id });
+    const [rev] = await ctx.db.insert(agents).values({ companyId: cid(), name: "Rev", role: "worker", agentKind: "claude" }).returning();
+    const [card] = await ctx.db.insert(agents).values({ companyId: cid(), name: "Carder", role: "worker", agentKind: "claude" }).returning();
+    const [lost] = await ctx.db.insert(agents).values({ companyId: cid(), name: "Lost", role: "worker", agentKind: "claude" }).returning();
+    await ctx.db.insert(reviewRequests).values({ ticketId: reviewed.id, kind: "code", reviewerAgentId: rev!.id, round: 1 });
+    await ctx.db.insert(decisions).values({ companyId: cid(), kind: "question", question: "Which?", options: ["A"], recommendedOption: "A", raisedByAgentId: card!.id, context: { ticketId: carded.id } });
+    await liveRun(ctx.ops.id, owned.id);
+    await liveRun(rev!.id, reviewed.id);
+    await liveRun(card!.id, carded.id);
+    await liveRun(lost!.id, stray.id, { origin: "deployment waiting" });
+    await liveRun(ctx.co.ceo.id, null, { origin: "deployment waiting" });
+    const b = await brief(ctx.dev.id, "worker");
+    expect(b).toContain('- Ops: "Owned work" (in_progress)\n');
+    expect(b).toContain('- Rev: "Reviewed work" (review)\n');
+    expect(b).toContain('- Carder: "Carded work" (in_progress)\n');
+    expect(b).toMatch(/- Lost: "Stray work" \(in_progress\) \(not assigned: woken by [^)]+\)/);
+    expect(b.match(/not assigned/g)).toHaveLength(1);
+    expect(b).toMatch(/- CEO: [^"\n]*\n/);
   });
 });
 
@@ -313,7 +338,8 @@ describe("scope and size", () => {
     const worker = await brief(ctx.dev.id, "worker");
     const ceo = await brief(ctx.co.ceo.id, "ceo");
     // About 4 characters a token: roughly 1k and 1.8k tokens with every cap reached and long notes.
-    expect(worker.length).toBeLessThanOrEqual(4000);
+    // 4400 since BOS-2657: all 8 shown In flight lines here are peers on someone else's tickets, each now carrying a "(not assigned: …)" marker (about 55 characters).
+    expect(worker.length).toBeLessThanOrEqual(4400);
     expect(ceo.length).toBeLessThanOrEqual(7500);
   });
 
