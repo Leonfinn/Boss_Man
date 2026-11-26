@@ -9,7 +9,7 @@ vi.mock("../src/clipboard", () => ({ copyText: (text: string) => copyText(text) 
 
 import { Wiki } from "../src/pages/Wiki";
 import { Markdown, headingId } from "../src/components/Markdown";
-import { OUTLINE_MIN, readOutline, sectionHash, sectionLink } from "../src/wiki-outline";
+import { OUTLINE_MIN, headingAt, readOutline, sectionHash, sectionLink } from "../src/wiki-outline";
 
 const json = (b: unknown) => new Response(JSON.stringify(b), { status: 200, headers: { "content-type": "application/json" } });
 const BODY = ["# Plan", "Intro.", "## Batch `27`: wiki", "Text.", "### Done so far", "More.", "## Batch 28", "## ✨", "End."].join("\n\n");
@@ -50,6 +50,19 @@ describe("wiki-outline helpers", () => {
     // Words inside inline code count towards the id too.
     expect(outline[1]!.id).toBe("batch-27-wiki");
     expect(headingId(outline[1]!.id)).toBe(outline[1]!.id);
+  });
+
+  it("finds the heading at a place among the headings, so two with the same words are told apart", () => {
+    const root = document.createElement("div");
+    root.innerHTML = "<h2>Plan</h2><p>A line.</p><h2>Plan</h2>";
+    const first = headingAt(root, 0);
+    const second = headingAt(root, 1);
+    expect(first?.textContent).toBe("Plan");
+    expect(second?.textContent).toBe("Plan");
+    expect(first).not.toBe(second);
+    expect(first).toBe(root.querySelectorAll("h2")[0]);
+    expect(second).toBe(root.querySelectorAll("h2")[1]);
+    expect(headingAt(root, 2)).toBeUndefined();
   });
 
   it("builds the section route and the full address to share", () => {
