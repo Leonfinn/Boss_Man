@@ -701,6 +701,11 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         const handOff = await handOffRefusal(db, ticketId, summary, { followUps, noFollowUpReason });
         if (handOff) return fail(handOff);
       }
+      // BOS-2679: a known edge case named in the summary or last reply needs a ticket before review too.
+      if (state === "review" && !sameState) {
+        const edge = await handOffRefusal(db, ticketId, summary, { followUps, noFollowUpReason }, true);
+        if (edge) return fail(edge);
+      }
       // DR-052 point 1: setup steps are checked like an owner card when they are written, and the stored ones again
       // on the move to review (host facts may have changed, or they were written before this check existed). A CEO
       // override given with the steps still covers them.

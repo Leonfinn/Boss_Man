@@ -154,6 +154,16 @@ describe("set_ticket_state done with hand-off wording", () => {
     expect((ok as { isError?: boolean }).isError).toBeFalsy();
   });
 
+  it("BOS-2679: a move to review with a known limitation in the summary is refused; a ticket id clears it", async () => {
+    const t = await ctx.ticket({ systemState: "in_progress", noCode: false });
+    const c = await ctx.agent(ctx.dev.id);
+    const refused = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "review", summary: "Built. Known limitation: renames are not handled." } });
+    expect((refused as { isError?: boolean }).isError).toBe(true);
+    expect(JSON.stringify(refused)).toContain("known edge case");
+    const ticketed = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "review", summary: "Built. Known limitation: renames are not handled (BOS-2680)." } });
+    expect(JSON.stringify(ticketed)).not.toContain("known edge case");
+  });
+
   it("BOS-2679: edge-case wording", () => {
     for (const s of ["Known limitation: stale rows stay.", "Edge case: two reviewers at once.", "Renames are not handled yet.", "It doesn't handle empty feeds.", "This may hide other limits."]) expect(edgeCasePhrase(s), s).not.toBeNull();
     for (const s of ["Edge case tracked in BOS-2680.", "Wrote the page; every criterion passes.", "Tests pass; the build is green."]) expect(edgeCasePhrase(s), s).toBeNull();

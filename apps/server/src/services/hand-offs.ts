@@ -91,10 +91,10 @@ export function criterionCarryRefusal(criteriaRaw: unknown, note: string | null 
 }
 
 /** The refusal for a move to done that hands work on with no follow-up and no reason; null when fine. */
-export async function handOffRefusal(db: Db, ticketId: string, summary: string | undefined, given: { followUps?: unknown[]; noFollowUpReason?: string }): Promise<string | null> {
+export async function handOffRefusal(db: Db, ticketId: string, summary: string | undefined, given: { followUps?: unknown[]; noFollowUpReason?: string }, edgeCaseOnly = false): Promise<string | null> {
   if (given.followUps?.length || given.noFollowUpReason?.trim()) return null;
   const [last] = await db.select({ text: ticketMessages.text }).from(ticketMessages).where(and(eq(ticketMessages.ticketId, ticketId), eq(ticketMessages.author, "agent"))).orderBy(desc(ticketMessages.createdAt)).limit(1);
-  const hit = handOffPhrase(summary, last?.text);
+  const hit = edgeCaseOnly ? null : handOffPhrase(summary, last?.text);
   if (!hit) {
     const edge = edgeCasePhrase(summary, last?.text);
     if (!edge) return null;
