@@ -74,7 +74,7 @@ describe.skipIf(!browser)("This host warning advice in a real browser (BOS-2674)
         expect(got.text).toContain("Does it matter?");
         expect(got.text).toContain("No runner is affected");
         expect(got.text).toContain("Ticket BOS-9 is open for it");
-        expect(got.text).toContain("The CEO has been told");
+        expect(got.text).toContain("The CEO has been alerted");
         expect(got.text).toContain("Do you need to do anything? No.");
         expect(got.overflow).toBeLessThanOrEqual(1);
         expect(got.insideX).toBe(true);

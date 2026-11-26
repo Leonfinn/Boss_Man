@@ -12,6 +12,9 @@ const STREAK_KEY = "host_warning_streaks";
 /** Reports in a row that show the same warning before the CEO is told. */
 export const WARNING_REPORTS = 2;
 export const hostWarningAlertKey = (key: string) => `alert:host-warning:${key}`;
+export const hostWarningOwnerKey = (key: string) => `alert:host-warning-owner:${key}`;
+/** How long the CEO's card may stay unanswered before the owner gets a notice (BOS-2721). */
+export const HOST_WARNING_OWNER_AFTER_MS = 30 * 60_000;
 
 type Streaks = Record<string, { reports: number; since: string }>;
 type Streak = { lastReportedAt: string | null; warnings: Streaks };
@@ -47,6 +50,8 @@ export type HostWarningDeps = {
   facts: () => Promise<HostFactsRecord>;
   homeCompany: () => Promise<string | null>;
   isOpen: (dedupeKey: string) => Promise<boolean>;
+  /** The newest card with this dedupe key, open or answered (BOS-2721): when it was raised and what the CEO answered. */
+  card?: (dedupeKey: string) => Promise<{ status: string; createdAt: Date; answer: string | null } | null>;
   /** The open ticket that names this warning key, if any. */
   ticketFor?: (key: string) => Promise<{ ref: string; title: string } | null>;
   raise: (input: Record<string, unknown>) => Promise<unknown>;
@@ -54,7 +59,17 @@ export type HostWarningDeps = {
 };
 
 /** `ticket` is the open ticket that names this warning's key in its title or body (the card asks the CEO to put it there). */
-export type WarningHandling = { state: "watching" | "ceo_told"; reports: number; since: string; ticket?: { ref: string; title: string } };
+export type WarningHandling = {
+  /** watching: no card yet. ceo_told: the CEO's card is open and unanswered. ceo_answered: the CEO answered the card. */
+  state: "watching" | "ceo_told" | "ceo_answered";
+  reports: number;
+  since: string;
+  /** When the CEO's card was raised (ISO), with the states that have a card. */
+  alertedAt?: string;
+  /** The CEO's note on the card, with ceo_answered. */
+  answer?: string;
+  ticket?: { ref: string; title: string };
+};
 
 export function hostWarningService(db: Db, deps: HostWarningDeps) {
   return {
@@ -82,7 +97,10 @@ export function hostWarningService(db: Db, deps: HostWarningDeps) {
       const companyId = await deps.homeCompany();
       if (!companyId) return raised;
       for (const k of lasting) {
-        if (await deps.isOpen(hostWarningAlertKey(k))) continue;
+        if (await deps.isOpen(hostWarningAlertKey(k))) {
+          await this.escalate(companyId, k, rec.facts[k]!.value.trim(), raised);
+          continue;
+        }
         const value = rec.facts[k]!.value.trim();
         const card = await deps.raise({
           companyId,
@@ -102,13 +120,44 @@ export function hostWarningService(db: Db, deps: HostWarningDeps) {
       return raised;
     },
 
+    /**
+     * BOS-2721: the CEO's card has sat open and unanswered for 30 minutes. The ceiling of the card is the CEO, so it
+     * never climbs by itself; one info notice goes to the owner's queue instead, and closes with the warning.
+     */
+    async escalate(companyId: string, k: string, value: string, raised: string[]): Promise<void> {
+      const card = await deps.card?.(hostWarningAlertKey(k));
+      if (!card || card.status !== "open") return;
+      const waited = deps.now().getTime() - card.createdAt.getTime();
+      if (waited < HOST_WARNING_OWNER_AFTER_MS) return;
+      if (await deps.isOpen(hostWarningOwnerKey(k))) return;
+      const sent = await deps.raise({
+        companyId,
+        kind: "host_warning_owner",
+        question: `Settings → This host still shows "${k}" = "${value}", and the CEO has not answered the alert raised ${Math.round(waited / 60_000)} minutes ago. Nothing for you to do unless you want to look: this closes by itself when the host stops reporting it.`,
+        from: "owner",
+        why: "the CEO has not answered a host warning in 30 minutes, so the owner should know",
+        dedupeKey: hostWarningOwnerKey(k),
+        clearWhen: [{ kind: "hostWarningGone", key: k }],
+        context: { hostWarning: { key: k, value } },
+      });
+      if (sent) {
+        raised.push(`${k} (owner)`);
+        deps.log?.(`host warning: ${k} unanswered for 30 minutes, told the owner`);
+      }
+    },
+
     /** What the panel says Boss Man is doing about each current warning, by key. */
     async handling(): Promise<Record<string, WarningHandling>> {
       const s = await readStreak(db);
       const out: Record<string, WarningHandling> = {};
       for (const [k, w] of Object.entries(s.warnings)) {
         const ticket = (await deps.ticketFor?.(k).catch(() => null)) ?? undefined;
-        out[k] = { state: (await deps.isOpen(hostWarningAlertKey(k))) ? "ceo_told" : "watching", reports: w.reports, since: w.since, ...(ticket ? { ticket } : {}) };
+        const card = (await deps.card?.(hostWarningAlertKey(k)).catch(() => null)) ?? ((await deps.isOpen(hostWarningAlertKey(k))) ? { status: "open", createdAt: null, answer: null } : null);
+        const alertedAt = card?.createdAt ? { alertedAt: card.createdAt.toISOString() } : {};
+        if (!card) out[k] = { state: "watching", reports: w.reports, since: w.since };
+        else if (card.status === "open") out[k] = { state: "ceo_told", reports: w.reports, since: w.since, ...alertedAt };
+        else out[k] = { state: "ceo_answered", reports: w.reports, since: w.since, ...alertedAt, ...(card.answer ? { answer: card.answer } : {}) };
+        if (ticket) out[k]!.ticket = ticket;
       }
       return out;
     },

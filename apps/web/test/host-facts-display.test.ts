@@ -180,13 +180,25 @@ describe("failingCheckText: what a failing check says (BOS-986)", () => {
     const base = { state: "ceo_told" as const, reports: 3, since: "2026-11-26T11:00:00Z" };
     const withTicket = warningAdvice("check.container_status.unhealthy", undefined, { ...base, ticket: { ref: "BOS-9", title: "Fix the unhealthy container" } });
     expect(withTicket.doing).toContain("Ticket BOS-9 is open for it: Fix the unhealthy container.");
-    expect(warningAdvice("check.container_status.unhealthy", undefined, base).doing).toContain("no ticket for it yet");
+    expect(warningAdvice("check.container_status.unhealthy", undefined, base).doing).toContain("no ticket for it");
   });
 
   it("says it may matter when a runner is not connected, and names who is handling it once the CEO is told (BOS-2674)", () => {
     const a = warningAdvice("check.container_status.unhealthy", { runnersTotal: 2, runnersConnected: 1, runsGoing: 0 }, { state: "ceo_told", reports: 3, since: "2026-11-26T11:00:00Z" });
     expect(a.matters).toContain("1 of 2 runners are not connected");
-    expect(a.doing).toContain("The CEO has been told");
+    expect(a.doing).toContain("The CEO has been alerted");
+  });
+
+  it("never says the CEO is looking into it until the CEO answered or a ticket exists (BOS-2721)", () => {
+    const base = { reports: 3, since: "2026-11-26T11:00:00Z", alertedAt: "2026-11-26T15:30:12Z" };
+    const k = "check.container_status.unhealthy";
+    const alerted = warningAdvice(k, undefined, { ...base, state: "ceo_told" }).doing;
+    expect(alerted).toContain("The CEO has been alerted (at 15:30 UTC)");
+    expect(alerted).not.toContain("looking into it");
+    const answered = warningAdvice(k, undefined, { ...base, state: "ceo_answered", answer: "Restarted the proxy; it is healthy again." }).doing;
+    expect(answered).toContain('The CEO answered the alert: "Restarted the proxy; it is healthy again."');
+    const ticketed = warningAdvice(k, undefined, { ...base, state: "ceo_told", ticket: { ref: "BOS-9", title: "Fix it" } }).doing;
+    expect(ticketed).toContain("Ticket BOS-9 is open for it: Fix it. The CEO has been alerted (at 15:30 UTC).");
   });
 
   it("asks the owner only for a fact only they can give (BOS-2674)", () => {
