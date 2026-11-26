@@ -10,9 +10,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../.
 const guide = "apps/site/src/guides/install-boss-man.md";
 const docFiles = ["docs/35-install-from-images.md", "docs/00-first-time-install.md"];
 
-// The site names the real repository; the docs use placeholders for it. Both sides compare as REPO_URL.
+// The site names the real repository; the docs may name it too or use a placeholder. Both sides compare as REPO_URL.
 const SITE_REPO = /https:\/\/github\.com\/[^/\s]+\/[^/\s]+?(?:\.git)?(?=[/\s]|$)/g;
-const DOC_REPO = /<repo-https-url>|https:\/\/github\.com\/<owner>\/<repo>/g;
+const DOC_REPO = /<repo-https-url>|https:\/\/github\.com\/(?:<owner>\/<repo>|[^/\s]+\/[^/\s]+?(?:\.git)?(?=[/\s]|$))/g;
 const norm = (s: string, repo: RegExp) => s.trim().replace(repo, "REPO_URL").replace(/\s+/g, " ");
 
 export function guideCommands(text: string): { line: number; cmd: string }[] {
