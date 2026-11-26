@@ -26,20 +26,24 @@ On a setup that is not in the first list, Boss Man still refuses to run agents u
 
 ## 1. Get the files
 
-Open the release page of the Boss Man repository on GitHub, pick the version you want (the newest *Pre-release* is the beta), and download these into an empty folder:
+Open the [release page of the Boss Man repository](https://github.com/Leonfinn/Boss_Man/releases) on GitHub, pick the version you want (the newest *Pre-release* is the beta), and download these into an empty folder:
 
 - `docker-compose.images.yml`
 - `images.env`
 
 Both are made and signed by the release. `images.env` holds the registry and the exact digest of every image; do not edit the digests.
 
-Optional: check the signature before you trust them. This needs [cosign](https://docs.sigstore.dev/cosign/installation/) and is the only step that does. Download `images.env.sigstore.json` and `docker-compose.images.yml.sigstore.json` from the same release page, then run, for each file:
+Optional: check the signature before you trust them. This needs [cosign](https://docs.sigstore.dev/cosign/installation/) and is the only step that does. Download `images.env.sigstore.json` and `docker-compose.images.yml.sigstore.json` from the same release page into the same folder, then run these two commands there, one for each file:
 
 ```
-cosign verify-blob --bundle images.env.sigstore.json --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity https://github.com/<owner>/<repo>/.github/workflows/release.yml@refs/heads/main images.env
+cosign verify-blob --bundle images.env.sigstore.json --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity https://github.com/Leonfinn/Boss_Man/.github/workflows/release.yml@refs/heads/main images.env
 ```
 
-Replace `<owner>/<repo>` with the repository you downloaded from, and repeat with `docker-compose.images.yml`.
+```
+cosign verify-blob --bundle docker-compose.images.yml.sigstore.json --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity https://github.com/Leonfinn/Boss_Man/.github/workflows/release.yml@refs/heads/main docker-compose.images.yml
+```
+
+Each prints `Verified OK` when the file is the one the release signed.
 
 ## 2. Pick a registry
 
@@ -74,7 +78,7 @@ Run these in the folder with the two files.
    docker compose --env-file images.env up -d
    ```
 
-3. Open `http://<this machine>:3100` and create the owner account. By default Boss Man listens only on the machine itself (`127.0.0.1`). To reach it from another computer, add `BOSSMAN_BIND=0.0.0.0` to `images.env` and run step 3 again, and keep the port off the internet. Logging in over plain `http://` on your home network also needs `BOSSMAN_INSECURE_COOKIES=1` in `images.env`; without it, login needs HTTPS.
+3. Open `http://<this machine>:3100` and create the owner account. By default Boss Man listens only on the machine itself (`127.0.0.1`). To reach it from another computer, add `BOSSMAN_BIND=0.0.0.0` to `images.env` and run the start command in step 2 again, and keep the port off the internet. Logging in over plain `http://` on your home network also needs `BOSSMAN_INSECURE_COOKIES=1` in `images.env`; without it, login needs HTTPS.
 
 Company data (workspaces, agent sessions) lives in Docker volumes created by Boss Man's launcher, not in a folder you choose. List them with `docker volume ls`.
 
@@ -111,7 +115,7 @@ Back up `config` (the master key) and `db-secret` (the database password) after 
 
 ### Settings
 
-Add any of these to `images.env`, then run step 3 again.
+Add any of these to `images.env`, then run the start command again (section 3, step 2).
 
 | Setting | What it does |
 |---|---|
@@ -128,19 +132,19 @@ The Boss Man runner image does not contain Claude Code. It is not ours to hand o
 
 ### Plain Linux
 
-Install Docker Engine from Docker's own instructions, then follow steps 1 to 4. Nothing else is needed. Check the kernel with `uname -r` (5.19 or newer).
+Install Docker Engine from Docker's own instructions, then follow sections 1 to 3. Nothing else is needed. Check the kernel with `uname -r` (5.19 or newer).
 
 ### Proxmox (a virtual machine)
 
-Create a **virtual machine**, not an LXC container (LXC is not supported). Give it at least 4 GB of RAM and a 64-bit Linux with a kernel 5.19 or newer, install Docker Engine inside it, and follow steps 1 to 4 inside the VM. Take a Proxmox snapshot of the VM after setup; the `config` volume lives inside the VM's disk, so the snapshot covers it. This section has not been run on a real Proxmox host yet.
+Create a **virtual machine**, not an LXC container (LXC is not supported). Give it at least 4 GB of RAM and a 64-bit Linux with a kernel 5.19 or newer, install Docker Engine inside it, and follow sections 1 to 3 inside the VM. Take a Proxmox snapshot of the VM after setup; the `config` volume lives inside the VM's disk, so the snapshot covers it. This section has not been run on a real Proxmox host yet.
 
 ### TrueNAS SCALE
 
-Use the machine's shell, in a **dataset-backed folder** for the two downloaded files, and follow steps 1 to 4. The compose file does not assume TrueNAS: it uses Docker volumes, which TrueNAS's Docker keeps in its own storage pool. TrueNAS SCALE versions differ in how they run Docker and Compose, so check `docker compose version` works first. For backups, snapshots and the self-update helper, the fuller worked example is [docs/06-install-truenas.md](06-install-truenas.md), which builds on the NAS. This section has not been run on a real TrueNAS machine for the image install.
+Use the machine's shell, in a **dataset-backed folder** for the two downloaded files, and follow sections 1 to 3. The compose file does not assume TrueNAS: it uses Docker volumes, which TrueNAS's Docker keeps in its own storage pool. TrueNAS SCALE versions differ in how they run Docker and Compose, so check `docker compose version` works first. For backups, snapshots and the self-update helper, the fuller worked example is [docs/06-install-truenas.md](06-install-truenas.md), which builds on the NAS. This section has not been run on a real TrueNAS machine for the image install.
 
 ### Docker Desktop (macOS, Windows) — preview
 
-Follow steps 1 to 4 in a terminal. The launcher finds where Docker keeps its data volume inside Docker Desktop's own virtual machine, so no shared folders are needed. This has not been tried yet.
+Follow sections 1 to 3 in a terminal. The launcher finds where Docker keeps its data volume inside Docker Desktop's own virtual machine, so no shared folders are needed. This has not been tried yet.
 
 ## If something goes wrong
 
