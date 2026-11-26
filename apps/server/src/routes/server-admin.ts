@@ -15,6 +15,7 @@ import type { runnerReportService } from "../services/runner-report.js";
 import type { schedulerService } from "../services/scheduler.js";
 import type { deployWaitService } from "../services/deploy-wait.js";
 import type { selfDeployService } from "../services/self-deploy.js";
+import type { releaseWatchService } from "../services/release-watch.js";
 import type { ActiveWait } from "../services/update-waits.js";
 
 const Uuid = z.string().uuid();
@@ -35,9 +36,15 @@ export function serverAdminRoutes(
     cancelRun: (runId: string) => Promise<unknown>;
     /** BOS-2058: every update wait that is on, from update-waits.ts (the same list server_status shows the CEO). */
     activeWaits: () => Promise<ActiveWait[]>;
+    /** BOS-2663: the new-release watch of an install from the published images. */
+    releaseWatch: ReturnType<typeof releaseWatchService>;
   },
 ) {
-  const { db, scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun, activeWaits } = deps;
+  const { db, scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun, activeWaits, releaseWatch } = deps;
+  // The Updates panel's "new release" line and its two switches. An install that isn't from the images answers { active: false }.
+  owner.get("/api/release-watch", async () => releaseWatch.status());
+  owner.put("/api/release-watch", async (req) => releaseWatch.setOptions(z.object({ enabled: z.boolean().optional(), ntfy: z.boolean().optional() }).strict().parse(req.body ?? {})));
+  owner.post("/api/release-watch/check", async () => releaseWatch.check({ force: true }));
   // One list for every screen (rule c): what each update wait waits on, since when, and when it goes ahead or ends.
   owner.get("/api/update-waits", async () => ({ waits: await activeWaits() }));
 

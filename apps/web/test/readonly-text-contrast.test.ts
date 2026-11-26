@@ -42,6 +42,7 @@ function answer(p: string): unknown {
   if (p === "/api/kill-switch") return { paused: false };
   if (p === "/api/maintenance") return { on: false, last: null };
   if (p === "/api/runner-report") return { live: [], update: null };
+  if (p === "/api/release-watch") return { active: false };
   if (p === "/api/self-deploy") return { enabled: false };
   if (p === "/api/devices") return [];
   if (p === "/api/funding-sources") return [];
