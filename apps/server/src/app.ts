@@ -920,7 +920,8 @@ export async function buildApp(opts: AppOptions) {
     wake: (input) => scheduler.wake(input),
     // BOS-2650: a wake can be saved (status "queued") and still never start: quiet hours, a quota hold, or too many
     // ticketless wakes that hour. The sweep reads the row it made to tell a started wake from one still waiting.
-    wakeStatus: async (wakeId) => ((await db.select({ status: wakes.status }).from(wakes).where(eq(wakes.id, wakeId)))[0] ?? null),
+    // BOS-2653: it also reads when that row was saved, the real time the 30-minute grace is measured from.
+    wakeStatus: async (wakeId) => ((await db.select({ status: wakes.status, createdAt: wakes.createdAt }).from(wakes).where(eq(wakes.id, wakeId)))[0] ?? null),
     now: opts.now,
     // BOS-2627, BOS-2633: tellOnce logs a wake that doesn't start (BOS-2160: into the error buffer, which raises an owner card if it keeps failing) and never counts it as delivered.
     log: (message) => app.log.error(message),

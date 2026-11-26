@@ -49,7 +49,7 @@ type Kept = { status: string | null; managed: boolean; woke?: boolean; sentAt?: 
 /** How long a saved wake may stay "queued" before this pass assumes it never started and sends again (BOS-2650). */
 export const WAKE_GRACE_MS = 30 * 60_000;
 
-export function milestoneRiskService(db: Db, deps: { planning: ReturnType<typeof planningService>; wake: (input: { agentId: string; reason: string; note: string; priority?: number }) => Promise<unknown>; now?: () => Date; log?: (message: string) => void; /** BOS-2650: a wake's current status by its row id; null when it can't be read. */ wakeStatus?: (wakeId: string) => Promise<{ status: string } | null> }) {
+export function milestoneRiskService(db: Db, deps: { planning: ReturnType<typeof planningService>; wake: (input: { agentId: string; reason: string; note: string; priority?: number }) => Promise<unknown>; now?: () => Date; log?: (message: string) => void; /** BOS-2650: a wake's current status (and when it was saved) by its row id; null when it can't be read. BOS-2653: `createdAt` is the real send time the grace is measured from, because `sentAt` holds the wake's id, not a time. */ wakeStatus?: (wakeId: string) => Promise<{ status: string; createdAt?: Date | string | null } | null> }) {
   const now = deps.now ?? (() => new Date());
   const log = deps.log ?? (() => undefined);
 
@@ -88,24 +88,35 @@ export function milestoneRiskService(db: Db, deps: { planning: ReturnType<typeof
         // hour) resolves as "queued" and starts nothing, so it must not go quiet for good. Reading that, from this pass's
         // own send or from the wake's row, and treating a stuck one as not woken is the same either way.
         let owedFrom: Date | null = null;
+        // BOS-2653: `sentAt` holds the wake's row id, not a time, so `new Date(sentAt)` is Invalid Date and the grace
+        // below never applied: a held wake was re-sent on every pass. The send time is now the wake row's own `createdAt`
+        // (or this pass's send time), and a missing or unreadable one counts as "still waiting", so nothing is re-sent
+        // more often than once per grace window.
+        let sentTime: Date | null = null;
         if (prev?.woke === true && prev.sentAt) {
           const current = justSent.get(m.id);
-          if (current) owedFrom = current.at;
-          else if (deps.wakeStatus) {
+          if (current) {
+            owedFrom = current.at;
+            sentTime = current.at;
+          } else if (deps.wakeStatus) {
             try {
               const row = await deps.wakeStatus(prev.sentAt);
-              if (row?.status === "queued") owedFrom = new Date(prev.sentAt);
+              if (row?.status === "queued") {
+                const made = row.createdAt ? new Date(row.createdAt) : null;
+                owedFrom = made && !Number.isNaN(made.getTime()) ? made : now();
+              }
             } catch (err) {
               log(`milestone at risk: reading the wake for ${m.id} failed: ${(err as Error).message}`);
             }
           }
           if (owedFrom) {
-            const stillWaiting = !!current || now().getTime() - owedFrom.getTime() <= WAKE_GRACE_MS;
+            // A missing/unreadable send time (impossible for a real row) means "just saved": stay quiet this pass.
+            const age = sentTime ? now().getTime() - sentTime.getTime() : now().getTime() - owedFrom.getTime();
+            const stillWaiting = !Number.isNaN(age) && age <= WAKE_GRACE_MS;
             // BOS-2650: still waiting this soon after it was sent is the scheduler's own hold: leave the row alone, so the
             // next pass finds the wake's row and reads what became of it. Otherwise the earlier "wake started" is undone.
             if (stillWaiting) continue;
             prev = { ...prev, woke: false };
-            seen.set(m.id, prev);
             // Counted again below, so a sentAt from an earlier wake is replaced rather than kept by a no-op write.
             seen.set(m.id, { ...prev, sentAt: undefined });
           }
