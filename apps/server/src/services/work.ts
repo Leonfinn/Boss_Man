@@ -33,6 +33,7 @@ import { cantMoveSql, isWorkingRun, wipExemptKind } from "./agent-wip.js";
 import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, wakes, watchdogFlags, workflowColumns } from "../db/schema.js";
 import { baselineRefusal } from "./hand-offs.js";
 import { looksStuck, type StuckFlag } from "./board-stuck.js";
+import { SCRUM_MASTER_DUTY } from "./watchdog.js";
 import { checkQueue } from "./check-queue.js";
 import { workingHoursNotes } from "./working-hours-note.js";
 import { checkPlace, CARRY_ON_NOTE, hhmm, ownLiveCheck, pendingFallback } from "./check-wording.js";
@@ -399,6 +400,18 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         const prev = stuckFlags.get(f.ticketId);
         if (f.rule !== "owner_decision_waiting" && (!prev || f.openedAt < prev.openedAt)) stuckFlags.set(f.ticketId, f);
       }
+      // BOS-2737: the Scrum Master's runs since the earliest hand-off, so each card's line says whether a run has started
+      // on its flag (the first one at or after that flag's hand-off) or that nobody has picked it up.
+      const handedAt = [...stuckFlags.values()].flatMap((f) => (f.lastFlaggedAt ? [f.lastFlaggedAt.getTime()] : []));
+      const smRuns = handedAt.length
+        ? await db
+            .select({ agent: agents.name, startedAt: runs.startedAt })
+            .from(runs)
+            .innerJoin(agents, eq(agents.id, runs.agentId))
+            .where(and(eq(agents.companyId, p.companyId), eq(agents.duty, SCRUM_MASTER_DUTY), sql`${runs.startedAt} >= ${new Date(Math.min(...handedAt)).toISOString()}`, sql`${runs.purpose} is distinct from 'chat'`))
+            .orderBy(asc(runs.startedAt))
+        : [];
+      const smRunAfter = (f: StuckFlag | undefined) => (f?.lastFlaggedAt ? (smRuns.find((r) => r.startedAt.getTime() >= f.lastFlaggedAt!.getTime()) ?? null) : null);
       // Where each one stands in the check line, in the words a check's owner hears ("queued at no. 3", "running now").
       const checkLines = new Map<string, string>();
       if (beingChecked.size) {
@@ -560,7 +573,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         // BOS-1910: null for Being checked, Merged watching (before its date) and Next up, whatever the watchdog holds.
         looksStuck: looksStuck(
           stuckFlags.get(t.id),
-          { beingChecked: beingChecked.has(t.id), nextUp: t.systemState === "ready" && !!t.nextUpAt, watching: !!t.mergeCommit && (watchEndsAt(t)?.getTime() ?? 0) > now().getTime() },
+          { beingChecked: beingChecked.has(t.id), nextUp: t.systemState === "ready" && !!t.nextUpAt, watching: !!t.mergeCommit && (watchEndsAt(t)?.getTime() ?? 0) > now().getTime(), smRun: smRunAfter(stuckFlags.get(t.id)) },
           now(),
         ),
         };
