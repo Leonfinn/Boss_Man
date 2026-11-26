@@ -24,8 +24,15 @@ const rateText = (perHour: number) => {
 };
 
 /** The limit estimate under a quota bar (R78): how fast it's going, and whether it lasts until the reset. */
-function Forecast({ f }: { f: FundingStatus["forecasts"][string] | undefined }) {
+function Forecast({ f, held, observedAt }: { f: FundingStatus["forecasts"][string] | undefined; held?: boolean; observedAt?: string }) {
   if (!f || f.perHour === null) return null;
+  // A run-out time already in the past is never shown (BOS-2670): at or over the hold level it says since when.
+  if (f.perHour > 0 && f.runsOutAt && new Date(f.runsOutAt).getTime() <= Date.now()) {
+    if (!held) return null;
+    return (
+      <span style={{ fontSize: 12, color: "var(--amber-ink)" }}>Held since about {dayAndTime(observedAt ?? f.runsOutAt)}</span>
+    );
+  }
   // The rate the date was worked out from, so the two always agree (BOS-1012).
   const rate = `at ${rateText(f.runsOutPerHour ?? f.perHour)}`;
   const [warn, text] = f.perHour <= 0 || !f.runsOutAt ? [false, "Not rising at the moment"] : f.beforeReset ? [true, `Runs out about ${dayAndTime(f.runsOutAt)} ${rate}, if the week so far keeps on as it has`] : [false, `Won't run out before it resets ${rate}, at the week's pace so far`];
@@ -446,7 +453,7 @@ function SourceCard({ s }: { s: FundingStatus }) {
                 {q.overageInUse ? " · using usage credits" : ""}
               </span>
             )}
-            <Forecast f={s.forecasts[q.window]} />
+            <Forecast f={s.forecasts[q.window]} held={!beforeReset && utilization >= (s.source.quotaHoldAt ?? 0.95)} observedAt={q.observedAt} />
           </div>
           );
         })

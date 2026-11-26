@@ -157,6 +157,20 @@ describe("subscription quota from the Claude adapter", () => {
     expect(windowHasReset(new Date(fable.resetsAt), new Date())).toBe(true);
   });
 
+  // BOS-2670: a weekly-limit stop writes one reading of its own; Fable stays on the card and in the hold list.
+  it("keeps Fable when Boss Man's own weekly-limit reading follows a real report", async () => {
+    const report = { "_claude/rateLimit": { unifiedWindows: { seven_day: { utilization: 0.9, resetsAt: 1792245600 }, seven_day_overage_included: { utilization: 0.4, resetsAt: 1792245600 } } } };
+    const a = (await post("/api/funding-sources", { name: "Account C", kind: "subscription", provider: "anthropic" })).json();
+    await post("/api/quota-samples", { fundingSourceId: a.id, claudeMeta: report });
+    await t.db.update(quotaSamples).set({ observedAt: new Date(Date.now() - 3_600_000) }).where(eq(quotaSamples.fundingSourceId, a.id));
+    const at = new Date();
+    await t.db.insert(quotaSamples).values({ fundingSourceId: a.id, window: "seven_day", utilization: 1, resetsAt: new Date(at.getTime() + 3_600_000), status: "rejected", overageInUse: false, observedAt: at });
+    const s = (await get(`/api/funding-sources/${a.id}/status`)).json();
+    expect(s.quota.map((q: { window: string }) => q.window).sort()).toEqual(["seven_day", "seven_day_overage_included"]);
+    expect(s.windowsSeen).toEqual(["seven_day", "seven_day_overage_included"]);
+    expect(s.quota.find((q: { window: string }) => q.window === "seven_day").utilization).toBe(1);
+  });
+
   // BOS-1916: a limit shows (and can trigger the hold) only while the account's latest report includes it.
   it("lists only the limits the latest report includes, and keeps the owner's switch for one that went away", async () => {
     const report = (windows: Record<string, number>) => ({ "_claude/rateLimit": { unifiedWindows: Object.fromEntries(Object.entries(windows).map(([k, u]) => [k, { utilization: u, resetsAt: 1792245600 }])) } });
