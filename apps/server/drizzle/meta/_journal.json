@@ -1310,6 +1310,13 @@
       "when": 1795685803917,
       "tag": "0205_ticket_merges",
       "breakpoints": true
+    },
+    {
+      "idx": 206,
+      "version": "7",
+      "when": 1795713043606,
+      "tag": "0206_builtin_skills",
+      "breakpoints": true
     }
   ]
 }

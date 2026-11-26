@@ -5,11 +5,12 @@
 // Format: https://code.claude.com/docs/en/skills and https://agentskills.io.
 import { lookup as dnsLookup } from "node:dns/promises";
 import { isIP } from "node:net";
-import { and, asc, eq, ilike, inArray, ne, or, sql } from "drizzle-orm";
+import { and, asc, eq, ilike, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { addonById, isPrivateAddress, missingAddons, type AddonReport } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { hashFiles, scriptFilesOf, sha256 } from "./skill-files.js";
 import { agentSkills, agents, companies, skillProposals, skills } from "../db/schema.js";
+import { BUILTIN_SKILLS, builtinSkill, type BuiltinSkill } from "./builtin-skills.js";
 
 // Per skill, and per agent: a run carries its agent's skills in one message to the runner.
 // Skills may ship many example assets (e.g. cathrynlavery/diagram-design has 200+), so the caps are generous.
@@ -171,6 +172,60 @@ export const UPSTREAM_TTL_MS = 6 * 60 * 60 * 1000;
 export type UpstreamResult = { status: "current" | "unchecked" } | { status: "newer"; commit: string; date: string | null } | { status: "error"; reason: string };
 
 const ADD_TOKEN ="add a git token that can read it: Settings → Secrets, a GIT_TOKEN granted to this company";
+
+// Built-in skills (BOS-2631): Boss Man ships them, so every company's library has them without a
+// proposal or a security review (they are reviewed once, as part of Boss Man). A fixed updatedAt
+// keeps a redeploy from churning the rows; only a text change replaces one.
+const BUILTIN_AT = new Date("2026-11-26T00:00:00.000Z");
+
+/**
+ * Adds every built-in skill a company doesn't have yet, and gives each to that company's agents on
+ * the matching hire template (the product manager). Never touches a skill already in the library
+ * under the same name, so an owner's install or edit wins, and never re-gives one: once the row is
+ * there a `take` is final until a CEO gives it again. Safe to call on every list, give and run.
+ */
+export async function seedBuiltins(db: Db, companyId: string) {
+  const have = await db.select({ name: skills.name }).from(skills).where(and(eq(skills.companyId, companyId), inArray(skills.name, BUILTIN_SKILLS.map((s) => s.name))));
+  const present = new Set(have.map((r) => r.name));
+  const missing = BUILTIN_SKILLS.filter((s) => !present.has(s.name));
+  if (!missing.length) return;
+  const sizeOf = (s: BuiltinSkill) => s.files.reduce((n, f) => n + Buffer.from(f.content, "base64").length, 0);
+  await db
+    .insert(skills)
+    .values(missing.map((s) => ({ companyId, name: s.name, description: s.description, source: "builtin" as const, files: s.files, sizeBytes: sizeOf(s), updatedAt: BUILTIN_AT })))
+    .onConflictDoNothing({ target: [skills.companyId, skills.name] });
+  await giveBuiltinsToTemplates(db, companyId, missing.map((s) => s.name));
+}
+
+/** Adds one built-in to a company on demand (e.g. a CEO gives it), if it isn't there yet. */
+export async function ensureBuiltin(db: Db, companyId: string, name: string) {
+  const skill = builtinSkill(name);
+  if (!skill) return false;
+  const [have] = await db.select({ id: skills.id }).from(skills).where(and(eq(skills.companyId, companyId), eq(skills.name, name)));
+  if (have) return true;
+  const sizeBytes = skill.files.reduce((n, f) => n + Buffer.from(f.content, "base64").length, 0);
+  await db
+    .insert(skills)
+    .values({ companyId, name: skill.name, description: skill.description, source: "builtin", files: skill.files, sizeBytes, updatedAt: BUILTIN_AT })
+    .onConflictDoNothing({ target: [skills.companyId, skills.name] });
+  await giveBuiltinsToTemplates(db, companyId, [name]);
+  return true;
+}
+
+/**
+ * Gives the named built-ins to each agent on the matching hire template. Only seeded built-ins reach
+ * here, so a skill an agent was told to drop (take()) is not re-given: its row already existed.
+ */
+async function giveBuiltinsToTemplates(db: Db, companyId: string, names: string[]) {
+  for (const name of names) {
+    const skill = builtinSkill(name);
+    if (!skill?.template) continue;
+    const [row] = await db.select({ id: skills.id }).from(skills).where(and(eq(skills.companyId, companyId), eq(skills.name, name)));
+    if (!row) continue;
+    const holders = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.template, skill.template), isNull(agents.retiredAt)));
+    for (const a of holders) await db.insert(agentSkills).values({ agentId: a.id, skillId: row.id, assignedByAgentId: null }).onConflictDoNothing();
+  }
+}
 
 export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (host: string) => Promise<string[]>; gitToken?: (companyId: string, runId?: string) => Promise<string | undefined> } = {}) {
   const get = deps.fetch ?? fetch;
@@ -386,6 +441,7 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (ho
     save,
 
     async list(companyId: string) {
+      await seedBuiltins(db, companyId);
       const rows = await db
         .select({ id: skills.id, name: skills.name, description: skills.description, source: skills.source, sourceUrl: skills.sourceUrl, sourceRef: skills.sourceRef, pack: skills.pack, packUrl: skills.packUrl, sizeBytes: skills.sizeBytes, files: skills.files, requiresAddons: skills.requiresAddons, updatedAt: skills.updatedAt })
         .from(skills)
@@ -518,8 +574,10 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (ho
     // No refresh here: a new version of a skill goes through a proposal (services/skill-proposals.ts), so it is reviewed and the owner decides.
 
     async remove(companyId: string, id: string) {
-      const rows = await db.delete(skills).where(and(eq(skills.id, id), eq(skills.companyId, companyId))).returning({ id: skills.id });
-      if (!rows.length) throw new SkillError(404, "No such skill.");
+      const [s] = await db.select({ source: skills.source }).from(skills).where(and(eq(skills.id, id), eq(skills.companyId, companyId)));
+      if (!s) throw new SkillError(404, "No such skill.");
+      if (s.source === "builtin") throw new SkillError(400, "This skill is built in to Boss Man, so it has to stay in the library. To stop an agent using it, take it from that agent instead.");
+      await db.delete(skills).where(eq(skills.id, id));
     },
 
     /** Sets exactly which agents of the company have a skill. */
@@ -554,6 +612,8 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (ho
         for (const p of inPack) await this.give(companyId, p.name, agentId, by);
         return;
       }
+      // A built-in is in every company, so giving one never needs a proposal: seed it here if it isn't yet.
+      await ensureBuiltin(db, companyId, skillName_);
       const [s] = await db.select({ id: skills.id }).from(skills).where(and(eq(skills.companyId, companyId), eq(skills.name, skillName_)));
       const [a] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.id, agentId), eq(agents.companyId, companyId)));
       if (!s || !a) throw new SkillError(404, !s ? `No skill called ${skillName_}.` : "No such agent in this company.");
@@ -578,6 +638,9 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (ho
 /** The skills an agent's run loads, as folders of files. */
 /** An agent's skills for a run; a skill needing an add-on the runner lacks is held back (docs/12). */
 export async function skillsForRun(db: Db, agentId: string, addons: AddonReport[] | null = null) {
+  // Seed the company's built-in skills first, so a product manager's first run has them (BOS-2631).
+  const [owner] = await db.select({ companyId: agents.companyId }).from(agents).where(eq(agents.id, agentId));
+  if (owner) await seedBuiltins(db, owner.companyId);
   const rows = await db
     .select({ name: skills.name, files: skills.files, requiresAddons: skills.requiresAddons })
     .from(agentSkills)

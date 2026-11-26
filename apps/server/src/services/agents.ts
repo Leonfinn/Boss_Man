@@ -2,6 +2,7 @@
 // to them, with what it was before so it can be undone.
 import { and, desc, eq, gte, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { AGENT_TEMPLATES, CEO_TEMPLATE, DAY_NAMES, WORKING_HOURS_REASON, nextWorkingStart, workingHoursProblem, startLabel, FUNDING_PROVIDERS, HARNESSES, INFINITE_MODEL_CHOICE, isClaudeModel, isInfiniteModel, harnessLabel, modelFitProblem, providerLabel, speakerNameProblem } from "@boss-man/shared";
+import { builtinSkillsForTemplate } from "./builtin-skills.js";
 import type { Db } from "../db/client.js";
 import { agentAvatars, agentChanges, agents, ceoChapters, companies, costEvents, decisions, fundingSources, paAnswers, projects, runs, settings, skills, ticketImages, tickets, wakes } from "../db/schema.js";
 import { record as logActivity } from "./activity.js";
@@ -78,9 +79,10 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
     await db.insert(agentChanges).values({ companyId: a.companyId, agentId: a.id, byAgentId, field, before: before ?? null, after: after ?? null });
   }
 
-  /** Refuses a skill or pack the library doesn't have, so a hire never names one that can't be given. */
-  async function checkSkills(companyId: string, names: string[]) {
+  /** Refuses a skill or pack the library doesn't have, so a hire never names one that can't be given. A template's own default skills are allowed even before the library has them (they are seeded on give, BOS-2631). */
+  async function checkSkills(companyId: string, names: string[], defaults: string[] = []) {
     for (const name of names) {
+      if (defaults.includes(name)) continue;
       const [hit] = await db.select({ id: skills.id }).from(skills).where(and(eq(skills.companyId, companyId), or(eq(skills.name, name), eq(skills.pack, name)))).limit(1);
       if (!hit) throw new AgentError(422, `There's no skill or pack called ${name} in the library.`);
     }
@@ -198,7 +200,7 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
       const tpl = p.template ? AGENT_TEMPLATES.find((x) => x.id === p.template) : undefined;
       if (p.template && !tpl) throw new AgentError(422, `There's no template called ${p.template}. Templates: ${AGENT_TEMPLATES.map((x) => x.id).join(", ")}.`);
       const config = await validateModelConfig(companyId, p);
-      await checkSkills(companyId, p.skills ?? []);
+      await checkSkills(companyId, p.skills ?? [], builtinSkillsForTemplate(p.template));
       const job = p.title ?? tpl?.title ?? "agent";
       const instructions = p.instructions !== undefined ? p.instructions : (tpl?.instructions ?? null);
       const [d] = await db
@@ -492,7 +494,7 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
       const hires: TeamHire[] = [];
       for (const h of plan.hires) {
         if (h.template && !AGENT_TEMPLATES.some((x) => x.id === h.template)) throw new AgentError(422, `There's no template called ${h.template}. Templates: ${AGENT_TEMPLATES.map((x) => x.id).join(", ")}.`);
-        await checkSkills(companyId, h.skills ?? []);
+        await checkSkills(companyId, h.skills ?? [], builtinSkillsForTemplate(h.template));
         const config = await validateModelConfig(companyId, h);
         hires.push({ ...h, ...config, harness: config.harness, provider: config.provider, model: config.model, fundingSourceId: config.fundingSourceId, fundingSourceName: config.fundingSourceName });
       }
@@ -525,7 +527,7 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
         try {
           const config = await validateModelConfig(companyId, h);
           const a = await this.hire(companyId, { name: h.name, template: h.template, title: h.title ?? undefined, agentKind: config.harness, model: config.model, fundingSourceId: config.fundingSourceId }, ceoId);
-          for (const sk of h.skills ?? []) await give(a.id, sk).catch((err: Error) => failed.push(`${h.name} didn't get ${sk}: ${err.message}`));
+          for (const sk of this.skillsForHire(h.template, h.skills)) await give(a.id, sk).catch((err: Error) => failed.push(`${h.name} didn't get ${sk}: ${err.message}`));
           hired.push(h.name);
         } catch (err) {
           failed.push(`${h.name}: ${(err as Error).message}`);
@@ -544,13 +546,13 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
         const config = await validateModelConfig(companyId, ctx.proposal);
         // Check the skills again before hiring, so a throw still means nobody was hired: a card can sit
         // open while a skill is deleted, and the caller reopens it and says so (BOS-889 review).
-        await checkSkills(companyId, ctx.proposal.skills ?? []);
+        await checkSkills(companyId, ctx.proposal.skills ?? [], builtinSkillsForTemplate(ctx.proposal.template));
         const hired = await this.hire(companyId, { ...ctx.proposal, agentKind: config.harness, model: config.model, fundingSourceId: config.fundingSourceId }, ctx.byAgentId);
         // The skills go on before the new agent can be woken, so its first run starts with them (BOS-889).
         // A give that still fails after the hire never throws: the agent exists, so a retry would hire a
         // duplicate. The failures are flagged to the owner instead, the way hireTeam does it.
         const failures: string[] = [];
-        for (const sk of ctx.proposal.skills ?? []) {
+        for (const sk of this.skillsForHire(ctx.proposal.template, ctx.proposal.skills)) {
           if (!give) {
             failures.push(`${hired.name} didn't get ${sk} (skills can't be given here)`);
             continue;
@@ -652,6 +654,11 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
           };
         })
         .sort((x, y) => Number(!!x.retiredAt) - Number(!!y.retiredAt) || (x.role === "ceo" ? -1 : y.role === "ceo" ? 1 : x.name.localeCompare(y.name)));
+    },
+
+    /** The skills a hire gets before its first run: the template's built-ins first, then any the CEO named (no repeats). */
+    skillsForHire(template: string | null | undefined, named: string[] | undefined) {
+      return [...new Set([...builtinSkillsForTemplate(template), ...(named ?? [])])];
     },
 
     /** Hires an agent, optionally from a template; the template fills in what isn't given. */
