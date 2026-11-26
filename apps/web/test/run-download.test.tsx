@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Company } from "../src/api";
-import { Run } from "../src/pages/Run";
+import type { Company, Transcript, TranscriptItem } from "../src/api";
+import { Run, runMarkdown } from "../src/pages/Run";
 
 // BOS-2322: "Download" the run's transcript as Markdown, fetching every page.
 afterEach(() => {
@@ -73,5 +73,82 @@ describe("run download (BOS-2322)", () => {
     release();
     await screen.findByRole("alert");
     expect(clicks).not.toHaveBeenCalled();
+  });
+});
+
+// BOS-2620: the Markdown itself, called directly (no render, DOM or network).
+describe("runMarkdown (BOS-2620)", () => {
+  const madeUpRun = (over: Partial<Transcript["run"]> = {}) =>
+    ({
+      id: "r9",
+      companyId: "c1",
+      agent: "Zara Quill",
+      agentId: "a9",
+      ticketId: "t9",
+      ticket: "Tidy the widget shelf",
+      startedAt: "2026-11-02T09:05:00.000Z",
+      endedAt: "2026-11-02T10:30:00.000Z",
+      outcome: "end_turn",
+      costMicros: 0,
+      ...over,
+    }) as Transcript["run"];
+
+  const item = (type: string, at: string, event: Record<string, unknown>): TranscriptItem => ({ seq: 1, type, at, event });
+  const says = (at: string, text: string) => item("run.update", at, { update: { kind: "agent_message", text } });
+  const tool = (at: string, title: string, status: string) => item("run.update", at, { update: { kind: "tool_call", title, status } });
+
+  it("heads with agent, ticket ref and title, and drops what is missing", () => {
+    const full = runMarkdown(madeUpRun(), "BOS-9", []);
+    expect(full.split("\n")[0]).toBe("# Run: Zara Quill, BOS-9 Tidy the widget shelf");
+    expect(full).toContain("- Ticket: BOS-9 Tidy the widget shelf");
+
+    const noRef = runMarkdown(madeUpRun(), null, []);
+    expect(noRef.split("\n")[0]).toBe("# Run: Zara Quill, Tidy the widget shelf");
+    expect(noRef).toContain("- Ticket: Tidy the widget shelf");
+    expect(noRef).not.toContain("BOS-");
+
+    const noTicket = runMarkdown(madeUpRun({ ticket: null, ticketId: null }), "BOS-9", []);
+    expect(noTicket.split("\n")[0]).toBe("# Run: Zara Quill");
+    expect(noTicket).not.toContain("- Ticket:");
+    expect(noTicket).not.toContain("BOS-9");
+
+    const noAgent = runMarkdown(madeUpRun({ agent: null }), "BOS-9", []);
+    expect(noAgent.split("\n")[0]).toBe("# Run: An agent, BOS-9 Tidy the widget shelf");
+    expect(noAgent).toContain("- Agent: An agent");
+  });
+
+  it("writes UTC times, and still running / end_turn when the run has not settled", () => {
+    const ended = runMarkdown(madeUpRun(), "BOS-9", []);
+    expect(ended).toContain("- Started: 2026-11-02 09:05 UTC");
+    expect(ended).toContain("- Ended: 2026-11-02 10:30 UTC");
+
+    const live = runMarkdown(madeUpRun({ endedAt: null, outcome: null }), "BOS-9", []);
+    expect(live).toContain("- Ended: still running");
+    expect(live).toContain("- Outcome: still running");
+
+    const noOutcome = runMarkdown(madeUpRun({ outcome: null }), "BOS-9", []);
+    expect(noOutcome).toContain("- Outcome: end_turn");
+  });
+
+  it("gives each item a bold label, a UTC time and a body, cutting long text", () => {
+    const text = runMarkdown(madeUpRun(), "BOS-9", [
+      says("2026-11-02T09:05:01.000Z", "Looking at the shelf."),
+      tool("2026-11-02T09:05:02.000Z", "Read file", "running"),
+    ]);
+    expect(text).toContain("**Agent** · 09:05:01 UTC");
+    expect(text).toContain("Looking at the shelf.");
+    expect(text).toContain("**Read file** · 09:05:02 UTC");
+    expect(text).toContain(`Status: running`);
+
+    const cut = runMarkdown(madeUpRun(), "BOS-9", [says("2026-11-02T09:05:03.000Z", "y".repeat(2_500))]);
+    expect(cut).toContain("(cut)");
+    expect(cut).not.toContain("y".repeat(2_001));
+  });
+
+  it("shows only the header when there are no items", () => {
+    const lines = runMarkdown(madeUpRun(), "BOS-9", []).trimEnd().split("\n");
+    expect(lines).toHaveLength(7);
+    expect(lines.at(-1)).toBe("- Outcome: end_turn");
+    expect(lines.some((line) => line.startsWith("**"))).toBe(false);
   });
 });
