@@ -7,12 +7,13 @@
 // It answers needed or not needed. When it truly can't work it out (a commit it can't place, an image that never said
 // what it was built from, a merge whose changed files weren't recorded) it says "can't tell", why, and what fixes
 // it: never "not needed" by default, and never "may be". That is a fault: the CEO is woken once per cause.
-import { and, asc, eq, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import { ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, runners, settings, tickets } from "../db/schema.js";
-import { allMergeOrder, liveServerCommit } from "./go-live-wait.js";
+import { liveServerCommit } from "./go-live-wait.js";
 import { runnerImageCommit } from "./runner-image.js";
+import { companyMerges } from "./ticket-merges.js";
 
 export type RunnerNeed =
   | { state: "needed"; image: string; live: string; tickets: string[]; words: string }
@@ -48,7 +49,8 @@ export async function runnerUpdateNeed(db: Db, companyId: string, opts: { liveFa
   if (image === live) {
     return { state: "not_needed", image, live, tickets: [], words: `Runners are up to date: they were built from the version the server runs (${short(live)}).` };
   }
-  const order = await allMergeOrder(db, companyId);
+  const merges = await companyMerges(db, companyId);
+  const order = [...new Set(merges.map((m) => m.commit))];
   const at = order.indexOf(live);
   const built = order.indexOf(image);
   if (at < 0) {
@@ -62,13 +64,25 @@ export async function runnerUpdateNeed(db: Db, companyId: string, opts: { liveFa
     return { state: "not_needed", image, live, tickets: [], words: `Runners are up to date: they were built from ${short(image)}, which has everything the server runs (${short(live)}).` };
   }
   const since = new Set(order.slice(built + 1, at + 1));
-  const rows = await db
-    .select({ mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner, number: tickets.number, title: tickets.title, prefix: companies.ticketPrefix })
-    .from(tickets)
-    .innerJoin(companies, eq(companies.id, tickets.companyId))
-    .where(and(eq(tickets.companyId, companyId), isNotNull(tickets.mergeCommit)))
-    .orderBy(asc(sql`coalesce(${tickets.mergedAt}, ${tickets.stateChangedAt})`));
-  const merged = rows.filter((r) => since.has(r.mergeCommit!.toLowerCase()));
+  // Every merge in the range, a ticket's earlier merges too (BOS-2653): a runner change in a ticket's first merge counts
+  // even after the ticket merged again. A ticket is named once, as touching if any of its merges in the range did.
+  const inRange = merges.filter((m) => since.has(m.commit));
+  const ids = [...new Set(inRange.map((m) => m.ticketId))];
+  const rows = ids.length
+    ? await db
+        .select({ id: tickets.id, number: tickets.number, title: tickets.title, prefix: companies.ticketPrefix })
+        .from(tickets)
+        .innerJoin(companies, eq(companies.id, tickets.companyId))
+        .where(and(eq(tickets.companyId, companyId), inArray(tickets.id, ids)))
+    : [];
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const merged = ids.flatMap((id) => {
+    const t = byId.get(id);
+    if (!t) return [];
+    const mine = inRange.filter((m) => m.ticketId === id);
+    const touchesRunner = mine.some((m) => m.touchesRunner === true) ? true : mine.some((m) => m.touchesRunner === null) ? null : false;
+    return [{ ...t, touchesRunner }];
+  });
   const name = (r: (typeof merged)[number]) => ticketRef(r.prefix, r.number) ?? `"${r.title.slice(0, 60)}"`;
   const touching = merged.filter((r) => r.touchesRunner === true).map(name);
   if (touching.length) {

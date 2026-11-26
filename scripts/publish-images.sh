@@ -16,6 +16,11 @@
 #   publish-images.sh resolve-commit <input> <default>
 #                                              the commit to release: <default> when <input> is empty, else <input> if it is
 #                                              a full 40-hex sha reachable from origin/main; otherwise fails
+#   publish-images.sh version-commit <version>
+#                                              the commit whose images already carry <version> (their revision label), or
+#                                              nothing when no image has it; fails when the images disagree
+#   publish-images.sh workflows-match <commit> fails when the commit's .github/workflows differ from origin/main's
+#                                              (GitHub refuses a release there with the Actions token)
 #
 # Settings come from the environment (GitHub: repository variables and secrets), never from this file:
 #   IMAGE_PREFIXES      space or comma separated <registry>/<namespace> list, e.g. "ghcr.io/me docker.io/me".
@@ -131,6 +136,40 @@ cmd_resolve_commit() {
   echo "$full"
 }
 
+cmd_workflows_match() {
+  # <commit>: fails, naming the files, when the commit's .github/workflows/ differ from origin/main's. GitHub's "Create a
+  # release" refuses such a target with the Actions token (HTTP 403 "Resource not accessible by integration", REST docs:
+  # the token must be allowed to modify workflows, and GITHUB_TOKEN never is). BOS-2602: runs #3/#4 tagged c94ebeb3's
+  # images, then step 13 hit exactly that 403, leaving a version half-made. Checked before anything is tagged.
+  local commit="${1:?commit}" files
+  git rev-parse --verify -q origin/main >/dev/null || die "origin/main is not available to compare commit $commit's workflow files with."
+  files="$(git diff --name-only "$commit" origin/main -- .github/workflows/)"
+  [ -z "$files" ] || die "commit $commit has different workflow files from main ($(echo "$files" | tr '\n' ' ')). GitHub will not let this workflow create a release there (HTTP 403). Leave the commit box blank, or type a newer main commit whose workflow files match main's; if this version is already on that commit's images, pick a new version."
+}
+
+cmd_version_commit() {
+  # <version>: the commit whose images already carry the version tag in the first registry, read from the
+  # org.opencontainers.image.revision label publish.yml puts on every image. Prints nothing when no image has the tag
+  # (a new version). Fails when the images name more than one commit, or one has the tag but no label. BOS-2602: a
+  # Release that tagged the images and then failed before the GitHub release is resumed on that commit, not on main's
+  # newest one (which would never match the tag, so the re-press was refused with nothing readable to say why).
+  local version="${1:?version}" first name cfg revs found=""
+  load_prefixes
+  first="${prefixes[0]}"
+  load_images
+  for name in "${names[@]}"; do
+    cfg="$(docker buildx imagetools inspect "$first/$name:$version" --format '{{json .Image}}' 2>/dev/null)" || continue
+    [ -n "$cfg" ] || continue
+    # One platform: the config itself; several: a map of platform to config. Collect every revision label in either.
+    revs="$(echo "$cfg" | jq -r '[.. | objects | .Labels? // empty | objects | .["org.opencontainers.image.revision"] // empty] | unique | .[]')"
+    [ -n "$revs" ] || die "$first/$name:$version has no org.opencontainers.image.revision label, so its commit is unknown. Type the commit in the commit box, or pick a new version."
+    [ "$(echo "$revs" | wc -l)" = 1 ] || die "$first/$name:$version names more than one commit ($(echo "$revs" | tr '\n' ' ')). Pick a new version."
+    [ -z "$found" ] || [ "$found" = "$revs" ] || die "the $version images name different commits ($found and $revs on $name). Pick a new version."
+    found="$revs"
+  done
+  [ -z "$found" ] || echo "$found"
+}
+
 # The Claude pack folder name for a commit: the first 24 hex characters of the sha256 of apps/runner/claude-pack/package-lock.json
 # at that commit, the same rule as lockHash() in apps/runner/src/claude-pack.ts. The updater (BOS-941a) compares the folder its pack
 # installer made with this signed value. Read from git at the released commit (main may have moved on since).
@@ -176,5 +215,7 @@ case "${1:-}" in
   verify) shift; cmd_verify "$@" ;;
   release-json) shift; cmd_release_json "$@" ;;
   resolve-commit) shift; cmd_resolve_commit "$@" ;;
-  *) sed -n '2,27p' "$0" >&2; exit 2 ;;
+  version-commit) shift; cmd_version_commit "$@" ;;
+  workflows-match) shift; cmd_workflows_match "$@" ;;
+  *) sed -n '2,32p' "$0" >&2; exit 2 ;;
 esac

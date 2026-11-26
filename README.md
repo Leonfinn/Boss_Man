@@ -4,7 +4,7 @@ Boss Man runs teams of AI agents on a machine you own. Each team is a **company*
 
 It is for people who want AI agents doing real project work (code, docs, design) on their own Docker host, with their own keys, and who want to stay in charge of what gets merged and deployed.
 
-> **Status: alpha.** Boss Man works, and its own agents build it, but expect rough edges and breaking changes. Read [docs/23-updating.md](docs/23-updating.md) before each update.
+> **Status: beta.** Boss Man works, and its own agents build it, but expect rough edges and breaking changes. Read [docs/23-updating.md](docs/23-updating.md) before each update.
 
 ## See it working
 
@@ -19,7 +19,7 @@ A one-minute tour (63 seconds), recorded from the real app with made-up data: th
 
 ## Install
 
-You need a Linux host with Docker (a plain Linux box, a Proxmox VM, or TrueNAS SCALE), and a Claude subscription or an Anthropic API key, or any OpenAI compatible API key (tested so far with OpenRouter, Ollama and Synthetic). During the alpha, the install builds the containers on your server. Ready-made Docker images are planned for the beta release.
+You need a Linux host with Docker (a plain Linux box, a Proxmox VM, or TrueNAS SCALE), and a Claude subscription or an Anthropic API key, or any OpenAI compatible API key (tested so far with OpenRouter, Ollama and Synthetic). You can install from ready-made Docker images, published as pre-releases on the [releases page](https://github.com/Leonfinn/Boss_Man/releases), or build the containers from the source on your server.
 
 > **On Proxmox, use a VM, not an LXC container.** In most LXC containers the network guard cannot load, so agents' runners could reach your home network. See [docs/32-proxmox.md](docs/32-proxmox.md).
 
@@ -32,7 +32,7 @@ You need a Linux host with Docker (a plain Linux box, a Proxmox VM, or TrueNAS S
 
 - **Something broken, or a question?** See [SUPPORT.md](SUPPORT.md): bugs go to GitHub Issues, questions and ideas to Discussions.
 - **A security problem?** Do not post it in public. Report it through GitHub's private form, as [SECURITY.md](SECURITY.md) explains.
-- **Want to contribute?** See [CONTRIBUTING.md](CONTRIBUTING.md). During the alpha we take bug reports and ideas, not pull requests.
+- **Want to contribute?** See [CONTRIBUTING.md](CONTRIBUTING.md). During the beta we take bug reports and ideas, not pull requests.
 
 ## How it works
 

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { decisions, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 
 // BOS-2291: who is woken when the owner answers a card, by card kind.
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -82,5 +82,41 @@ describe("a card answer and the ticket's assignee (BOS-2291)", () => {
     await ctx.req("POST", `/api/decisions/${d.id}/answer`, { answer: "Yes" });
     const ws = (await devWakes()).filter((w) => w.reason === "decision answered");
     for (const w of ws) expect(w.note).toContain("Not your card");
+  });
+});
+
+// BOS-2655: a reissued card keeps its first raiser, who may no longer own the ticket.
+describe("a card answer after the ticket changed hands (BOS-2655)", () => {
+  const second = async () => (await ctx.req("POST", `/api/companies/${ctx.co.company.id}/agents`, { name: "Brian" })).json() as { id: string };
+  const wakesOf = async (id: string) => (await ctx.db.select().from(wakes).where(eq(wakes.agentId, id)));
+
+  it("wakes the current assignee, not the raiser who handed the ticket over, and tells the CEO", async () => {
+    const brian = await second();
+    // Brian owns the ticket and works it, then it is reassigned to Dev.
+    const t = await ctx.ticket("Look into the failing release", { systemState: "blocked", assigneeAgentId: brian.id });
+    await ctx.db.insert(runs).values({ companyId: ctx.co.company.id, agentId: brian.id, ticketId: t.id, startedAt: new Date() });
+    const d = await card(t, { type: "question" }, brian.id, true);
+    await ctx.db.update(tickets).set({ assigneeAgentId: ctx.dev.id }).where(eq(tickets.id, t.id));
+    await ctx.req("POST", `/api/decisions/${d.id}/answer`, { answer: "Yes" });
+    expect(await wakesOf(brian.id)).toEqual([]);
+    expect((await devWakes()).some((w) => w.ticketId === t.id)).toBe(true);
+    const ceoWake = (await wakesOf(ctx.co.ceo.id)).find((w) => w.note?.includes("no longer owns"));
+    expect(ceoWake).toBeTruthy();
+  });
+
+  it("still wakes a raiser who never owned the ticket (a peer asking about it)", async () => {
+    const brian = await second();
+    const t = await ctx.ticket("Look into the failing release", { systemState: "blocked" });
+    const d = await card(t, { type: "question" }, brian.id, true);
+    await ctx.req("POST", `/api/decisions/${d.id}/answer`, { answer: "Yes" });
+    expect((await wakesOf(brian.id)).some((w) => w.reason === "decision answered" && w.note?.includes("your question"))).toBe(true);
+    expect((await wakesOf(ctx.co.ceo.id)).some((w) => w.note?.includes("no longer owns"))).toBe(false);
+  });
+
+  it("still wakes the raiser while they are the assignee", async () => {
+    const t = await ctx.ticket("Look into the failing release", { systemState: "blocked" });
+    const d = await card(t, { type: "question" }, ctx.dev.id, true);
+    await ctx.req("POST", `/api/decisions/${d.id}/answer`, { answer: "Yes" });
+    expect((await devWakes()).some((w) => w.reason === "decision answered" && w.note?.includes("your question"))).toBe(true);
   });
 });

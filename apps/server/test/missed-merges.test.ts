@@ -6,16 +6,19 @@
 //     recorded (mergeCommit, mergedAt at the commit's own time, ticket moved on, assignee told), never twice;
 //  3. a live commit that still can't be placed after that wakes the CEO once per commit, not on every sweep.
 import { randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { MainLogResult, RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, checkJobs, projects, runners, settings, tickets, wakes } from "../src/db/schema.js";
+import { activity, checkJobs, projects, runners, settings, ticketMerges, tickets, wakes } from "../src/db/schema.js";
 import { gateMergeMessage, isGateMergeOf, LIVE_UNPLACED_REASON, mergeMessageTicket } from "../src/services/missed-merges.js";
+import { allMergeOrder, serverHas } from "../src/services/go-live-wait.js";
+import { runnerUpdateNeed } from "../src/services/runner-update-need.js";
 
 const KEY = "k".repeat(43);
 const sha = (c: string) => c.repeat(40);
@@ -81,17 +84,20 @@ async function setup() {
   /** When set, the runner holds its answer to the merge push until released (a push in flight). */
   let holdPush = false;
   const heldPush: Array<() => void> = [];
+  /** The next merge's commit and changed files (BOS-2653: a ticket merged twice). */
+  const next = { commit: sha("c"), files: DIFF.files };
   const starts: Array<Extract<RunnerCommand, { type: "run.start" }>> = [];
   built.runners.connect(
     reg.runnerId,
     (c) => {
       const ok = (data: unknown) => queueMicrotask(() => built.runners.resolveReply({ requestId: (c as { requestId: string }).requestId, ok: true, data }));
       if (c.type === "run.start") starts.push(c);
-      if (c.type === "workspace.diff") ok(DIFF);
+      if (c.type === "workspace.diff") ok({ ...DIFF, files: next.files });
       if (c.type === "workspace.carried") ok({ carried: [] });
       if (c.type === "workspace.migrations") ok({ needed: false, reason: "free" });
       if (c.type === "workspace.merge") {
-        const answer = () => ok({ status: "merged", commit: sha("c") });
+        const commit = next.commit;
+        const answer = () => ok({ status: "merged", commit });
         if (holdPush) heldPush.push(answer);
         else answer();
       }
@@ -112,7 +118,7 @@ async function setup() {
     return row(t.id);
   };
   const wakesOf = (agentId: string, reason: string) => db.select().from(wakes).where(and(eq(wakes.agentId, agentId), eq(wakes.reason, reason)));
-  return { ...built, db, close, dir, req, company, ceo, worker, project, row, ticket, main, mainLogAsks, recreated, wakesOf, setHoldPush: (v: boolean) => (holdPush = v), heldPush, starts, advance: (ms: number) => (offset += ms) };
+  return { ...built, db, close, dir, req, company, ceo, worker, project, row, ticket, main, mainLogAsks, recreated, next, runnerId: reg.runnerId, wakesOf, setHoldPush: (v: boolean) => (holdPush = v), heldPush, starts, advance: (ms: number) => (offset += ms) };
 }
 
 describe("reading a gate merge message (BOS-1645)", () => {
@@ -395,5 +401,111 @@ describe("a live commit that still can't be placed (BOS-1645)", () => {
     await c.review.recordMissedMerges();
     expect(await c.wakesOf(c.ceo.id, LIVE_UNPLACED_REASON)).toHaveLength(0);
     expect(await c.db.select().from(settings).where(eq(settings.key, `live_unplaced:${c.company.id}`))).toHaveLength(0);
+  });
+});
+
+// BOS-2653 (25-26 Nov): BOS-2627 merged as 25dcf039, the deployer switched to it and the runners were built from it; the
+// ticket was reopened and merged again as 4595cb74, which overwrote tickets.mergeCommit. Merge order then had no 25dcf039,
+// so Settings → Updates said the runners were built from "a merge Boss Man never recorded", and a runner change in the
+// first merge could have been counted as "runners not needed". Every merge of a ticket is now kept.
+describe("a ticket merged twice keeps both merges (BOS-2653)", () => {
+  const live = (c: NonNullable<typeof ctx>, s: string) =>
+    c.db.insert(settings).values({ key: `live_release:${c.company.id}`, value: { old: s, new: s } }).onConflictDoUpdate({ target: settings.key, set: { value: { old: s, new: s } } });
+  const image = (c: NonNullable<typeof ctx>, s: string) => c.db.update(runners).set({ imageCommit: s }).where(eq(runners.id, c.runnerId));
+
+  it("through the gate: the first merge's runner change still counts, and a version built from it is placed", async () => {
+    const c = (ctx = await setup());
+    // An earlier merge the runners were built from.
+    const older = await c.ticket("Older work", "done");
+    await c.db.update(tickets).set({ mergeCommit: sha("0"), mergedAt: new Date("2026-11-01T10:00:00Z"), touchesRunner: false }).where(eq(tickets.id, older.id));
+
+    // First merge: changes runner code.
+    const t = await c.ticket("CEO manages at risk");
+    c.next.commit = sha("c");
+    c.next.files = [{ path: "apps/runner/src/workspace.ts", added: 1, removed: 0 }];
+    await c.review.startLanding(t.id, "Sam", null, { skipChecks: true });
+    await until(async () => (await c.row(t.id)).mergeCommit === sha("c"), "the first merge record");
+    await until(async () => !(await c.review.landingMergesByCompany()).size, "the first landing to end");
+
+    // Reopened for a second round, then merged again: server code only.
+    await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+    c.next.commit = sha("d");
+    c.next.files = [{ path: "apps/server/src/x.ts", added: 1, removed: 0 }];
+    await c.review.startLanding(t.id, "Sam", null, { skipChecks: true });
+    await until(async () => (await c.row(t.id)).mergeCommit === sha("d"), "the second merge record");
+
+    const kept = await c.db.select().from(ticketMerges).where(eq(ticketMerges.ticketId, t.id));
+    expect(kept.map((m) => [m.commit, m.touchesRunner]).sort()).toEqual([
+      [sha("c"), true],
+      [sha("d"), false],
+    ]);
+    expect(await allMergeOrder(c.db, c.company.id)).toEqual([sha("0"), sha("c"), sha("d")]);
+
+    // Runners built before both merges, server on the second: the first merge's runner change makes an update needed
+    // (before the fix: only the second merge was in range, server-only, so "up to date").
+    await image(c, sha("0"));
+    await live(c, sha("d"));
+    expect(await runnerUpdateNeed(c.db, c.company.id)).toMatchObject({ state: "needed" });
+
+    // Runners built from the first merge (25dcf039's case): placed, not "isn't a merge Boss Man recorded".
+    await image(c, sha("c"));
+    expect(await runnerUpdateNeed(c.db, c.company.id)).toMatchObject({ state: "not_needed" });
+    // And a server running the first merge contains it, and not yet the second.
+    expect(serverHas(sha("c"), sha("c"), await allMergeOrder(c.db, c.company.id))).toEqual({ state: "yes" });
+    expect(serverHas(sha("c"), sha("d"), await allMergeOrder(c.db, c.company.id))).toEqual({ state: "no" });
+  });
+
+  it("the sweep adds an earlier merge of a ticket that already has one, without touching the ticket", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Merged twice", "done");
+    await c.db.update(tickets).set({ mergeCommit: sha("e"), mergedAt: new Date("2026-11-16T12:00:00Z"), touchesRunner: false }).where(eq(tickets.id, t.id));
+    c.main.push(
+      { sha: sha("e"), subject: `Merge "Merged twice" (${t.id})`, at: "2026-11-16T12:00:00Z", files: ["apps/server/src/x.ts"] },
+      { sha: sha("f"), subject: "Hand-made commit, no ticket", at: "2026-11-16T11:30:00Z", files: [] },
+      { sha: sha("d"), subject: `Merge "Merged twice" (${t.id})`, at: "2026-11-16T11:00:00Z", files: ["apps/runner/src/workspace.ts"] },
+    );
+
+    expect((await c.review.recordMissedMerges()).recorded).toEqual([]);
+    const r = await c.row(t.id);
+    expect([r.mergeCommit, r.systemState, r.touchesRunner]).toEqual([sha("e"), "done", false]);
+    const kept = await c.db.select().from(ticketMerges).where(eq(ticketMerges.ticketId, t.id));
+    expect(kept.map((m) => [m.commit, m.touchesRunner, m.mergedAt.toISOString()])).toEqual([[sha("d"), true, "2026-11-16T11:00:00.000Z"]]);
+    expect(c.mainLogAsks.at(-1)!.filesFor).toEqual([sha("d")]);
+    expect(await allMergeOrder(c.db, c.company.id)).toEqual([sha("d"), sha("e")]);
+    expect(await c.wakesOf(c.worker.id, "merge recorded late")).toHaveLength(0);
+
+    // Never twice.
+    const asks = c.mainLogAsks.length;
+    await c.review.recordMissedMerges();
+    expect(c.mainLogAsks.length).toBe(asks + 1); // the log read only, no second files read
+    expect(await c.db.select().from(ticketMerges).where(eq(ticketMerges.ticketId, t.id))).toHaveLength(1);
+  });
+
+  it("the migration backfills each ticket's merge and the earlier merges the merge line recorded", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("BOS-2627 stand-in", "done");
+    await c.db.update(tickets).set({ mergeCommit: sha("9"), mergedAt: new Date("2026-11-26T00:00:35Z"), touchesRunner: false }).where(eq(tickets.id, t.id));
+    for (const [commit, at] of [
+      [sha("8"), "2026-11-25T22:03:40Z"],
+      [sha("9"), "2026-11-26T00:00:35Z"],
+    ] as const)
+      await c.db.insert(activity).values({ companyId: c.company.id, ticketId: t.id, kind: "merge_line", summary: "Merge line: merged", detail: { event: "merged", commit }, at: new Date(at) });
+    await c.db.insert(activity).values({ companyId: c.company.id, ticketId: t.id, kind: "merge_line", summary: "Merge line: merged", detail: { event: "merged", commit: null } });
+    await c.db.delete(ticketMerges);
+
+    // Found by name: the gate may renumber the migration.
+    const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "drizzle");
+    const file = (await readdir(dir)).find((f) => /^\d{4}_ticket_merges\.sql$/.test(f))!;
+    const inserts = (await readFile(path.join(dir, file), "utf8")).split("--> statement-breakpoint").filter((s) => s.includes('INSERT INTO "ticket_merges"'));
+    expect(inserts).toHaveLength(2);
+    for (const s of inserts) await c.db.execute(sql.raw(s));
+    for (const s of inserts) await c.db.execute(sql.raw(s)); // runs again harmlessly
+
+    const kept = await c.db.select().from(ticketMerges).where(eq(ticketMerges.ticketId, t.id));
+    expect(kept.map((m) => [m.commit, m.mergedAt.toISOString(), m.touchesRunner]).sort()).toEqual([
+      [sha("8"), "2026-11-25T22:03:40.000Z", null],
+      [sha("9"), "2026-11-26T00:00:35.000Z", false],
+    ]);
+    expect(await allMergeOrder(c.db, c.company.id)).toEqual([sha("8"), sha("9")]);
   });
 });

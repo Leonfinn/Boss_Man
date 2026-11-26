@@ -64,7 +64,7 @@ Open the [Boss Man releases page](@repo/releases) and pick a version. The newest
 - `docker-compose.images.yml`
 - `images.env`
 
-If the release you pick has no `images.env`, its images are not published yet: use [Build from source](#build-from-source) further down instead.
+Use 0.1.0-beta.3 or newer. The older 0.1.0-beta.1 has no `images.env`, because its images were not published.
 
 `images.env` holds the registry and the exact digest of every image. Do not edit the digests.
 

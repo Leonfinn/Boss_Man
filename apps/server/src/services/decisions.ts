@@ -3879,7 +3879,27 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         const plan = (ctx as { plan?: boolean; planText?: string | null; ticketId?: string | null });
         const overlap = plan.plan && plan.ticketId && answer === APPROVE_PLAN ? await planApprovalOverlapNote(plan.ticketId, plan.planText ?? "").catch(() => "") : "";
         const reportBack = infoAsk && !extra.settledBy ? `\n\n${reportBackNote({ ownerVoice: "The owner", question: d.question, ticketId: onTicket?.id ?? "", ref: null })}` : "";
-        await wake({ agentId: d.raisedByAgentId, reason: "decision answered", ticketId: onTicket?.id ?? null, note: `${settled ? `${settled.name} settled` : extra.by === "ceo" ? "The CEO settled" : "The owner answered"} your question "${d.question}": ${answer}${extra.note ? ` — their note: ${extra.note}` : ""}${pictures}${overlap ? ` ${overlap}` : ""}${reportBack}` });
+        const answerNote = `${settled ? `${settled.name} settled` : extra.by === "ceo" ? "The CEO settled" : "The owner answered"} your question "${d.question}": ${answer}${extra.note ? ` — their note: ${extra.note}` : ""}${pictures}${overlap ? ` ${overlap}` : ""}${reportBack}`;
+        // BOS-2655: a reissue keeps the original raiser, who may have been replaced on the ticket since. The answer is about
+        // the ticket's work, so its current assignee hears it; the raiser is woken only while still the assignee. A card with
+        // no ticket, the CEO's own card, and a ticket in review or done (the raiser may be its reviewer) wake the raiser as before.
+        const [assignedNow] = onTicket?.id ? await db.select({ assignee: tickets.assigneeAgentId, state: tickets.systemState, number: tickets.number }).from(tickets).where(eq(tickets.id, onTicket.id)) : [];
+        const [raisedBy] = await db.select({ role: agents.role, name: agents.name }).from(agents).where(eq(agents.id, d.raisedByAgentId));
+        // Handed over means the raiser worked the ticket before (a run of theirs on it): an architect, PM or QA agent asking
+        // about a peer's ticket never owned it, and still hears its answer.
+        const couldHaveMoved = !!assignedNow?.assignee && !!d.raisedByAgentId && assignedNow.assignee !== d.raisedByAgentId && raisedBy?.role !== "ceo" && assignedNow.state !== "review" && assignedNow.state !== "done";
+        const [workedIt] = couldHaveMoved && onTicket?.id ? await db.select({ id: runs.id }).from(runs).where(and(eq(runs.ticketId, onTicket.id), eq(runs.agentId, d.raisedByAgentId!))).limit(1) : [];
+        const moved = couldHaveMoved && !!workedIt;
+        if (moved && onTicket) {
+          // A released or kept ticket's assignee is already woken below ("unblocked" / "Not your card"); wake only when neither applies.
+          if (![...unblocked, ...kept].some((t) => t.id === onTicket!.id)) await wake({ agentId: assignedNow!.assignee!, reason: "decision answered", ticketId: onTicket.id, note: `Not your card (${raisedBy?.name ?? "another agent"} raised it, and this ticket is yours now): you need to act only if the answer changes your work.\nThe card "${d.question}" was answered: ${answer}${extra.note ? ` — their note: ${extra.note}` : ""}${pictures}${reportBack}` });
+          try {
+            const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, d.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+            if (ceo && ceo.id !== assignedNow!.assignee) await wake({ agentId: ceo.id, reason: "decision answered", ticketId: onTicket.id, note: `${settled ? `${settled.name} settled` : extra.by === "ceo" ? "The CEO settled" : "The owner answered"} the card "${d.question}" with "${answer}" (card ${id}). ${raisedBy?.name ?? "The agent that raised it"} no longer owns ${assignedNow!.number ? `BOS-${assignedNow!.number}` : "the ticket"}, so they were not woken; its current assignee was, with a "not your card" note. Nothing for you to do unless the answer was meant for someone else.` });
+          } catch (err) {
+            log(`telling the CEO that the answer to ${id} went to the ticket's assignee failed: ${(err as Error).message}`);
+          }
+        } else await wake({ agentId: d.raisedByAgentId, reason: "decision answered", ticketId: onTicket?.id ?? null, note: answerNote });
       }
       for (const t of unblocked) {
         if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "unblocked", ticketId: t.id, note: await unblockedNote(db, t.id, { question: d.question, answer, raisedByAgentId: d.raisedByAgentId }) });

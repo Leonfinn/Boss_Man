@@ -63,7 +63,7 @@ jobs:
       GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
       GH_TOKEN: ${{ github.token }}
       # VERSION, RELEASE_SHA, RELEASE_TAG, RELEASE_PREV_SHA and RELEASE_SKIP are set for the later steps through
-      # $GITHUB_ENV: by the step below for a pressed run, by "Pick the commit" for a scheduled one.
+      # $GITHUB_ENV: VERSION by the step below for a pressed run, all of them by "Pick the commit" for a scheduled one.
     steps:
       - uses: actions/checkout@v7
         with:
@@ -74,7 +74,6 @@ jobs:
       - name: Read and check the publishing settings (fails loudly when Docker Hub is on and a secret is missing)
         id: s
         env:
-          COMMIT_INPUT: ${{ inputs.commit }}
           VERSION_INPUT: ${{ inputs.version }}
         run: |
           set -euo pipefail
@@ -84,22 +83,15 @@ jobs:
             echo "ghcr=$(if echo "$prefixes" | grep -q '^ghcr.io/'; then echo true; else echo false; fi)"
             echo "hub=$(if echo "$prefixes" | grep -q '^docker.io/'; then echo true; else echo false; fi)"
           } >> "$GITHUB_OUTPUT"
-          # A scheduled run has no typed version or commit: "Pick the commit" below decides them.
+          # A scheduled run has no typed version: "Pick the commit and the version" below decides it.
           if [ "$GITHUB_EVENT_NAME" != schedule ]; then
-            # Refuses a commit that is not 40 hex or not on main, before anything is tagged.
-            SHA="$(scripts/publish-images.sh resolve-commit "$COMMIT_INPUT" "$GITHUB_SHA")"
-            # The typed version goes into $GITHUB_ENV below: a newline in it would add env lines (RELEASE_SHA, BASH_ENV)
-            # after the "on main" check above, so refuse anything but a plain version first (grep -x matches whole lines).
+            # The typed version goes into $GITHUB_ENV: a newline in it would add env lines (RELEASE_SHA, BASH_ENV), so
+            # refuse anything but a plain one-line version first.
             if [ "$(printf '%s' "$VERSION_INPUT" | grep -cE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$')" != 1 ] || [ "$(printf '%s' "$VERSION_INPUT" | wc -l)" != 0 ]; then
               echo "::error::version must look like 0.1.0-beta.4 (one line, no spaces)"
               exit 1
             fi
-            echo "Releasing commit $SHA"
-            {
-              echo "RELEASE_SHA=$SHA"
-              echo "RELEASE_TAG=$(scripts/publish-images.sh tag "$SHA")"
-              echo "VERSION=$VERSION_INPUT"
-            } >> "$GITHUB_ENV"
+            echo "VERSION=$VERSION_INPUT" >> "$GITHUB_ENV"
           fi
       - uses: docker/login-action@v3
         if: ${{ steps.s.outputs.ghcr == 'true' }}
@@ -121,34 +113,79 @@ jobs:
           out="$(scripts/release-pick.sh pick)"
           echo "$out"
           skip="$(printf '%s\n' "$out" | sed -n 's/^skip=//p')"
+          if [ -z "$skip" ]; then
+            sha="$(printf '%s\n' "$out" | sed -n 's/^sha=//p')"
+            # GitHub refuses the release (HTTP 403) on a commit whose workflow files differ from main's: skip, say why.
+            if ! scripts/publish-images.sh workflows-match "$sha" 2> "$RUNNER_TEMP/err"; then
+              skip="Commit $sha can't be released by this workflow: $(tr '\n' ' ' < "$RUNNER_TEMP/err" | cut -c1-300)"
+            fi
+          fi
           if [ -n "$skip" ]; then
             echo "::notice title=Weekly release skipped::$skip"
-            echo "RELEASE_SKIP=$skip" >> "$GITHUB_ENV"
+            echo "RELEASE_SKIP=$skip" | tr -d '\r' | head -n 1 >> "$GITHUB_ENV"
             exit 0
           fi
           {
-            echo "RELEASE_SHA=$(printf '%s\n' "$out" | sed -n 's/^sha=//p')"
+            echo "RELEASE_SHA=$sha"
             echo "RELEASE_TAG=$(printf '%s\n' "$out" | sed -n 's/^tag=//p')"
             echo "VERSION=$(printf '%s\n' "$out" | sed -n 's/^version=//p')"
             echo "RELEASE_PREV_SHA=$(printf '%s\n' "$out" | sed -n 's/^prev_sha=//p')"
           } >> "$GITHUB_ENV"
+      - name: Pick the commit to release (a half-finished release of this version resumes on its own commit)
+        id: c
+        if: ${{ github.event_name != 'schedule' }}
+        env:
+          COMMIT_INPUT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          # BOS-2602: run #6 of 0.1.0-beta.2 was pressed with the commit box blank after runs #3/#4 had tagged commit
+          # c94ebeb3's images. Blank meant main's newest commit, so the next step refused, in the log only (agents can't
+          # read it). After the registry login, so private images can be read: a blank box now takes the commit the
+          # version's images were built from (their revision label). A new version has no such images: main's newest.
+          # That commit still has to pass workflows-match below, or the run stops with a readable reason.
+          if ! held="$(scripts/publish-images.sh version-commit "$VERSION" 2> "$RUNNER_TEMP/err")"; then
+            echo "::error title=Can't tell which commit $VERSION is on::$(tr '\n' ' ' < "$RUNNER_TEMP/err" | cut -c1-400)"; exit 1
+          fi
+          input="$COMMIT_INPUT"
+          if [ -n "$held" ] && [ -z "$input" ]; then
+            input="$held"
+            echo "::notice title=Resuming $VERSION::Its images were already tagged from commit $held, so this run finishes that release (the commit box was blank)."
+          fi
+          # Refuses a commit that is not 40 hex or not on main, before anything is tagged.
+          if ! SHA="$(scripts/publish-images.sh resolve-commit "$input" "$GITHUB_SHA" 2> "$RUNNER_TEMP/err")"; then
+            echo "::error title=Commit refused::$(tr '\n' ' ' < "$RUNNER_TEMP/err" | cut -c1-400)"; exit 1
+          fi
+          # Before anything is tagged: GitHub refuses the release (HTTP 403) on a commit whose workflow files differ from
+          # main's, which left 0.1.0-beta.2 half-made on c94ebeb3 (runs #3 and #4).
+          if ! scripts/publish-images.sh workflows-match "$SHA" 2> "$RUNNER_TEMP/err"; then
+            echo "::error title=Commit can't be released by this workflow::$(tr '\n' ' ' < "$RUNNER_TEMP/err" | cut -c1-600)"; exit 1
+          fi
+          echo "Releasing commit $SHA"
+          {
+            echo "sha=$SHA"
+            echo "held=$held"
+            echo "tag=$(scripts/publish-images.sh tag "$SHA")"
+          } >> "$GITHUB_OUTPUT"
+          { echo "RELEASE_SHA=$SHA"; echo "RELEASE_TAG=$(scripts/publish-images.sh tag "$SHA")"; } >> "$GITHUB_ENV"
       - name: The version is new, and the commit being released has its images
         if: ${{ env.RELEASE_SKIP == '' }}
         env:
           TAG: ${{ env.RELEASE_TAG }}
+          SHA: ${{ env.RELEASE_SHA }}
+          HELD: ${{ steps.c.outputs.held }}
         run: |
           set -euo pipefail
-          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "Version '$VERSION' is not like 0.1.0 or 0.1.0-beta.1."; exit 1; }
-          if gh release view "v$VERSION" > /dev/null 2>&1; then echo "Version $VERSION is already released. Pick a new version."; exit 1; fi
+          # Every refusal is an annotation too: annotations are readable without the job log (BOS-2602).
+          refuse() { echo "$1"; echo "::error title=Release refused::$(echo "$1" | tr '\n' ' ' | cut -c1-400)"; exit 1; }
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || refuse "Version '$VERSION' is not like 0.1.0 or 0.1.0-beta.1."
+          if gh release view "v$VERSION" > /dev/null 2>&1; then refuse "Version $VERSION is already released. Pick a new version."; fi
           first="$(scripts/publish-images.sh prefixes | head -n 1)"
           missing=""
           for name in $(scripts/publish-images.sh images); do
             docker buildx imagetools inspect "$first/$name:$TAG" > /dev/null 2>&1 || missing="$missing $name"
           done
           if [ -n "$missing" ]; then
-            echo "No image for commit $RELEASE_SHA ($TAG) for:$missing."
-            echo "Either the 'Publish images' run for that commit has not finished (wait, then run this again), or an image was added to PUBLISH_IMAGES after that commit was published: re-run 'Publish images' for the commit (Actions > Publish images > the run > Re-run all jobs), or type the sha of an older green main commit in the commit box."
-            exit 1
+            refuse "No image for commit $SHA ($TAG) for:$missing. Either the 'Publish images' run for that commit has not finished (wait, then run this again), or an image was added to PUBLISH_IMAGES after that commit was published: re-run 'Publish images' for the commit (Actions > Publish images > the run > Re-run all jobs), or type the sha of an older green main commit in the commit box."
           fi
           # A version tag that is already on an image is fine only when it is this commit's own image (same digest): a
           # half-finished run (tags added, GitHub release not made, checked above) resumes. Tagging again is a no-op.
@@ -158,7 +195,7 @@ jobs:
               existing="$(docker buildx imagetools inspect "$p/$name:$VERSION" --format '{{json .Manifest}}' 2> /dev/null | jq -r .digest || true)"
               [ -n "$existing" ] || continue
               want="$(docker buildx imagetools inspect "$first/$name:$TAG" --format '{{json .Manifest}}' | jq -r .digest)"
-              if [ "$existing" != "$want" ]; then echo "$p/$name:$VERSION already exists and is not this commit's image. Pick a new version."; exit 1; fi
+              if [ "$existing" != "$want" ]; then refuse "$p/$name:$VERSION already exists and is not the image of commit $SHA (it is on commit ${HELD:-unknown}). Leave the commit box blank to finish $VERSION on that commit, or pick a new version."; fi
               echo "::notice::$p/$name:$VERSION is already on this commit's image: resuming a half-finished release."
             done
           done

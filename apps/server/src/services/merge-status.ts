@@ -5,7 +5,7 @@
 // on them) and the shared context as `ctx`. review.ts keeps one delegate line per method.
 import { and, eq, inArray, isNotNull, isNull } from "drizzle-orm";
 import { isGateMergeOf, MAIN_LOG_MAX, mergeMessageTicket, wakeCeoIfLiveUnplaced } from "./missed-merges.js";
-import { deploysNothing, touchesRunnerCode, touchesRunnerUpdate } from "@boss-man/shared";
+import { mergeFacts, recordedMergeKeys, recordTicketMerge } from "./ticket-merges.js";
 import { MERGE_MISSED_AFTER_MS, parseRepoUrl, renderTemplate, ticketRef, type GitHostKind, type MainLogResult, type MergeLineConflictsResult } from "@boss-man/shared";
 import { agents, checkResults, companies, projects, runners, settings, tickets } from "../db/schema.js";
 import { CI_BRANCH_PREFIX, GitHostError, type CommitChecks } from "./git-hosts.js";
@@ -253,7 +253,8 @@ export async function landingMergesByCompany(this: ReviewSelf, ctx: ReviewCtx): 
  * BOS-1645 (R27): records the merges on main the gate never recorded (its answer was lost, e.g. to a runner swap between
  * push and record). For each project with a repo whose runner answers workspace.mainLog, it reads main's newest first-parent
  * commits, and every `Merge "..." (<ticket id>)` naming one of the project's tickets that has no mergeCommit is recorded as
- * the gate would have (recordMissedMerge). Then, per company read, a live commit that still can't be placed wakes the CEO
+ * the gate would have (recordMissedMerge). A ticket's other gate merges on main that aren't kept yet (an earlier merge of a
+ * ticket merged twice) are added to its merges only (BOS-2653), so merge order can place them. Then, per company read, a live commit that still can't be placed wakes the CEO
  * once. `projectId` limits it to one project (after a landing). Runs on the leader only, one pass at a time; never throws.
  */
 export async function recordMissedMerges(this: ReviewSelf, ctx: ReviewCtx, projectId?: string): Promise<{ recorded: string[] }> {
@@ -276,28 +277,39 @@ export async function recordMissedMerges(this: ReviewSelf, ctx: ReviewCtx, proje
           deps.runners.request<MainLogResult>(runner.id, (requestId) => ({ type: "workspace.mainLog", requestId, projectId: p.id, target: p.target, max: MAIN_LOG_MAX, ...(filesFor?.length ? { filesFor } : {}) }), 60_000);
         const log = (await ask())?.commits ?? [];
         read.set(p.companyId, [...(read.get(p.companyId) ?? []), ...log]);
-        // Newest first, so a ticket merged twice keeps its newest merge.
-        const named = new Map<string, (typeof log)[number]>();
+        // Every gate merge of each ticket, newest first (BOS-2653: a ticket merged twice keeps both, not just its newest).
+        const named = new Map<string, Array<(typeof log)[number]>>();
         for (const c of log) {
           const id = typeof c.message === "string" ? mergeMessageTicket(c.message) : null;
-          if (id && !named.has(id)) named.set(id, c);
+          if (id) named.set(id, [...(named.get(id) ?? []), c]);
         }
         if (!named.size) continue;
         // Only a commit whose whole message is exactly this ticket's gate merge message counts (Jane, BOS-1645): a
         // ticket title is agent-written, so a message merely naming an id must never close another ticket.
-        const missing = (
+        const found = (
           await db
-            .select({ id: tickets.id, title: tickets.title })
+            .select({ id: tickets.id, title: tickets.title, companyId: tickets.companyId, mergeCommit: tickets.mergeCommit })
             .from(tickets)
-            .where(and(inArray(tickets.id, [...named.keys()]), eq(tickets.projectId, p.id), isNull(tickets.mergeCommit)))
-        ).filter((t) => isGateMergeOf(named.get(t.id)!.message, t));
-        if (!missing.length) continue;
+            .where(and(inArray(tickets.id, [...named.keys()]), eq(tickets.projectId, p.id)))
+        ).map((t) => ({ ...t, merges: named.get(t.id)!.filter((c) => isGateMergeOf(c.message, t)) }));
+        const kept = await recordedMergeKeys(db, found.map((t) => t.id));
+        // A ticket with no merge recorded is closed by its newest merge (recordMissedMerge); any other merge of it not yet
+        // kept is only added to its merges, so merge order can place it. The ticket's latest merge is left as it is.
+        const missing = found.filter((t) => !t.mergeCommit && t.merges.length);
+        // The ticket's latest merge already places through tickets.mergeCommit (companyMerges), so it is never "extra".
+        const latest = (t: (typeof found)[number]) => t.mergeCommit?.toLowerCase() ?? t.merges[0]?.sha.toLowerCase();
+        const extra = found.flatMap((t) => t.merges.filter((c) => c.sha.toLowerCase() !== latest(t) && !kept.has(`${t.id}:${c.sha.toLowerCase()}`)).map((c) => ({ t, c })));
+        if (!missing.length && !extra.length) continue;
         // A second read for the changed files of just these, so touchesRunner is known (BOS-1021) rather than assumed.
-        const shas = missing.slice(0, 20).map((m) => named.get(m.id)!.sha);
+        const shas = [...missing.map((m) => m.merges[0]!.sha), ...extra.map((e) => e.c.sha)].slice(0, 20);
         const files = new Map(((await ask(shas).catch(() => null))?.commits ?? []).filter((c) => c.files).map((c) => [c.sha, c.files!]));
         for (const m of missing) {
-          const c = named.get(m.id)!;
+          const c = m.merges[0]!;
           if (await this.recordMissedMerge(m.id, c.sha, { at: c.at, files: files.get(c.sha) }).catch(() => false)) recorded.push(m.id);
+        }
+        for (const { t, c } of extra) {
+          const at = c.at && !Number.isNaN(Date.parse(c.at)) ? new Date(c.at) : new Date();
+          await recordTicketMerge(db, { companyId: t.companyId, ticketId: t.id, commit: c.sha, at, files: files.get(c.sha) }).catch(() => false);
         }
       } catch {
         // A runner away or too slow: the next pass tries again.
@@ -327,13 +339,15 @@ export async function recordMissedMerge(this: ReviewSelf, ctx: ReviewCtx, ticket
   if (!t || t.mergeCommit) return false;
   const at = opts.at && !Number.isNaN(Date.parse(opts.at)) ? new Date(opts.at) : new Date();
   const files = opts.files;
-  const runnerFacts = { touchesRunner: files ? touchesRunnerCode(files) : true, touchesRunnerUpdate: files ? touchesRunnerUpdate(files) : null, deploysNothing: files ? deploysNothing(files) : null };
+  const runnerFacts = mergeFacts(files);
   const [claimed] = await db
     .update(tickets)
     .set({ mergeCommit: commit, mergedAt: at, ...runnerFacts })
     .where(and(eq(tickets.id, ticketId), isNull(tickets.mergeCommit)))
     .returning({ id: tickets.id });
   if (!claimed) return false;
+  // BOS-2653: kept among the ticket's merges here too, as a ticket already done never reaches finishMerged below.
+  await recordTicketMerge(db, { companyId: t.companyId, ticketId, commit, at, files });
   const short = commit.slice(0, 12);
   await record(db, { companyId: t.companyId, ticketId, kind: "merge_recorded_late", summary: `Merged as ${short} at ${at.toISOString()}, but Boss Man never got the answer (the runner was cut off between push and record). Found on main and recorded now.` });
   if (t.systemState === "done") return true;
