@@ -274,6 +274,12 @@ export const ALERT_KINDS = {
     topRung: "ceo",
     clearWhen: () => [],
   },
+  // The same warning 30 minutes after the CEO's card, if the CEO has not answered it: an info notice on the owner's
+  // queue (BOS-2721), as idle_slots_owner does. Closes by itself with the warning.
+  host_warning_owner: {
+    topRung: "owner",
+    clearWhen: () => [],
+  },
   // sweep-step-guard.ts (BOS-2160): a background safety step failed in 3 sweeps in a row. Only the owner can fix or
   // restart the server; one card per step, closes by itself (sweepStepOk) after the step's next success.
   sweep_step_failing: {

@@ -1175,6 +1175,7 @@ export async function buildApp(opts: AppOptions) {
     facts: () => hostFacts.sync(),
     homeCompany: async () => (await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1))[0]?.id ?? null,
     isOpen: async (dedupeKey) => (await db.select({ id: decisions.id }).from(decisions).where(and(eq(decisions.dedupeKey, dedupeKey), eq(decisions.status, "open"))).limit(1)).length > 0,
+    card: async (dedupeKey) => (await db.select({ status: decisions.status, createdAt: decisions.createdAt, answer: decisions.answer }).from(decisions).where(eq(decisions.dedupeKey, dedupeKey)).limit(1))[0] ?? null,
     ticketFor: async (key) => {
       const [t] = await db
         .select({ title: tickets.title, number: tickets.number, prefix: companies.ticketPrefix })
