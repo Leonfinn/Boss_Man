@@ -370,7 +370,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         const who = await diagnoser(ceo.companyId, ceo);
         if (projectId) {
           const body = [
-            `Boss Man opened this ticket by itself: the ${what} ${how}, and the next ${what} card is held off the owner's queue until the cause is known (BOS-2554). The Updates panel names you and this ticket, and says "being looked into" only once your run has started.`,
+            `Boss Man opened this ticket by itself: the ${what} ${how}, and the next ${what} card is held off the owner's queue until the cause is known (BOS-2554). The Updates panel names you and this ticket, and says work has started only once your run has.`,
             "",
             facts,
             "",
@@ -387,7 +387,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       if (t?.assignee) {
         const note = repeat
           ? `The ${what} failed again while this ticket was diagnosing the last failure. The hold stays linked to this ticket.\n\n${facts}`
-          : `Boss Man opened this ticket for you: a ${what} ${how}, and the next card is held until you find out why. The owner's Updates panel says "Not picked up yet" until your run starts.\n\n${facts}\n\nWhen the cause is known, call the deploy tool with action release_hold (outcome retry_safe or do_not_retry, ownerText in plain words for the owner).`;
+          : `Boss Man opened this ticket for you: a ${what} ${how}, and the next card is held until you find out why. The owner's Updates panel says "no run has started on it yet" until your run starts.\n\n${facts}\n\nWhen the cause is known, call the deploy tool with action release_hold (outcome retry_safe or do_not_retry, ownerText in plain words for the owner).`;
         await deps.wake(t.assignee, { reason: FAILED_UPDATE_REASON, ticketId: ticketId!, note, priority: 4 });
         await markWoken(db, hold.id, now);
         const p = await pickupOf(db, { ...hold, ticketId: ticketId!, wokenAt: now });
@@ -428,7 +428,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       if (!claimed) continue;
       const what = subject === "server_deploy" ? "server update" : "runner update";
       const where = p.ticketId ? `${p.ref}, assigned to ${p.agent ?? "nobody"}` : "no diagnosis ticket";
-      await tellCeo(`Nobody has started on the failed ${what} (${short(h.commit)}, "${h.result}"): ${where}, woken at ${h.wokenAt.toISOString().slice(11, 16)} UTC, and no run has started since. The owner's Updates panel says "Not picked up yet". Get it started now: wake or reassign the ticket, or take it yourself.${p.ticketId ? "" : " Open a ticket and link it with link_hold."}`, FAILED_UPDATE_REASON).catch((err: Error) => deps.log?.(`self-deploy: telling the CEO failed: ${err.message}`));
+      await tellCeo(`Nobody has started on the failed ${what} (${short(h.commit)}, "${h.result}"): ${where}, woken at ${h.wokenAt.toISOString().slice(11, 16)} UTC, and no run has started since. The owner's Updates panel says nobody has picked it up. Get it started now: wake or reassign the ticket, or take it yourself.${p.ticketId ? "" : " Open a ticket and link it with link_hold."}`, FAILED_UPDATE_REASON).catch((err: Error) => deps.log?.(`self-deploy: telling the CEO failed: ${err.message}`));
     }
   }
 

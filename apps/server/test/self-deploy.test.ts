@@ -1874,7 +1874,7 @@ describe("after a failed update the next card is held while it is diagnosed (BOS
     const [held] = await c.db.select().from(decisions).where(eq(decisions.id, r.decisionId));
     expect(held!.recommendedOption).toBe("Not now");
     // BOS-2609: no project to open a diagnosis ticket in here, so the card says nobody is assigned, never "being looked into".
-    expect(held!.question).toMatch(/^Held: the last server update \(to bbbbbbbb\) failed at [^.]*\. Not picked up yet: nobody is assigned to diagnose it; the CEO was woken at \d\d:\d\d UTC\./);
+    expect(held!.question).toMatch(/^Held: the last server update \(to bbbbbbbb\) failed at [^.]*\. The CEO was alerted: raised at \d\d:\d\d UTC, nobody has picked it up yet\./);
     expect(held!.question).not.toContain("being looked into");
     expect(held!.question).toContain("If a card asks you for the update's log, answer that one first.");
     const hold = (await currentHold(c.db, "server_deploy"))!;
@@ -2037,7 +2037,7 @@ describe("after a failed update the next card is held while it is diagnosed (BOS
     await c.available({ deployed: B, tip: B });
     await c.status({ id: randomUUID(), target: "runner", result: "failed", message: "The runner image build failed.", from_commit: B, to_commit: B, ended: "2026-10-20T12:10:00Z" });
     await c.selfDeploy.sync();
-    expect(await c.selfDeploy.updateRunners()).toMatchObject({ queued: true, message: expect.stringContaining("The last runner update failed and the runners can't be updated until we know a retry is safe. Not picked up yet:") });
+    expect(await c.selfDeploy.updateRunners()).toMatchObject({ queued: true, message: expect.stringContaining("The last runner update failed and the runners can't be updated until we know a retry is safe. The CEO was alerted: raised at") });
     await c.selfDeploy.sync();
     expect(await readdir(path.join(c.dir, "inbox"))).not.toContain("request.json");
     await release(c, "retry_safe", "Fixed.");
@@ -2203,24 +2203,24 @@ describe("a failed update is picked up by someone, and the panel says who (BOS-2
     expect((await c.db.select().from(wakes)).some((w) => w.agentId === ceo.id && w.ticketId === t!.id && w.reason === FAILED_UPDATE_REASON)).toBe(true);
   });
 
-  it("the panel says 'Not picked up yet' until the assignee's run starts, then who and since when", async () => {
+  it("the panel says no run has started until the assignee's run starts, then who and since when", async () => {
     const c = (ctx = await setup());
     const { co, infra } = await team(c, { infra: true });
     await fail(c);
     const [t] = await diagnoses(c);
     const ref = await refOf(c, t!);
-    expect(await words(c)).toMatch(new RegExp(`^Held: the last runner update \\(built from bbbbbbbb\\) failed at [^.]*\\. Not picked up yet: Dougal woken at \\d\\d:\\d\\d UTC \\(${ref}\\)\\.`));
-    expect(await words(c)).not.toContain("being looked into");
+    expect(await words(c)).toMatch(new RegExp(`^Held: the last runner update \\(built from bbbbbbbb\\) failed at [^.]*\\. ${ref} is assigned to Dougal, woken at \\d\\d:\\d\\d UTC; no run has started on it yet\\.`));
+    expect(await words(c)).not.toContain("started work");
     // A chat about the ticket, or a run from before the failure, is not the diagnosis.
     const hold = (await currentHold(c.db, "runner_update"))!;
     await c.db.insert(runs).values({ companyId: co.id, agentId: infra!.id, ticketId: t!.id, purpose: "chat", startedAt: new Date(hold.createdAt.getTime() + 60_000) });
     await c.db.insert(runs).values({ companyId: co.id, agentId: infra!.id, ticketId: t!.id, startedAt: new Date(hold.createdAt.getTime() - 60_000), endedAt: hold.createdAt });
-    expect(await words(c)).toContain("Not picked up yet: Dougal woken at");
+    expect(await words(c)).toContain("no run has started on it yet");
     const at = new Date(Date.UTC(2030, 0, 1, 16, 5));
     await c.db.insert(runs).values({ companyId: co.id, agentId: infra!.id, ticketId: t!.id, startedAt: at });
-    expect(await words(c)).toContain(`Being looked into by Dougal on ${ref} (started 16:05 UTC).`);
+    expect(await words(c)).toContain(`Dougal started work on it on ${ref} at 16:05 UTC.`);
     // The owner's own Build and update runners press says the same, read at that moment.
-    expect(await c.selfDeploy.updateRunners()).toMatchObject({ message: expect.stringContaining(`Being looked into by Dougal on ${ref} (started 16:05 UTC).`) });
+    expect(await c.selfDeploy.updateRunners()).toMatchObject({ message: expect.stringContaining(`Dougal started work on it on ${ref} at 16:05 UTC.`) });
   });
 
   it("a repeat failure while the ticket is open opens no second ticket; the hold keeps it and the assignee is woken again", async () => {
@@ -2254,7 +2254,7 @@ describe("a failed update is picked up by someone, and the panel says who (BOS-2
     await c.available({ deployed: B, tip: B });
     await c.selfDeploy.sync();
     expect((await rexWakes()).map((w) => w.ticketId)).toEqual([other.id]);
-    expect(await words(c)).toMatch(new RegExp(`Not picked up yet: Rex woken at \\d\\d:\\d\\d UTC \\(${await refOf(c, other)}\\)\\.`));
+    expect(await words(c)).toMatch(new RegExp(`${await refOf(c, other)} is assigned to Rex, woken at \\d\\d:\\d\\d UTC; no run has started on it yet\\.`));
     await c.available({ deployed: B, tip: B });
     await c.selfDeploy.sync();
     expect(await rexWakes()).toHaveLength(1);
@@ -2276,7 +2276,7 @@ describe("a failed update is picked up by someone, and the panel says who (BOS-2
     await fresh.sync();
     expect(woken.map((w) => [w.agentId, w.reason])).toEqual([[ceo.id, FAILED_UPDATE_REASON]]);
     expect(woken[0]!.note).toContain(`${await refOf(c, t!)}, assigned to Dougal`);
-    expect(woken[0]!.note).toContain('says "Not picked up yet"');
+    expect(woken[0]!.note).toContain("says nobody has picked it up");
     expect(await currentHold(c.db, "runner_update")).toMatchObject({ ticketId: t!.id, releasedAt: null, chasedAt: expect.any(Date) });
     // Only once.
     await c.available({ deployed: B, tip: B });
