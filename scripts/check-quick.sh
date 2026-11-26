@@ -311,6 +311,9 @@ fi
   # BOS-1549: two guides in docs/ must not share a number, counting pages main added since this branch left it. Runs on
   # every branch (it takes well under a second), since a clash can come from main even when the branch touched no doc.
   step "docs numbers are unique" node scripts/check-doc-numbers.mjs "$base"
+  # BOS-2732: the branch must not add proof files (core dumps, logs, scratch folders, screenshots and recordings outside docs/
+  # and the shipped image folders). Files main already has are never flagged. Runs on every branch; it reads only added paths.
+  step "no added proof files" node scripts/check-proof-files.mjs "$base"
   # BOS-1894: a secret file docker-compose.yml names must be created in step 3 of docs/00 (compose refuses to start without it).
   if has '^docker-compose\.yml$|^docs/00-first-time-install\.md$|^scripts/check-compose-secrets-docs'; then step "compose secrets are in the install guide" node scripts/check-compose-secrets-docs.mjs; fi
   # The in-memory-state lint (BOS-460, 492, 516, 702) now runs with the other list guards, first (BOS-1727).
