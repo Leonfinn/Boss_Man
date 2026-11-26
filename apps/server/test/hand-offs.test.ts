@@ -7,9 +7,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { projects, ticketMessages, tickets } from "../src/db/schema.js";
+import { projects, ticketDependencies, ticketMessages, tickets } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { handOffPhrase } from "../src/services/hand-offs.js";
+import { openBlockers } from "../src/services/ticket-links.js";
 
 let server: Awaited<ReturnType<typeof boot>>;
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -268,6 +269,43 @@ describe("set_ticket_state done with hand-off wording", () => {
       const made = (await ctx.db.select().from(tickets)).find((x) => x.title === "The rest")!;
       expect(made.acceptanceCriteria).toEqual(CRITERIA);
       expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).toBe("done");
+    });
+
+    // BOS-2643: BOS-2302 and BOS-2298 came from BOS-2283's followUps with a 3-day watch in their criteria, merged in hours
+    // and sat open for 3 days. A carried watch of a day or more now opens its own check ticket; a one-time reading doesn't.
+    it("a carried watch of a day or more opens its own check ticket, which waits on the follow-up's merge", async () => {
+      const WATCH = { text: "Over 3 days live, no main CI run is cancelled for a higher priority waiting request", after: "merge" as const };
+      const ONCE = { text: "One go-live reading shows the run", after: "merge" as const };
+      const t = await ctx.ticket({ acceptanceCriteria: ["Workflow change written", WATCH, ONCE] });
+      const c = await ctx.agent(ctx.co.ceo.id);
+      const r = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "Inventory done; handing the fix on.", followUps: [{ title: "Stop cancelling main runs", assignee: "Dev", why: "Main runs are cancelled." }] } });
+      expect((r as { isError?: boolean }).isError, textOf(r)).toBeFalsy();
+      const all = await ctx.db.select().from(tickets);
+      const made = all.find((x) => x.title === "Stop cancelling main runs")!;
+      const checks = all.filter((x) => x.checksTicketId === made.id);
+      expect(checks).toHaveLength(1);
+      const check = checks[0]!;
+      expect(check.checksCriterion).toBe(2);
+      expect(check.acceptanceCriteria).toEqual([WATCH.text]);
+      expect([check.assigneeAgentId, check.systemState, check.noCode]).toEqual([ctx.dev.id, "blocked", true]);
+      // One way only: the check waits on the follow-up's merge, and the follow-up waits on nothing, so it can start.
+      const deps = await ctx.db.select().from(ticketDependencies);
+      expect(deps.filter((d) => d.blockedTicketId === check.id).map((d) => [d.blockerTicketId, d.until])).toEqual([[made.id, "merged"]]);
+      expect(deps.filter((d) => d.blockedTicketId === made.id)).toEqual([]);
+      expect(await openBlockers(ctx.db, made.id)).toEqual([]);
+      expect(textOf(r)).toMatch(/with its long watch on check ticket [A-Z]+-\d+/);
+      // The closing ticket's note names both, so whoever reads it finds the watch.
+      expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.stateNote).toMatch(/for Dev, with check ticket [A-Z]+-\d+ for its long watch/);
+    });
+
+    it("a follow-up whose carried criteria need no long watch opens no check ticket", async () => {
+      const t = await ctx.ticket({ acceptanceCriteria: ["Workflow change written", { text: "One go-live reading shows the run", after: "merge" }] });
+      const c = await ctx.agent(ctx.co.ceo.id);
+      const r = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "Done; handing the rest on.", followUps: [{ title: "Read it once live", assignee: "Dev", why: "x" }] } });
+      expect((r as { isError?: boolean }).isError, textOf(r)).toBeFalsy();
+      const made = (await ctx.db.select().from(tickets)).find((x) => x.title === "Read it once live")!;
+      expect((await ctx.db.select().from(tickets)).filter((x) => x.checksTicketId === made.id)).toEqual([]);
+      expect(textOf(r)).not.toContain("long watch");
     });
   });
 });

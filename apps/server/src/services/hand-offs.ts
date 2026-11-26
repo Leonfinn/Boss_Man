@@ -10,6 +10,7 @@ import { carriedCriteria, criteriaText, criterionText, readCriteria, readVerdict
 import type { Db } from "../db/client.js";
 import { agents, companies, ticketMessages, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
+import { openLongWatchChecks } from "./after-merge-check-tickets.js";
 import type { workService } from "./work.js";
 
 type Work = ReturnType<typeof workService>;
@@ -37,7 +38,7 @@ export function handOffPhrase(...texts: (string | null | undefined)[]): { label:
   return null;
 }
 
-export const FOLLOW_UP_HELP = "followUps: work you are handing on, one entry each {title, assignee (an agent's name, or \"CEO\"), why, criterion?}. Boss Man opens each as a ticket in the same project (and feature), linked to this one, and wakes the assignee. When this ticket's criteria leave one failed or not reported, the follow-up gets that criterion's text, unchanged, as its own acceptance criterion (all of them when the entry names no criterion): the new ticket then has to show the outcome, not just do the task. criterion names one, by its number, to carry exactly that one. Only the CEO or a manager can assign a follow-up to a colleague; from anyone else a named colleague is kept as a suggested assignee and the ticket goes to the CEO. Opened only on a real change of state. Use it whenever the summary or a reply says someone else will do something next. noFollowUpReason: when nothing is handed on although the wording sounds like it (up to 240 characters).";
+export const FOLLOW_UP_HELP = "followUps: work you are handing on, one entry each {title, assignee (an agent's name, or \"CEO\"), why, criterion?}. Boss Man opens each as a ticket in the same project (and feature), linked to this one, and wakes the assignee. When this ticket's criteria leave one failed or not reported, the follow-up gets that criterion's text, unchanged, as its own acceptance criterion (all of them when the entry names no criterion): the new ticket then has to show the outcome, not just do the task. criterion names one, by its number, to carry exactly that one. A carried after-merge criterion that needs a watch of a day or more (\"over 3 days live\", \"a week on\", \"for 48 hours\") is opened as its own check ticket, waiting on the follow-up's merge, so the follow-up can close once it is live. Only the CEO or a manager can assign a follow-up to a colleague; from anyone else a named colleague is kept as a suggested assignee and the ticket goes to the CEO. Opened only on a real change of state. Use it whenever the summary or a reply says someone else will do something next. noFollowUpReason: when nothing is handed on although the wording sounds like it (up to 240 characters).";
 
 export const followUpsSchema = z.array(z.object({ title: z.string().trim().min(1).max(200), assignee: z.string().trim().min(1).max(100), why: z.string().trim().min(1).max(1500), criterion: z.number().int().min(1).max(10).optional().describe("The number (1-based) of this ticket's criterion to carry into the follow-up, when only one applies. Left out, every failed or not-yet-reported criterion is carried.") })).max(20);
 export type FollowUpInput = z.infer<typeof followUpsSchema>[number];
@@ -100,7 +101,7 @@ export async function openFollowUps(db: Db, work: Work, ticketId: string, follow
   // BOS-2599 (cock-ups G1): the criterion the hand-on came from goes with it, so the follow-up has to show the outcome
   // and not just do the task. Read here, after the move, so the note is the one this close stored.
   const [fresh] = await db.select({ criteria: tickets.acceptanceCriteria, note: tickets.stateNote }).from(tickets).where(eq(tickets.id, ticketId));
-  const opened: { id: string; ref: string; title: string; assignee: string; carried: string[] }[] = [];
+  const opened: { id: string; ref: string; title: string; assignee: string; carried: string[]; checks: string[] }[] = [];
   for (const [i, f] of followUps.entries()) {
     const suggestion = opts.suggested[i] ? [`**Suggested assignee:** ${opts.suggested[i]} (named by the closing agent; the CEO decides).`, ""] : [];
     const carry = fresh ? carriedCriteria(readCriteria(fresh.criteria), fresh.note, f.criterion !== undefined ? [f.criterion] : undefined) ?? [] : [];
@@ -112,11 +113,14 @@ export async function openFollowUps(db: Db, work: Work, ticketId: string, follow
     const [numbered] = await db.select({ number: tickets.number }).from(tickets).where(eq(tickets.id, made.id));
     const newRef = ticketRef(prefix, numbered?.number) ?? `"${made.title}"`;
     const [who] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, assigneeIds[i]!));
-    const link = `Follow-up: ${newRef} (#/tickets/${made.id}) for ${who?.name ?? "someone"}.`;
+    // BOS-2643: a carried watch of a day or more goes to its own check ticket, with the follow-up's assignee, so the
+    // follow-up can close at go-live instead of sitting open for the watch (BOS-2302, BOS-2298).
+    const checks = await openLongWatchChecks(db, work, made.id, { byAgentId, assigneeAgentId: assigneeIds[i]!, suggested: opts.suggested[i] ?? null });
+    const link = `Follow-up: ${newRef} (#/tickets/${made.id}) for ${who?.name ?? "someone"}${checks.length ? `, with check ticket${checks.length > 1 ? "s" : ""} ${checks.map((c) => c.ref).join(", ")} for its long watch` : ""}.`;
     const [now] = await db.select({ note: tickets.stateNote }).from(tickets).where(eq(tickets.id, t.id));
     await db.update(tickets).set({ stateNote: `${(now?.note ?? "").trim()}${now?.note?.trim() ? " " : ""}${link}`.slice(0, 4000) }).where(eq(tickets.id, t.id));
     await record(db, { companyId: t.companyId, ticketId: t.id, agentId: byAgentId, kind: "follow_up", summary: link, detail: { followUpTicketId: made.id } });
-    opened.push({ id: made.id, ref: newRef, title: made.title, assignee: who?.name ?? "someone", carried: criteriaText(carry) });
+    opened.push({ id: made.id, ref: newRef, title: made.title, assignee: who?.name ?? "someone", carried: criteriaText(carry), checks: checks.map((c) => c.ref) });
   }
   return opened;
 }
