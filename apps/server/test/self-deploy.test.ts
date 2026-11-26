@@ -2535,6 +2535,28 @@ describe("an approval when main moves on before the host runs it (BOS-753)", () 
       expect((await c.db.select().from(decisions).where(eq(decisions.dedupeKey, "self-deploy:deployer-script"))).length).toBe(0);
     });
 
+    // BOS-2684: the host script going live wakes the tickets that watch for it, once each, and nobody else.
+    it("wakes the host_script_live watchers when the script catches up, once, and not for other triggers", async () => {
+      const c = (ctx = await setup());
+      const [co] = await c.db.select().from(companies).limit(1);
+      const [ceo] = await c.db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, co!.id), eq(agents.role, "ceo")));
+      const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Dev" }).returning();
+      const watch = (number: number, trigger: string) => c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: `watcher ${number}`, number, assigneeAgentId: ceo!.id, systemState: "blocked", mergeCommit: "a".repeat(40), watchingFor: "host script live", watchTrigger: trigger }).returning();
+      const [w] = await watch(701, "host_script_live");
+      await watch(702, "gate_ci_failed");
+      const woken = async () => (await c.db.select().from(wakes)).filter((x) => x.reason === "watch trigger");
+      await report(c, { scriptSha: OLD, repoSha: NEW });
+      await c.selfDeploy.sync();
+      expect((await c.selfDeploy.deployerScript()).state).toBe("behind");
+      expect(await woken()).toHaveLength(0);
+      await report(c, { scriptSha: NEW, repoSha: NEW });
+      await c.selfDeploy.sync();
+      await c.selfDeploy.sync();
+      const after = await woken();
+      expect(after).toHaveLength(1);
+      expect(after[0]!.ticketId).toBe(w!.id);
+    });
+
     it("keeps the line (BOS-1057) when host.json is unreadable after a report was recorded", async () => {
       const c = (ctx = await setup());
       await report(c, { scriptSha: OLD, repoSha: NEW });
