@@ -30,6 +30,10 @@ Release step: adding to this file is part of every release (Release Manager, on 
 Check before committing: pnpm --filter @boss-man/site build (it stops on a heading that is not a date, or one out of order).
 -->
 
+## 26 November 2026
+
+- A new beta release now goes out by itself every Tuesday morning (10:00 UTC), with that week's changes in its notes, as long as the newest code has passed its checks and its images are ready. If there is nothing new or nothing ready, it skips that week. You don't need to press anything.
+
 ## 25 November 2026
 
 - In Settings → Server and runner → Updates, "Recent updates" no longer leaves older server updates stuck on "Waiting". The one now live says Live, and one a newer update took over from says Replaced. Each row shows its real number of changes, not "10 changes" on every row.
