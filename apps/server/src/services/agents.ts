@@ -3,6 +3,7 @@
 import { and, desc, eq, gte, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { AGENT_TEMPLATES, CEO_TEMPLATE, DAY_NAMES, WORKING_HOURS_REASON, nextWorkingStart, workingHoursProblem, startLabel, FUNDING_PROVIDERS, HARNESSES, INFINITE_MODEL_CHOICE, isClaudeModel, isInfiniteModel, harnessLabel, modelFitProblem, providerLabel, speakerNameProblem } from "@boss-man/shared";
 import { builtinSkillsForTemplate } from "./builtin-skills.js";
+import { giveBuiltinsToAgent } from "./skills.js";
 import type { Db } from "../db/client.js";
 import { agentAvatars, agentChanges, agents, ceoChapters, companies, costEvents, decisions, fundingSources, paAnswers, projects, runs, settings, skills, ticketImages, tickets, wakes } from "../db/schema.js";
 import { record as logActivity } from "./activity.js";
@@ -527,7 +528,8 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
         try {
           const config = await validateModelConfig(companyId, h);
           const a = await this.hire(companyId, { name: h.name, template: h.template, title: h.title ?? undefined, agentKind: config.harness, model: config.model, fundingSourceId: config.fundingSourceId }, ceoId);
-          for (const sk of this.skillsForHire(h.template, h.skills)) await give(a.id, sk).catch((err: Error) => failed.push(`${h.name} didn't get ${sk}: ${err.message}`));
+          // hire() gives the template's built-ins; here only the skills the CEO named (BOS-2631 review).
+          for (const sk of h.skills ?? []) await give(a.id, sk).catch((err: Error) => failed.push(`${h.name} didn't get ${sk}: ${err.message}`));
           hired.push(h.name);
         } catch (err) {
           failed.push(`${h.name}: ${(err as Error).message}`);
@@ -549,10 +551,11 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
         await checkSkills(companyId, ctx.proposal.skills ?? [], builtinSkillsForTemplate(ctx.proposal.template));
         const hired = await this.hire(companyId, { ...ctx.proposal, agentKind: config.harness, model: config.model, fundingSourceId: config.fundingSourceId }, ctx.byAgentId);
         // The skills go on before the new agent can be woken, so its first run starts with them (BOS-889).
+        // hire() gives the template's built-ins; here only the skills the CEO named (BOS-2631 review).
         // A give that still fails after the hire never throws: the agent exists, so a retry would hire a
         // duplicate. The failures are flagged to the owner instead, the way hireTeam does it.
         const failures: string[] = [];
-        for (const sk of this.skillsForHire(ctx.proposal.template, ctx.proposal.skills)) {
+        for (const sk of ctx.proposal.skills ?? []) {
           if (!give) {
             failures.push(`${hired.name} didn't get ${sk} (skills can't be given here)`);
             continue;
@@ -656,11 +659,6 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
         .sort((x, y) => Number(!!x.retiredAt) - Number(!!y.retiredAt) || (x.role === "ceo" ? -1 : y.role === "ceo" ? 1 : x.name.localeCompare(y.name)));
     },
 
-    /** The skills a hire gets before its first run: the template's built-ins first, then any the CEO named (no repeats). */
-    skillsForHire(template: string | null | undefined, named: string[] | undefined) {
-      return [...new Set([...builtinSkillsForTemplate(template), ...(named ?? [])])];
-    },
-
     /** Hires an agent, optionally from a template; the template fills in what isn't given. */
     async hire(companyId: string, input: { name: string; template?: string; title?: string | null; instructions?: string | null; role?: "manager" | "worker"; agentKind?: string; model?: string | null; thinking?: string | null; fundingSourceId?: string | null; reportsTo?: string | null }, byAgentId: string | null = null) {
       const tpl = input.template ? AGENT_TEMPLATES.find((x) => x.id === input.template) : undefined;
@@ -688,6 +686,9 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
           instructions: input.instructions !== undefined ? input.instructions : (tpl?.instructions ?? null),
         })
         .returning();
+      // Built-ins belong to the template (a product manager's skills), so every hire route gets them
+      // before the new agent can be woken, not only the CEO's propose_hire and team-plan paths (BOS-2631 review).
+      await giveBuiltinsToAgent(db, companyId, a!.id, tpl?.id);
       await record(a!, "hired", null, { name: a!.name, title: a!.title, template: a!.template }, byAgentId);
       return a!;
     },

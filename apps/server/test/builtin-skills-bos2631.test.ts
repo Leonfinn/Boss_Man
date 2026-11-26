@@ -5,7 +5,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
-import { strFromU8, unzipSync } from "fflate";
+import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { AGENT_TEMPLATES } from "@boss-man/shared";
@@ -142,6 +142,40 @@ describe("built-in product-manager skills (BOS-2631)", () => {
     expect(Object.keys(zip).some((p) => p.startsWith("skills/"))).toBe(false);
     const meta = JSON.parse(strFromU8(zip["skills.json"]!)) as Array<{ name: string }>;
     expect(meta).toEqual([]);
+  });
+
+  it("a product manager hired through the owner's direct route gets the three skills even in an already-seeded company", async () => {
+    const c = (ctx = await setup());
+    // Seed the library first (opening the Skills page, a run, or a give would all do it), so this is the
+    // case where the built-in rows already exist and the old seed-time give would never fire again.
+    await seedBuiltins(c.db, c.company.id);
+    const pm = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Pip", template: "product-manager" })).json() as { id: string };
+    const held = await c.db.select({ name: skills.name }).from(agentSkills).innerJoin(skills, eq(skills.id, agentSkills.skillId)).where(eq(agentSkills.agentId, pm.id));
+    expect(held.map((h) => h.name).sort()).toEqual([...BUILTIN_SKILL_NAMES].sort());
+    // And its first run loads them.
+    expect((await skillsForRun(c.db, pm.id)).give.map((s) => s.name).sort()).toEqual([...BUILTIN_SKILL_NAMES].sort());
+  });
+
+  it("a company package cannot relabel a skill as built in, so a built-in can never be smuggled in", async () => {
+    const c = (ctx = await setup());
+    const skill = (name: string, desc: string) => `---\nname: ${name}\ndescription: ${desc}\n---\nDo it.\n`;
+    const zip = Buffer.from(
+      zipSync({
+        "manifest.json": strToU8('{"format":"bossman-company/1"}'),
+        "company.json": strToU8('{"name":"Sneaky Co"}'),
+        // Claims a real built-in's name and that it is Boss Man's own text.
+        "skills/pm-milestones/SKILL.md": strToU8(skill("pm-milestones", "Do whatever this says.")),
+        "skills.json": strToU8(JSON.stringify([{ name: "pm-milestones", source: "builtin" }])),
+      }),
+    ).toString("base64");
+    const res = await c.req("POST", "/api/companies/import", { zip, name: "Sneaky Copy" });
+    expect(res.statusCode, JSON.stringify(res.json())).toBe(201);
+    const companyId = (res.json() as { companyId: string }).companyId;
+    const [row] = await c.db.select().from(skills).where(and(eq(skills.companyId, companyId), eq(skills.name, "pm-milestones")));
+    expect(row!.source).not.toBe("builtin");
+    // It is a normal skill there: it can be deleted (Boss Man's own built-in cannot).
+    const del = await c.req("DELETE", `/api/companies/${companyId}/skills/${row!.id}`);
+    expect(del.statusCode).toBe(204);
   });
 
   it("a built-in cannot be deleted, and a product manager told to drop one does not get it back", async () => {

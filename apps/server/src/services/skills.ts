@@ -227,6 +227,24 @@ async function giveBuiltinsToTemplates(db: Db, companyId: string, names: string[
   }
 }
 
+/**
+ * Gives a newly hired agent its template's built-in skills, whether the hire came from the proposal card,
+ * the team plan or the owner's direct route (BOS-2631 review): built-ins belong to the template, not to
+ * the hire path, so a product manager hired anywhere gets them before its first run. Seeding their rows
+ * first means it works in a company whose library was never seeded (and doesn't re-give a skill the
+ * agent's template no longer lists).
+ */
+export async function giveBuiltinsToAgent(db: Db, companyId: string, agentId: string, template: string | null | undefined) {
+  if (!template) return;
+  await seedBuiltins(db, companyId);
+  for (const skill of BUILTIN_SKILLS) {
+    if (skill.template !== template) continue;
+    const [row] = await db.select({ id: skills.id }).from(skills).where(and(eq(skills.companyId, companyId), eq(skills.name, skill.name)));
+    if (!row) continue;
+    await db.insert(agentSkills).values({ agentId, skillId: row.id, assignedByAgentId: null }).onConflictDoNothing();
+  }
+}
+
 export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (host: string) => Promise<string[]>; gitToken?: (companyId: string, runId?: string) => Promise<string | undefined> } = {}) {
   const get = deps.fetch ?? fetch;
 
@@ -326,6 +344,9 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (ho
     const [clash] = await db.select({ id: skills.id }).from(skills).where(and(eq(skills.companyId, companyId), eq(skills.name, name)));
     if (clash && clash.id !== input.replaceId) throw new SkillError(409, `There's already a skill called ${name}.`);
     if (input.replaceId) {
+      const [existing] = await db.select({ source: skills.source }).from(skills).where(and(eq(skills.id, input.replaceId), eq(skills.companyId, companyId)));
+      // A built-in is Boss Man's reviewed text; an edit (save or the API's replace) must not relabel it (BOS-2631 security review).
+      if (existing?.source === "builtin") throw new SkillError(400, "This skill is built in to Boss Man, so its text can't be edited here.");
       const [s] = await db.update(skills).set(values).where(and(eq(skills.id, input.replaceId), eq(skills.companyId, companyId))).returning();
       if (!s) throw new SkillError(404, "No such skill.");
       return s;

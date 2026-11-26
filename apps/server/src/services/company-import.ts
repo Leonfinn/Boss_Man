@@ -47,7 +47,7 @@ const Agent = z.object({
   reportsTo: opt(120),
   instructions: opt(100_000),
 });
-const SkillMeta = z.object({ name: z.string().max(64), source: z.enum(["written", "link", "upload", "retro", "builtin"]).optional(), sourceUrl: opt(2000), sourceRef: opt(200), pack: opt(200), packUrl: opt(2000), requiresAddons: z.array(str(64)).max(20).nullable().optional(), agents: z.array(str(120)).max(500).default([]) });
+const SkillMeta = z.object({ name: z.string().max(64), source: z.enum(["written", "link", "upload", "retro"]).catch("upload").optional(), sourceUrl: opt(2000), sourceRef: opt(200), pack: opt(200), packUrl: opt(2000), requiresAddons: z.array(str(64)).max(20).nullable().optional(), agents: z.array(str(120)).max(500).default([]) });
 const Column = z.object({ name: z.string().trim().min(1).max(60), systemState: z.enum(["backlog", "ready", "in_progress", "blocked", "review", "done"]), wipLimit: z.number().int().positive().nullable().optional() });
 const Project = z.object({
   name: z.string().trim().min(1).max(80),
@@ -532,9 +532,12 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
 
     for (const s of pkg.skills) {
       const m = s.meta;
+      // A package is a file from outside, so it can never claim a skill is Boss Man's built-in text (BOS-2631
+      // security review): only seeding writes source "builtin". Anything it asks for is stored as a normal upload.
+      const source = m?.source === "link" || m?.source === "retro" || m?.source === "written" ? m.source : "upload";
       const [row] = await tx
         .insert(skills)
-        .values({ companyId, name: s.name, description: s.description, source: m?.source ?? "upload", sourceUrl: m?.sourceUrl ?? null, sourceRef: m?.sourceRef ?? null, pack: m?.pack ?? null, packUrl: m?.packUrl ?? null, requiresAddons: m?.requiresAddons ?? null, files: s.files, sizeBytes: s.bytes })
+        .values({ companyId, name: s.name, description: s.description, source, sourceUrl: m?.sourceUrl ?? null, sourceRef: m?.sourceRef ?? null, pack: m?.pack ?? null, packUrl: m?.packUrl ?? null, requiresAddons: m?.requiresAddons ?? null, files: s.files, sizeBytes: s.bytes })
         .returning();
       const holders = (m?.agents ?? []).map((slug) => agentId.get(slug)).filter((x): x is string => !!x);
       if (holders.length) await tx.insert(agentSkills).values(holders.map((id) => ({ agentId: id, skillId: row!.id })));
