@@ -565,6 +565,19 @@ describe("reading a branch's Actions runs (BOS-1072)", () => {
     expect(asked).toEqual(["/actions/runs?branch=main&per_page=100&page=3", "/actions/runs?branch=main&per_page=30"]);
   });
 
+  it("asks each active workflow for its own newest runs on the branch (BOS-2664)", async () => {
+    const asked: string[] = [];
+    const h = host((p) => {
+      asked.push(p);
+      if (p.startsWith("/actions/workflows?")) return json(200, { workflows: [{ id: 7, name: "Release", state: "active" }, { id: 8, name: "Old", state: "disabled_manually" }] });
+      return json(200, { workflow_runs: [{ id: 50, name: "Release", event: "workflow_dispatch", status: "completed", conclusion: "failure" }] });
+    });
+    const runs = await h.quietWorkflowRuns(cfg("github"), "t", "main");
+    expect(asked).toEqual(["/actions/workflows?per_page=100", "/actions/workflows/7/runs?branch=main&per_page=5"]);
+    expect(runs.map((r) => [r.id, r.name, r.conclusion])).toEqual([[50, "Release", "failure"]]);
+    expect(await h.quietWorkflowRuns(cfg("gitea"), "t", "main")).toEqual([]);
+  });
+
   it("throws a GitHostError when the token can't read the runs", async () => {
     await expect(host(() => json(403, { message: "Resource not accessible" })).workflowRuns(cfg("github"), "t", "main")).rejects.toMatchObject({ status: 403 });
   });

@@ -7,7 +7,7 @@ import { and, eq, inArray, isNotNull, isNull } from "drizzle-orm";
 import { isGateMergeOf, MAIN_LOG_MAX, mergeMessageTicket, wakeCeoIfLiveUnplaced } from "./missed-merges.js";
 import { mergeFacts, recordedMergeKeys, recordTicketMerge } from "./ticket-merges.js";
 import { MERGE_MISSED_AFTER_MS, parseRepoUrl, renderTemplate, ticketRef, type GitHostKind, type MainLogResult, type MergeLineConflictsResult } from "@boss-man/shared";
-import { agents, checkResults, companies, projects, runners, settings, tickets } from "../db/schema.js";
+import { agents, checkResults, companies, projects, runners, settings, ticketMerges, tickets } from "../db/schema.js";
 import { CI_BRANCH_PREFIX, GitHostError, type CommitChecks } from "./git-hosts.js";
 import { clearMergeCards } from "./decisions.js";
 import { record } from "./activity.js";
@@ -250,6 +250,22 @@ export async function landingMergesByCompany(this: ReviewSelf, ctx: ReviewCtx): 
 }
 
 /**
+ * BOS-2654: true when a reopened ticket (in review or in progress) that already has a merge recorded has a newer gate
+ * merge on main than that one, i.e. the gate's answer to its second merge was lost. `merges` is newest first. "Newer": the
+ * recorded merge is further down main's log, or, when it is older than the log read, the newest one is later than mergedAt.
+ * Never for a done ticket (closed by hand or already recorded: nothing to close) or one with no merge recorded.
+ */
+export function newerMerge(t: { mergeCommit: string | null; mergedAt: Date | null; systemState: string; merges: ReadonlyArray<{ sha: string; at: string }> }): boolean {
+  if (!t.mergeCommit || (t.systemState !== "review" && t.systemState !== "in_progress")) return false;
+  const newest = t.merges[0];
+  const recorded = t.mergeCommit.toLowerCase();
+  if (!newest || newest.sha.toLowerCase() === recorded) return false;
+  if (t.merges.some((c) => c.sha.toLowerCase() === recorded)) return true;
+  const at = Date.parse(newest.at);
+  return !t.mergedAt || (!Number.isNaN(at) && at > t.mergedAt.getTime());
+}
+
+/**
  * BOS-1645 (R27): records the merges on main the gate never recorded (its answer was lost, e.g. to a runner swap between
  * push and record). For each project with a repo whose runner answers workspace.mainLog, it reads main's newest first-parent
  * commits, and every `Merge "..." (<ticket id>)` naming one of the project's tickets that has no mergeCommit is recorded as
@@ -288,16 +304,17 @@ export async function recordMissedMerges(this: ReviewSelf, ctx: ReviewCtx, proje
         // ticket title is agent-written, so a message merely naming an id must never close another ticket.
         const found = (
           await db
-            .select({ id: tickets.id, title: tickets.title, companyId: tickets.companyId, mergeCommit: tickets.mergeCommit })
+            .select({ id: tickets.id, title: tickets.title, companyId: tickets.companyId, mergeCommit: tickets.mergeCommit, mergedAt: tickets.mergedAt, systemState: tickets.systemState })
             .from(tickets)
             .where(and(inArray(tickets.id, [...named.keys()]), eq(tickets.projectId, p.id)))
         ).map((t) => ({ ...t, merges: named.get(t.id)!.filter((c) => isGateMergeOf(c.message, t)) }));
         const kept = await recordedMergeKeys(db, found.map((t) => t.id));
-        // A ticket with no merge recorded is closed by its newest merge (recordMissedMerge); any other merge of it not yet
-        // kept is only added to its merges, so merge order can place it. The ticket's latest merge is left as it is.
-        const missing = found.filter((t) => !t.mergeCommit && t.merges.length);
+        // A ticket with no merge recorded is closed by its newest merge (recordMissedMerge), and so is a reopened one (in
+        // review or in progress) whose newest gate merge is newer than the one recorded (BOS-2654: the gate's answer to its
+        // second merge was lost). Any other merge of it not yet kept is only added to its merges, so merge order can place it.
+        const missing = found.filter((t) => t.merges.length && (!t.mergeCommit || newerMerge(t)));
         // The ticket's latest merge already places through tickets.mergeCommit (companyMerges), so it is never "extra".
-        const latest = (t: (typeof found)[number]) => t.mergeCommit?.toLowerCase() ?? t.merges[0]?.sha.toLowerCase();
+        const latest = (t: (typeof found)[number]) => (t.mergeCommit && !newerMerge(t) ? t.mergeCommit.toLowerCase() : t.merges[0]?.sha.toLowerCase());
         const extra = found.flatMap((t) => t.merges.filter((c) => c.sha.toLowerCase() !== latest(t) && !kept.has(`${t.id}:${c.sha.toLowerCase()}`)).map((c) => ({ t, c })));
         if (!missing.length && !extra.length) continue;
         // A second read for the changed files of just these, so touchesRunner is known (BOS-1021) rather than assumed.
@@ -305,7 +322,8 @@ export async function recordMissedMerges(this: ReviewSelf, ctx: ReviewCtx, proje
         const files = new Map(((await ask(shas).catch(() => null))?.commits ?? []).filter((c) => c.files).map((c) => [c.sha, c.files!]));
         for (const m of missing) {
           const c = m.merges[0]!;
-          if (await this.recordMissedMerge(m.id, c.sha, { at: c.at, files: files.get(c.sha) }).catch(() => false)) recorded.push(m.id);
+          const replaces = m.mergeCommit ?? undefined;
+          if (await this.recordMissedMerge(m.id, c.sha, { at: c.at, files: files.get(c.sha), replaces }).catch(() => false)) recorded.push(m.id);
         }
         for (const { t, c } of extra) {
           const at = c.at && !Number.isNaN(Date.parse(c.at)) ? new Date(c.at) : new Date();
@@ -331,21 +349,29 @@ export async function recordMissedMerges(this: ReviewSelf, ctx: ReviewCtx, proje
  * order stays right), the ticket moved on as after a merge (done, or back to its assignee for after-merge checks), and the
  * assignee told. The claim (`mergeCommit is null`) makes it once only, whatever runs beside it; a ticket whose own merge is
  * running here is left to that merge. A ticket already done (closed by hand) only gets the merge facts.
+ * `replaces` (BOS-2654): a reopened ticket's recorded merge that this newer one supersedes; the claim is then
+ * `mergeCommit = replaces`, and the earlier merge is kept among the ticket's merges with its own facts.
  */
-export async function recordMissedMerge(this: ReviewSelf, ctx: ReviewCtx, ticketId: string, commit: string, opts: { at?: string; files?: string[] } = {}): Promise<boolean> {
+export async function recordMissedMerge(this: ReviewSelf, ctx: ReviewCtx, ticketId: string, commit: string, opts: { at?: string; files?: string[]; replaces?: string } = {}): Promise<boolean> {
   const { db, landings, closeAfterMerge, tellAgent } = ctx;
   if (landings.get(ticketId)?.state === "running") return false;
   const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
-  if (!t || t.mergeCommit) return false;
+  if (!t || (t.mergeCommit ?? undefined) !== opts.replaces) return false;
+  if (opts.replaces && opts.replaces.toLowerCase() === commit.toLowerCase()) return false;
   const at = opts.at && !Number.isNaN(Date.parse(opts.at)) ? new Date(opts.at) : new Date();
   const files = opts.files;
   const runnerFacts = mergeFacts(files);
   const [claimed] = await db
     .update(tickets)
     .set({ mergeCommit: commit, mergedAt: at, ...runnerFacts })
-    .where(and(eq(tickets.id, ticketId), isNull(tickets.mergeCommit)))
+    .where(and(eq(tickets.id, ticketId), opts.replaces ? eq(tickets.mergeCommit, opts.replaces) : isNull(tickets.mergeCommit)))
     .returning({ id: tickets.id });
   if (!claimed) return false;
+  if (opts.replaces)
+    await db
+      .insert(ticketMerges)
+      .values({ companyId: t.companyId, ticketId, commit: opts.replaces.toLowerCase(), mergedAt: t.mergedAt ?? t.stateChangedAt, touchesRunner: t.touchesRunner, touchesRunnerUpdate: t.touchesRunnerUpdate, deploysNothing: t.deploysNothing })
+      .onConflictDoNothing({ target: [ticketMerges.ticketId, ticketMerges.commit] });
   // BOS-2653: kept among the ticket's merges here too, as a ticket already done never reaches finishMerged below.
   await recordTicketMerge(db, { companyId: t.companyId, ticketId, commit, at, files });
   const short = commit.slice(0, 12);

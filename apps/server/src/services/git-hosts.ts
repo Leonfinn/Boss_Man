@@ -192,6 +192,27 @@ const TIMEOUT_MS = 15_000;
 export const MAX_LOG_CHARS = 4_000_000;
 const MAX_LOG_DOWNLOAD = 32_000_000;
 
+/** The most workflows read one by one by quietWorkflowRuns (BOS-2664): bounds the request count. */
+const MAX_WORKFLOWS = 30;
+
+const toWorkflowRun = (r: Record<string, unknown>): WorkflowRun => {
+  const head = (r.head_commit ?? {}) as Record<string, unknown>;
+  return {
+    id: Number(r.id),
+    attempt: Number(r.run_attempt ?? 1),
+    name: String(r.name ?? r.workflow_name ?? "CI"),
+    event: String(r.event ?? ""),
+    status: String(r.status ?? ""),
+    conclusion: typeof r.conclusion === "string" ? r.conclusion : null,
+    headSha: String(r.head_sha ?? ""),
+    headMessage: typeof head.message === "string" ? head.message : "",
+    ...(typeof r.path === "string" && r.path ? { path: r.path.split("@")[0]! } : {}),
+    url: String(r.html_url ?? ""),
+    createdAt: String(r.created_at ?? ""),
+    updatedAt: String(r.updated_at ?? r.created_at ?? ""),
+  };
+};
+
 export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
   const http = opts.fetch ?? fetch;
 
@@ -519,23 +540,27 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
       const body = res.json && !Array.isArray(res.json) ? res.json : null;
       const rows = body?.workflow_runs as Array<Record<string, unknown>> | undefined;
       if (!res.ok || !Array.isArray(rows)) throw new GitHostError(res.status, `Couldn't read the workflow runs on ${branch}: ${messageOf(res.json, res.status)}`);
-      return rows.map((r) => {
-        const head = (r.head_commit ?? {}) as Record<string, unknown>;
-        return {
-          id: Number(r.id),
-          attempt: Number(r.run_attempt ?? 1),
-          name: String(r.name ?? r.workflow_name ?? "CI"),
-          event: String(r.event ?? ""),
-          status: String(r.status ?? ""),
-          conclusion: typeof r.conclusion === "string" ? r.conclusion : null,
-          headSha: String(r.head_sha ?? ""),
-          headMessage: typeof head.message === "string" ? head.message : "",
-          ...(typeof r.path === "string" && r.path ? { path: r.path.split("@")[0]! } : {}),
-          url: String(r.html_url ?? ""),
-          createdAt: String(r.created_at ?? ""),
-          updatedAt: String(r.updated_at ?? r.created_at ?? ""),
-        };
-      });
+      return rows.map(toWorkflowRun);
+    },
+
+    /**
+     * BOS-2664: each workflow's own newest runs on a branch, however long ago they ran. The branch-wide list holds
+     * only the newest runs of every workflow together, so a rare workflow (a manual Release) falls out of it. One
+     * request for the workflow list, then one per workflow (at most MAX_WORKFLOWS). Newest first within a workflow.
+     */
+    async quietWorkflowRuns(cfg: GitHostConfig, token: string, branch: string, perWorkflow = 5): Promise<WorkflowRun[]> {
+      if (cfg.kind !== "github") return [];
+      const list = await call(cfg, token, "GET", `/actions/workflows?per_page=100`);
+      const workflows = (list.json && !Array.isArray(list.json) ? list.json.workflows : null) as Array<Record<string, unknown>> | null;
+      if (!list.ok || !Array.isArray(workflows)) throw new GitHostError(list.status, `Couldn't read the workflows: ${messageOf(list.json, list.status)}`);
+      const out: WorkflowRun[] = [];
+      for (const w of workflows.filter((x) => x.state === undefined || x.state === "active").slice(0, MAX_WORKFLOWS)) {
+        const res = await call(cfg, token, "GET", `/actions/workflows/${Number(w.id)}/runs?branch=${encodeURIComponent(branch)}&per_page=${Math.max(1, Math.min(100, perWorkflow))}`);
+        const rows = (res.json && !Array.isArray(res.json) ? res.json.workflow_runs : null) as Array<Record<string, unknown>> | null;
+        if (!res.ok || !Array.isArray(rows)) throw new GitHostError(res.status, `Couldn't read the runs of workflow ${String(w.name ?? w.id)}: ${messageOf(res.json, res.status)}`);
+        out.push(...rows.map(toWorkflowRun));
+      }
+      return out;
     },
 
     /** The jobs and their steps in one Actions run, so a failure can name the job and step. */

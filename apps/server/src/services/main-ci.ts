@@ -363,7 +363,25 @@ export function mainCiService(
       return writeState(p.id, state);
     }
     fetched = fetched.sort((a, b) => b.id - a.id);
-    const runs = fetched.filter((r) => EVENTS.has(r.event));
+    let runs = fetched.filter((r) => EVENTS.has(r.event));
+    // BOS-2664: a quiet workflow (a manual Release) has no run in the pages, however many are read. When there is no mark
+    // to page back to (first pass, or a gap), each workflow's own newest finished run is read too. Not part of `fetched`:
+    // it must not pull the mark down to a run from long ago. `extra` lets those runs be read although below the mark.
+    // not state: a per-pass local.
+    const extra = new Set<number>();
+    if (state.low === undefined || !reached) {
+      try {
+        const have = new Set(runs.filter((r) => r.status === "completed").map((r) => r.name));
+        const quiet = (await deps.gitHosts.quietWorkflowRuns?.(cfg, token, p.defaultBranch)) ?? [];
+        const added = new Map<string, WorkflowRun>();
+        for (const r of quiet.sort((a, b) => b.id - a.id)) if (EVENTS.has(r.event) && r.status === "completed" && !have.has(r.name) && !added.has(r.name)) added.set(r.name, r);
+        for (const r of added.values()) extra.add(r.id);
+        runs = [...runs, ...added.values()].sort((a, b) => b.id - a.id);
+      } catch (err) {
+        // Not fatal: the pages already read still count; the next pass has a mark, so this is the last chance only on a first pass or gap.
+        deps.log?.(`main CI: couldn't read each workflow's newest run (${(err as Error).message})`);
+      }
+    }
     if (!runs.length) {
       setStatus({ state: "no_ci", detail: "No CI runs on main were found." });
       return writeState(p.id, state);
@@ -403,7 +421,7 @@ export function mainCiService(
       // cancelled or skipped) must not hide an older red one (BOS-1703, BOS-2468). A re-run (a new attempt) of a run
       // still on the pages is read again.
       const pending = runs
-        .filter((r) => r.name === workflow && r.status === "completed" && judged[r.id] !== r.attempt && (r.id > low || judged[r.id] !== undefined))
+        .filter((r) => r.name === workflow && r.status === "completed" && judged[r.id] !== r.attempt && (r.id > low || judged[r.id] !== undefined || extra.has(r.id)))
         .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt) || a.id - b.id);
       // Left in the log so the next missed run can be told apart: not polled, not finished, or read and judged.
       if (pending.length) deps.log?.(`main CI: ${workflow}: reading ${pending.map((r) => `${r.id}:${r.conclusion}`).join(", ")} (mark ${low})`);
