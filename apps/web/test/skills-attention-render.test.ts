@@ -149,9 +149,25 @@ describe.skipIf(!browser || !server)("Skills needs-attention line in a real brow
         // Take the file the browser really saves, as the other CSV render tests do (BOS-2588). This file used to
         // stub <a>.click() with a fetch of the blob URL and poll a window flag for 10 s; on a slow GitHub runner
         // the flag was never set once (run 45596753558). The download event has no page-side race and no limit of its own.
+        // The row shows as soon as the skills list arrives, but the "updates" answer comes after and re-renders it
+        // (the count changes). A click that lands between those renders can lose its mouse-up to the replaced
+        // button and never fire (run 45772597766: no download in 40 s at safari-1550, passed on re-run). So wait
+        // until the count is the settled one, then click; and if a click still produced no download in 8 s,
+        // click again until the 40 s deadline. A second click only saves a second copy of the same file.
+        await page.waitForFunction((t: string) => document.querySelector(".skills-attention-count")?.textContent === t, `${needing} need attention`, { timeout: 40_000 });
         const save = async () => {
-          const [dl] = await Promise.all([page.waitForEvent("download", { timeout: 40_000 }), page.click(".skills-attention button.btn.small")]);
-          return { name: dl.suggestedFilename(), text: readFileSync(await dl.path(), "utf8") };
+          const deadline = Date.now() + 40_000;
+          for (;;) {
+            const wait = page.waitForEvent("download", { timeout: 8_000 });
+            wait.catch(() => undefined);
+            await page.click(".skills-attention button.btn.small", { timeout: 40_000 });
+            try {
+              const dl = await wait;
+              return { name: dl.suggestedFilename(), text: readFileSync(await dl.path(), "utf8") };
+            } catch (e) {
+              if (Date.now() > deadline) throw e;
+            }
+          }
         };
         const saved = await save();
         expect(saved.name).toMatch(/^skills-\d{4}-\d{2}-\d{2}\.csv$/);
