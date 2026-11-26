@@ -123,14 +123,14 @@ describe("urgentBackwards", () => {
 });
 
 describe("planMoveWarning", () => {
-  it("names the move, the plan, and that the CEO was told", () => {
-    expect(planMoveWarning("Split it in two", "in_progress", "blocked", true)).toBe(
-      "\n\nHeads up: the CEO set a plan for this ticket that has not expired yet, and in_progress -> blocked leaves it. Split it in two The CEO has been told.",
+  it("names the move, the plan, and when the CEO's wake was sent (BOS-2737)", () => {
+    expect(planMoveWarning("Split it in two", "in_progress", "blocked", false, new Date("2026-11-26T15:30:00Z"))).toBe(
+      "\n\nHeads up: the CEO set a plan for this ticket that has not expired yet, and in_progress -> blocked leaves it. Split it in two The CEO was alerted: raised at 15:30 UTC, nobody has picked it up yet.",
     );
   });
 
   it("says nobody else was told when the mover is the CEO", () => {
-    expect(planMoveWarning("Split it in two", "ready", "backlog", false)).toBe(
+    expect(planMoveWarning("Split it in two", "ready", "backlog", true, null)).toBe(
       "\n\nHeads up: the CEO set a plan for this ticket that has not expired yet, and ready -> backlog leaves it. Split it in two You are the CEO, so nobody else was told.",
     );
   });
