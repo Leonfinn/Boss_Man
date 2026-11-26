@@ -189,7 +189,18 @@ export function windowLabel(key: string): { name: string; note?: string } {
  * has never had a sample is simply absent ("no report yet"). Synthetic readings are written per measure with
  * their own times, so the caller leaves those alone.
  */
-export function currentReportSamples<T extends { observedAt: Date }>(newestPerWindow: T[]): T[] {
-  const newest = Math.max(...newestPerWindow.map((s) => s.observedAt.getTime()));
-  return newestPerWindow.filter((s) => s.observedAt.getTime() === newest);
+export function currentReportSamples<T extends { observedAt: Date; resetsAt?: Date | null }>(newestPerWindow: T[]): T[] {
+  // A reading Boss Man wrote itself (BOS-463) is never a report: it updates its own window and does not
+  // hide the limits the account's last real report included (BOS-2670).
+  const real = newestPerWindow.filter((s) => !isMadeUpReading(s));
+  const newest = Math.max(...(real.length ? real : newestPerWindow).map((s) => s.observedAt.getTime()));
+  return newestPerWindow.filter((s) => s.observedAt.getTime() === newest || (isMadeUpReading(s) && s.observedAt.getTime() > newest));
+}
+
+/** BOS-463 marks an account full for this long after a weekly-limit refusal; the made-up reading is told apart by its exact length. */
+export const MADE_UP_READING_MS = 60 * 60_000;
+
+/** A reading Boss Man wrote itself after a weekly-limit refusal, not one the account reported. */
+export function isMadeUpReading(s: { observedAt: Date; resetsAt?: Date | null }): boolean {
+  return !!s.resetsAt && s.resetsAt.getTime() - s.observedAt.getTime() === MADE_UP_READING_MS;
 }

@@ -12,10 +12,10 @@ afterEach(() => {
 const soon = new Date(Date.now() + 36 * 3_600_000).toISOString();
 const later = new Date(Date.now() + 96 * 3_600_000).toISOString();
 
-function stubApi(forecast: Record<string, unknown>, overageInUse = false, reading?: { resetsAt: string; observedAt: string }) {
+function stubApi(forecast: Record<string, unknown>, overageInUse = false, reading?: { resetsAt: string; observedAt: string }, holdAt?: number) {
   const resetsAt = reading?.resetsAt ?? later;
   const status = {
-    source: { id: "s1", name: "Claude Max", kind: "subscription", provider: "anthropic" },
+    source: { id: "s1", name: "Claude Max", kind: "subscription", provider: "anthropic", ...(holdAt ? { quotaHoldAt: holdAt } : {}) },
     credit: null,
     quota: [{ window: "seven_day_overage_included", utilization: 0.33, resetsAt, status: null, overageInUse, observedAt: reading?.observedAt ?? new Date().toISOString() }],
     windowsSeen: ["seven_day_overage_included"],
@@ -57,6 +57,22 @@ describe("quota card wording", () => {
     const day = new Date(soon).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
     expect(screen.getByText(new RegExp(`Runs out about ${day} at `))).toBeTruthy();
     expect(screen.queryByText(/own allowance/)).toBeNull();
+  });
+
+  // BOS-2670: a projected run-out already in the past is never shown.
+  it("says 'Held since' instead of a run-out time in the past when at the hold level", async () => {
+    const past = new Date(Date.now() - 6 * 3_600_000).toISOString();
+    stubApi({ runsOutAt: past, beforeReset: true }, false, undefined, 0.3);
+    render(<FundingCards />);
+    expect(await screen.findByText(/^Held since about /)).toBeTruthy();
+    expect(screen.queryByText(/Runs out about/)).toBeNull();
+  });
+
+  it("shows no run-out line at all for a past time when below the hold level", async () => {
+    stubApi({ runsOutAt: new Date(Date.now() - 6 * 3_600_000).toISOString(), beforeReset: true });
+    render(<FundingCards />);
+    expect(await screen.findByText("Fable (this week)")).toBeTruthy();
+    expect(screen.queryByText(/Runs out about|Held since/)).toBeNull();
   });
 
   it("shows the day and date for a time later today", async () => {
