@@ -29,7 +29,7 @@ import { moveTicket } from "./services/ticket-moves.js";
 import { ceoMoveNote, ceoPlanText, IN_PROGRESS_BLOCKED_WARNING, leavesPlan, planHoldsAlerts, planMoveWarning, REVIEW_BLOCKED_REFUSAL, unexpiredPlan, urgentBackwards } from "./services/ceo-plan.js";
 import { conflictNote } from "./services/merge-line-conflicts.js";
 import { checkTicketDoneRefusal, closableChecks, holdableUnreported, longWatchNote, moveWatchToChecks, openLongWatchChecks, tiedCriteria, unreportedUntied } from "./services/after-merge-check-tickets.js";
-import { CARD_CITE_REFUSAL, hostFactRefusal, namesOutsideService, noCriteriaOutsideServiceRefusal, outsideServiceEvidenceRefusal, ownSiteHosts, pageShotRefusal, uncitedCardPasses } from "./services/host-fact-gate.js";
+import { CARD_CITE_REFUSAL, hostFactRefusal, namesOutsideService, noCriteriaOutsideServiceRefusal, outsideServiceEvidenceRefusal, ownerTextReceiptRefusal, ownSiteHosts, pageShotRefusal, uncitedCardPasses } from "./services/host-fact-gate.js";
 import { addTicketDependency, blockedHolds, openBlockers, openCardIds, openOwnerOnlyCard } from "./services/ticket-links.js";
 import { noteBlockedPark, refusalForNamedAgent, refusalForNamedTicket } from "./services/blocked-who-acts.js";
 import { githubOnlyMarkWarning } from "./services/line-holder.js";
@@ -874,6 +874,11 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         // BOS-2142: the same for a note that names only another ticket, on unmerged and merged-watch work alike.
         const namedTicket = await refusalForNamedTicket(db, { companyId: scope.companyId, ticketId, text: `${summary ?? ""}\n${blocked_reason ?? ""}`, holds: blockedNow });
         if (namedTicket) return fail(namedTicket);
+      }
+      // BOS-2741 (R2): the state note is owner-facing text; a receipt as the result is held (a Blocked note may say it is waiting).
+      if (summary) {
+        const receiptHold = ownerTextReceiptRefusal(summary, { allowReceipt: state === "blocked" });
+        if (receiptHold) return fail(receiptHold);
       }
       // BOS-1576: a note that says the ticket waits on the owner needs a card in their queue, in any state.
       if (state !== "done" && waitsOnOwnerNote(summary) && !(await ticketHasOpenCard(db, ticketId))) return fail(OWNER_WAIT_REFUSAL);

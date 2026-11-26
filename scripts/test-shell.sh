@@ -33,9 +33,11 @@ for t in "${tests[@]}"; do
   if [ "$rc" -ne 0 ]; then
     echo "test-shell: FAILED $t (exit $rc)" >&2
     # On GitHub the step log needs a sign-in, but an annotation shows on the public job page: put the test name and the last lines there.
+    # file= makes GitHub record the test as the annotation's path (BOS-2758): without it the path is ".github", the merge gate
+    # reads the failure as naming no test file, and a one-off failure in a test the branch doesn't touch is never re-run.
     if [ -n "${GITHUB_ACTIONS:-}" ]; then
       tail_text=$(tail -n 15 "$out" | cut -c1-300 | sed -e 's/%/%25/g' -e ':a;N;$!ba;s/\n/%0A/g' -e 's/\r//g')
-      echo "::error title=test-shell FAILED $t (exit $rc)::$tail_text"
+      echo "::error file=$t,title=test-shell FAILED $t (exit $rc)::$tail_text"
     fi
     exit "$rc"
   fi
