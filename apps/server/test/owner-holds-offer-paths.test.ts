@@ -4,6 +4,7 @@
 // way it respects the hold (and the hold check is really there).
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { pickupWords } from "../src/services/owner-holds.js";
 
 const src = readFileSync(new URL("../src/services/self-deploy.ts", import.meta.url), "utf8");
 const lines = src.split("\n");
@@ -68,5 +69,48 @@ describe("every update offer path asks the owner hold (DR-076 A)", () => {
     expect(body("releaseHeldServer")).toMatch(/heldFor\(db, "server_deploy"[\s\S]*writeRequest\(/);
     expect(body("releaseRunnerDue")).toMatch(/runnerBlocker\(a\)\) return;[\s\S]*writeRequest\(/);
     expect(body("updateRunners")).toMatch(/runnerBlocker\(a\)[\s\S]*raiseRunner\(/);
+  });
+});
+
+// BOS-2609: who is diagnosing a held update, said only once their run has started. A card keeps its words once
+// raised, so `live` false gets the form that stays true (ticket and agent, no claim that work is under way).
+describe("pickupWords: who is diagnosing the failure", () => {
+  const at = (hhmm: string) => new Date(`2026-11-26T${hhmm}:00Z`);
+  const pickup = (over: Partial<{ ticketId: string | null; ref: string | null; agent: string | null; startedAt: Date | null; wokenAt: Date | null }> = {}) => ({
+    ticketId: "6f1c2b3a-0000-4000-8000-000000000019",
+    ref: "APP-19",
+    agent: "Nova",
+    startedAt: null,
+    wokenAt: null,
+    ...over,
+  });
+
+  it("says nobody is assigned, with and without a woken time", () => {
+    expect(pickupWords(pickup({ ticketId: null, ref: null, agent: null }))).toBe(
+      "Not picked up yet: nobody is assigned to diagnose it.",
+    );
+    expect(pickupWords(pickup({ ticketId: null, ref: null, agent: null, wokenAt: at("09:05") }))).toBe(
+      "Not picked up yet: nobody is assigned to diagnose it; the CEO was woken at 09:05 UTC.",
+    );
+  });
+
+  it("uses the card form, which stays true, when not read live", () => {
+    expect(pickupWords(pickup({ startedAt: at("09:05") }), false)).toBe("The diagnosis is APP-19, assigned to Nova.");
+    expect(pickupWords(pickup({ startedAt: at("09:05") }), false)).not.toMatch(/being looked into/i);
+  });
+
+  it("says it is being looked into only once a run has started, with the time in UTC", () => {
+    expect(pickupWords(pickup({ startedAt: at("09:05") }))).toBe(
+      "Being looked into by Nova on APP-19 (started 09:05 UTC).",
+    );
+  });
+
+  it("says assigned but not picked up, with and without a woken time, and never claims work is under way", () => {
+    const plain = pickupWords(pickup());
+    expect(plain).toBe("Not picked up yet: Nova assigned (APP-19).");
+    expect(plain).not.toMatch(/being looked into/i);
+    const woken = pickupWords(pickup({ wokenAt: at("09:05") }));
+    expect(woken).toBe("Not picked up yet: Nova woken at 09:05 UTC (APP-19).");
+    expect(woken).not.toMatch(/being looked into/i);
   });
 });
