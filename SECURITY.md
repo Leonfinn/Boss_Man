@@ -17,4 +17,4 @@ Please do not open a public GitHub issue for a security problem. Other people's 
 
 ## Which versions we fix
 
-Boss Man is in alpha. We fix the latest version on the `main` branch only. Update to it before you report, if you can.
+Boss Man is in beta. We fix the latest version on the `main` branch only. Update to it before you report, if you can.

@@ -8,7 +8,7 @@ order: 15
 lead: You may have read the stories about AI agents that ran up a $47,000 bill, deleted a production database or claimed to have written tests that did not exist. This page takes the stories people have published and says, for each one, what Boss Man does about it, and where it does nothing yet.
 ---
 
-Each answer was checked against Boss Man's code on 21 November 2026. Boss Man is in alpha and changes often, so if something here looks out of date, [tell us on GitHub](@repo/issues).
+Each answer was checked against Boss Man's code on 21 November 2026. Boss Man is in beta and changes often, so if something here looks out of date, [tell us on GitHub](@repo/issues).
 
 ## At a glance
 

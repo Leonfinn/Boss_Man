@@ -81,7 +81,7 @@ Boss Man was inspired by Paperclip and written from scratch. It does not depend 
 
 ## Is it ready to use?
 
-It is in alpha. Boss Man's own agents build Boss Man, and some parts are still rough. Keep it off the open internet.
+It is in beta. Boss Man's own agents build Boss Man, and some parts are still rough. Install from the ready-made images on the releases page, or build from source. Keep it off the open internet.
 
 ## Where do I ask for help?
 
