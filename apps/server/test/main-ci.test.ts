@@ -55,7 +55,7 @@ async function setup(opts: { token?: string | undefined; github?: boolean } = {}
   const [ceo] = await db.select().from(agents).where(and(eq(agents.companyId, company.id), eq(agents.role, "ceo")));
 
   // A fake GitHub: the runs, jobs and logs the test sets.
-  const gh = { runs: [] as WorkflowRun[], jobs: {} as Record<number, WorkflowJob[]>, log: "", logError: null as Error | null, runsError: null as Error | null, calls: 0, compare: {} as Record<string, CompareDetail>, tree: null as string[] | null };
+  const gh = { runs: [] as WorkflowRun[], jobs: {} as Record<number, WorkflowJob[]>, log: "", logError: null as Error | null, runsError: null as Error | null, quiet: [] as WorkflowRun[], calls: 0, compare: {} as Record<string, CompareDetail>, tree: null as string[] | null };
   const gitHosts = {
     // Keyed "from...to"; an unset pair answers like a token without Contents read.
     compareDetail: async (_c: unknown, _t: unknown, from: string, to: string) => {
@@ -69,6 +69,8 @@ async function setup(opts: { token?: string | undefined; github?: boolean } = {}
       if (gh.runsError) throw gh.runsError;
       return gh.runs.slice((page - 1) * limit, page * limit);
     },
+    // BOS-2664: each workflow's own newest runs, whatever the branch-wide pages hold.
+    quietWorkflowRuns: async () => gh.quiet,
     runJobs: async (_c: unknown, _t: unknown, id: number) => gh.jobs[id] ?? [],
     jobLog: async () => {
       if (gh.logError) throw gh.logError;
@@ -500,6 +502,24 @@ describe("the main-CI watcher", () => {
     const made = await c.failingTickets();
     expect(made).toHaveLength(1);
     expect(made[0]!.body).toContain("actions/runs/1001");
+  });
+
+  it("reads a quiet workflow's newest run even when it is older than every page, once, without duplicates (BOS-2664)", async () => {
+    ctx = await setup();
+    const c = ctx;
+    // 150 green CI runs on main; the manual Release failed long before them, so no page holds it.
+    for (let id = 1000; id <= 1149; id++) c.gh.runs.unshift(run(id, "success", sha("c")));
+    const release = run(50, "failure", sha("b"), { name: "Release", event: "workflow_dispatch" });
+    c.gh.quiet = [release, run(1149, "success", sha("c"))];
+    c.gh.jobs[50] = [job("publish", [["Set up", "success"], ["Push images", "failure"]])];
+    await c.service.run();
+    const made = await c.failingTickets();
+    expect(made).toHaveLength(1);
+    expect(made[0]!.title).toContain("Release");
+    expect(made[0]!.body).toContain("actions/runs/50");
+    // A second pass reads nothing new and opens nothing more.
+    await c.service.run();
+    expect(await c.failingTickets()).toHaveLength(1);
   });
 
   it("records why runs weren't read when more ran between two passes than it pages back through (BOS-2468)", async () => {
