@@ -1556,12 +1556,16 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
                                   const shotFor = d.options.filter((o) => optionNeedsAttachment(o, d.context?.attachOptions));
                                   const attachable = shotFor.length > 0 || d.context?.type === "owner_todo";
                                   if (!noted && !attachable) return null;
-                                  const base = d.options.includes("Edit") && d.options.includes("Add") ? "Your one-line reason, or the corrected lesson (needed for Edit)" : d.context?.type === "owner_todo" ? "What went wrong (if a step failed)" : noted ? `Note for ${d.context?.type === "risk_review" ? (d.context.builder ?? "the builder") : agentOf(d)}, sent with "${d.options.find((o) => o === "Keep planning" || o === "Send it back")}"` : null;
+                                  const hasBase = noted || d.context?.type === "owner_todo";
                                   const shotLine = shotFor.length ? `Screenshot for "${shotFor.join('" or "')}": paste it here or use Attach file.` : attachable ? "Paste a screenshot here or use Attach file." : null;
                                   const mine = attachedTo(d.id);
                                   return (
                                     <div className="field" data-testid={attachable ? "card-attach" : undefined}>
-                                      <label htmlFor={`note-${d.id}`}>{shotLine && base ? `${base}. ${shotLine}` : base ?? shotLine}</label>
+                                      {/* The wording stays inline in the label: the owner-controls list guard reads field labels from here. */}
+                                      <label htmlFor={`note-${d.id}`}>
+                                        {d.options.includes("Edit") && d.options.includes("Add") ? "Your one-line reason, or the corrected lesson (needed for Edit)" : d.context?.type === "owner_todo" ? "What went wrong (if a step failed)" : noted ? `Note for ${d.context?.type === "risk_review" ? (d.context.builder ?? "the builder") : agentOf(d)}, sent with "${d.options.find((o) => o === "Keep planning" || o === "Send it back")}"` : null}
+                                        {hasBase && shotLine ? `. ${shotLine}` : shotLine}
+                                      </label>
                                       <DraftTextarea
                                         draftKey={draftNote(d.id)}
                                         id={`note-${d.id}`}
