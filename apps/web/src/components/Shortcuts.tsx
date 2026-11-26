@@ -3,22 +3,10 @@
 // Mounted once in App.tsx beside the search box. Ctrl/Cmd+K itself stays the search box's own listener;
 // this only lists it.
 import { useEffect, useRef, useState } from "react";
+import { G_WINDOW_MS, HELP_KEY, JUMPS, JUMP_PREFIX, cardActionFor, screenKeys } from "../shortcut-list";
 
-/** How long after "g" the second letter still counts. */
-export const G_WINDOW_MS = 1500;
-
-/** "g" + letter → the route the sidebar's link for that screen opens. "b" is worked out at press time. */
-export const JUMPS: Array<{ key: string; label: string; to: string }> = [
-  { key: "d", label: "Dashboard", to: "dashboard" },
-  { key: "b", label: "Board", to: "board" },
-  { key: "c", label: "Chat", to: "chat" },
-  { key: "i", label: "Decisions", to: "decisions" },
-  { key: "n", label: "Notifications", to: "notifications" },
-  { key: "r", label: "Runs", to: "runs" },
-  { key: "w", label: "Wiki", to: "wiki" },
-  { key: "f", label: "Features", to: "features" },
-  { key: "s", label: "Settings", to: "settings" },
-];
+// The keys themselves live in ../shortcut-list.ts (BOS-2687); re-exported so existing imports keep working.
+export { G_WINDOW_MS, JUMPS, screenKeys };
 
 const isMac = () => typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 
@@ -36,30 +24,6 @@ function busyElsewhere(target: EventTarget | null): boolean {
  * Board lanes are sections in order with their cards inside, so document order is down a lane, then the next.
  */
 export const CARD_SELECTOR = "[data-shortcut-card]";
-
-/** The current screen's own keys for the "?" list, or null on a screen without any. */
-export function screenKeys(hash: string): { title: string; rows: Array<{ keys: string[]; what: string }> } | null {
-  const on = /^#\/board(\/|$)/.test(hash)
-    ? "Board"
-    : /^#\/decisions(\/|$)/.test(hash)
-      ? "Decisions"
-      : /^#\/runs\/?(\?|$)/.test(hash)
-        ? "Runs"
-        : /^#\/features(\/[^/?]+)?\/?(\?|$)/.test(hash)
-          ? "Features"
-          : null;
-  if (!on) return null;
-  const list = on === "Runs" || on === "Features";
-  const noun = on === "Runs" ? "run" : "feature";
-  return {
-    title: `On ${on === "Board" ? "the Board" : on}`,
-    rows: [
-      { keys: ["j"], what: on === "Board" ? "Next card (down the lane, then the next lane)" : list ? "Next row" : "Next card" },
-      { keys: ["k"], what: list ? "Previous row" : "Previous card" },
-      { keys: ["Enter"], what: on === "Board" ? "Open the card's task" : list ? `Open the ${noun}'s page` : "Go to the card's answer buttons" },
-    ],
-  };
-}
 
 /** Moves focus to the next (+1) or previous (-1) card. False when the screen has no cards. */
 function moveCard(step: 1 | -1): boolean {
@@ -118,7 +82,7 @@ export function Shortcuts({ go, hasProjects }: { go: (to: string) => void; hasPr
         gAt.current = 0;
         return;
       }
-      if (e.key === "?") {
+      if (e.key === HELP_KEY) {
         e.preventDefault();
         gAt.current = 0;
         back.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -142,15 +106,16 @@ export function Shortcuts({ go, hasProjects }: { go: (to: string) => void; hasPr
           return;
         }
       }
-      if (key === "g") {
+      if (key === JUMP_PREFIX) {
         gAt.current = Date.now();
         return;
       }
-      if (e.key === "j" || e.key === "k") {
-        if (moveCard(e.key === "j" ? 1 : -1)) e.preventDefault();
+      const action = cardActionFor(e.key);
+      if (action === "next" || action === "prev") {
+        if (moveCard(action === "next" ? 1 : -1)) e.preventDefault();
         return;
       }
-      if (e.key === "Enter" && openCard()) e.preventDefault();
+      if (action === "open" && openCard()) e.preventDefault();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -189,12 +154,12 @@ export function Shortcuts({ go, hasProjects }: { go: (to: string) => void; hasPr
             <dd>Search tickets, wiki, chats, features, decisions, runs, agents, skills and feedback</dd>
           </div>
           <div className="shortcuts-row">
-            <dt><kbd>?</kbd></dt>
+            <dt><kbd>{HELP_KEY}</kbd></dt>
             <dd>Show this list</dd>
           </div>
           {JUMPS.map((j) => (
             <div key={j.key} className="shortcuts-row">
-              <dt><kbd>g</kbd> then <kbd>{j.key}</kbd></dt>
+              <dt><kbd>{JUMP_PREFIX}</kbd> then <kbd>{j.key}</kbd></dt>
               <dd>Go to {j.key === "b" ? "the Board (or Projects if there is none)" : j.label}</dd>
             </div>
           ))}
