@@ -19,6 +19,8 @@
 #   publish-images.sh version-commit <version>
 #                                              the commit whose images already carry <version> (their revision label), or
 #                                              nothing when no image has it; fails when the images disagree
+#   publish-images.sh workflows-match <commit> fails when the commit's .github/workflows differ from origin/main's
+#                                              (GitHub refuses a release there with the Actions token)
 #
 # Settings come from the environment (GitHub: repository variables and secrets), never from this file:
 #   IMAGE_PREFIXES      space or comma separated <registry>/<namespace> list, e.g. "ghcr.io/me docker.io/me".
@@ -134,6 +136,17 @@ cmd_resolve_commit() {
   echo "$full"
 }
 
+cmd_workflows_match() {
+  # <commit>: fails, naming the files, when the commit's .github/workflows/ differ from origin/main's. GitHub's "Create a
+  # release" refuses such a target with the Actions token (HTTP 403 "Resource not accessible by integration", REST docs:
+  # the token must be allowed to modify workflows, and GITHUB_TOKEN never is). BOS-2602: runs #3/#4 tagged c94ebeb3's
+  # images, then step 13 hit exactly that 403, leaving a version half-made. Checked before anything is tagged.
+  local commit="${1:?commit}" files
+  git rev-parse --verify -q origin/main >/dev/null || die "origin/main is not available to compare commit $commit's workflow files with."
+  files="$(git diff --name-only "$commit" origin/main -- .github/workflows/)"
+  [ -z "$files" ] || die "commit $commit has different workflow files from main ($(echo "$files" | tr '\n' ' ')). GitHub will not let this workflow create a release there (HTTP 403). Leave the commit box blank, or type a newer main commit whose workflow files match main's; if this version is already on that commit's images, pick a new version."
+}
+
 cmd_version_commit() {
   # <version>: the commit whose images already carry the version tag in the first registry, read from the
   # org.opencontainers.image.revision label publish.yml puts on every image. Prints nothing when no image has the tag
@@ -203,5 +216,6 @@ case "${1:-}" in
   release-json) shift; cmd_release_json "$@" ;;
   resolve-commit) shift; cmd_resolve_commit "$@" ;;
   version-commit) shift; cmd_version_commit "$@" ;;
-  *) sed -n '2,30p' "$0" >&2; exit 2 ;;
+  workflows-match) shift; cmd_workflows_match "$@" ;;
+  *) sed -n '2,32p' "$0" >&2; exit 2 ;;
 esac

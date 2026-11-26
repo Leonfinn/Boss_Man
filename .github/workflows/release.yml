@@ -90,6 +90,7 @@ jobs:
           # c94ebeb3's images. Blank meant main's newest commit, so the next step refused, in the log only (agents can't
           # read it). After the registry login, so private images can be read: a blank box now takes the commit the
           # version's images were built from (their revision label). A new version has no such images: main's newest.
+          # That commit still has to pass workflows-match below, or the run stops with a readable reason.
           if ! held="$(scripts/publish-images.sh version-commit "$VERSION" 2> "$RUNNER_TEMP/err")"; then
             echo "::error title=Can't tell which commit $VERSION is on::$(tr '\n' ' ' < "$RUNNER_TEMP/err" | cut -c1-400)"; exit 1
           fi
@@ -101,6 +102,11 @@ jobs:
           # Refuses a commit that is not 40 hex or not on main, before anything is tagged.
           if ! SHA="$(scripts/publish-images.sh resolve-commit "$input" "$GITHUB_SHA" 2> "$RUNNER_TEMP/err")"; then
             echo "::error title=Commit refused::$(tr '\n' ' ' < "$RUNNER_TEMP/err" | cut -c1-400)"; exit 1
+          fi
+          # Before anything is tagged: GitHub refuses the release (HTTP 403) on a commit whose workflow files differ from
+          # main's, which left 0.1.0-beta.2 half-made on c94ebeb3 (runs #3 and #4).
+          if ! scripts/publish-images.sh workflows-match "$SHA" 2> "$RUNNER_TEMP/err"; then
+            echo "::error title=Commit can't be released by this workflow::$(tr '\n' ' ' < "$RUNNER_TEMP/err" | cut -c1-600)"; exit 1
           fi
           echo "Releasing commit $SHA"
           {

@@ -119,6 +119,23 @@ grep -q "40-character" "$S/err" || fail "the refusal must say 40 characters"
 if rc "$(printf 'A%.0s' {1..40})" "$HEAD_SHA" 2>/dev/null; then fail "non-hex-lowercase must be refused"; fi
 if rc "$(printf '0%.0s' {1..40})" "$HEAD_SHA" 2>"$S/err"; then fail "an unknown commit must be refused"; fi
 grep -q "not in this repository" "$S/err" || fail "the refusal must say the commit is unknown"
+# workflows-match (BOS-2602): GitHub refuses a release (403) on a commit whose workflow files differ from main's.
+W="$S/wrepo"; mkdir -p "$W/.github/workflows" "$W/apps"
+git_w() { git -C "$W" -c user.name=t -c user.email=t@example.com "$@"; }
+git_w init -q -b main; echo one >"$W/.github/workflows/release.yml"; git_w add -A; git_w commit -q -m one; WOLD=$(git_w rev-parse HEAD)
+echo code >"$W/apps/x"; git_w add -A; git_w commit -q -m code-only; WSAME=$(git_w rev-parse HEAD)
+echo two >"$W/.github/workflows/release.yml"; git_w add -A; git_w commit -q -m workflow; WHEAD=$(git_w rev-parse HEAD)
+git_w update-ref refs/remotes/origin/main "$WHEAD"
+wm() { (cd "$W" && env -i PATH="$PATH" "$OLDPWD/$P" workflows-match "$@"); }
+wm "$WHEAD" || fail "main's head must pass workflows-match"
+if wm "$WOLD" 2>"$S/err"; then fail "a commit with older workflow files must be refused before anything is tagged"; fi
+grep -q "release.yml" "$S/err" || fail "the refusal must name the differing workflow file"
+grep -q "403" "$S/err" || fail "the refusal must say GitHub would answer 403"
+if wm "$WSAME" 2>/dev/null; then fail "a code-only commit is still behind main's workflow change and must be refused"; fi
+git_w update-ref refs/remotes/origin/main "$WSAME"
+wm "$WOLD" || fail "an older commit whose workflow files match main's must pass"
+grep -qF "workflows-match \"\$SHA\"" .github/workflows/release.yml || fail "release.yml must check workflows-match on the commit it releases"
+awk '/workflows-match "\$SHA"/{w=NR} /imagetools create -t/{if(!c)c=NR} END{exit !(w && c && w < c)}' .github/workflows/release.yml || fail "release.yml must check workflows-match before it tags anything"
 # version-commit (BOS-2602): the commit whose images already carry a version, from their revision label.
 C1=$(printf 'c%.0s' {1..40}); C2=$(printf 'd%.0s' {1..40})
 vc() { run IMAGE_PREFIXES="ghcr.io/vc" $P version-commit "$@"; }
