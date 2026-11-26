@@ -201,6 +201,26 @@ describe("subscription quota from the Claude adapter", () => {
     expect(dropped.windowsSeen).toEqual(["seven_day"]);
   });
 
+  // BOS-2676: a read-only readout of the newest stored reports per Claude account, for server_status.
+  it("reads out each Claude account's newest reports and flags a row Boss Man wrote itself", async () => {
+    const future = Math.floor(Date.now() / 1000) + 3 * 86_400;
+    const report = (windows: Record<string, number>) => ({ "_claude/rateLimit": { unifiedWindows: Object.fromEntries(Object.entries(windows).map(([k, u]) => [k, { utilization: u, resetsAt: future }])) } });
+    const a = (await post("/api/funding-sources", { name: "Account A", kind: "subscription", provider: "anthropic" })).json();
+    await post("/api/funding-sources", { name: "Other", kind: "subscription", provider: "codex" });
+    await post("/api/quota-samples", { fundingSourceId: a.id, claudeMeta: report({ seven_day: 0.5, seven_day_overage_included: 0.4 }) });
+    await t.db.update(quotaSamples).set({ observedAt: new Date(Date.now() - 3_600_000) }).where(eq(quotaSamples.fundingSourceId, a.id));
+    await post("/api/quota-samples", { fundingSourceId: a.id, claudeMeta: report({ seven_day: 0.9 }) });
+    const written = new Date();
+    await t.db.insert(quotaSamples).values({ fundingSourceId: a.id, window: "seven_day", utilization: 1, status: "rejected", resetsAt: new Date(written.getTime() + 3_600_000), observedAt: written });
+    const out = await t.funding.claudeQuotaReports();
+    expect(out.map((s) => s.name)).toEqual(["Account A"]);
+    const reports = out[0]!.reports;
+    expect(reports).toHaveLength(3);
+    expect(reports[0]!.windows).toEqual([expect.objectContaining({ window: "seven_day", bossManWritten: true })]);
+    expect(reports[1]!.windows.map((w) => [w.window, w.bossManWritten])).toEqual([["seven_day", false]]);
+    expect(reports[2]!.windows.map((w) => w.window)).toEqual(["seven_day", "seven_day_overage_included"]);
+  });
+
   it("keeps the hold threshold, extra-usage choice and window switches per source", async () => {
     const sub = (await post("/api/funding-sources", { name: "Claude Max", kind: "subscription", provider: "anthropic" })).json();
     await post("/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: { "_claude/rateLimit": { unifiedWindows: { seven_day: { utilization: 0.9, resetsAt: 1792245600 }, five_hour: { utilization: 0.2, resetsAt: 1792177800 } } } } });

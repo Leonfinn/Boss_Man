@@ -713,6 +713,7 @@ export async function buildApp(opts: AppOptions) {
     permissions: (companyId: string) => permLog.summary(companyId),
     // Synthetic's cached quota, for the CEO's server_status in chat and runs (BOS-239).
     syntheticUsage: (companyId: string) => funding.syntheticUsage(companyId),
+    claudeQuota: () => funding.claudeQuotaReports(),
     addons: addonFacts,
     hostFacts: () => hostFacts.sync(),
     commit: process.env.BOSSMAN_COMMIT || "dev",

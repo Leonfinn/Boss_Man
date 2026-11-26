@@ -729,6 +729,37 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
     },
 
     /**
+     * A read-only readout of each Claude subscription's stored quota reports for server_status (BOS-2676): the
+     * newest `batches` reports (rows sharing one observedAt), each with its windows, so an agent can see whether
+     * a limit such as Fable is still reported, and whether reports alternate between window sets. A row Boss Man
+     * wrote itself on a weekly-limit stop (seven_day, 100%, rejected, resetting exactly an hour after it was
+     * observed) is flagged bossManWritten; every other row came from a real Claude report.
+     */
+    async claudeQuotaReports(batches = 12) {
+      const sources = await db.select().from(fundingSources).where(and(eq(fundingSources.kind, "subscription"), eq(fundingSources.provider, "anthropic"))).orderBy(fundingSources.name);
+      const out = [];
+      for (const source of sources) {
+        const rows = await db.select().from(quotaSamples).where(eq(quotaSamples.fundingSourceId, source.id)).orderBy(desc(quotaSamples.observedAt)).limit(batches * 6);
+        const byTime = new Map<number, typeof rows>();
+        for (const r of rows) byTime.set(r.observedAt.getTime(), [...(byTime.get(r.observedAt.getTime()) ?? []), r]);
+        const reports = [...byTime.entries()].slice(0, batches).map(([at, list]) => ({
+          observedAt: new Date(at).toISOString(),
+          windows: list
+            .map((r) => ({
+              window: r.window,
+              utilization: r.utilization,
+              resetsAt: r.resetsAt?.toISOString() ?? null,
+              status: r.status,
+              bossManWritten: r.window === "seven_day" && r.utilization === 1 && r.status === "rejected" && r.resetsAt != null && r.resetsAt.getTime() - at === 3_600_000,
+            }))
+            .sort((a, b) => a.window.localeCompare(b.window)),
+        }));
+        out.push({ fundingSourceId: source.id, name: source.name, reports });
+      }
+      return out;
+    },
+
+    /**
      * What the CEO sees: every Synthetic source's reading, its age, history and warnings had (BOS-239).
      * The reading is the owner's own plan, so every company's CEO may see it; but agent names are
      * company-scoped (BOS-224): only the calling company's agents are named, and agents another
