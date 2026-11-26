@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { checkAsk } from "../src/services/decisions.js";
 import { hasWalkingSettingsPath, walkingMenuRoot } from "../src/services/owner-screens.js";
@@ -90,6 +92,13 @@ describe("R8: the screen a step sends the owner to", () => {
   it("still refuses a bare review kind straight under Settings, and Security's email field under Reviews' neighbour", () => {
     expect(r8(["Open Settings → Security and pick an agent."])[0]?.problem).toContain("Server and runner");
     expect(r8(["Open Settings → Server and runner → Reviews → Security review."])[0]?.problem).toContain("Settings → Reviews");
+  });
+
+  it("keeps skills propose's 'no Security Reviewer' text on a path the step check accepts", () => {
+    const src = readFileSync(join(import.meta.dirname, "../src/services/skill-proposals.ts"), "utf8");
+    const path = /name one in (Settings [^,]*?),/.exec(src)?.[1];
+    expect(path).toBe("Settings → Reviews → Security review");
+    expect(r8([`Open ${path} and pick an agent.`])).toEqual([]);
   });
 
   it("names the screen the path reaches when R7 refuses a button", () => {
