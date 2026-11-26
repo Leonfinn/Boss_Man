@@ -38,6 +38,7 @@ function answer(p: string): unknown {
   if (p === "/api/kill-switch") return { paused: false };
   if (p === "/api/maintenance") return { on: false, last: null };
   if (p === "/api/runner-report") return { live: [], update: null };
+  if (p === "/api/release-watch") return { active: false };
   if (p === "/api/self-deploy") return { enabled: false };
   if (p === "/api/run-limits") return { instance: 8, company: 4, background: 2, defaults: { instance: 8, company: 4, background: 2 } };
   if (p === "/api/settings/check-queue") return { mode: "legacy", slots: 1, maxSlots: 4, defaultSlots: 1, runnersTooOld: [] };

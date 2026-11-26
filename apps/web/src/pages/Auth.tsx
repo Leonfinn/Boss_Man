@@ -15,6 +15,9 @@ export function Auth({ firstRun, onDone }: { firstRun: boolean; onDone: (usernam
     setError(null);
     try {
       const res = await api<{ username: string }>(firstRun ? "/api/setup" : "/api/login", { method: "POST", body: { username, password } });
+      // The password is no longer needed, and the form can stay on screen while the app re-reads the
+      // session (BOS-2689), so it isn't left holding a password and a full box blocks the resubmit.
+      setPassword("");
       onDone(res.username);
     } catch (err) {
       const status = err instanceof ApiError ? err.status : 0;

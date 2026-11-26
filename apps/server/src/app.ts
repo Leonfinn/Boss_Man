@@ -49,12 +49,14 @@ import { serverHealthService, type ServerHealth, type ServerHealthDeps } from ".
 import { createPermissionLog } from "./services/permission-log.js";
 import { permissionStore } from "./services/permission-store.js";
 import { selfDeployService } from "./services/self-deploy.js";
+import { releaseWatchService } from "./services/release-watch.js";
 import { deployWaitService } from "./services/deploy-wait.js";
 import { readUpdateChain } from "./services/update-chain.js";
 import { hostFactsService, OWNER_FACTS } from "./services/host-facts.js";
 import { gitTokenActionsProbe } from "./services/owner-record.js";
 import { netguardAllowReport } from "./services/netguard-allow.js";
 import { deviceProfilesService } from "./services/device-profiles.js";
+import { ownerPreferencesService } from "./services/owner-preferences.js";
 import { releaseLogService } from "./services/release-log.js";
 import { ownerSetupFacts } from "./services/owner-setup-check.js";
 import { closeStallAlertForRun, sweepService, type SweepLimits } from "./services/sweeps.js";
@@ -153,7 +155,7 @@ import { spendReportRoutes } from "./routes/spend-report.js";
 import { featureRoutes } from "./routes/features.js";
 import { DateStr, companyExists, objectiveRoutes, roadmapRoutes } from "./routes/roadmap.js";
 import { searchRoutes } from "./routes/search.js";
-import { deviceRoutes, notificationRoutes, notificationSettingsRoutes, ntfySetupSaver, phoneApproveRoutes } from "./routes/devices-notifications.js";
+import { deviceRoutes, notificationRoutes, notificationSettingsRoutes, ntfySetupSaver, phoneApproveRoutes, preferenceRoutes } from "./routes/devices-notifications.js";
 import { agentRunsRoutes } from "./routes/agents-runs.js";
 import { ticketRecordRoutes } from "./routes/ticket-record.js";
 import { createMemorySampler, readRssAndPeak } from "./services/memory-sampler.js";
@@ -475,6 +477,7 @@ export async function buildApp(opts: AppOptions) {
   // BOS-2336: Boss Man's own owner cards (raiseOwnerTodo) are checked against this host's reported facts before they go out.
   setOwnerTodoFacts(() => ownerSetupFacts(hostFacts));
   const deviceProfiles = deviceProfilesService(db);
+  const ownerPreferences = ownerPreferencesService(db);
   const selfDeploy = selfDeployService(db, { dir: opts.deployerDir, notify: (n) => notes.notify(n), releaseLog, hosts: () => hostFacts.hosts(), deployerScript: () => hostFacts.deployerScript(), facts: async () => Object.fromEntries(Object.entries((await hostFacts.sync()).facts).map(([k, f]) => [k, f.value])), log: (m) => app.log.warn(m),
     // BOS-1648: the CEO is woken once when Boss Man can't tell whether a runner update is needed.
     wake: (agentId, input) => scheduler.notify(agentId, input),
@@ -1535,6 +1538,11 @@ export async function buildApp(opts: AppOptions) {
   // Runners may come back later than 60 s after an update, so tickets skipped for want of one are retried every 2 minutes for 30 minutes.
   const stopPreflightRecover = ciPreflight.recoverRepeatedly({ firstMs: 60_000, everyMs: 120_000, forMs: 30 * 60_000 });
   app.addHook("onClose", async () => stopPreflightRecover());
+  // BOS-2663: an install from the published images looks for a newer release at least daily and tells the owner once per version.
+  // Without the three BOSSMAN_ values the updater hands each server colour (a source install), the service is off and offers nothing.
+  const releaseWatch = releaseWatchService(db, { fetch: opts.fetch, now: opts.now, notify: (n) => notes.notify(n), hasNtfy: async () => !!(await notes.getSettings()).ntfy, isLeader: () => leader.isLeader(), log: (m) => app.log.warn(m) });
+  const stopReleaseWatch = releaseWatch.start();
+  app.addHook("onClose", async () => stopReleaseWatch());
   // BOS-1749: bossman-ci/* branches the gate's own cleanup missed (a restart mid-check, a refused delete) are deleted from GitHub.
   // First sweep 5 minutes after start (so old leftovers go without anyone asking), then every 30 minutes; branches under 6 hours old stay.
   const sweepCi = () => void review.sweepCiBranches().catch(() => undefined);
@@ -1756,6 +1764,9 @@ export async function buildApp(opts: AppOptions) {
 
     // Device profiles (BOS-641): the owner's browsers report their measured screens.
     deviceRoutes(owner, { deviceProfiles, currentOwnerId });
+
+    // The owner's per-login preferences (BOS-2689, shared with BOS-2669): they follow the login.
+    preferenceRoutes(owner, { ownerPreferences, currentOwnerId });
 
     // Companies: creating one always creates its CEO (R18).
     const CompanyInput = z.object({
@@ -2779,7 +2790,7 @@ export async function buildApp(opts: AppOptions) {
     });
 
     // Scheduling and kill switches, the runner update hold, self-deploy, restart and deploy targets (R30, R14, R15).
-    serverAdminRoutes(owner, { db, scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun: (runId) => runsSvc.cancel(runId), activeWaits: () => currentUpdateWaits() });
+    serverAdminRoutes(owner, { db, scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun: (runId) => runsSvc.cancel(runId), activeWaits: () => currentUpdateWaits(), releaseWatch });
 
     // The decision queue (R20), ranked, with what each row holds up.
     owner.get("/api/decisions", async () => decisionsSvc.queue());

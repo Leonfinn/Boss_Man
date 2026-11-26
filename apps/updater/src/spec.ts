@@ -40,7 +40,9 @@ export function colourSpec(cfg: SwapReady, p: ColourParams) {
   return {
     Image: p.image,
     Hostname: name,
-    Env: [...cfg.swap.serverEnv, `BOSSMAN_COLOUR=${p.colour}`, `BOSSMAN_ROLE=${p.role}`],
+    // BOS-2663: the server learns it is an image install, which repository its releases come from and which release it is, so it can
+    // look for a newer one by itself. A source install is not started by the updater, so it never gets these three.
+    Env: [...cfg.swap.serverEnv, `BOSSMAN_COLOUR=${p.colour}`, `BOSSMAN_ROLE=${p.role}`, "BOSSMAN_IMAGE_INSTALL=1", `BOSSMAN_RELEASE_REPO=${cfg.repo}`, `BOSSMAN_VERSION=${p.version}`],
     Labels: { [lk]: lv, [LABEL_MANAGED]: "1", [LABEL_COLOUR]: p.colour, [LABEL_RELEASE]: p.version, [LABEL_DIGEST]: p.digest },
     StopTimeout: cfg.swap.stopGraceSeconds,
     HostConfig: {

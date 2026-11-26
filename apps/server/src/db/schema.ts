@@ -2404,6 +2404,25 @@ export const deviceProfiles = pgTable(
   (t) => [uniqueIndex("device_profiles_owner_fingerprint").on(t.ownerId, t.fingerprint), index("device_profiles_owner").on(t.ownerId)],
 );
 
+/**
+ * The owner's per-login preferences (BOS-2689, shared with BOS-2669): one row per owner, saved on the
+ * server so a choice follows the login to every browser and survives updates and restarts. A missing row
+ * means every default, so nothing is written until the owner changes something.
+ */
+export const ownerPreferences = pgTable(
+  "owner_preferences",
+  {
+    ownerId: uuid("owner_id")
+      .primaryKey()
+      .references(() => owners.id, { onDelete: "cascade" }),
+    /** The single-letter-key switch (BOS-2671 3d); on until turned off. */
+    singleLetterKeys: boolean("single_letter_keys").notNull().default(true),
+    /** BOS-2669 part 3: the page ids the owner pinned to the menu, in their order. */
+    pinnedPages: jsonb("pinned_pages").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+);
+
 /** One row per runner-update hold (BOS-2408): what it was, each swap try, notable moments, and how it ended. Kept after the hold's settings row is gone, so a restart can't erase why an update waited. */
 export const updateHolds = pgTable(
   "update_holds",

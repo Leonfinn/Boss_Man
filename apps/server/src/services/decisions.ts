@@ -632,13 +632,25 @@ export async function raiseOwnerTodo(
 }
 
 const HAND_APPLY_KEY = "owner-todo:self-deploy:";
+
+/**
+ * A hand-apply card keeps the steps written when the owner was asked, so a card held by the card check is raised again
+ * with text from the code of that day. Two older shapes now fail the check, and this brings them up to what
+ * self-deploy.ts writes today: the host-deployer copy that kept the source's open mode (cp, chown, chmod; BOS-2527), and
+ * the "has the new server taken charge" step that names the standby colour (R31c; BOS-2619). Current steps pass through unchanged.
+ */
+export function currentHandSteps(steps: string[]): string[] {
+  return steps
+    .filter((s) => !/docker compose (?:exec|kill)\b[^\n]*\bserver-(?:blue|green)\b/.test(s))
+    .map((s) => s.replace(/^cp -v (\S+\/host-deployer\.sh) (\S+) && chown root:root \2 && chmod 750 \2$/m, "install -v -m 0750 -o root -g root $1 $2"));
+}
 /** The hand-apply to-do of an approved infra update (BOS-122), raised when the owner approves and again by reraiseHeldHandApply. */
 export async function raiseHandApplyTodo(db: Db, d: { id: string; companyId: string; question: string; raisedByAgentId: string | null }, ctx: SelfDeployCtx, quietFirst: boolean) {
   return raiseOwnerTodo(db, {
     companyId: d.companyId,
     question: `"${d.question.split("\n\n")[0]}" was approved. It's waiting for you to apply it by hand on the machine that runs Boss Man.`,
     key: `${HAND_APPLY_KEY}${ctx.commit}`,
-    steps: ctx.handSteps?.length ? ctx.handSteps : ["Apply the approved change by hand on the server that runs Boss Man."],
+    steps: ctx.handSteps?.length ? currentHandSteps(ctx.handSteps) : ["Apply the approved change by hand on the server that runs Boss Man."],
     check: ctx.check,
     rollback: ctx.rollback,
     ofDecisionId: d.id,
