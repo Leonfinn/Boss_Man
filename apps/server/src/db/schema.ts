@@ -571,6 +571,31 @@ export const tickets = pgTable(
   ],
 );
 
+/**
+ * BOS-2653: every merge of a ticket, not just its latest (tickets.mergeCommit). A ticket reopened and merged again
+ * keeps its first merge here, so merge order (allMergeOrder) can still place a version built from it, and a runner
+ * change in the first merge still counts. Written by the gate's merge and the missed-merges sweep; null runner facts
+ * = files not known (counted as "can't tell", never as server-only).
+ */
+export const ticketMerges = pgTable(
+  "ticket_merges",
+  {
+    id: id(),
+    companyId: uuid("company_id")
+      .notNull()
+      .references(() => companies.id, { onDelete: "cascade" }),
+    ticketId: uuid("ticket_id")
+      .notNull()
+      .references(() => tickets.id, { onDelete: "cascade" }),
+    commit: text("commit").notNull(),
+    mergedAt: timestamp("merged_at", { withTimezone: true }).notNull(),
+    touchesRunner: boolean("touches_runner"),
+    touchesRunnerUpdate: boolean("touches_runner_update"),
+    deploysNothing: boolean("deploys_nothing"),
+  },
+  (t) => [uniqueIndex("ticket_merges_ticket_commit").on(t.ticketId, t.commit), index("ticket_merges_company").on(t.companyId, t.mergedAt)],
+);
+
 // ---------- Decisions and engagements ----------
 
 export const decisionKind = pgEnum("decision_kind", ["question", "approval", "permission", "stale_blocker", "stalled_run", "engagement", "budget", "skill"]);
