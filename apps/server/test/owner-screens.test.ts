@@ -72,6 +72,26 @@ describe("R8: the screen a step sends the owner to", () => {
       expect(r8([s]), s).toEqual([]);
   });
 
+  // BOS-2716: "Security" is also an Outgoing email field, so the Security reviewer's page was refused both ways.
+  it("accepts the review kinds as the Reviews page names them", () => {
+    for (const s of [
+      "Open Settings → Reviews and name a Security reviewer.",
+      "Open Settings → Reviews → Security review and pick an agent.",
+      "Open Settings → Reviews → Security and pick an agent.",
+      "Open Settings → Reviews → Infrastructure review and pick an agent.",
+      "Open Settings → Reviews → Adversarial review and pick an agent.",
+      "Open Settings → Reviews → Code and pick an agent.",
+      "Open Settings → Reviews for Security and pick an agent.",
+      "Open Settings > Reviews > Security review and pick an agent.",
+    ])
+      expect(r8([s]), s).toEqual([]);
+  });
+
+  it("still refuses a bare review kind straight under Settings, and Security's email field under Reviews' neighbour", () => {
+    expect(r8(["Open Settings → Security and pick an agent."])[0]?.problem).toContain("Server and runner");
+    expect(r8(["Open Settings → Server and runner → Reviews → Security review."])[0]?.problem).toContain("Settings → Reviews");
+  });
+
   it("names the screen the path reaches when R7 refuses a button", () => {
     const [f] = rule("R7")(["Open Settings → Server and runner and click Restart server."]);
     expect(f?.problem).toContain("The buttons on Server and runner are:");
