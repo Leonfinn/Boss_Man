@@ -8,7 +8,7 @@ import path from "node:path";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ticketRef } from "@boss-man/shared";
-import { wakeWatchers } from "./watch-triggers.js";
+import { wakeUpdateWatchers, wakeWatchers } from "./watch-triggers.js";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, ownerHolds, owners, projects, settings, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
@@ -1468,6 +1468,13 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     if (d && ctx?.type === "self_deploy") {
       await db.update(decisions).set({ context: { ...ctx, result: { result: s.result, message: s.message, at: s.ended } } }).where(eq(decisions.id, d.id));
       await record(db, { companyId: d.companyId, kind: "self_deploy", summary: `${title}. ${s.message}` });
+    }
+    // BOS-2755: a real server update (gone in or broken), or a runner build that broke, wakes the tickets watching for one.
+    // A runner build that succeeded is not the end of the runner update: the swap's end wakes them (maintenance.ts).
+    if ((s.target === "server" && (s.result === "deployed" || broke)) || (s.target === "runner" && broke)) {
+      const ended = Number.isFinite(Date.parse(s.ended)) ? new Date(s.ended) : new Date();
+      const started = Number.isFinite(Date.parse(s.started)) ? new Date(s.started) : null;
+      await wakeUpdateWatchers(db, deps.wake, { what: s.target, commit: s.to_commit, result: s.result, started, ended }, deps.log);
     }
     await saveSeen(key);
   }

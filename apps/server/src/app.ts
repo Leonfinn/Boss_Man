@@ -600,6 +600,8 @@ export async function buildApp(opts: AppOptions) {
     updateChain: (tied) => readUpdateChain(db, { wait: () => deployWait.get(), trialUntil: () => selfDeploy.trialUntil(), facts: () => selfDeploy.chainFacts() }, tied),
     tick: () => scheduler.tick(),
     notify: (n) => notes.notify(n),
+    // BOS-2755: a runner update's end wakes the tickets watching for one.
+    wake: (agentId, input) => scheduler.notify(agentId, input),
     // BOS-1377: the per-run Stop (runsSvc is built further down; this only runs when the owner answers a card).
     cancelRun: (runId) => runsSvc.cancel(runId, undefined, undefined),
     tellRunning: async (text) => {
