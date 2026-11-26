@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { currentReportSamples, normaliseUtilization, parseClaudeRateLimit, parseCodexRateLimits, windowHasReset, toDate, windowLabel } from "../src/quota.js";
+import { currentReportSamples, isMadeUpReading, normaliseUtilization, parseClaudeRateLimit, parseCodexRateLimits, windowHasReset, toDate, windowLabel } from "../src/quota.js";
 
 describe("windowHasReset (BOS-1409)", () => {
   const reset = new Date("2026-11-12T10:00:00.000Z");
@@ -204,6 +204,21 @@ describe("currentReportSamples (BOS-1916, BOS-2676)", () => {
     expect(currentReportSamples([fable, current], NOW)).toEqual([fable, current]);
     // After its reset, with no report bringing it back, it goes.
     expect(currentReportSamples([fable, current], new Date("2026-11-28T14:00:00.000Z"))).toEqual([current]);
+  });
+
+  // BOS-2670: a weekly-limit stop writes one made-up reading (resets exactly an hour on); it must not hide Fable.
+  it("keeps Fable when a Boss-Man-written weekly reading follows a real report", () => {
+    const real = (w: string) => ({ window: w, observedAt: new Date("2026-11-21T08:00:00.000Z"), resetsAt: new Date("2026-11-28T14:00:00.000Z") });
+    const madeUp = { window: "seven_day", observedAt: new Date("2026-11-22T08:00:00.000Z"), resetsAt: new Date("2026-11-22T09:00:00.000Z") };
+    const out = currentReportSamples([real("five_hour"), real("fable"), madeUp]);
+    expect(out.map((s) => s.window)).toEqual(["five_hour", "fable", "seven_day"]);
+    expect(isMadeUpReading(madeUp)).toBe(true);
+    expect(isMadeUpReading(real("fable"))).toBe(false);
+  });
+
+  it("keeps a made-up reading when it is all there is", () => {
+    const madeUp = { window: "seven_day", observedAt: new Date("2026-11-22T08:00:00.000Z"), resetsAt: new Date("2026-11-22T09:00:00.000Z") };
+    expect(currentReportSamples([madeUp])).toEqual([madeUp]);
   });
 
   it("keeps a whole newer batch even when an older one had more windows", () => {

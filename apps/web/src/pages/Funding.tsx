@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api, usd, type BudgetRow, type Company, type FundingSource, type FundingStatus } from "../api";
 import { usePoll } from "../hooks";
-import { windowHasReset, windowLabel } from "@boss-man/shared";
+import { isMadeUpReading, windowHasReset, windowLabel } from "@boss-man/shared";
 import { ageLabel } from "../age";
 import { buildCsv, download } from "../csv";
 import { Loader } from "../components/Loader";
@@ -24,8 +24,15 @@ const rateText = (perHour: number) => {
 };
 
 /** The limit estimate under a quota bar (R78): how fast it's going, and whether it lasts until the reset. */
-function Forecast({ f }: { f: FundingStatus["forecasts"][string] | undefined }) {
+function Forecast({ f, held, observedAt }: { f: FundingStatus["forecasts"][string] | undefined; held?: boolean; observedAt?: string }) {
   if (!f || f.perHour === null) return null;
+  // A run-out time already in the past is never shown (BOS-2670): at or over the hold level it says since when.
+  if (f.perHour > 0 && f.runsOutAt && new Date(f.runsOutAt).getTime() <= Date.now()) {
+    if (!held) return null;
+    return (
+      <span style={{ fontSize: 12, color: "var(--amber-ink)" }}>Held since about {dayAndTime(observedAt ?? f.runsOutAt)}</span>
+    );
+  }
   // The rate the date was worked out from, so the two always agree (BOS-1012).
   const rate = `at ${rateText(f.runsOutPerHour ?? f.perHour)}`;
   const [warn, text] = f.perHour <= 0 || !f.runsOutAt ? [false, "Not rising at the moment"] : f.beforeReset ? [true, `Runs out about ${dayAndTime(f.runsOutAt)} ${rate}, if the week so far keeps on as it has`] : [false, `Won't run out before it resets ${rate}, at the week's pace so far`];
@@ -419,7 +426,8 @@ function SourceCard({ s }: { s: FundingStatus }) {
         <ProviderQuotaBlock q={s.providerQuota} />
       ) : s.quota.length ? (
         s.quota.map((q, _i, all) => {
-          const newestReport = all.reduce((m, x) => (x.observedAt > m ? x.observedAt : m), "");
+          const asReading = (x: { observedAt: string; resetsAt?: string | null }) => ({ observedAt: new Date(x.observedAt), resetsAt: x.resetsAt ? new Date(x.resetsAt) : null });
+          const newestReport = all.reduce((m, x) => (!isMadeUpReading(asReading(x)) && x.observedAt > m ? x.observedAt : m), "");
           const label = windowLabel(q.window);
           // A reading whose window has already reset says nothing about the window now (BOS-1409):
           // every limit reads as empty, the same rule the hold uses, so Fable and This week never show last week's figure.
@@ -447,12 +455,12 @@ function SourceCard({ s }: { s: FundingStatus }) {
                 {q.overageInUse ? " · using usage credits" : ""}
               </span>
             )}
-            {q.observedAt < newestReport && (
+            {q.observedAt < newestReport && !isMadeUpReading(asReading(q)) && (
               <span className="muted" style={{ fontSize: 12 }}>
                 Not in the latest report; last reported by {s.source.provider === "anthropic" ? "Claude" : "the account"} {when(q.observedAt)}
               </span>
             )}
-            <Forecast f={s.forecasts[q.window]} />
+            <Forecast f={s.forecasts[q.window]} held={!beforeReset && utilization >= (s.source.quotaHoldAt ?? 0.95)} observedAt={q.observedAt} />
           </div>
           );
         })

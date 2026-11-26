@@ -79,6 +79,10 @@ describe("which questions the record answers (pure)", () => {
     expect(answerFromRecord(["Your phone confirmed the test; do you also want pushes on a tablet?", "Yes", "No"], fresh)).toBeNull();
     expect(answerFromRecord(["Close BOS-12 now that the export works?", "Close it", "Keep it open"], fresh)).toBeNull();
     expect(answerFromRecord(["The phone reached the public address on the 16th."], fresh)).toBeNull(); // a statement, not a question
+    // BOS-2685: a shortcuts plan question that mentions a phone, an address bar, "open" and "can" got the ntfy record line.
+    const plan = "Plan for custom keyboard shortcuts: can you open the shortcut settings page, and does it work on a phone with a touch keyboard? Keep the current defaults?";
+    expect(answerFromRecord([plan, "Approve the plan", "Change it"], fresh)).toBeNull();
+    expect(answerFromRecord(["Can the phone open the url bar shortcut? Does it still work?"], fresh)).toBeNull();
   });
 });
 
