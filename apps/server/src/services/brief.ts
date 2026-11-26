@@ -85,14 +85,15 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
   /** Other agents' live runs that aren't owner chat: what each is doing, in the same words the dashboard uses (BOS-118). */
   const flightLines = async () => {
     const rows = await db
-      .select({ agent: agents.name, ticket: tickets.title, state: tickets.systemState, ref: sql<string | null>`(select case when t."number" is null then null else coalesce(nullif(c."ticket_prefix", ''), 'T') || '-' || t."number"::text end from "tickets" t left join "companies" c on c."id" = t."company_id" where t."id" = "runs"."ticket_id")`, ...runOriginQuery("runs") })
+      .select({ agent: agents.name, ticket: tickets.title, state: tickets.systemState, linked: sql<boolean>`(${tickets.assigneeAgentId} = ${runs.agentId} or exists (select 1 from "review_requests" rr where rr."ticket_id" = ${runs.ticketId} and rr."reviewer_agent_id" = ${runs.agentId} and rr."status" = 'pending') or exists (select 1 from "decisions" d where d."status" = 'open' and d."raised_by_agent_id" = ${runs.agentId} and d."context"->>'ticketId' = ${runs.ticketId}::text))`, ref: sql<string | null>`(select case when t."number" is null then null else coalesce(nullif(c."ticket_prefix", ''), 'T') || '-' || t."number"::text end from "tickets" t left join "companies" c on c."id" = t."company_id" where t."id" = "runs"."ticket_id")`, ...runOriginQuery("runs") })
       .from(runs)
       .innerJoin(agents, eq(agents.id, runs.agentId))
       .leftJoin(tickets, eq(tickets.id, runs.ticketId))
       .where(and(eq(runs.companyId, companyId), isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`, agentId ? ne(runs.agentId, agentId) : undefined))
       .orderBy(asc(runs.startedAt));
     return rows.map((r) => {
-      if (r.ticket) return `- ${r.agent}: "${one(r.ticket, 40)}" (${r.state})`;
+      // A run on a ticket the agent neither owns, reviews nor raised a card about stays listed, but marked (BOS-2657).
+      if (r.ticket) return `- ${r.agent}: "${one(r.ticket, 40)}" (${r.state})${r.linked ? "" : ` (not assigned: woken by ${one(runLabel(r).text, 30)})`}`;
       return `- ${r.agent}: ${one(runLabel(r).text, 160)}`;
     });
   };
