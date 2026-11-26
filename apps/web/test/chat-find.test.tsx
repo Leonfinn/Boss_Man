@@ -86,7 +86,7 @@ describe("chat: find in this conversation (BOS-2411)", { timeout: 45_000 }, () =
     scrolls = 0;
     type("");
     await waitFor(() => expect(container.querySelectorAll("mark")).toHaveLength(0));
-    expect(screen.queryByText("1 of 3")).toBeNull();
+    await waitFor(() => expect(screen.queryByText("1 of 3")).toBeNull());
     expect(scrolls).toBe(0);
     Element.prototype.scrollIntoView = () => {};
   });
