@@ -62,15 +62,18 @@ describe("Settings → Updates shows the runner trial and rate-limit wait from t
     expect(screen.getByTestId("deploy-wait").className).toContain("muted");
   });
 
-  it("shows the server's plain reply with the time when Build and update runners is pressed during the trial", async () => {
+  // BOS-2672: the time is said once, by the status box; the press's reply only points at it (26 Nov 11:45 showed it twice).
+  it("says the runner update is queued when Build and update runners is pressed during the trial, and gives its time once", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-11-09T15:27:00Z"));
+    let queued = false;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string, init?: RequestInit) => {
-        if (url.endsWith("/api/self-deploy")) return json(view({ trial: { endsAt: "2026-11-09T15:33:00Z", seconds: 900 } }));
+        if (url.endsWith("/api/self-deploy")) return json(view({ trial: { endsAt: "2026-11-09T15:33:00Z", seconds: 900 }, ...(queued ? { runnerQueue: { pressedAt: "2026-11-09T15:27:00Z", startsAt: "2026-11-09T15:33:00Z", why: "the server update's 15-minute trial" } } : {}) }));
         if (url.includes("/update-runners") && init?.method === "POST") {
-          return json({ queued: true, startsAt: "2026-11-09T15:33:00Z", message: "Runners will update at 15:33, when this server update's 15-minute trial ends. You don't need to press again." });
+          queued = true;
+          return json({ queued: true, startsAt: "2026-11-09T15:33:00Z", message: "Runners will update at 15:33, when this server update's 15-minute trial ends. You don't need to press again.", note: null });
         }
         return json([]);
       }),
@@ -78,7 +81,9 @@ describe("Settings → Updates shows the runner trial and rate-limit wait from t
     const go = vi.fn();
     render(<SelfDeploy go={go} />);
     (await screen.findByRole("button", { name: "Build and update runners" })).click();
-    expect(await screen.findByText(/Runners will update at 15:33, when this server update's 15-minute trial ends\./)).toBeTruthy();
+    expect(await screen.findByText("Runner update queued; the status above says when it starts.")).toBeTruthy();
+    await screen.findByText(/Runners will update at/);
+    expect(screen.getAllByText(/Runners will update at/)).toHaveLength(1);
     // A queued press stays on the Settings page: there is no card to go to.
     expect(go).not.toHaveBeenCalled();
   });
@@ -86,6 +91,12 @@ describe("Settings → Updates shows the runner trial and rate-limit wait from t
 
 describe("Settings → Updates says what holds the runner update (BOS-1086)", () => {
   const now = Date.parse("2026-11-10T17:00:00Z");
+  // BOS-2672: a wrap-up tied to the runner update already names it and its time in the box, so the box's own line is left out.
+  it("leaves the runner line out when the wrap-up line already names the runner update", () => {
+    const { container } = render(<TrialLines trial={{ endsAt: "2026-11-10T17:04:00Z" }} wait={null} now={now} queue={{ startsAt: "2026-11-10T17:04:00Z", why: "the trial" }} cancelled={{ why: "An older queued update was cancelled." }} wrapNamesRunner />);
+    expect(container.textContent).not.toMatch(/Runners will update at|runner update is queued/);
+    expect(container.textContent).toContain("An older queued update was cancelled.");
+  });
   it("says when a queued runner update starts, in plain words", () => {
     render(<TrialLines trial={{ endsAt: "2026-11-10T17:04:00Z" }} wait={null} now={now} queue={{ startsAt: "2026-11-10T17:04:00Z", why: "the trial" }} />);
     const line = screen.getByTestId("runner-trial");

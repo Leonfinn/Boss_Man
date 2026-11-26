@@ -13,6 +13,7 @@ export const WATCH_TRIGGER_REASON = "watch trigger";
 const WHAT: Record<WatchTrigger, string> = {
   gate_ci_failed: "a GitHub CI wait at the merge gate ended in a failure",
   github_main_failed: "a GitHub CI run failed on the main branch",
+  host_script_live: "the host's deployer script went live (the script it runs now matches the repo's copy)",
 };
 
 /**

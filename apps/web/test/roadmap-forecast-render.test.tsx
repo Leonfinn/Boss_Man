@@ -37,7 +37,16 @@ describe("milestone rows (BOS-2560)", () => {
     expect(rows.map((r) => r.closest("li")?.getAttribute("data-status")).sort()).toEqual(["at_risk", "no_work", "on_track"]);
     const late = screen.getByText(/5 days after its date/);
     expect(late.className).toContain("warn");
-    expect(screen.getByText(/3 tickets have no size/)).toBeTruthy();
+    expect(screen.getByText(/3 tickets have no size yet, so they aren't counted \(the CEO sizes them\)/)).toBeTruthy();
+  });
+
+  it("explains what a point is first in 'How the status is worked out' (BOS-2708)", async () => {
+    stub([ms("m1", "Beta", "on_track")]);
+    render(<Roadmap companies={[company]} tab="timeline" go={() => {}} />);
+    const rules = (await screen.findByText("How the status is worked out")).closest("details")!;
+    const first = within(rules).getAllByRole("listitem")[0]!;
+    expect(first.textContent).toMatch(/^Points: Each ticket is sized 1, 2, 3, 5 or 8 points by how much work it is/);
+    expect(first.textContent).toContain("the CEO sizes it when planning");
   });
 
   it("folds done milestones into a Done group and shows no chart until a row is opened", async () => {

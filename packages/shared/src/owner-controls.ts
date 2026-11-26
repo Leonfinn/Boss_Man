@@ -20,7 +20,7 @@ export const OWNER_CONTROLS = {
   "Any screen": [
     "Dashboard", "Decisions", "Notifications", "Chat", "Projects", "Roadmap", "Plan", "Wiki", "Features", "Feedback",
     "Agents", "Skills", "Runs", "Merge queue", "Scrum Master log", "Workflow report", "Engagements", "Settings",
-    "Switch company", "Create", "Creating", "New company", "Close menu", "Menu …", "Log out",
+    "Switch company", "Create", "Creating", "New company", "Close menu", "Menu …", "Log out", "Keyboard shortcuts",
     "Save", "Saving", "Saved", "Attach file", "Attaching", "Remove", "Try again", "OK", "Cancel",
     // The error line a page shows when its first load fails (Features, Chat).
     "Retry",

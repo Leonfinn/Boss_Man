@@ -23,7 +23,9 @@ const MIN = 60_000;
 // The BOS-1844 text, as the runner sent it on 19 Nov (the URL shortened to the repo's host).
 const BLIP = "Couldn't push the merge commit to bossman-ci/fc5ce221 for the git host's CI: fatal: unable to access 'https://github.com/example/repo.git/': Could not resolve host: github.com";
 const FETCH_BLIP = "Command failed: git fetch --quiet origin\nerror: RPC failed; HTTP 502 curl 22 The requested URL returned error: 502\nfatal: expected flush after ref listing";
-const NON_FF = "Couldn't push the merge to main: To https://github.com/example/repo.git\n ! [rejected]        main -> main (non-fast-forward)\nerror: failed to push some refs to 'https://github.com/example/repo.git'";
+// BOS-2696: BOS-2559's recorded text (24 Nov), plus git's report of the host's 500 for the ref.
+const GH500 = "Couldn't push the merge to main: remote: Internal Server Error        \nremote: Request ID 1F46:3E8C3:12F6D4:1D73DB:6B061E09        \nremote: Time 2026-11-24T23:30:18Z\nTo https://github.com/example/repo.git\n ! [remote rejected] main -> main (Internal Server Error)\nerror: failed to push some refs to 'https://github.com/example/repo.git'";
+const NON_FF ="Couldn't push the merge to main: To https://github.com/example/repo.git\n ! [rejected]        main -> main (non-fast-forward)\nerror: failed to push some refs to 'https://github.com/example/repo.git'";
 const PROTECTED = "Couldn't push the merge to main: remote: error: GH006: Protected branch update failed for refs/heads/main.\nTo https://github.com/example/repo.git\n ! [remote rejected] main -> main (protected branch hook declined)";
 const WORKFLOW_SCOPE = "Couldn't push the merge to main: To https://github.com/example/repo.git\n ! [remote rejected] main -> main (refusing to allow a Personal Access Token to create or update workflow `.github/workflows/ci.yml` without `workflow` scope)";
 
@@ -102,6 +104,18 @@ describe("a push or fetch that fails on the network retries once by itself (BOS-
     const after = await c.row(t.id);
     expect([GIT_RETRY_NOTE, GIT_RETRY_CARD_NOTE]).not.toContain(after.stateNoteStaleReason);
     expect(after.stateNote).toBe("1 pass; 2 pass. Approved, merging.");
+  });
+
+  it("GitHub's 500 inside the push to main (BOS-2559's text, BOS-2696): retried once, merges, no card", async () => {
+    const c = await setup();
+    c.mergeAnswers.push(GH500);
+    const t = await c.approved();
+    await c.built.review.landVisible(t.id, "the owner");
+    await vi.waitFor(async () => expect((await c.row(t.id)).systemState).toBe("done"));
+    expect(c.merges()).toBe(2);
+    expect(await c.cards(t.id)).toHaveLength(0);
+    expect(await c.wakesFor(c.ceo.id)).toHaveLength(0);
+    expect(await c.failReasons(t.id)).toEqual(["git_transport_retried"]);
   });
 
   it("three recovered blips in a row raise no 'Merges keep failing' alert", async () => {

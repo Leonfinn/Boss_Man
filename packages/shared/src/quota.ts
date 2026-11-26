@@ -185,16 +185,26 @@ export function windowLabel(key: string): { name: string; note?: string } {
  * The limits an account reports now (BOS-1916). One report from Claude Code or Codex is stored as a batch of
  * samples sharing one observedAt, so the newest sample per window is current only when it is from the newest
  * report: a window whose newest sample is older was left out of a later report (the account stopped
- * reporting it) and is dropped, from the card, the hold list, the hold and account switching. A window that
- * has never had a sample is simply absent ("no report yet"). Synthetic readings are written per measure with
- * their own times, so the caller leaves those alone.
+ * reporting it). Such a window is kept until its own reset time (BOS-2676: one report may carry only some
+ * windows, e.g. a per-model weekly limit that appears only when a run used that model, so one report that
+ * leaves it out is not proof it is gone), and dropped, from the card, the hold list, the hold and account
+ * switching, once that time has passed (or if its sample had no reset time) with no report bringing it back.
+ * A window that has never had a sample is simply absent ("no report yet"). Synthetic readings are written
+ * per measure with their own times, so the caller leaves those alone. Pass `now` only for the card and its
+ * switch list (they carry a left-out window to its reset); the hold and account switching call without it, so a
+ * carried reading never holds work.
  */
-export function currentReportSamples<T extends { observedAt: Date; resetsAt?: Date | null }>(newestPerWindow: T[]): T[] {
+export function currentReportSamples<T extends { observedAt: Date; resetsAt?: Date | null }>(newestPerWindow: T[], now?: Date): T[] {
   // A reading Boss Man wrote itself (BOS-463) is never a report: it updates its own window and does not
   // hide the limits the account's last real report included (BOS-2670).
   const real = newestPerWindow.filter((s) => !isMadeUpReading(s));
   const newest = Math.max(...(real.length ? real : newestPerWindow).map((s) => s.observedAt.getTime()));
-  return newestPerWindow.filter((s) => s.observedAt.getTime() === newest || (isMadeUpReading(s) && s.observedAt.getTime() > newest));
+  return newestPerWindow.filter(
+    (s) =>
+      s.observedAt.getTime() === newest ||
+      (isMadeUpReading(s) && s.observedAt.getTime() > newest) ||
+      (now !== undefined && s.resetsAt != null && !windowHasReset(s.resetsAt, now)),
+  );
 }
 
 /** BOS-463 marks an account full for this long after a weekly-limit refusal; the made-up reading is told apart by its exact length. */

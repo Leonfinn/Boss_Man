@@ -78,6 +78,7 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 ## N
 
 - **Network guard**: The first check on every request, which refuses addresses agents must not reach, such as your home network or the Boss Man machine. No permission rule can lift it. To let runners reach an extra address, add it to `BOSSMAN_NETGUARD_ALLOW` in `.env`. ([Guide 6](/guides/permissions#who-is-asked))
+- **No size**: A ticket nobody has given points yet. It adds nothing to the points left, so a forecast with unsized tickets is only as good as the sized ones. ([Guide 1](/guides/how-boss-man-works#features-tasks-and-sub-tasks))
 - **Note**: The lowest notification level, shown on the Notifications page only. ([Guide 8](/guides/phone-notifications#notification-levels))
 - **ntfy**: A free, open-source notification service that you run yourself. Boss Man uses it to send notifications to your phone. ([Guide 8](/guides/phone-notifications#send-notifications-to-your-phone))
 
@@ -87,11 +88,13 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 
 ## P
 
+- **Pace**: How many points of a milestone were finished each week over the last 4 weeks. Boss Man uses it to guess when the rest will be finished. ([Guide 1](/guides/how-boss-man-works#features-tasks-and-sub-tasks))
 - **Page**: The notification level that is also sent to your phone, for example when a runner goes offline. ([Guide 8](/guides/phone-notifications#notification-levels))
 - **Pause**: A button on an agent's row on the **Agents** page. The agent starts nothing new until you choose **Start**. A run it already has going finishes by itself. **Settings > Team and CEO** can pause a whole company the same way. ([Guide 12](/guides/stopping-work#pause-one-agent))
 - **Penpot**: An open-source design tool that Boss Man can run for your designer agents, on your home network only. ([Guide 9](/guides/add-ons#penpot-a-design-tool-for-your-designer-agents))
 - **Permission card**: A card on Decisions that asks whether an agent may run a command or use a tool, with buttons such as **Allow once** and **Deny**. If nobody answers within 10 minutes, the request counts as denied. ([Guide 6](/guides/permissions#answering-a-permission-card))
 - **Plan**: An agent's outline of how it will do a ticket, approved before the work starts. By default, the CEO approves plans for low and medium risk, and you approve them for high and critical. You can change this in **Settings > Reviews**. ([Guide 7](/guides/reviews-and-merge-queue#risk-levels))
+- **Points**: How big a ticket is: a number it is given when it is planned. A bigger number means more work. The Roadmap adds up the points still to do to forecast when a milestone finishes. ([Guide 1](/guides/how-boss-man-works#features-tasks-and-sub-tasks))
 - **Priority 1**: A tick box on the ticket page, once called **Urgent**. The ticket goes first in the check queue and the merge line, keeps running when a plan is nearly used up, and you get one alert when it is ready to go live. ([Guide 4](/guides/board-and-decisions#the-ticket-page))
 - **Project**: One git repository that a company's agents work in. Each project has its own board. ([Guide 1](/guides/how-boss-man-works#projects-and-tasks))
 

@@ -4,6 +4,7 @@
 // moved out whole: it takes the service as `this` (so calls to other methods go through the assembled object, where tests
 // spy on them) and the shared context as `ctx`. review.ts keeps one delegate line per method.
 import { and, eq, inArray, isNotNull } from "drizzle-orm";
+import { NEW_WORDS_REFUSAL, newWordsLine, newWordsProblem, touchesOwnerScreen } from "@boss-man/shared";
 import { OWNER_STEPS_MISSING, OWNER_STEPS_OK, OWNER_STEPS_WRONG, realUseWalkthrough, type OwnerStepFlag, REAL_USE_REFUSAL, touchesInstallSurface, usabilityGated } from "@boss-man/shared";
 import { formatReviewComments, REVIEW_KINDS, riskOf, ruleFor, slotRef, type MigrationsResult, type ReviewComment, type ReviewSlot, type WorkspaceDiff } from "@boss-man/shared";
 import { agents, decisions, reviewRequests, runners, tickets } from "../db/schema.js";
@@ -168,6 +169,16 @@ export async function submit(
     const openKinds = rows.filter((r) => r.reviewerAgentId === input.reviewerAgentId && r.status === "pending" && (!input.kind || r.kind === input.kind)).map((r) => r.kind);
     const carries = !rows.length || openKinds.some((k) => k === "code" || k === "infra");
     if (carries && (usabilityGated(t) || touchesInstallSurface(await this.diff(ticketId).then((d) => d.files.map((f) => f.path), () => [] as string[])))) throw new ReviewError(422, REAL_USE_REFUSAL);
+  }
+  // BOS-2709: a code approval of a change to an owner screen (web pages and components) carries a "New words:" line,
+  // "none" or the words, each of which is in the owner terms list.
+  if (input.verdict === "approved" && input.reviewerAgentId && newWordsLine(input.summary) === null) {
+    const openKinds = rows.filter((r) => r.reviewerAgentId === input.reviewerAgentId && r.status === "pending" && (!input.kind || r.kind === input.kind)).map((r) => r.kind);
+    if ((!rows.length || openKinds.some((k) => k === "code")) && touchesOwnerScreen(await this.diff(ticketId).then((d) => d.files.map((f) => f.path), () => [] as string[]))) throw new ReviewError(422, NEW_WORDS_REFUSAL);
+  }
+  if (input.verdict === "approved" && input.reviewerAgentId) {
+    const problem = newWordsLine(input.summary) ? newWordsProblem(input.summary) : null;
+    if (problem) throw new ReviewError(422, problem);
   }
   // Each lesson becomes exactly one CEO decision (BOS-105): nothing reaches the brief without it, and the owner is told the outcome.
   if (lesson) {

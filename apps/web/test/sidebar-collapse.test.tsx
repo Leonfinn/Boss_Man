@@ -64,7 +64,7 @@ describe("collapsed icons still work", () => {
     show({ collapsed: true });
     const dashboard = screen.getByRole("link", { name: "Dashboard" });
     expect(dashboard.getAttribute("href")).toBe("#/dashboard");
-    expect(dashboard.getAttribute("title")).toBe("Dashboard");
+    expect(dashboard.getAttribute("title")).toBe("Dashboard (g then d)");
     expect(dashboard.getAttribute("aria-current")).toBeNull();
     expect(screen.getByRole("link", { name: "Projects" }).getAttribute("aria-current")).toBe("page");
   });

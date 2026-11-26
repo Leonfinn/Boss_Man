@@ -272,3 +272,30 @@ describe("a reviewer's verdict on the owner setup steps", () => {
     await expect(c.review.submit(s.id, { verdict: "approved", summary: "No findings.", kind: "security", reviewer: "Reviewer", reviewerAgentId: c.reviewer.id, background: true })).resolves.toBeTruthy();
   });
 });
+
+// BOS-2709: a code approval of a change to an owner screen carries a "New words:" line.
+describe("a reviewer can't approve a change to an owner screen without a New words line", () => {
+  const submit = (c: NonNullable<typeof ctx>, id: string, summary: string) =>
+    c.review.submit(id, { verdict: "approved", summary, reviewer: "Reviewer", reviewerAgentId: c.reviewer.id, background: true });
+
+  it("refuses with no line, takes none or a listed word, and refuses a word not in the list", async () => {
+    const c = (ctx = await setup());
+    c.state.files = ["apps/web/src/pages/Roadmap.tsx"];
+    const t = await c.raw({ systemState: "review" });
+    await c.slot(t.id);
+    await expect(submit(c, t.id, "Looks right.")).rejects.toThrow(/New words:/);
+    await expect(submit(c, t.id, "Looks right.\nNew words: velocity")).rejects.toThrow(/not in the owner terms list/);
+    await expect(submit(c, t.id, "Looks right.\nNew words: points, pace")).resolves.toBeTruthy();
+    const u = await c.raw({ systemState: "review" });
+    await c.slot(u.id);
+    await expect(submit(c, u.id, "Looks right.\nNew words: none")).resolves.toBeTruthy();
+  });
+
+  it("leaves a change that touches no owner screen alone", async () => {
+    const c = (ctx = await setup());
+    c.state.files = ["apps/server/src/a.ts"];
+    const t = await c.raw({ systemState: "review" });
+    await c.slot(t.id);
+    await expect(submit(c, t.id, "Looks right.")).resolves.toBeTruthy();
+  });
+});
