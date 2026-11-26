@@ -53,5 +53,6 @@ export * from "./age.js";
 export * from "./owner-figures.js";
 export * from "./list-price.js";
 export * from "./wrap-up-words.js";
+export * from "./attach-options.js";
 export * from "./action-claim.js";
 export * from "./outside-service-readings.js";
