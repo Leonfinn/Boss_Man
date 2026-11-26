@@ -103,15 +103,16 @@ describe("Spend page", () => {
     };
     render(<SpendReport company={company} />);
     const heading = await screen.findByRole("heading", { name: "Costliest tickets" });
-    const table = within(heading.parentElement!).getByRole("table");
-    const link = within(table).getByRole("link", { name: "Fix the thing" });
+    const table = await waitFor(() => within(heading.parentElement!).getByRole("table"));
+    // Wait for the rows' own text: the heading and table can show before the rows do.
+    const link = await within(table).findByRole("link", { name: "Fix the thing" });
     expect(link.getAttribute("href")).toBe("#/tickets/t1");
-    expect(within(table).getByText("75%")).toBeTruthy();
-    expect(within(table).getByText("Not on a ticket").closest("a")).toBeNull();
+    expect(await within(table).findByText("75%")).toBeTruthy();
+    expect((await within(table).findByText("Not on a ticket")).closest("a")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "7 days" }));
-    // The old rows vanish while the loader shows, so wait for the new period's table itself.
+    // The old rows vanish while the loader shows, so wait for the new period's rows to settle.
+    await waitFor(() => expect(screen.queryByText("Not on a ticket")).toBeNull());
     expect(await screen.findByRole("link", { name: "Fix the thing" })).toBeTruthy();
-    expect(screen.queryByText("Not on a ticket")).toBeNull();
   });
 
   it("downloads a CSV whose rows add up to the table's total", async () => {
