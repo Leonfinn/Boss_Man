@@ -30,6 +30,11 @@ Release step: adding to this file is part of every release (Release Manager, on 
 Check before committing: pnpm --filter @boss-man/site build (it stops on a heading that is not a date, or one out of order).
 -->
 
+## 26 November 2026
+
+- Boss Man is now in beta, no longer alpha. The website, the GitHub README and the contribution and security pages say so. You can install it from the ready-made Docker images on the GitHub releases page, or build it from the source.
+- In the company brief (Wiki → Company brief), the "In flight" list now marks an agent whose run is on a ticket it does not own, review or have a card on: the line ends "(not assigned: woken by …)" with the reason it was started, so a stray run stands out. Runs on an agent's own tickets look as before.
+
 ## 25 November 2026
 
 - In Settings → Server and runner → Updates, "Recent updates" no longer leaves older server updates stuck on "Waiting". The one now live says Live, and one a newer update took over from says Replaced. Each row shows its real number of changes, not "10 changes" on every row.
