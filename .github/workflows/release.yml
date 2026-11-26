@@ -88,6 +88,12 @@ jobs:
           if [ "$GITHUB_EVENT_NAME" != schedule ]; then
             # Refuses a commit that is not 40 hex or not on main, before anything is tagged.
             SHA="$(scripts/publish-images.sh resolve-commit "$COMMIT_INPUT" "$GITHUB_SHA")"
+            # The typed version goes into $GITHUB_ENV below: a newline in it would add env lines (RELEASE_SHA, BASH_ENV)
+            # after the "on main" check above, so refuse anything but a plain version first (grep -x matches whole lines).
+            if [ "$(printf '%s' "$VERSION_INPUT" | grep -cE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$')" != 1 ] || [ "$(printf '%s' "$VERSION_INPUT" | wc -l)" != 0 ]; then
+              echo "::error::version must look like 0.1.0-beta.4 (one line, no spaces)"
+              exit 1
+            fi
             echo "Releasing commit $SHA"
             {
               echo "RELEASE_SHA=$SHA"
