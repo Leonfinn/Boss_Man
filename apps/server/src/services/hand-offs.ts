@@ -38,6 +38,37 @@ export function handOffPhrase(...texts: (string | null | undefined)[]): { label:
   return null;
 }
 
+/**
+ * BOS-2679: wording that names a known edge case or limitation. Such a case needs a follow-up ticket, a ticket id in the
+ * same sentence, or noFollowUpReason. Edit this list only; a false positive is cleared with noFollowUpReason.
+ */
+export const EDGE_CASE_WORDING: readonly { label: string; re: RegExp }[] = [
+  { label: '"edge case"', re: /\bedge[- ]cases?\b/i },
+  { label: '"known limitation / issue / gap"', re: /\bknown (?:limitations?|issues?|gaps?|caveats?|problems?)\b/i },
+  { label: '"limitation(s)" or "caveat(s)"', re: /\b(?:limitations?|caveats?)\b/i },
+  { label: '"not handled"', re: /\b(?:not|isn['’]t|aren['’]t|n['’]t|never) (?:yet )?handled\b|\bunhandled\b|\b(?:does not|doesn['’]t|do not|don['’]t|won['’]t|will not|can['’]t|cannot) (?:yet )?(?:handle|cover)\b/i },
+  { label: '"may/can still hide or miss"', re: /\b(?:may|can|could|might) (?:still )?(?:hide|miss|show a stale)\b/i },
+];
+const TICKET_ID_IN_SENTENCE = /\b[A-Z]{2,6}-\d{1,6}\b/;
+
+/** The first edge-case phrase found whose sentence names no ticket id, or null. */
+export function edgeCasePhrase(...texts: (string | null | undefined)[]): { label: string; quote: string } | null {
+  for (const t of texts) {
+    if (!t) continue;
+    for (const sentence of t.split(/(?<=[.!?;])\s+|\n+/)) {
+      if (TICKET_ID_IN_SENTENCE.test(sentence)) continue;
+      for (const { label, re } of EDGE_CASE_WORDING) {
+        const m = re.exec(sentence);
+        if (m) return { label, quote: sentence.replace(/\s+/g, " ").trim().slice(0, 120) };
+      }
+    }
+  }
+  return null;
+}
+
+/** The line in the reviewer's brief (BOS-2679). */
+export const EDGE_CASE_REVIEW_LINE = "Known edge cases (BOS-2679): if the summary or the author's replies name an edge case, limitation, caveat or \"not handled\" case and no ticket id, followUps entry or noFollowUpReason covers it, request changes: it must be ticketed, not just mentioned.";
+
 export const FOLLOW_UP_HELP = "followUps: work you are handing on, one entry each {title, assignee (an agent's name, or \"CEO\"), why, criterion?}. Boss Man opens each as a ticket in the same project (and feature), linked to this one, and wakes the assignee. When this ticket's criteria leave one failed or not reported, the follow-up gets that criterion's text, unchanged, as its own acceptance criterion (all of them when the entry names no criterion): the new ticket then has to show the outcome, not just do the task. criterion names one, by its number, to carry exactly that one. A carried after-merge criterion that needs a watch of a day or more (\"over 3 days live\", \"a week on\", \"for 48 hours\") is opened as its own check ticket, waiting on the follow-up's merge, so the follow-up can close once it is live. Only the CEO or a manager can assign a follow-up to a colleague; from anyone else a named colleague is kept as a suggested assignee and the ticket goes to the CEO. Opened only on a real change of state. Use it whenever the summary or a reply says someone else will do something next. noFollowUpReason: when nothing is handed on although the wording sounds like it (up to 240 characters).";
 
 export const followUpsSchema = z.array(z.object({ title: z.string().trim().min(1).max(200), assignee: z.string().trim().min(1).max(100), why: z.string().trim().min(1).max(1500), criterion: z.number().int().min(1).max(10).optional().describe("The number (1-based) of this ticket's criterion to carry into the follow-up, when only one applies. Left out, every failed or not-yet-reported criterion is carried.") })).max(20);
@@ -60,11 +91,15 @@ export function criterionCarryRefusal(criteriaRaw: unknown, note: string | null 
 }
 
 /** The refusal for a move to done that hands work on with no follow-up and no reason; null when fine. */
-export async function handOffRefusal(db: Db, ticketId: string, summary: string | undefined, given: { followUps?: unknown[]; noFollowUpReason?: string }): Promise<string | null> {
+export async function handOffRefusal(db: Db, ticketId: string, summary: string | undefined, given: { followUps?: unknown[]; noFollowUpReason?: string }, edgeCaseOnly = false): Promise<string | null> {
   if (given.followUps?.length || given.noFollowUpReason?.trim()) return null;
   const [last] = await db.select({ text: ticketMessages.text }).from(ticketMessages).where(and(eq(ticketMessages.ticketId, ticketId), eq(ticketMessages.author, "agent"))).orderBy(desc(ticketMessages.createdAt)).limit(1);
-  const hit = handOffPhrase(summary, last?.text);
-  if (!hit) return null;
+  const hit = edgeCaseOnly ? null : handOffPhrase(summary, last?.text);
+  if (!hit) {
+    const edge = edgeCasePhrase(summary, last?.text);
+    if (!edge) return null;
+    return `The summary or the last reply names a known edge case or limitation ("${edge.quote}", matched ${edge.label}), but no ticket covers it, so it would be forgotten when this closes. Pass followUps on set_ticket_state: [{title, assignee, why}] so Boss Man opens a ticket for it, or put its ticket id (like BOS-123) in the same sentence. If it is a false alarm or already handled, pass noFollowUpReason (one line) instead.`;
+  }
   return `The summary or the last reply hands work to someone else ("${hit.quote}", matched ${hit.label}), but nothing puts that work on their queue, so it would be lost when this closes. Pass followUps on set_ticket_state: [{title, assignee, why}] and Boss Man opens each as a linked ticket. If nothing is handed on and this wording is a false alarm, pass noFollowUpReason (one line) instead.`;
 }
 

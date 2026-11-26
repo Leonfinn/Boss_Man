@@ -8,6 +8,7 @@ import type { Db } from "./db/client.js";
 import { agents, decisions as decisionsTable, tickets, tickets as ticketsTable } from "./db/schema.js";
 import { record } from "./services/activity.js";
 import { AnswerError, OPENING_WHY_MAX, adviceOf, checkAsk, FIXES_LIVE_MAX, fixesLiveProblem, isSystemCard } from "./services/decisions.js";
+import { EDGE_CASE_REVIEW_LINE } from "./services/hand-offs.js";
 import { LINT_OVERRIDE_HELP, lintOverrideSchema } from "./services/lint-override.js";
 import { type CardLint, lintLines } from "./services/steps.js";
 import { cardIdInput, resolveCardId, resolveReplacedBy } from "./services/card-id.js";
@@ -446,7 +447,7 @@ export function registerDecisionTools(
             : "";
           const gate = usabilityGateBlock(rt, d.files.map((f) => f.path), d.diff);
           const moved = movedMidRead ? "The branch moved since your first page; start again from offset 0 so you read one head throughout.\n\n" : "";
-          return text(`${moved}${checklist}${setup}${live}${gate}Base ${d.baseCommit.slice(0, 12)}, ${d.commits.length} commit(s).\nFiles:\n${files || "(none)"}\n\n${patch}${d.truncated ? "\n[diff truncated by the runner]" : ""}`);
+          return text(`${moved}${checklist}${setup}${live}${gate}${EDGE_CASE_REVIEW_LINE}\n\nBase ${d.baseCommit.slice(0, 12)}, ${d.commits.length} commit(s).\nFiles:\n${files || "(none)"}\n\n${patch}${d.truncated ? "\n[diff truncated by the runner]" : ""}`);
         }
         if (!input.verdict) return fail("Give the verdict.");
         // A verdict on a ticket is touching it, like any other hook (BOS-268).

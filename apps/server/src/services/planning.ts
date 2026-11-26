@@ -300,8 +300,13 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
       if (patch.ceoPlan) {
         if (!(patch.ceoManagesRisk ?? m.ceoManagesRisk)) throw new WorkError(422, 'Only a milestone the CEO manages at risk can have a plan. Turn on "CEO manages at risk" for it first.');
         const planned = { ...m, ...patch };
-        const status = (await milestoneFigures(db, [planned], dateIn(new Date(), "UTC")))(planned).status;
-        if (!needsCeoPlan(status)) throw new WorkError(422, "A plan is shown under the reason while the milestone is At risk or Late, and this one isn't. Record it once it is.");
+        // BOS-2653: the owner's Roadmap works out "today" in their browser's time zone, while this read and the sweep use
+        // UTC, so around midnight the two can be a calendar day apart and the screen can say At risk while a UTC read says
+        // On track. Accept a plan if the milestone is At risk or Late on UTC today or either side of it (which covers every
+        // time zone), so the CEO is never refused a plan the owner's own screen is asking for.
+        const now = new Date();
+        const ok = await Promise.all([0, -dayMs, dayMs].map(async (shift) => needsCeoPlan((await milestoneFigures(db, [planned], dateIn(new Date(now.getTime() + shift), "UTC")))(planned).status)));
+        if (!ok.some(Boolean)) throw new WorkError(422, "A plan is shown under the reason while the milestone is At risk or Late, and this one isn't. Record it once it is.");
       }
       const [u] = await db.update(milestones).set(patch).where(eq(milestones.id, id)).returning();
       return u!;

@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { issueRunToken } from "../src/mcp.js";
+import { decisions, ticketDependencies, tickets as ticketsTable } from "../src/db/schema.js";
+import { eq } from "drizzle-orm";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -23,7 +25,7 @@ async function setup() {
   const milestone = (await req("POST", `/api/objectives/${objective.id}/milestones`, { title: "Launch", targetDate: "2026-10-10" })).json() as { id: string };
   await req("POST", `/api/projects/${project.id}/tickets`, { title: "Done work", milestoneId: milestone.id, state: "done" });
   await req("POST", `/api/projects/${project.id}/tickets`, { title: "Left to build", milestoneId: milestone.id, state: "in_progress" });
-  return { ...built, cookie, base, req, company, ceo, milestone };
+  return { ...built, cookie, base, req, company, ceo, milestone, project };
 }
 
 beforeEach(async () => {
@@ -68,6 +70,24 @@ describe("the CEO's plan for a milestone (BOS-2627)", () => {
     const cleared = await c.callTool({ name: "roadmap", arguments: { action: "set_plan", milestoneId: ctx.milestone.id, plan: null, reason: "No remedy needed." } });
     expect(cleared.isError).not.toBe(true);
     expect((await readMilestone()).ceoPlan).toBeNull();
+    await c.close();
+  });
+
+  it("set_plan is accepted on a milestone At risk only because a ticket waits on the owner's card, as list shows it (BOS-2627)", async () => {
+    const c = await agent();
+    // Due well out with an estimate, so the only reason for At risk is the open card the ticket waits on.
+    const o = (await ctx.req("POST", `/api/companies/${ctx.company.id}/objectives`, { title: "Owner waits", priority: 2 })).json() as { id: string };
+    const m = (await ctx.req("POST", `/api/objectives/${o.id}/milestones`, { title: "Card bound", targetDate: "2026-12-30" })).json() as { id: string };
+    const made = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Waiting on the owner", milestoneId: m.id, state: "ready" })).json() as { id: string };
+    await ctx.db.update(ticketsTable).set({ size: 1 }).where(eq(ticketsTable.id, made.id));
+    const [d] = await ctx.db.insert(decisions).values({ companyId: ctx.company.id, kind: "question", question: "Do it this way?", options: ["Yes", "No"], recommendedOption: "Yes", raisedByAgentId: ctx.ceo.id }).returning();
+    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: made.id, blockerDecisionId: d!.id });
+    await ctx.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
+    const listed = JSON.parse(textOf(await c.callTool({ name: "roadmap", arguments: { action: "list" } }))) as Array<{ milestones: Array<{ id: string; status: string }> }>;
+    expect(listed.flatMap((x) => x.milestones).find((x) => x.id === m.id)?.status).toBe("at_risk");
+    const res = await c.callTool({ name: "roadmap", arguments: { action: "set_plan", milestoneId: m.id, plan: "Ask the owner for a yes on the card.", reason: "Planning the milestone." } });
+    expect(res.isError).not.toBe(true);
+    expect(textOf(res)).toMatch(/Recorded the plan/);
     await c.close();
   });
 });

@@ -178,6 +178,10 @@ export const releaseLogService = (
       }
       const have = new Set((primary.body ?? "").split("\n"));
       const add = [...lines, `New commit: ${to}`].filter((l, i, all) => !have.has(l) && all.indexOf(l) === i);
+      // BOS-2673: the folded ticket is named for the newest live commit, so the Release Manager doesn't start from
+      // the first commit it collected. The "Release log: record " prefix stays, as that is how folded tickets are found.
+      const retitle = primary.title !== title;
+      if (retitle) await db.update(tickets).set({ title, version: sql`${tickets.version} + 1` }).where(eq(tickets.id, primary.id));
       if (add.length) {
         await db.update(tickets).set({ body: `${primary.body ?? ""}\n${add.join("\n")}`.trim(), version: sql`${tickets.version} + 1` }).where(eq(tickets.id, primary.id));
         await db.insert(ticketMessages).values({ companyId, ticketId: primary.id, author: "system", text: `The live commit changed from ${short(from)} to ${short(to)}: it went live by ${HOW_WORDS[how]}. Record ${short(to)} too, and republish the website from it so this release's "What's new" entry is live.` });
@@ -208,6 +212,8 @@ export const releaseLogService = (
       .where(and(eq(wakes.ticketId, ticket.id), eq(wakes.agentId, rm.id), inArray(wakes.status, ["queued", "deferred"])));
     const already = waitingAll.find((w) => w.reason === RELEASE_REASON);
     if (already) {
+      // BOS-2673: the waiting wake leads with the newest change, not the one it was queued for.
+      await db.update(wakes).set({ note }).where(eq(wakes.id, already.id));
       // A release wake is already waiting: the "assigned" one it was created with is redundant.
       for (const w of waitingAll) if (w.reason === "assigned") await db.delete(wakes).where(eq(wakes.id, w.id));
       return false;
