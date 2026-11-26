@@ -174,6 +174,8 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "pages/settings/Tools.tsx": "Tools and deploys",
   "pages/settings/Transfer.tsx": "Import and export",
   "pages/settings/Account.tsx": "Account",
+  // The single-letter-key switch on Settings → Account (BOS-2689, BOS-2671 part 3d).
+  "pages/settings/KeyboardShortcuts.tsx": "Account",
   "pages/settings/Watchdog.tsx": "Watchdog",
   "pages/settings/shared.tsx": "Any screen",
   "pages/Setup.tsx": "Setup",

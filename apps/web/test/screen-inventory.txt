@@ -216,6 +216,7 @@ reads: (none)
 ## #/settings/<company>/account
 sections: 
   - Change password
+  - Keyboard shortcuts
   - Sign out other devices
 reads: (none)
 

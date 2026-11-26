@@ -31,6 +31,8 @@ const lvl = { planApprover: "ceo", reviewer: "ceo", ownerSignoff: false };
 const api = urlStub({
   "/api/setup": { needsSetup: false },
   "/api/me": { username: "owner" },
+  // The per-login preferences read at sign-in (BOS-2689).
+  "/api/preferences": { singleLetterKeys: true, pinnedPages: [] },
   "/api/setup-progress": { dismissed: true },
   "/api/companies": [company],
   "/api/notifications": { items: [], unread: 0 },
