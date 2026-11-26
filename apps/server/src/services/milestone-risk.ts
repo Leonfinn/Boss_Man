@@ -104,6 +104,10 @@ export function milestoneRiskService(db: Db, deps: { planning: ReturnType<typeof
               if (row?.status === "queued") {
                 const made = row.createdAt ? new Date(row.createdAt) : null;
                 owedFrom = made && !Number.isNaN(made.getTime()) ? made : now();
+              } else if (!row) {
+                // BOS-2653: the wake row is gone (never saved, purged, or written by the broken version that recorded
+                // "woken" on a save). Nothing proves the CEO was told, so treat it as not woken and send again now.
+                owedFrom = new Date(0);
               }
             } catch (err) {
               log(`milestone at risk: reading the wake for ${m.id} failed: ${(err as Error).message}`);
