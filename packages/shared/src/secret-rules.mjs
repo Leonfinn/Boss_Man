@@ -45,7 +45,8 @@ export const SECRET_RULES = [
   ['token-in-url', /[?&](?:access_token|token|api_key|apikey|key)=([A-Za-z0-9._~-]{20,})/i, (v) => !PLACEHOLDER.test(v) && entropy(v) > 3.5],
   [
     'secret-assignment',
-    /\b[A-Za-z0-9_]*(?:secret|password|passwd|token|api_?key|master_?key|private_?key)[A-Za-z0-9_]*['"]?\s*[:=]\s*['"`]([A-Za-z0-9+/=_-]{24,})['"`]/i,
+    // Both name parts are capped (BOS-2731): unbounded, one long run of word characters took quadratic time.
+    /\b[A-Za-z0-9_]{0,64}(?:secret|password|passwd|token|api_?key|master_?key|private_?key)[A-Za-z0-9_]{0,64}['"]?\s*[:=]\s*['"`]([A-Za-z0-9+/=_-]{24,})['"`]/i,
     (v) => !PLACEHOLDER.test(v) && entropy(v) > 3.5,
   ],
 ]

@@ -7,7 +7,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { issueRunToken } from "../src/mcp.js";
-import { ticketMessages, tickets } from "../src/db/schema.js";
+import { runs, ticketMessages, tickets } from "../src/db/schema.js";
 
 // Built at run time so this file holds no key-shaped text.
 const rnd = "aB3dE5gH7jK9mN1pQ3sT5vX7zC2fG4hJ6kL8";
@@ -79,6 +79,25 @@ describe("agent writes with a secret are refused (BOS-2731)", { timeout: 30_000 
     const read = await worker.callTool({ name: "tickets", arguments: { action: "read", ticketId: c.ticketId } });
     expect(c.isError(read)).toBe(false);
     expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticketId)))[0]!.body).toBe(`old text with ${key}`);
+  });
+
+  it("the CEO's owner chat is guarded too: a key pasted there is refused when the CEO writes it into a ticket reply or the wiki", async () => {
+    const c = (ctx = await setup());
+    const [run] = await c.db.insert(runs).values({ companyId: (await c.db.select().from(tickets).where(eq(tickets.id, c.ticketId)))[0]!.companyId, agentId: c.ceo.id, purpose: "chat" }).returning();
+    const companyId = run!.companyId;
+    const token = await issueRunToken(c.db, { companyId, agentId: c.ceo.id, runId: run!.id });
+    const base = `127.0.0.1:${(c.app.server.address() as { port: number }).port}`;
+    const chat = new Client({ name: "t", version: "0" });
+    await chat.connect(new StreamableHTTPClientTransport(new URL(`http://${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
+    c.clients.push(chat);
+    const before = (await c.db.select().from(ticketMessages)).length;
+    const reply = await chat.callTool({ name: "ticket_reply", arguments: { ticketId: c.ticketId, text: `The key is ${key}` } });
+    expect(c.isError(reply)).toBe(true);
+    expect(c.say(reply)).toContain("anthropic-key");
+    expect((await c.db.select().from(ticketMessages)).length).toBe(before);
+    const wiki = await chat.callTool({ name: "wiki", arguments: { action: "write", title: "Chat notes", body: `token ${key}` } });
+    expect(c.isError(wiki)).toBe(true);
+    expect(c.say(wiki)).toContain("anthropic-key");
   });
 
   it("the same call without the key goes through", async () => {

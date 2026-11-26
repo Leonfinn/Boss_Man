@@ -74,6 +74,18 @@ describe("secretRefusal (BOS-2731)", () => {
     expect(shared.findSecretKind(anthropic)).toBe(script.SECRET_RULES.find(([k]) => k === "anthropic-key")![0]);
   });
 
+  it("stays fast on a 200 KB run of the word token (the secret-assignment rule once took quadratic time)", () => {
+    const time = (text: string) => {
+      const t0 = performance.now();
+      secretRefusal("wiki", { action: "write", body: text });
+      return performance.now() - t0;
+    };
+    const baseline = time("a".repeat(200_000)) + 20; // same length, no keyword: the cost of scanning alone, plus a floor for timer noise
+    const hostile = time("token".repeat(40_000));
+    // Catches a return to quadratic time (about 8 s here before the cap); a linear scan stays within a small multiple of the baseline.
+    expect(hostile).toBeLessThan(baseline * 25);
+  });
+
   it("checks only the wiki's writing actions, and only the guarded tools", () => {
     expect(secretRefusal("wiki", { action: "read", slug: anthropic })).toBeNull();
     expect(secretRefusal("notes", { action: "save", body: anthropic })).toBeNull();
