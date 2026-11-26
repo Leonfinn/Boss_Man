@@ -362,6 +362,7 @@ describe("ownerTextReceiptRefusal (BOS-2741)", () => {
     expect(ownerTextReceiptRefusal("Google shows Couldn't fetch for the sitemap.")).toBeNull();
     expect(ownerTextReceiptRefusal("The job is pending review and has 0 errors.")).toBeNull();
     expect(ownerTextReceiptRefusal("Pending review.\n\nDetails: pushed the fix.")).toBeNull();
+    expect(ownerTextReceiptRefusal("Google has not read it yet (no Last read date).")).toBeNull();
   });
 
   it("lets a Blocked note say it is waiting, but still refuses 0 errors with no date", () => {
