@@ -48,6 +48,7 @@ import { serverHealthService, type ServerHealth, type ServerHealthDeps } from ".
 import { createPermissionLog } from "./services/permission-log.js";
 import { permissionStore } from "./services/permission-store.js";
 import { selfDeployService } from "./services/self-deploy.js";
+import { releaseWatchService } from "./services/release-watch.js";
 import { deployWaitService } from "./services/deploy-wait.js";
 import { hostFactsService, OWNER_FACTS } from "./services/host-facts.js";
 import { gitTokenActionsProbe } from "./services/owner-record.js";
@@ -1507,6 +1508,11 @@ export async function buildApp(opts: AppOptions) {
   // Runners may come back later than 60 s after an update, so tickets skipped for want of one are retried every 2 minutes for 30 minutes.
   const stopPreflightRecover = ciPreflight.recoverRepeatedly({ firstMs: 60_000, everyMs: 120_000, forMs: 30 * 60_000 });
   app.addHook("onClose", async () => stopPreflightRecover());
+  // BOS-2663: an install from the published images looks for a newer release at least daily and tells the owner once per version.
+  // Without the three BOSSMAN_ values the updater hands each server colour (a source install), the service is off and offers nothing.
+  const releaseWatch = releaseWatchService(db, { fetch: opts.fetch, now: opts.now, notify: (n) => notes.notify(n), hasNtfy: async () => !!(await notes.getSettings()).ntfy, isLeader: () => leader.isLeader(), log: (m) => app.log.warn(m) });
+  const stopReleaseWatch = releaseWatch.start();
+  app.addHook("onClose", async () => stopReleaseWatch());
   // BOS-1749: bossman-ci/* branches the gate's own cleanup missed (a restart mid-check, a refused delete) are deleted from GitHub.
   // First sweep 5 minutes after start (so old leftovers go without anyone asking), then every 30 minutes; branches under 6 hours old stay.
   const sweepCi = () => void review.sweepCiBranches().catch(() => undefined);
@@ -2745,7 +2751,7 @@ export async function buildApp(opts: AppOptions) {
     });
 
     // Scheduling and kill switches, the runner update hold, self-deploy, restart and deploy targets (R30, R14, R15).
-    serverAdminRoutes(owner, { db, scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun: (runId) => runsSvc.cancel(runId), activeWaits: () => currentUpdateWaits() });
+    serverAdminRoutes(owner, { db, scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun: (runId) => runsSvc.cancel(runId), activeWaits: () => currentUpdateWaits(), releaseWatch });
 
     // The decision queue (R20), ranked, with what each row holds up.
     owner.get("/api/decisions", async () => decisionsSvc.queue());

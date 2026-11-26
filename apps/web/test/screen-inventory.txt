@@ -399,6 +399,7 @@ reads:
   - /api/kill-switch
   - /api/maintenance
   - /api/maintenance/history
+  - /api/release-watch
   - /api/runner-report
   - /api/self-deploy
   - /api/self-deploy/history

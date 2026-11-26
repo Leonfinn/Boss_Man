@@ -167,6 +167,7 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "pages/settings/Runner.tsx": "Server and runner",
   "pages/settings/System.tsx": "Server and runner",
   "pages/settings/CheckWorkers.tsx": "Server and runner",
+  "pages/settings/ReleaseNotice.tsx": "Server and runner",
   "pages/settings/SlotSplit.tsx": "Server and runner",
   "pages/settings/Team.tsx": "Team and CEO",
   "pages/settings/ThisHost.tsx": "Server and runner",

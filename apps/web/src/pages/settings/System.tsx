@@ -13,6 +13,7 @@ import { DraftTextarea } from "../../components/DraftTextarea";
 import { SaveButton } from "../../components/SaveButton";
 import { Section, useAction } from "./shared";
 import { CheckWorkers, type CheckWorkerView } from "./CheckWorkers";
+import { ReleaseNotice } from "./ReleaseNotice";
 import { DEFAULT_POLICY, policyLine, policyValid, SlotSplitFields, type SlotPolicy } from "./SlotSplit";
 import { LiveState, atTime, historyTag, historyWaitingOn, historyWhat, inAbout, runnerProgress, updateStatus, type RunnerProgress, type DeployWaitView, type HistoryRow, type MaintenanceView, type Report, type SelfDeployView, type UpdateStatus, type WrapUpRun, type WrapUpStatus } from "./updates";
 
@@ -248,6 +249,7 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
     // BOS-1486: with no host deployer there is no Build and update runners button, but a hand-built image still needs the drain.
     return (
       <Section id="deploy-h" title="Updates">
+        <ReleaseNotice />
         <p className="muted" style={{ fontSize: 14 }}>
           Building the image from here needs the host deployer, and this install doesn't have one, so there is no Build and update runners button. Build the image on the host with scripts/update-runner.sh, then use the button below. To get in-app updates, set up the host deployer (<a href="https://github.com/Leonfinn/Boss_Man/blob/main/docs/30-in-app-updates.md" target="_blank" rel="noreferrer">how to set it up</a>).
         </p>
@@ -347,6 +349,7 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
 
   return (
     <Section id="deploy-h" title="Updates">
+      <ReleaseNotice />
       {/* One status box in every state, at the same height while loading (BOS-1238). */}
       <div className={`upd-status ${st.tone}`} role={st.alert ? "alert" : "status"} aria-live={st.alert ? "assertive" : "polite"} data-testid="update-status" data-state={st.tag}>
         <span className={`tag ${st.tone}`} data-testid="update-tag">{st.tag}</span>

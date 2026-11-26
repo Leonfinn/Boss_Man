@@ -49,6 +49,7 @@ const api = urlStub({
   "/api/maintenance": { on: false, last: null },
   "/api/maintenance/history": { holds: [] },
   "/api/runner-report": { live: [], update: null },
+  "/api/release-watch": { active: false },
   "/api/companies/c1/agents": [agent],
   "/api/companies/c1/projects": [],
   // Settings → Team and CEO lists the chapters (an array) beside the approvals setting.

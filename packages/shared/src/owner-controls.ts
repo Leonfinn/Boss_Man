@@ -362,6 +362,7 @@ export const OWNER_FIELDS = {
   ],
   "Scrum Master": ["Filter", "Undone only", "With you only"],
   "Server and runner": [
+    "Tell me about new releases", "Also send it to my phone",
     "Across all companies (1 to 32)", "In one company (1 to 16, no more than the number above)",
     "Background agents at once (0 to 16)",
     // Settings → Server and runner → Private details to block (BOS-979).
