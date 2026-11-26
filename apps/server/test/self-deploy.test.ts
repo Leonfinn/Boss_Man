@@ -2289,6 +2289,27 @@ describe("a failed update is picked up by someone, and the panel says who (BOS-2
     await fresh.sync();
     expect(woken).toHaveLength(1);
   });
+
+  it("a hold linked to an unassigned ticket with no wake time still chases the CEO after 15 minutes, once (BOS-2624)", async () => {
+    const c = (ctx = await setup());
+    const { ceo, project } = await team(c, { infra: true });
+    await fail(c);
+    const other = (await c.req("POST", `/api/projects/${project.id}/tickets`, { title: "Nobody's ticket" })).json() as { id: string };
+    expect((await linkHold(c.db, { ticketId: other.id })).ok).toBe(true);
+    expect(await currentHold(c.db, "runner_update")).toMatchObject({ ticketId: other.id, wokenAt: null });
+    const woken: { agentId: string; reason: string; note: string }[] = [];
+    const fresh = selfDeployService(c.db, { dir: c.dir, notify: async () => undefined, wake: async (agentId, input) => void woken.push({ agentId, ...input }) });
+    await c.available({ deployed: B, tip: B });
+    await fresh.sync();
+    expect(woken).toHaveLength(0); // not 15 minutes yet
+    await c.db.update(ownerHolds).set({ createdAt: new Date(Date.now() - 16 * 60_000) });
+    await c.available({ deployed: B, tip: B });
+    await fresh.sync();
+    expect(woken.map((w) => [w.agentId, w.reason])).toEqual([[ceo.id, FAILED_UPDATE_REASON]]);
+    await c.available({ deployed: B, tip: B });
+    await fresh.sync();
+    expect(woken).toHaveLength(1);
+  });
 });
 
 describe("an approval when main moves on before the host runs it (BOS-753)", () => {
