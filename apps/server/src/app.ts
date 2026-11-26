@@ -44,6 +44,7 @@ import { addonsService, mergeHostAddons, unknownAddons } from "./services/addons
 import { probeColours } from "./services/bluegreen.js";
 import { createStallMonitor } from "./services/stall-monitor.js";
 import { dailyBackupService } from "./services/daily-backup.js";
+import { hostWarningService } from "./services/host-warnings.js";
 import { serverHealthService, type ServerHealth, type ServerHealthDeps } from "./services/server-health.js";
 import { createPermissionLog } from "./services/permission-log.js";
 import { permissionStore } from "./services/permission-store.js";
@@ -1167,6 +1168,30 @@ export async function buildApp(opts: AppOptions) {
     composeCmd: () => hostFacts.value("compose.cmd"),
     log: (m) => app.log.warn(m),
   });
+  // BOS-2674: a host warning seen in 2 reports in a row tells the CEO; the panel reads what is being done about each one.
+  const hostWarnings = hostWarningService(db, {
+    now: opts.now ?? (() => new Date()),
+    facts: () => hostFacts.sync(),
+    homeCompany: async () => (await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1))[0]?.id ?? null,
+    isOpen: async (dedupeKey) => (await db.select({ id: decisions.id }).from(decisions).where(and(eq(decisions.dedupeKey, dedupeKey), eq(decisions.status, "open"))).limit(1)).length > 0,
+    ticketFor: async (key) => {
+      const [t] = await db
+        .select({ title: tickets.title, number: tickets.number, prefix: companies.ticketPrefix })
+        .from(tickets)
+        .innerJoin(companies, eq(companies.id, tickets.companyId))
+        .where(and(ne(tickets.systemState, "done"), or(sql`position(${key} in ${tickets.title}) > 0`, sql`position(${key} in coalesce(${tickets.body}, '')) > 0`)))
+        .orderBy(desc(tickets.createdAt))
+        .limit(1);
+      const ref = t ? ticketRef(t.prefix, t.number) : null;
+      return t && ref ? { ref, title: t.title } : null;
+    },
+    raise: async (input) => {
+      const r = await alerts.raise(input as Parameters<typeof alerts.raise>[0]);
+      if (r) await notes.syncDecisions();
+      return r;
+    },
+    log: (m) => app.log.warn(m),
+  });
   const gitHosts = gitHostService({ fetch: opts.fetch });
   const gitTokenProbe = gitTokenActionsProbe({ db, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "pull_request")).GIT_TOKEN, now: opts.now });
   const setup = setupService(db, { isConnected: (id) => runners.isConnected(id) });
@@ -1893,7 +1918,13 @@ export async function buildApp(opts: AppOptions) {
     settingsLimitsRoutes(owner, { db, scheduler, checkQueueSvc, launch, maintenance, checks, review, runners, mainCi, checkWorkers: checkWorkersSvc });
 
     // BOS-419: Settings → This host. The facts the host reported (with source and any conflict) and the ones only the owner can give.
-    owner.get("/api/host-facts", async () => ({ ...(await hostFacts.sync()), ownerFacts: [...OWNER_FACTS], deployerScript: await selfDeploy.deployerScript().catch(() => ({ state: "none" as const })) }));
+    owner.get("/api/host-facts", async () => {
+      // BOS-2674: what Boss Man knows that decides whether a warning matters: how many runners are connected and how many runs are going.
+      const rows = await db.select({ id: runnersTable.id }).from(runnersTable);
+      const [live] = await db.select({ n: count() }).from(runsTable).where(and(isNull(runsTable.endedAt), sql`${runsTable.purpose} is distinct from 'chat'`));
+      const impact = { runnersTotal: rows.length, runnersConnected: rows.filter((r) => runners.isConnected(r.id)).length, runsGoing: live?.n ?? 0 };
+      return { ...(await hostFacts.sync()), ownerFacts: [...OWNER_FACTS], deployerScript: await selfDeploy.deployerScript().catch(() => ({ state: "none" as const })), impact, handling: await hostWarnings.handling().catch(() => ({})) };
+    });
     // BOS-770: Settings → Server and runner. The .env network-guard allow entries and which ones Boss Man already covers. Read only.
     owner.get("/api/netguard-allow", async () => ({ report: await netguardAllow().catch(() => null) }));
     owner.put("/api/host-facts", async (req, reply) => {
@@ -2994,5 +3025,5 @@ export async function buildApp(opts: AppOptions) {
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
   /** BOS-2159: removes login rows past their expiry (they are refused already; this stops the table growing). Returns how many. */
   const sweepExpiredSessions = async () => (await db.delete(sessions).where(lte(sessions.expiresAt, new Date())).returning({ h: sessions.tokenHash })).length;
-  return { app, webhooks, sweepExpiredSessions, mailer, weeklySummary, launcher: launch, githubWatch, memory, serverHealth, dailyBackup, checks, releaseLog, mainCi, secretScan, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, planning: roadmapPlanning, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, ticketMeaningEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
+  return { app, webhooks, sweepExpiredSessions, mailer, weeklySummary, launcher: launch, githubWatch, memory, serverHealth, dailyBackup, hostWarnings, checks, releaseLog, mainCi, secretScan, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, planning: roadmapPlanning, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, ticketMeaningEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
 }
