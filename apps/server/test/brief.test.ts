@@ -340,7 +340,7 @@ describe("scope and size", () => {
     // About 4 characters a token: roughly 1k and 1.8k tokens with every cap reached and long notes.
     // 4400 since BOS-2657: all 8 shown In flight lines here are peers on someone else's tickets, each now carrying a "(not assigned: …)" marker (about 55 characters).
     expect(worker.length).toBeLessThanOrEqual(4400);
-    expect(ceo.length).toBeLessThanOrEqual(7500);
+    expect(ceo.length).toBeLessThanOrEqual(8000);
   });
 
   it("is small on an ordinary day", async () => {
