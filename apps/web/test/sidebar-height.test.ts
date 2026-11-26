@@ -63,7 +63,7 @@ describe("side menu height", () => {
     if (!shell) throw new Error(".app no-wrap rule missing from styles.css");
     expect(shell.at).toBe("min-width: 641px");
     expect(shell.body).toContain("flex-wrap: nowrap");
-    expect(side().body).toContain("flex: 0 0 232px");
+    expect(side().body).toContain("flex: 0 0 var(--side-width)");
     const main = rules(".app > main", true).find((r) => r.at === "min-width: 641px");
     expect(main?.at).toBe("min-width: 641px");
     expect(main?.body).toContain("flex: 1 1 0");
@@ -74,8 +74,8 @@ describe("side menu height", () => {
     if (!strip) throw new Error("collapsed sidebar width rule missing from styles.css");
     expect(strip.at).toBe("min-width: 641px");
     expect(strip.body).toContain("flex: 0 0 64px");
-    // The expanded menu keeps its 232px column, so the strip only swaps the width.
-    expect(side().body).toContain("flex: 0 0 232px");
+    // The expanded menu keeps its shared column width, so the strip only swaps the width.
+    expect(side().body).toContain("flex: 0 0 var(--side-width)");
   });
 
   it("leaves the phone bar above the page alone", () => {
