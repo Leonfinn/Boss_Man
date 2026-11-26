@@ -178,6 +178,7 @@ jobs:
         if: ${{ env.RELEASE_SKIP == '' }}
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
           SHA: ${{ env.RELEASE_SHA }}
         run: |
           set -euo pipefail

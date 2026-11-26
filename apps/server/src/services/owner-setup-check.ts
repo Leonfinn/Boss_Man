@@ -138,7 +138,9 @@ export function checkOwnerSetup(steps: readonly string[], facts: OwnerSetupFacts
   // When written, a company token may have no record yet (the other company adds its target before go-live); a
   // known host fact may be unreported. At go-live both stay, and the steps go to the CEO.
   const knownGap = (f: LintFinding) => f.rule === "R4" && (Object.hasOwn(HOST_FACT_LABELS, /^has \{\{host\.([A-Za-z0-9_.]+)\}\}/.exec(f.problem)?.[1] ?? "") || /^has \{\{company\.[a-z0-9-]+\.deployTarget\.(?:name|kind|address|tagName)\}\}/.test(f.problem));
-  const kept = refuse.filter((f) => f.rule !== "R11" && !(mode === "write" && knownGap(f)) && !(facts.todo && (f.rule === "R20" || f.rule === "R21")));
+  // R32 (BOS-2730) is a write-time rule: steps saved before it existed are not re-checked at go-live, and steps written
+  // since passed it when written.
+  const kept = refuse.filter((f) => f.rule !== "R11" && !(mode === "raise" && f.rule === "R32") &&!(mode === "write" && knownGap(f)) && !(facts.todo && (f.rule === "R20" || f.rule === "R21")));
   return { steps: shown, generic: filled.generic, where: place.where, hard: kept.filter((f) => NOT_OVERRIDABLE.has(f.rule)), soft: kept.filter((f) => !NOT_OVERRIDABLE.has(f.rule)), warn, dropped: settled.dropped };
 }
 
@@ -152,7 +154,9 @@ export function ownerSetupWriteCheck(steps: readonly string[], facts: OwnerSetup
   if (override !== undefined && !o.byCeo) return { error: "Only the CEO can pass lintOverride. Fix the setup steps instead." };
   if (override !== undefined && overrideTooShort(override)) return { error: "lintOverride needs a reason the owner can read, at least 10 characters." };
   if (!steps.length) return { error: null, override: null };
-  const c = checkOwnerSetup(steps, facts, "write");
+  const c0 = checkOwnerSetup(steps, facts, "write");
+  // `strict: false` is the re-check of steps already stored (the move to review): R32 only judges what is written now.
+  const c = o.strict === false ? { ...c0, soft: c0.soft.filter((f) => f.rule !== "R32") } : c0;
   const head = "These owner setup steps can't go to the owner as written (one step per line):";
   const tail = `The owner pastes each command exactly as written and has no other document open. ${HOST_TOKEN_HELP}`;
   if (c.hard.length) return { error: `${head}\n${lintLines([...c.hard, ...c.soft])}\n${tail}` };
