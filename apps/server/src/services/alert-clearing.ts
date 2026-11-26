@@ -18,6 +18,7 @@ import { backInBandReason } from "./cost-check.js";
 import { idleSlotsGoneReason } from "./idle-slots-alert.js";
 import { backupFreshReason } from "./daily-backup.js";
 import { sweepStepOkReason } from "./sweep-step-guard.js";
+import { hostWarningGoneReason } from "./host-warnings.js";
 
 /** One machine-checkable reason a card can go: a fixed shape, never free text. */
 export type ClearWhen =
@@ -84,7 +85,8 @@ export type ClearWhen =
   /** The landing-turn-late card (BOS-2359): that ticket no longer holds its project's landing turn. */
   | { kind: "landingTurnEnded"; companyId: string; ticketId: string }
   /** A failing sweep step's card (BOS-2160): the step ran without an error in the last pass. */
-  | { kind: "sweepStepOk"; step: string };
+  | { kind: "sweepStepOk"; step: string }
+  | { kind: "hostWarningGone"; key: string };
 
 type Card = { id: string; companyId: string; status: string; createdAt: Date; question: string; context: unknown };
 
@@ -156,6 +158,9 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
         break;
       case "idleSlotsGone":
         if (typeof c.companyId === "string") out.push({ kind: "idleSlotsGone", companyId: c.companyId });
+        break;
+      case "hostWarningGone":
+        if (typeof c.key === "string") out.push({ kind: "hostWarningGone", key: c.key });
         break;
       case "sweepStepOk":
         if (typeof c.step === "string") out.push({ kind: "sweepStepOk", step: c.step });
@@ -341,6 +346,8 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
         return idleSlotsGoneReason(db, c.companyId, (deps.now ?? (() => new Date()))());
       case "sweepStepOk":
         return sweepStepOkReason(db, c.step);
+      case "hostWarningGone":
+        return hostWarningGoneReason(db, c.key);
       case "landingTurnEnded":
         if (!deps.landingTurnHeld) return null;
         return (await deps.landingTurnHeld(c.companyId, c.ticketId)) ? null : "that ticket no longer holds the landing turn";

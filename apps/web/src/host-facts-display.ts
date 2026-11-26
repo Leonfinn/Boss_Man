@@ -8,6 +8,9 @@ export type HostFactsView = {
   ownerFacts: string[];
   /** BOS-990: whether the host's deployer script is the live version. Absent from an older server. */
   deployerScript?: { state: "current" | "behind" | "unknown" | "none"; since?: string };
+  /** BOS-2674: what Boss Man knows about runners and runs, and what it is doing about each warning. Absent from an older server. */
+  impact?: HostImpact;
+  handling?: Record<string, WarningHandling>;
   facts: Record<string, { value: string; source: "host" | "owner"; at: string; conflict?: { confirmed: string; reported: string } }>;
 };
 
@@ -69,7 +72,7 @@ export function failingCheckText(key: string, d: HostFactsView, names: string[],
     const who = names.length ? `the containers ${names.join("; ")}` : `${v} container${v === "1" ? "" : "s"}`;
     return {
       what: `${who} ${v === "1" ? "is" : "are"} not running${total ? ` (of ${total} in the Boss Man stack)` : ""}`,
-      fix: "a stopped or crashed container holds nothing back by itself, but the part of Boss Man it runs is down. The host's log says why it stopped; pressing Build and update runners, or the next update, starts the stack again. Someone with access to the host can look at that container's log.",
+      fix: "a stopped or crashed container holds nothing back by itself, but the part of Boss Man it runs is down. Pressing Build and update runners, or the next update, starts the stack again.",
     };
   }
   if (key === "check.container_status.unhealthy") {
@@ -78,25 +81,53 @@ export function failingCheckText(key: string, d: HostFactsView, names: string[],
       what: unh.length
         ? `${v} container${v === "1" ? " is" : "s are"} restarting or unhealthy: ${unh.join(", ")}`
         : `${v} container${v === "1" ? " is" : "s are"} restarting or unhealthy (this host's deployer is too old to name them)`,
-      fix: "a container that keeps restarting is failing its own health check. The next update restarts the stack; if it comes back, its log on the host says why.",
+      fix: "a container that keeps restarting is failing its own health check. The next update restarts the stack.",
     };
   }
   if (key === "repo.probe") {
     return {
       what: `Boss Man could not read the code host${probeWhy ? `: ${probeWhy}` : ""}`,
-      fix: "deploys that already have the code still work, so this only stops the next check of what is waiting. It is usually the key or the address the host uses for the code host (a network or key change). Someone with access to the host can try the read there.",
+      fix: "deploys that already have the code still work, so this only stops the next check of what is waiting. It is usually the key or the address the host uses for the code host (a network or key change).",
     };
   }
   if (key === "check.restart_counts.max") {
-    return { what: `a container has restarted ${v} time${v === "1" ? "" : "s"}`, fix: "build and update the runners from Settings → Server and runner → Updates; if it keeps restarting, its log on the host says why." };
+    return { what: `a container has restarted ${v} time${v === "1" ? "" : "s"}`, fix: "building and updating the runners from Settings → Server and runner → Updates restarts it cleanly." };
   }
   if (key === "check.state_file_sizes.ageSeconds" || key === "check.state_file_sizes.stale") {
     return { what: "the host's own record is out of date", fix: "the host deployer runs every minute; a stale record means it hasn't run. Check that Boss Man's update service is running on the host." };
   }
   // BOS-2481: never an empty name. An empty value is a fact the host reported with nothing in it; otherwise the check
   // is named by its key and its value.
-  if (!v) return { what: `The host reported "${key}" with no value`, fix: "the host's log says why it could not read it." };
-  return { what: `The check "${key}" reports "${v}"`, fix: "this is a check the host runs about itself; its log on the host says more." };
+  if (!v) return { what: `The host reported "${key}" with no value`, fix: "the host could not read it." };
+  return { what: `The check "${key}" reports "${v}"`, fix: "this is a check the host runs about itself." };
+}
+
+/** What Boss Man knows about itself that decides whether a warning matters (the server works it out, BOS-2674). */
+export type HostImpact = { runnersTotal: number; runnersConnected: number; runsGoing: number };
+/** What Boss Man is doing about one warning: watching it, or the CEO has been told (the server's host-warnings.ts). */
+export type WarningHandling = { state: "watching" | "ceo_told"; reports: number; since: string };
+
+/** The three plain lines under every warning: does it matter, what Boss Man is doing, whether the owner needs to act. */
+export function warningAdvice(key: string, impact: HostImpact | undefined, handling: WarningHandling | undefined, reportedGap = "a few minutes"): { matters: string; doing: string; needs: string } {
+  let matters: string;
+  if (key in OWNER_FACT_HELP) {
+    matters = `Only the cards that need it are held back (${OWNER_FACT_HELP[key]!.needs}). Agents keep working.`;
+  } else if (!impact) {
+    matters = "Boss Man can't tell yet whether anything is affected.";
+  } else if (impact.runnersTotal > 0 && impact.runnersConnected < impact.runnersTotal) {
+    const off = impact.runnersTotal - impact.runnersConnected;
+    matters = `Possibly. ${off} of ${impact.runnersTotal} runner${impact.runnersTotal === 1 ? " is" : "s are"} not connected right now, so that work can't run until it is back.`;
+  } else if (impact.runnersTotal === 0) {
+    matters = "No runner is set up yet, so no agent work is running that this could hold up.";
+  } else {
+    matters = `Not right now. ${impact.runnersTotal === 1 ? "The runner is" : `All ${impact.runnersTotal} runners are`} connected and ${impact.runsGoing === 0 ? "no runs are going" : `${impact.runsGoing} run${impact.runsGoing === 1 ? " is" : "s are"} going`}, so agents are working normally.`;
+  }
+  if (key in OWNER_FACT_HELP) return { matters, doing: "Nothing to do on Boss Man's side: only you can give this fact.", needs: `Yes: ${OWNER_FACT_HELP[key]!.where}.` };
+  const doing =
+    handling?.state === "ceo_told"
+      ? "The CEO has been told and is looking into it. You'll hear from them if it needs you."
+      : `Boss Man is watching it. If the next host report (in ${reportedGap}) still shows it, the CEO is told straight away.`;
+  return { matters, doing, needs: "No. Boss Man will ask you with a card if that changes." };
 }
 
 /** The line the "Worth a look" block adds for a missing fact or a failing check. */

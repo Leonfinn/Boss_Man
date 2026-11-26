@@ -2,7 +2,7 @@ import { Fragment, useState } from "react";
 import { api } from "../../api";
 import { usePoll } from "../../hooks";
 import { when } from "../Runs";
-import { isFailingCheck, NORMALLY_EMPTY_FACTS, OWNER_FACT_LABELS, STOPPED_CONTAINERS_KEY, problemText, stoppedContainerNames, type HostFactsView } from "../../host-facts-display";
+import { isFailingCheck, NORMALLY_EMPTY_FACTS, OWNER_FACT_LABELS, STOPPED_CONTAINERS_KEY, problemText, stoppedContainerNames, warningAdvice, type HostFactsView } from "../../host-facts-display";
 import { Section, useAction } from "./shared";
 
 type Health = { role: "leader" | "standby" | "single"; version: string; commit: string; colour: "blue" | "green" | null; startedAt: string };
@@ -59,6 +59,18 @@ function problemLine(p: { missing: string[]; failing: string[]; addonsDown: stri
   if (p.failing.length) bits.push(`${p.failing.length} check${p.failing.length === 1 ? "" : "s"} failing`);
   if (p.addonsDown.length) bits.push(`${p.addonsDown.length} add-on${p.addonsDown.length === 1 ? "" : "s"} not running`);
   return bits.length ? bits.join(" · ") : null;
+}
+
+/** BOS-2674: the three plain lines under a warning: does it matter, what Boss Man is doing, does the owner need to act. */
+function AdviceLines({ k, d }: { k: string; d: HostFactsView }) {
+  const a = warningAdvice(k, d.impact, d.handling?.[k]);
+  return (
+    <ul data-testid="warning-advice" style={{ margin: "2px 0 6px", paddingLeft: 18, listStyle: "none" }}>
+      <li><strong>Does it matter?</strong> {a.matters}</li>
+      <li><strong>What Boss Man is doing:</strong> {a.doing}</li>
+      <li><strong>Do you need to do anything?</strong> {a.needs}</li>
+    </ul>
+  );
 }
 
 /** The "Deployer script" line of Settings → This host (BOS-990). */
@@ -129,11 +141,15 @@ export function ThisHost() {
                 <p style={{ marginTop: 0, marginBottom: 4 }}>Worth a look. Raw keys are in the list below.</p>
                 <ul style={{ margin: 0, paddingLeft: 18 }}>
                   {problemTexts.map((p) => (
-                    <li key={p.key}>{p.text}</li>
+                    <li key={p.key}>
+                      {p.text}
+                      <AdviceLines k={p.key} d={d} />
+                    </li>
                   ))}
                   {problems.addonsDown.map((a) => (
                     <li key={`addon.${a}`}>
-                      The {ADDON_NAME[a] ?? a} add-on isn't running, so whatever uses it can't be reached. Turn it back on for this host and it starts again; its own log says why it stopped.
+                      The {ADDON_NAME[a] ?? a} add-on isn't running, so whatever uses it can't be reached. Turn it back on for this host and it starts again.
+                      <AdviceLines k={`addon.${a}`} d={d} />
                     </li>
                   ))}
                 </ul>

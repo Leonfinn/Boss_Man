@@ -38,7 +38,9 @@ export type ClearWhen =
   /** The landing-turn-late alert (BOS-2359): the named ticket no longer holds the landing turn. */
   | { kind: "landingTurnEnded"; companyId: string; ticketId: string }
   /** A failing sweep step's card (BOS-2160): the step ran without an error in the last pass. */
-  | { kind: "sweepStepOk"; step: string };
+  | { kind: "sweepStepOk"; step: string }
+  /** A host warning's alert (BOS-2674): the host no longer reports that failing check or stopped add-on. */
+  | { kind: "hostWarningGone"; key: string };
 
 export type AlertRung = "scrum_master" | "ceo" | "owner";
 
@@ -265,6 +267,12 @@ export const ALERT_KINDS = {
   daily_backup_stale: {
     topRung: "owner",
     clearWhen: () => [{ kind: "backupFresh" }],
+  },
+  // host-warnings.ts (BOS-2674): a failing check or stopped add-on in 2 host reports in a row. The CEO looks first and
+  // never hands it to the owner by default; one card per warning, closes by itself (hostWarningGone).
+  host_warning: {
+    topRung: "ceo",
+    clearWhen: () => [],
   },
   // sweep-step-guard.ts (BOS-2160): a background safety step failed in 3 sweeps in a row. Only the owner can fix or
   // restart the server; one card per step, closes by itself (sweepStepOk) after the step's next success.

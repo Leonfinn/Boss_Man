@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { NORMALLY_EMPTY_FACTS, STOPPED_CONTAINERS_KEY, UNHEALTHY_CONTAINERS_KEY, failingCheckText, problemText, stoppedContainerNames, type HostFactsView } from "../src/host-facts-display";
+import { NORMALLY_EMPTY_FACTS, STOPPED_CONTAINERS_KEY, UNHEALTHY_CONTAINERS_KEY, failingCheckText, problemText, stoppedContainerNames, warningAdvice, type HostFactsView } from "../src/host-facts-display";
 
 // BOS-986: the "This host" panel says in plain words what is missing and what failed, rather than the raw
 // dotted key ("check.container_status.notRunning" told the owner nothing). These tests pin the wording the
@@ -76,7 +76,7 @@ describe("failingCheckText: what a failing check says (BOS-986)", () => {
     const d = view({ "check.container_status.notRunning": "2", "check.container_status.total": "18" });
     const t = failingCheckText("check.container_status.notRunning", d, ["bm-worker-1 (exited, exit 137, 2 hours ago)", "bm-cache-1 (restarting, exit 255, 5 minutes ago)"], "");
     expect(t.what).toBe("the containers bm-worker-1 (exited, exit 137, 2 hours ago); bm-cache-1 (restarting, exit 255, 5 minutes ago) are not running (of 18 in the Boss Man stack)");
-    expect(t.fix).toContain("pressing Build and update runners");
+    expect(t.fix).toContain("Pressing Build and update runners");
     expect(t.fix).toContain("starts the stack again");
     expect(t.fix).not.toContain("check.container_status");
   });
@@ -151,7 +151,33 @@ describe("failingCheckText: what a failing check says (BOS-986)", () => {
   it("falls back to the raw value and a generic line for a check it does not know", () => {
     const t = failingCheckText("check.something.new", view({ "check.something.new": "weird" }), [], "");
     expect(t.what).toBe('The check "check.something.new" reports "weird"');
-    expect(t.fix).toBe("this is a check the host runs about itself; its log on the host says more.");
+    expect(t.fix).toBe("this is a check the host runs about itself.");
+  });
+
+  it("never sends the owner to a host log (BOS-2674)", () => {
+    for (const key of ["check.container_status.notRunning", "check.container_status.unhealthy", "repo.probe", "check.restart_counts.max", "check.state_file_sizes.stale", "check.something.new"]) {
+      const t = problemText(key, view({ [key]: "1" }), [], "");
+      expect(t, key).not.toMatch(/\blog\b|access to the host/i);
+    }
+  });
+
+  it("says a warning does not matter while every runner is connected, from the live counts (BOS-2674)", () => {
+    const a = warningAdvice("check.container_status.unhealthy", { runnersTotal: 1, runnersConnected: 1, runsGoing: 3 }, undefined);
+    expect(a.matters).toContain("Not right now");
+    expect(a.matters).toContain("3 runs are going");
+    expect(a.doing).toContain("the CEO is told");
+    expect(a.needs).toMatch(/^No\./);
+  });
+
+  it("says it may matter when a runner is not connected, and names who is handling it once the CEO is told (BOS-2674)", () => {
+    const a = warningAdvice("check.container_status.unhealthy", { runnersTotal: 2, runnersConnected: 1, runsGoing: 0 }, { state: "ceo_told", reports: 3, since: "2026-11-26T11:00:00Z" });
+    expect(a.matters).toContain("1 of 2 runners are not connected");
+    expect(a.doing).toContain("The CEO has been told");
+  });
+
+  it("asks the owner only for a fact only they can give (BOS-2674)", () => {
+    const a = warningAdvice("network.publicAddress", undefined, undefined);
+    expect(a.needs).toMatch(/^Yes/);
   });
 
   it("never leaks a raw dotted key for any check it knows", () => {
