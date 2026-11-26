@@ -205,14 +205,23 @@ describe("raise_decision against the record (BOS-1797)", () => {
       await ctx.put(PHONE_TEST_KEY, confirmed("https://old.example.net"));
       const c = await ctx.mcp(ctx.dev.id);
       const options = ["Keep it", "Change it"];
-      const plain = { name: "raise_decision", arguments: { question: CARD1.question, options, recommended: "Keep it", triedFirst: TRIED, blocksTicketId: ctx.ticket.id } };
-      const withRecord = { name: "raise_decision", arguments: { question: CARD1.question, options, recommended: "Keep it", triedFirst: TRIED, blocksTicketId: ctx.ticket.id, stillNeeded: "The owner removed Tailscale from the phone yesterday." } };
+      // Both raises are the same ask: same question, options and recommended, neither naming a ticket. One carries the
+      // record line at its head (the phone proof is stale), the other is plain: only the record line differs, as on 26 Nov.
+      // Every other word is a made-up name, so the earlier card's words never read as "already answered" to the other
+      // raise (checkOwnerAsk's word search): only the record line differs, and only the repeat check can catch it.
+      const ask = "Keep the zorblax address on the flimquat and close the snazzle?";
+      const plain = { name: "raise_decision", arguments: { question: ask, options, recommended: "Keep it", triedFirst: TRIED } };
+      const withRecord = { name: "raise_decision", arguments: { question: `Boss Man's record says: the phone reached Boss Man at https://old.example.net. The record may be out of date, so this is asked.\n\n${ask}`, options, recommended: "Keep it", triedFirst: TRIED } };
       const [first, second] = await Promise.all(recordFirst ? [c.callTool(plain), c.callTool(withRecord)] : [c.callTool(withRecord), c.callTool(plain)]);
       expect([textOf(first), textOf(second)].some((t) => /already in the owner's queue|went to the CEO first|Decision [0-9a-f-]{36}/.test(t))).toBe(true);
       const open = await openCards();
       expect(open).toHaveLength(1);
-      expect(askedQuestion(open[0]!.question)).toBe(CARD1.question);
-      if (recordFirst) expect(open[0]!.question.startsWith("Boss Man's record says:")).toBe(true);
+      expect(askedQuestion(open[0]!.question)).toBe(ask);
+      // Exactly one of the two raises is left open, and the other closed itself: the owner keeps one card either way.
+      const raisedIds = [idOf(textOf(first)), idOf(textOf(second))];
+      expect(raisedIds).toContain(open[0]!.id);
+      const [other] = await ctx.db.select().from(decisions).where(eq(decisions.id, raisedIds.find((id) => id !== open[0]!.id)!));
+      expect(other?.status).toBe("withdrawn");
     });
   }
 
