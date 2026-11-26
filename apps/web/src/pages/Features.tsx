@@ -386,7 +386,7 @@ export function forecastLines(fc: FeatureForecastView): string[] {
     const finish = fc.pointsLeft === 0 ? "" : fc.expectedFinish ? ` · at this pace about ${dayMonth(fc.expectedFinish)}` : "";
     lines.push(`${fc.pointsDone} of ${total} points done · ${fc.pointsLeft} left${finish}`);
   }
-  if (fc.unsized > 0) lines.push(`${fc.unsized} ${fc.unsized === 1 ? "task has" : "tasks have"} no size`);
+  if (fc.unsized > 0) lines.push(fc.unsized === 1 ? "1 task has no size yet, so it isn't counted (the CEO sizes it)" : `${fc.unsized} tasks have no size yet, so they aren't counted (the CEO sizes them)`);
   if (fc.pointsLeft > 0 && fc.pace === 0) lines.push("No finished work in the last 4 weeks to estimate from.");
   return lines;
 }

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { TASK_SIZES, windowLabel } from "@boss-man/shared";
+import { POINTS_EXPLAINED, TASK_SIZES, windowLabel } from "@boss-man/shared";
 import { api, ApiError, RISKS, type Company, type Risk, type TicketDetail, type WorkspaceDiff } from "../api";
 import { RiskLevels, useRiskTiers } from "../components/RiskHelp";
 import { FieldHelp } from "../components/FieldHelp";
@@ -1244,7 +1244,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             <dt>
               <label htmlFor="t-size">Size</label>
               <FieldHelp label="Size">
-                How big this task is compared with others: 1, 2, 3, 5 or 8. Whoever creates a task sets it. The Workflow page shows what each size really takes. <a href="#/workflow">What each size really takes, on the Workflow page</a>
+                {POINTS_EXPLAINED} Whoever creates a task sets it, and you can change it here. <a href="#/workflow">What each size really takes, on the Workflow page</a>
               </FieldHelp>
             </dt>
             <dd>
@@ -1252,7 +1252,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                 <option value="">Not sized</option>
                 {TASK_SIZES.map((n) => (
                   <option key={n} value={n}>
-                    {n}
+                    {n === 1 ? "1 point" : `${n} points`}
                   </option>
                 ))}
               </select>

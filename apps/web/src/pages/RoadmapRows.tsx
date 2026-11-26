@@ -5,6 +5,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { BurnupPoint, MilestoneStatus, RoadmapCompany, RoadmapMilestone } from "../api";
 import { api } from "../api";
+import { POINTS_EXPLAINED } from "@boss-man/shared";
 import { dayOf, short } from "../short-date";
 
 const DAY = 86_400_000;
@@ -56,6 +57,11 @@ export function summaryLine(ms: RoadmapMilestone[]): string {
   return done ? `${lead} · ${done} done` : lead;
 }
 
+/** BOS-2708: what "no size" means and who fixes it, so the owner isn't left guessing. */
+export function unsizedNote(n: number): string {
+  return n === 1 ? "1 ticket has no size yet, so it isn't counted (the CEO sizes it)" : `${n} tickets have no size yet, so they aren't counted (the CEO sizes them)`;
+}
+
 /** The two meta lines of a row, and whether the second is a warning. */
 export function metaLines(m: RoadmapMilestone, now: string): { line1: string; line2: string; warn: boolean } {
   const f = m.forecast;
@@ -63,7 +69,7 @@ export function metaLines(m: RoadmapMilestone, now: string): { line1: string; li
   // Rounded down: 99.6% shows 99%, never 100% while work is left.
   const pct = total > 0 ? Math.floor((f.pointsDone * 100) / total) : m.total > 0 ? Math.floor((m.done * 100) / m.total) : 0;
   const due = m.targetDate ? `Due ${weekday(m.targetDate)} ${short(m.targetDate)}` : null;
-  const addOns = [m.blocked ? plural(m.blocked, "ticket blocked", "tickets blocked") : null, f.unsized ? (f.unsized === 1 ? "1 ticket has no size" : `${f.unsized} tickets have no size`) : null].filter(Boolean);
+  const addOns = [m.blocked ? plural(m.blocked, "ticket blocked", "tickets blocked") : null, f.unsized ? unsizedNote(f.unsized) : null].filter(Boolean);
   const tail = addOns.length ? ` · ${addOns.join(" · ")}` : "";
   if (m.status === "no_work") return { line1: `${due ?? "No date"} · no tickets yet`, line2: "Add tickets or features to it to get a forecast.", warn: false };
   const line1 = [due, `${pct}% done`, `${f.pointsLeft} points left`].filter(Boolean).join(" · ");
@@ -338,6 +344,7 @@ export function MilestoneRows({ ms, range, now, selected, onSelect, detail, onCh
       <details className="rm-rules">
         <summary>How the status is worked out</summary>
         <ul>
+          <li><b>Points:</b> {POINTS_EXPLAINED}</li>
           <li><b>✓ Done:</b> Every ticket in it is finished.</li>
           <li><b>✓ Live, being checked:</b> Everything is built and live; some final checks haven't reported yet. It turns Done when the last one passes.</li>
           <li><b>● On track:</b> At its pace it finishes by its date. A merged, live ticket counts as built.</li>

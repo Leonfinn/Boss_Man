@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type 
 import { FilterPanel, useIsPhone } from "../components/FilterPanel";
 import { buildCsv, download } from "../csv";
 import { api, today, FEATURE_STATUSES, FEATURE_STATUS_LABEL, RISKS, type Board as BoardData, type Company, type Feature, type FeatureStatus, type Project, type Risk, type ScoredFeatures } from "../api";
-import { BULK_TICKET_MAX, isLiveCheckWait, ticketRef, type Criterion } from "@boss-man/shared";
+import { BULK_TICKET_MAX, isLiveCheckWait, POINTS_EXPLAINED, ticketRef, type Criterion } from "@boss-man/shared";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
 import { OwnerAsksLaneHead, OwnerAsksStrip, SameQuestionLine, sameQuestionAs, sameQuestionText } from "../components/OwnerAsks";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
@@ -694,7 +694,7 @@ function TicketCard({ sameAs, waiters, t, mine, merging, who, name, prefix, tier
           </span>
         )}
         {t.size && (
-          <span className="tag" title="Size, relative to other tasks">
+          <span className="tag" title={POINTS_EXPLAINED}>
             Size {t.size}
           </span>
         )}
