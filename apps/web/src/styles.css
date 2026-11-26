@@ -1845,6 +1845,7 @@ details.pushes[open] > summary { margin-bottom: 8px; }
 .side .side-pinned { margin-top: 0; padding: 10px 0 0; border-top: 1px solid #2a3544; flex: none; flex-direction: row; align-items: center; gap: 8px; }
 .side .side-pinned a.nav { flex: 1; min-width: 0; }
 .side .side-pinned .logout { flex: none; width: 44px; min-height: 44px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+.side .side-pinned .shortcuts-button { flex: none; width: 44px; min-height: 44px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
 .side .side-pinned .label-full { display: none; }
 .side .side-pinned .logout-icon { display: block; }
 /* A group's pages in a small panel beside its row (the icon strip, and a window too short to unfold them). */
@@ -1872,7 +1873,11 @@ details.pushes[open] > summary { margin-bottom: 8px; }
   .side.collapsed .nav-scroll { gap: 8px; }
   .side.collapsed .side-pinned { flex-direction: column; padding-top: 8px; }
   .side.collapsed .side-pinned a.nav { flex: none; width: 100%; }
-  .side.collapsed .side-pinned .logout { width: 100%; }
+  .side.collapsed .side-pinned .logout, .side.collapsed .side-pinned .shortcuts-button { width: 100%; }
+}
+/* A phone's Menu sheet keeps Settings and Log out only; "?" still works with a keyboard plugged in (BOS-2688). */
+@media (max-width: 640px) {
+  .side .side-pinned .shortcuts-button { display: none; }
 }
 .side .brand span { white-space: nowrap; }
 /* A window too short for the list at the normal spacing (1667x724): tighter gaps so ten rows and the pinned row fit without scrolling. */
@@ -1967,13 +1972,16 @@ details.pushes[open] > summary { margin-bottom: 8px; }
 .search-title .search-state { margin-right: 6px; font-weight: 500; vertical-align: 1px; }
 /* Keyboard shortcuts list (BOS-2321): reuses the search box's back and panel. */
 .shortcuts-title { flex: 1; margin: 0; font-size: 16px; }
-.shortcuts-list { margin: 0; padding: 8px 16px; overflow-y: auto; }
+.shortcuts-list { margin: 0; padding: 8px 16px; }
+.shortcuts-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.shortcuts-note { flex: none; border-top: 1px solid var(--line); }
 .shortcuts-row { display: flex; gap: 12px; align-items: baseline; padding: 6px 0; }
 .shortcuts-row dt { flex: 0 0 120px; margin: 0; }
 .shortcuts-row dd { margin: 0; }
 .shortcuts-list kbd { font-family: var(--mono); font-size: 12px; padding: 1px 6px; border: 1px solid var(--line-strong); border-radius: 4px; }
 .shortcuts-note { margin: 0; padding: 4px 16px 12px; font-size: 13px; }
 .shortcuts-section { margin: 0; padding: 8px 16px 0; font-size: 14px; border-top: 1px solid var(--line); }
+.shortcuts-section.first { border-top: 0; }
 /* BOS-2330: the card j/k moved to. Inside the outline, as a lane's scroll box would clip one drawn outside. */
 [data-shortcut-card]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .search-snippet { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

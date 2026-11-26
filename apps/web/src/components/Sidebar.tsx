@@ -4,9 +4,10 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { figureText } from "@boss-man/shared";
 import type { Company, Decision } from "../api";
 import { useMediaQuery } from "../hooks";
-import { Activity, BookOpen, ChevronDown, ChevronRight, ChevronsLeft, ChevronsRight, FolderGit2, Bell, GitMerge, Gavel, Handshake, LayoutDashboard, ListChecks, LogOut, Map, Menu as MenuIcon, MessageCircle, MessageSquare, Puzzle, Settings, ShieldCheck, Sparkles, Star, Users, Workflow as WorkflowIcon, type LucideIcon } from "lucide-react";
+import { Activity, BookOpen, ChevronDown, ChevronRight, ChevronsLeft, ChevronsRight, FolderGit2, Bell, GitMerge, Gavel, Handshake, Keyboard, LayoutDashboard, ListChecks, LogOut, Map, Menu as MenuIcon, MessageCircle, MessageSquare, Puzzle, Settings, ShieldCheck, Sparkles, Star, Users, Workflow as WorkflowIcon, type LucideIcon } from "lucide-react";
 import { art } from "../brand";
 import { SearchButton } from "./SearchPalette";
+import { SHOW_SHORTCUTS_EVENT, linkTitle } from "../shortcut-list";
 
 /**
  * R43: a per-company server figure (feedback.toProcess) for the chosen company, the one its own page shows. The
@@ -272,7 +273,7 @@ export function Sidebar(props: {
   const itemLink = (n: Item) => {
     const b = badge(n);
     return (
-      <a className="nav" href={`#/${n.id}`} onClick={closeIfNarrow} title={n.label} aria-current={isCurrent(n.id) ? "page" : undefined}>
+      <a className="nav" href={`#/${n.id}`} onClick={closeIfNarrow} title={linkTitle(n.id, n.label)} aria-current={isCurrent(n.id) ? "page" : undefined}>
         <n.icon size={18} strokeWidth={1.75} aria-hidden="true" />
         <span className="nav-label">{n.label}</span>
         {b && <span className={`count${b.warn ? " warn" : ""}`} aria-label={b.label}>{b.value}</span>}
@@ -379,6 +380,10 @@ export function Sidebar(props: {
         {/* Pinned below the list, so Settings and Log out are in view without scrolling. On a phone they sit inside the folded menu, so the header stays one row. */}
         <div className="side-pinned foot">
           {itemLink(SETTINGS)}
+          {/* BOS-2688: opens the "?" list for people who never press "?". Hidden on a phone (styles.css). */}
+          <button type="button" className="shortcuts-button" onClick={() => window.dispatchEvent(new Event(SHOW_SHORTCUTS_EVENT))} title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts (?)">
+            <Keyboard size={18} strokeWidth={1.75} aria-hidden="true" />
+          </button>
           <button type="button" className="logout" onClick={props.onLogout} title="Log out" aria-label="Log out">
             <LogOut size={18} strokeWidth={1.75} aria-hidden="true" className="logout-icon" />
             <span className="label-full">Log out</span>

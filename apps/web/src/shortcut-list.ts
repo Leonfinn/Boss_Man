@@ -22,6 +22,16 @@ export const JUMPS: Array<{ key: string; label: string; to: string }> = [
   { key: "s", label: "Settings", to: "settings" },
 ];
 
+/** The window event the menu's keyboard button sends to open the list (BOS-2688). */
+export const SHOW_SHORTCUTS_EVENT = "bossman:show-shortcuts";
+
+/** The tooltip for a menu link: "Decisions (g then i)" when its page has a jump key, else just the label. */
+export function linkTitle(id: string, label: string): string {
+  // The Projects link is where "g then b" lands (the board of the current project).
+  const key = JUMPS.find((j) => j.to === id || (id === "projects" && j.key === "b"))?.key;
+  return key ? `${label} (${JUMP_PREFIX} then ${key})` : label;
+}
+
 /** What a card key does on a screen that marks its cards with `data-shortcut-card`. */
 export type CardAction = "next" | "prev" | "open";
 
