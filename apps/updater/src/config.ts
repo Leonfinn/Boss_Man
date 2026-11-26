@@ -150,6 +150,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     const serverEnv = lines("UPDATER_SPEC_ENV");
     for (const l of serverEnv) {
       if (!/^[A-Z][A-Z0-9_]*=/.test(l)) throw new UpdaterError("config", "UPDATER_SPEC_ENV has a line that is not KEY=value.");
+      if (/^BOSSMAN_(IMAGE_INSTALL|RELEASE_REPO|VERSION)=/.test(l)) throw new UpdaterError("config", "UPDATER_SPEC_ENV must not set BOSSMAN_IMAGE_INSTALL, BOSSMAN_RELEASE_REPO or BOSSMAN_VERSION: the updater sets them for each colour from the release it makes.");
       if (/^BOSSMAN_(COLOUR|ROLE)=/.test(l)) throw new UpdaterError("config", "UPDATER_SPEC_ENV must not set BOSSMAN_COLOUR or BOSSMAN_ROLE: the updater sets them for each colour.");
     }
     swap = {

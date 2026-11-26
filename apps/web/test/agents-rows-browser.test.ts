@@ -37,6 +37,7 @@ function answer(p: string): unknown {
   if (p === "/api/kill-switch") return { paused: false };
   if (p === "/api/maintenance") return { on: false, last: null };
   if (p === "/api/runner-report") return { live: [], update: null };
+  if (p === "/api/release-watch") return { active: false };
   if (p === "/api/companies/c1/agents") return agents;
   if (p === "/api/companies/c1/projects") return [];
   if (p === "/api/companies/c1/models") return { runner: {}, api: [] };

@@ -155,6 +155,7 @@ export const CARRY_ON_MS = 15 * 60_000;
 export { CARRY_ON_NOTE } from "./check-wording.js";
 import { CARRY_ON_NOTE } from "./check-wording.js";
 import { RENDER_CHECK_REVIEW_GUIDANCE } from "./render-check-gate.js";
+import { SURFACES_REVIEW_GUIDANCE } from "./surfaces-gate.js";
 
 /**
  * True while the agent has its own check job queued or running on the ticket (request_check, DR-003).
@@ -885,7 +886,7 @@ export function schedulerService(
     if (w.reason === WATCH_REASON) lines.push("", ...(await watchDuty(w)));
     if (w.reason === RETRO_REASON) lines.push("", ...RETRO_DUTY);
     if (w.reason === REVIEW_REASON) {
-      lines.push("", "These tickets are ready for review. Review each one with the review tool (diff, then submit):", TWIN_PATHS_GUIDANCE, USABILITY_GATE_GUIDANCE, RENDER_CHECK_REVIEW_GUIDANCE);
+      lines.push("", "These tickets are ready for review. Review each one with the review tool (diff, then submit):", TWIN_PATHS_GUIDANCE, USABILITY_GATE_GUIDANCE, RENDER_CHECK_REVIEW_GUIDANCE, SURFACES_REVIEW_GUIDANCE);
       const copy = await reviewCopy(w);
       if (copy) lines.push(`Your working folder is your own copy of "${copy.title}" as its author left it, uncommitted work included, with its packages installed from the shared store. Read the code around the change and run one related test with \`pnpm vitest run <path/to/that.test.ts>\` there (no permission card) before you give your verdict; nothing you change there reaches the ticket. If the install didn't happen (node_modules is missing or the test command can't find vitest), run \`pnpm install --frozen-lockfile --prefer-offline --store-dir "$(pnpm store path)"\` in that folder first, then run the test. For any other ticket listed, use the review tool's diff and tickets read.`);
     }

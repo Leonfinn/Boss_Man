@@ -68,13 +68,17 @@ Use 0.1.0-beta.3 or newer. The older 0.1.0-beta.1 has no `images.env`, because i
 
 `images.env` holds the registry and the exact digest of every image. Do not edit the digests.
 
-Optional: check the signatures with [cosign](https://docs.sigstore.dev/cosign/installation/). Download `images.env.sigstore.json` and `docker-compose.images.yml.sigstore.json` from the same release, then run:
+Optional: check the signatures with [cosign](https://docs.sigstore.dev/cosign/installation/). Download `images.env.sigstore.json` and `docker-compose.images.yml.sigstore.json` from the same release into the same folder, then run these two commands there, one for each file:
 
-```sh Run in the folder with the files
+```sh Run in the folder with the files (checks images.env)
 cosign verify-blob --bundle images.env.sigstore.json --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity https://github.com/Leonfinn/Boss_Man/.github/workflows/release.yml@refs/heads/main images.env
 ```
 
-Run it again with `docker-compose.images.yml.sigstore.json` and `docker-compose.images.yml` in place of the two `images.env` names.
+```sh Run in the folder with the files (checks docker-compose.images.yml)
+cosign verify-blob --bundle docker-compose.images.yml.sigstore.json --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity https://github.com/Leonfinn/Boss_Man/.github/workflows/release.yml@refs/heads/main docker-compose.images.yml
+```
+
+Each prints `Verified OK` when the file is the one the release signed.
 
 :::worked
 `ls` in the folder shows `docker-compose.images.yml` and `images.env`.
