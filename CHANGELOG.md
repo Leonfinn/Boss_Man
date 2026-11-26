@@ -32,6 +32,7 @@ Check before committing: pnpm --filter @boss-man/site build (it stops on a headi
 
 ## 26 November 2026
 
+- A new beta release now goes out by itself every Tuesday morning (10:00 UTC), with that week's changes in its notes, as long as the newest code has passed its checks and its images are ready. If there is nothing new or nothing ready, it skips that week. You don't need to press anything.
 - Boss Man is now in beta, no longer alpha. The website, the GitHub README and the contribution and security pages say so. You can install it from the ready-made Docker images on the GitHub releases page, or build it from the source.
 - In the company brief (Wiki → Company brief), the "In flight" list now marks an agent whose run is on a ticket it does not own, review or have a card on: the line ends "(not assigned: woken by …)" with the reason it was started, so a stray run stands out. Runs on an agent's own tickets look as before.
 
