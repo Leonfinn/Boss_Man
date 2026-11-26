@@ -104,6 +104,17 @@ describe("flattenHostRecord: check lists", () => {
     expect("check.container_status.unhealthyNames" in none).toBe(false);
   });
 
+  it("carries the last health-probe reason, and leaves an empty one out (BOS-2680)", () => {
+    const some = flattenHostRecord({ ...base(), checks: { container_status: { unhealthyReason: "runner (exit 1, 3 failed in a row)" } } });
+    expect(some["check.container_status.unhealthyReason"]).toBe("runner (exit 1, 3 failed in a row)");
+    const none = flattenHostRecord({ ...base(), checks: { container_status: { unhealthyReason: "" } } });
+    expect("check.container_status.unhealthyReason" in none).toBe(false);
+    const where = flattenHostRecord({ ...base(), checks: { container_status: { unhealthyWhere: "runner-x (stack staging)" } } });
+    expect(where["check.container_status.unhealthyWhere"]).toBe("runner-x (stack staging)");
+    const noWhere = flattenHostRecord({ ...base(), checks: { container_status: { unhealthyWhere: "" } } });
+    expect("check.container_status.unhealthyWhere" in noWhere).toBe(false);
+  });
+
   it("reports an empty stopped list as 0 and adds no names key", () => {
     const flat = flattenHostRecord({ ...base(), checks: { container_status: { stopped: [] } } });
     expect(flat["check.container_status.stopped"]).toBe("0");
