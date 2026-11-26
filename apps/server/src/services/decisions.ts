@@ -89,7 +89,7 @@ import { agents, budgetPolicies, companies, decisions, deploys, engagementMessag
 import type { ClearWhen } from "./alert-clearing.js";
 import { unlinkedWaiters } from "./owner-todo.js";
 import { openAlertsLine } from "./go-live-card.js";
-import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer, similarQuestion } from "./stale-requests.js";
+import { askedQuestion, decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer, similarQuestion } from "./stale-requests.js";
 import { infoAskOf, ownContentOf, reportBackNote, startedInfoAnswer } from "./owner-result.js";
 import { openReviewProposal } from "./skill-proposals.js";
 import { lineEvent } from "./merge-line.js";
@@ -174,6 +174,16 @@ async function keepOpenInCompany<T extends OrderLink>(db: Db, companyId: string,
   const kept = links.filter((l) => why.get(l.decisionId) === null);
   const dropped = ids.flatMap((id) => { const reason = why.get(id); return reason ? [{ decisionId: id, link, reason }] : []; });
   return { ...(kept.length ? { kept } : {}), dropped };
+}
+
+/**
+ * Is another connection waiting for one agent's raise lock (BOS-2739)? Run on its own connection, outside a transaction,
+ * before this raise takes the lock: a raise that finds a waiter is behind one that took the lock first, so its card is the
+ * repeat to close. A lock is "waiting", in pg_locks, when it is requested but not granted.
+ */
+async function lockWaiterExists(db: Db, agentId: string): Promise<boolean> {
+  const r = await db.execute(sql`select 1 from pg_locks where locktype = 'advisory' and not granted and objid = hashtext(${`decision-raise:${agentId}`})`);
+  return (Array.isArray(r) ? r : []).length > 0;
 }
 
 /** One ticket a Boss Man update brings, as the owner sees it on a deploy card (BOS-213). */
@@ -2205,7 +2215,33 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // BOS-1219: a plan on a ticket whose plan the owner already approved amends it; the approval stays.
       const [approvedOf] = input.plan && input.blocksTicketId ? await db.select({ at: tickets.planApprovedAt }).from(tickets).where(eq(tickets.id, input.blocksTicketId)) : [];
       const questionText = `${input.question}${amendsText(approvedOf?.at)}`;
+      // BOS-2739: the open card asking the same thing, found under a lock taken before this card is written, so two
+      // raises at once can't both find no other card. A card that offers other choices, or recommends another, is a
+      // different ask (BOS-195): it stays. The record line at a card's head is not part of the ask.
+      let repeatedId: string | null = null;
+      // Set when this raise lost a race: the other raise's lock was taken first and its card already asks this. Its card
+      // is the one the owner keeps, so this one closes itself once it is written.
+      let lostToId: string | null = null;
+      // Was another raise of this agent's already waiting for its turn? Asked before this transaction begins, so a wait that
+      // took the lock first is now writing or has written its card: this raise then loses the race and closes its own card,
+      // leaving the owner the one that got there first. false when the view is unavailable (PGlite's tests), where raises run
+      // one after another and the first one stored reads as the repeat.
+      let raced = false;
+      if (input.agentId) raced = await lockWaiterExists(db, input.agentId).catch(() => false);
       const raised = await db.transaction(async (tx) => {
+        if (!input.plan && input.agentId) {
+          await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`decision-raise:${input.agentId}`}))`);
+          const same = await tx
+            .select({ id: decisions.id, question: decisions.question, companyId: decisions.companyId, options: decisions.options, recommendedOption: decisions.recommendedOption })
+            .from(decisions)
+            .where(and(eq(decisions.companyId, input.companyId), eq(decisions.status, "open"), eq(decisions.raisedByAgentId, input.agentId), eq(decisions.kind, "question"), sql`${decisions.context}->>'type' = 'question'`, sql`${decisions.context}->>'plan' is null`, input.blocksTicketId ? sql`${decisions.context}->>'ticketId' = ${input.blocksTicketId}` : sql`${decisions.context}->>'ticketId' is null`));
+          const sameChoices = (o: (typeof same)[number]) => o.recommendedOption === input.recommended && [...((o.options as string[] | null) ?? [])].sort().join("\u0000") === [...input.options].sort().join("\u0000");
+          const repeats = same.filter((o) => similarQuestion(o.question, input.question) && sameChoices(o)).sort((a, b) => a.id.localeCompare(b.id));
+          if (repeats.length && (!replaced || !repeats.some((o) => o.id === replaced!.id))) {
+            if (raced) lostToId = repeats[0]!.id;
+            else repeatedId = repeats[0]!.id;
+          }
+        }
         const [row] = await tx
           .insert(decisions)
           .values({
@@ -2244,24 +2280,24 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             await addTicketDependency(tx as unknown as Db, { companyId: input.companyId, blockedTicketId: other, blockerDecisionId: row!.id, actor: { type: "agent", agentId: input.agentId }, hold: true, now });
           }
         }
-        return row!;
+        // The older card a repeat closes (BOS-1193); a racer has none here: its own card is the one that goes.
+        return { row: row!, olderCardId: repeatedId, lostToId };
       });
       // BOS-1161: a new plan card closes the older open plan cards for the ticket.
-      if (input.plan && input.blocksTicketId) await supersedePlanCards(db, { companyId: input.companyId, ticketId: input.blocksTicketId, newCardId: raised.id, now: now(), release: (id) => releaseIfFree(id, false), ...(await supersedeExtras(input.companyId, input.blocksTicketId, raised.id, input.agentId)) }).catch((err) => log(`closing older plan cards for ${input.blocksTicketId} failed: ${(err as Error).message}`));
+      if (input.plan && input.blocksTicketId) await supersedePlanCards(db, { companyId: input.companyId, ticketId: input.blocksTicketId, newCardId: raised.row.id, now: now(), release: (id) => releaseIfFree(id, false), ...(await supersedeExtras(input.companyId, input.blocksTicketId, raised.row.id, input.agentId)) }).catch((err) => log(`closing older plan cards for ${input.blocksTicketId} failed: ${(err as Error).message}`));
       // BOS-1193: the older card closes as superseded. Explicitly (replaces), or when the same agent asks the same thing
       // again on the same ticket (similarQuestion). Two different questions from one agent both stay open.
+      // BOS-2739: the repeat is found by comparing the ask without the record line, on either side, and the check runs
+      // from the lock taken before this card's row is written, so two raises at once can't both find no older card.
       if (!input.plan) {
         const closeDeps = { markRead: (id: string, when: Date) => markDecisionNotificationRead(db, id, when), release: (id: string) => releaseIfFree(id, false), now, notify: feed };
-        const note = `superseded by ${raised.id}`;
-        if (replaced) await closeCardBySystem(db, replaced, note, closeDeps).catch((err) => log(`closing the replaced card ${replaced!.id} failed: ${(err as Error).message}`));
-        else if (input.agentId) {
-          const same = await db
-            .select({ id: decisions.id, question: decisions.question, companyId: decisions.companyId, options: decisions.options, recommendedOption: decisions.recommendedOption })
-            .from(decisions)
-            .where(and(eq(decisions.companyId, input.companyId), eq(decisions.status, "open"), ne(decisions.id, raised.id), eq(decisions.raisedByAgentId, input.agentId), eq(decisions.kind, "question"), sql`${decisions.context}->>'type' = 'question'`, sql`${decisions.context}->>'plan' is null`, input.blocksTicketId ? sql`${decisions.context}->>'ticketId' = ${input.blocksTicketId}` : sql`${decisions.context}->>'ticketId' is null`));
-          // A card that offers other choices, or recommends another, is a different ask (BOS-195): it stays.
-          const sameChoices = (o: (typeof same)[number]) => o.recommendedOption === input.recommended && [...((o.options as string[] | null) ?? [])].sort().join("\u0000") === [...input.options].sort().join("\u0000");
-          for (const o of same) if (similarQuestion(o.question, input.question) && sameChoices(o)) await closeCardBySystem(db, o, note, closeDeps).catch((err) => log(`closing the repeated card ${o.id} failed: ${(err as Error).message}`));
+        if (replaced) await closeCardBySystem(db, replaced, `superseded by ${raised.row.id}`, closeDeps).catch((err) => log(`closing the replaced card ${replaced!.id} failed: ${(err as Error).message}`));
+        // A racer that lost the advisory lock closes its own card: the winner's card is the one the owner keeps, so two
+        // raises at once leave one open card. Any other repeat is a later raise, and the older card closes (BOS-1193).
+        if (raised.lostToId) await closeCardBySystem(db, raised.row, `superseded by ${raised.lostToId}`, closeDeps).catch((err) => log(`closing the repeated card ${raised.row.id} failed: ${(err as Error).message}`));
+        else if (raised.olderCardId) {
+          const [older] = await db.select({ id: decisions.id, companyId: decisions.companyId, question: decisions.question }).from(decisions).where(and(eq(decisions.id, raised.olderCardId), eq(decisions.status, "open")));
+          if (older) await closeCardBySystem(db, older, `superseded by ${raised.row.id}`, closeDeps).catch((err) => log(`closing the repeated card ${older.id} failed: ${(err as Error).message}`));
         }
       }
       await record(db, { companyId: input.companyId, agentId: input.agentId, ticketId: input.blocksTicketId, kind: "decision_raised", summary: `${route.tier === "ceo" ? "Asked the CEO first" : "Asked the owner"}: ${input.question}`, at: now() });
@@ -2269,9 +2305,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       clearTallyCache();
       // BOS-1318: a team question waits with the CEO. If the CEO's wake is dropped it goes straight to the owner (wakeLadderCeo).
       if (route.tier === "ceo" && ceoRow) {
-        const ladder = (raised.context as { ladder: Ladder }).ladder;
-        await wakeLadderCeo(input.companyId, raised, { ladder }, ceoRow.id, [
-          `A team question is waiting for you (decision ${raised.id}):\n${untrusted("agent's question", input.question.slice(0, 1000))}`,
+        const ladder = (raised.row.context as { ladder: Ladder }).ladder;
+        await wakeLadderCeo(input.companyId, raised.row, { ladder }, ceoRow.id, [
+          `A team question is waiting for you (decision ${raised.row.id}):\n${untrusted("agent's question", input.question.slice(0, 1000))}`,
           "An agent asked it, and it needs none of the owner's hands, money, secrets or sign-off, so it came to you before the owner. Settle it yourself: answer with the decisions tool (action answer, one of its options) and a note saying why. The agent is woken with your answer and the owner can read the note.",
           `If it really is the owner's call (product direction, a secret, money, a host step or a sign-off), escalate it at once (decisions tool, action escalate, with triedFirst). If you don't answer within ${CEO_QUESTION_HANDOVER_MINUTES} minutes it goes to the owner, marked as tried by you first.`,
           `If the asker wanted the owner to act (GitHub, the host, a secret, a payment) and left out steps, escalate it with steps rather than waiting. ${OWNER_HANDS_HINT}`,
@@ -2280,10 +2316,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // Links that weren't stored come back so the tool's reply can say which, and why (BOS-625).
       let withCeo = false;
       if (route.tier === "ceo") {
-        const [now1] = await db.select({ tier: decisions.tier }).from(decisions).where(eq(decisions.id, raised.id));
+        const [now1] = await db.select({ tier: decisions.tier }).from(decisions).where(eq(decisions.id, raised.row.id));
         withCeo = now1?.tier === "ceo";
       }
-      return { ...raised, droppedLinks, withCeo };
+      return { ...raised.row, droppedLinks, withCeo };
     },
 
     /** Re-sends permission verdicts that couldn't be delivered, once the runner is back. */
