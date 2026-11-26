@@ -16,6 +16,14 @@ case "$1" in
 esac
 FAKE
 chmod +x "$t/bin/docker"
+# The archive name holds the minute, so a real clock can tick over between two runs (a slow machine
+# does this) and make a legitimate second archive. Pin the name stamp; other date calls stay real.
+real_date="$(command -v date)"
+cat >"$t/bin/date" <<FAKE
+#!/usr/bin/env bash
+if [[ "\$*" == "+%F-%H%M" ]]; then echo "\${FAKE_STAMP:-2030-01-01-0000}"; else exec "$real_date" "\$@"; fi
+FAKE
+chmod +x "$t/bin/date"
 export PATH="$t/bin:$PATH" FAKE_LOG="$t/log" FAKE_VOL="$t/vol" BOSSMAN_BACKUP_DIR="$t/backups" BOSSMAN_BACKUP_KEEP=2
 fail() { echo "FAIL: $*"; exit 1; }
 
@@ -33,9 +41,11 @@ mkdir "$t/x"; tar -C "$t/x" -xf "$1"; gzip -t "$t/x/penpot-db.sql.gz"
 mkdir "$t/r"; tar -C "$t/r" -xzf "$t/x/penpot-assets.tar.gz"; [[ "$(cat "$t/r/file1")" == asset1 ]] || fail "asset not restored"
 if find "$t/backups" -maxdepth 1 -name '.*' -mindepth 1 | grep -q .; then fail "temp files left behind"; fi
 
-# Second run (same minute): still one archive, exit 0.
+# Second run (same minute, clock pinned): still one archive, exit 0, content untouched.
+before="$(cksum "$t"/backups/penpot-*.tar)"
 "$here/backup-penpot.sh" >/dev/null
 [[ "$(find "$t/backups" -name 'penpot-*.tar' | wc -l)" -eq 1 ]] || fail "second run changed the archives"
+[[ "$(cksum "$t"/backups/penpot-*.tar)" == "$before" ]] || fail "second run rewrote the archive"
 
 # Retention keeps the newest KEEP penpot archives and never touches Boss Man's files.
 rm -f "$t"/backups/penpot-20[2-9]*.tar
