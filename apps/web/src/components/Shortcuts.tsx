@@ -13,6 +13,9 @@ export { G_WINDOW_MS, JUMPS, screenKeys };
 
 const isMac = () => typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 
+/** True on a touch screen with no mouse or trackpad (design 3a): the keys need a keyboard. Unknown counts as having a mouse. */
+const noFinePointer = () => typeof window !== "undefined" && typeof window.matchMedia === "function" && !window.matchMedia("(any-pointer: fine)").matches;
+
 /** True when a key press belongs to something else: a text box, or another open dialog (search box, lightbox). */
 function busyElsewhere(target: EventTarget | null): boolean {
   const el = target instanceof HTMLElement ? target : null;
@@ -64,7 +67,7 @@ function openCard(): boolean {
  * nothing, while Ctrl/Cmd+K and Escape keep working. The list still opens from the menu button and says so.
  * onTurnKeysOn: the list's "Turn them on", saved per login.
  */
-export function Shortcuts({ go, hasProjects, singleLetterKeys = true, onTurnKeysOn, initialOpen = false }: { go: (to: string) => void; hasProjects: boolean; singleLetterKeys?: boolean; onTurnKeysOn?: () => void; /** Open on the first draw: for the rendering test, which reads the markup. */ initialOpen?: boolean }) {
+export function Shortcuts({ go, hasProjects, singleLetterKeys = true, onTurnKeysOn, initialOpen = false, noMouse }: { go: (to: string) => void; hasProjects: boolean; singleLetterKeys?: boolean; onTurnKeysOn?: () => void; /** For the rendering test, which has no window when it builds the markup: forces the "These need a keyboard." line on or off. */ noMouse?: boolean;/** Open on the first draw: for the rendering test, which reads the markup. */ initialOpen?: boolean }) {
   const [open, setOpen] = useState(initialOpen);
   const gAt = useRef(0);
   const back = useRef<HTMLElement | null>(null);
@@ -173,6 +176,25 @@ export function Shortcuts({ go, hasProjects, singleLetterKeys = true, onTurnKeys
           if (e.key === "Escape" || e.key === "?") {
             e.preventDefault();
             close();
+            return;
+          }
+          // Keep Tab inside the open dialog (aria-modal): wrap from the last control to the first and back.
+          if (e.key === "Tab") {
+            const items = Array.from(e.currentTarget.querySelectorAll<HTMLElement>("button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex='-1'])"));
+            if (items.length === 0) {
+              e.preventDefault();
+              return;
+            }
+            const first = items[0]!;
+            const last = items[items.length - 1]!;
+            const at = document.activeElement;
+            if (e.shiftKey && (at === first || !e.currentTarget.contains(at))) {
+              e.preventDefault();
+              last.focus();
+            } else if (!e.shiftKey && (at === last || !e.currentTarget.contains(at))) {
+              e.preventDefault();
+              first.focus();
+            }
           }
         }}
       >
@@ -227,6 +249,7 @@ export function Shortcuts({ go, hasProjects, singleLetterKeys = true, onTurnKeys
           </dl>
         </div>
         <p className="muted shortcuts-note">
+          {(noMouse ?? noFinePointer()) && <>These need a keyboard. </>}
           Shortcuts don't work while you're typing in a box.
           {singleLetterKeys && onTurnKeysOn && (
             <>
