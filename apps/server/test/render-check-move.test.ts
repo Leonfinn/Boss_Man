@@ -78,7 +78,7 @@ async function agent() {
   return c;
 }
 const textOf = (r: unknown) => ((r as { content: Array<{ text: string }> }).content[0]?.text ?? "");
-const toReview = async (id: string, extra: Record<string, unknown> = {}) => textOf(await (await agent()).callTool({ name: "set_ticket_state", arguments: { ticketId: id, state: "review", summary: "Built it.", ...extra } }));
+const toReview = async (id: string, extra: Record<string, unknown> = {}) => textOf(await (await agent()).callTool({ name: "set_ticket_state", arguments: { ticketId: id, state: "review", summary: "Built it.", surfaces: "Board lane header", ...extra } }));
 const stateOf = async (id: string) => (await ctx.db.select().from(tickets).where(eq(tickets.id, id)))[0]!;
 
 describe("BOS-2511: a screen change at the move to review", () => {
@@ -153,5 +153,50 @@ describe("BOS-2511: a screen change at the move to review", () => {
     const out = await toReview(c.id);
     expect((await stateOf(c.id)).systemState).toBe("review");
     expect(out).toContain("screen-change check (BOS-2511) was skipped");
+  });
+});
+
+describe("BOS-2733: a Surfaces line at the move to review", () => {
+  it("refuses owner-facing code without surfaces, saying what to add", async () => {
+    ctx.runner.diff = HANDLER;
+    const t = await ctx.ticket();
+    const out = await toReview(t.id, { surfaces: undefined });
+    expect(out).toContain("needs a surfaces line");
+    expect(out).toContain(BOARD);
+    expect((await stateOf(t.id)).systemState).toBe("in_progress");
+  });
+
+  it("moves with surfaces and keeps the line in the state note", async () => {
+    ctx.runner.diff = HANDLER;
+    const t = await ctx.ticket();
+    await toReview(t.id, { surfaces: "Board card, Ticket page header" });
+    const row = await stateOf(t.id);
+    expect(row.systemState).toBe("review");
+    expect(row.stateNote).toContain("Surfaces: Board card, Ticket page header");
+  });
+
+  it("does not ask a test-only branch, a project without a repo, or an unreadable diff", async () => {
+    ctx.runner.diff = { ...BASE, files: [{ path: TEST, added: 1, removed: 0 }], diff: `diff --git a/${TEST} b/${TEST}\n+  it("x", () => {});` };
+    const a = await ctx.ticket();
+    await toReview(a.id, { surfaces: undefined });
+    expect((await stateOf(a.id)).systemState).toBe("review");
+
+    ctx.runner.diff = HANDLER;
+    const b = await ctx.ticket(ctx.noRepo.id);
+    await toReview(b.id, { surfaces: undefined });
+    expect((await stateOf(b.id)).systemState).toBe("review");
+
+    ctx.runner.diffFails = true;
+    const c = await ctx.ticket();
+    await toReview(c.id, { surfaces: undefined });
+    expect((await stateOf(c.id)).systemState).toBe("review");
+  });
+
+  it("refuses a too-short line and one given with another state", async () => {
+    ctx.runner.diff = HANDLER;
+    const t = await ctx.ticket();
+    expect(await toReview(t.id, { surfaces: "Board" })).toMatch(/at least 10/);
+    const out = textOf(await (await agent()).callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "in_progress", surfaces: "Board card, Ticket page" } }));
+    expect(out).toContain("surfaces goes with state review");
   });
 });
