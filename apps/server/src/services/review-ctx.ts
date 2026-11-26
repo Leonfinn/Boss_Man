@@ -3,7 +3,7 @@
 // moved to its own file takes it as `ctx`. The two values reassigned after building (the wake hook and the running
 // missed-merge sweep) live on `state`, because a destructured `let` can't be reassigned from another file.
 import { and, eq, inArray, isNotNull, ne, sql } from "drizzle-orm";
-import { carryFailedOver, DEFAULT_GIT_TEMPLATES, deploysNothing, goLiveWaitWords, MERGE_MISSED_AFTER_MS, parseRepoUrl, readCriteria, riskOf, ruleFor, ticketRef, touchesRunnerCode, touchesRunnerUpdate, unreportedAfterMerge, type CarriedTicket, type GitHostKind } from "@boss-man/shared";
+import { carryFailedOver, DEFAULT_GIT_TEMPLATES, deploysNothing, goLiveWaitWords, MERGE_MISSED_AFTER_MS, parseRepoUrl, readCriteria, riskOf, ruleFor, ticketRef, touchesRunnerCode, unreportedAfterMerge, type CarriedTicket, type GitHostKind } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, deployTargets, projects, runners, settings, tickets } from "../db/schema.js";
 import { addTicketDependency } from "./ticket-links.js";
@@ -28,6 +28,7 @@ import { CHECK_WAIT_LABEL, createHold, ensureSystemHold, mergeHolds, mergeWaits,
 import { CARRIED_NOTE_PREFIX, type TurnWait } from "./merge-queue.js";
 import type { notificationsService } from "./notifications.js";
 import { goLiveWaitOf } from "./go-live-wait.js";
+import { mergeFacts, recordTicketMerge } from "./ticket-merges.js";
 import { landingTurns } from "./landing-turn.js";
 import { cardHeld, CHECK_MERGED_KEY, highestRisk, MERGE_CARRY_KEY, MERGE_RETARGET_KEY, MERGE_TURN_DEFAULT_MIN, MERGE_TURN_KEY, MERGE_TURN_MAX_MIN, MERGE_WAIT_MS, raiseCheckStuck, ReviewError, ReviewHeldError, SignoffPendingError, WAIT_FOR_CI_KEY, type CarriedInfo, type GitTemplates, type HoldInput, type LandingStatus, type NotifyHook } from "./review-common.js";
 
@@ -353,11 +354,14 @@ export function reviewContext(db: Db, deps: ReviewDeps) {
     // A criterion still at fail when the work lands was put off, not failed (BOS-575): it stays on this
     // ticket, with its assignee, as an after-merge check, instead of the ticket closing on it.
     const carry = carryFailedOver(readCriteria(t.acceptanceCriteria), t.stateNote);
+    const mergedAt = at ?? new Date();
     await db
       .update(tickets)
       // mergedAt and touchesRunner (BOS-1021) place the merge and say whether the runners need a rebuild for it.
-      .set({ mergeCommit: commit, pullRequestNote: null, ...(commit ? { mergedAt: at ?? new Date() } : {}), ...(commit ? { touchesRunner: files ? touchesRunnerCode(files) : true, touchesRunnerUpdate: files ? touchesRunnerUpdate(files) : null, deploysNothing: files ? deploysNothing(files) : null } : {}), ...(carry ? { acceptanceCriteria: carry.criteria, stateNote: carry.note, stateNoteAt: new Date() } : {}) })
+      .set({ mergeCommit: commit, pullRequestNote: null, ...(commit ? { mergedAt, ...mergeFacts(files) } : {}), ...(carry ? { acceptanceCriteria: carry.criteria, stateNote: carry.note, stateNoteAt: new Date() } : {}) })
       .where(eq(tickets.id, t.id));
+    // BOS-2653: kept beside every earlier merge of this ticket, which the line above overwrites on a second merge.
+    if (commit) await recordTicketMerge(db, { companyId: t.companyId, ticketId: t.id, commit, at: mergedAt, files });
     await announceMerged(t.id);
     if (carry) t = { ...t, acceptanceCriteria: carry.criteria, stateNote: carry.note };
     await lineEvent(db, t, { event: "merged", commit });

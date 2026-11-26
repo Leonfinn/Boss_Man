@@ -25,6 +25,7 @@ import { ciStep } from "./merge-ci-step.js";
 import { recordBranchFiles } from "./branch-overlaps.js";
 import { failedQuickCheck } from "./review-holds.js";
 import { mergeRounds } from "./merge-rounds.js";
+import { recordTicketMerge } from "./ticket-merges.js";
 
 type TicketRepo = Awaited<ReturnType<ReviewCtx["ticketWithRepo"]>>;
 /**
@@ -501,6 +502,8 @@ export async function landOnce(this: ReviewSelf, ctx: ReviewCtx, ticketId: strin
   const mine = await closeAfterMerge(t, m.commit, causedByRunId, changed?.files.map((f) => f.path));
   for (const c of together) {
     await db.update(tickets).set({ mergeCommit: m.commit, lastActivityAt: new Date() }).where(eq(tickets.id, c.ticketId));
+    // BOS-2653: each of a rider's merges is kept too, with the files this merge changed.
+    if (m.commit) await recordTicketMerge(db, { companyId: t.companyId, ticketId: c.ticketId, commit: m.commit, at: new Date(), files: changed?.files.map((f) => f.path) });
     await announceMerged(c.ticketId);
     // A fix riding along on this merge is just as live (BOS-639).
     const [rider] = await db.select().from(tickets).where(eq(tickets.id, c.ticketId));

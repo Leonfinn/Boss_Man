@@ -2,11 +2,12 @@
 // running: not before the server runs a commit that contains it, and, for runner code, not before the runners are
 // on an image built from it. The server has no git, so "contains" is read from merge order, as in
 // runner-image.ts; a merge Boss Man can't place is never assumed to be live.
-import { and, asc, eq, isNotNull, sql } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 import type { GoLiveWait } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { companies, settings, tickets } from "../db/schema.js";
+import { companies, settings } from "../db/schema.js";
 import { imageContains, runnerImageCommit } from "./runner-image.js";
+import { companyMerges } from "./ticket-merges.js";
 
 const SEEN_PREFIX = "live_release:";
 const isSha = (sha: unknown): sha is string => typeof sha === "string" && /^[0-9a-f]{40}$/i.test(sha);
@@ -31,15 +32,11 @@ export async function liveServerCommit(db: Db, companyId: string): Promise<strin
 /**
  * Every merge commit of the company, oldest merge first, whatever the ticket's state: a ticket waiting for
  * go-live is still open, so the done-only order in runner-image.ts can't place it. mergedAt is the merge time;
- * tickets merged before it existed fall back to when they were closed.
+ * tickets merged before it existed fall back to when they were closed. Every merge of a ticket counts, not only its
+ * latest (BOS-2653: a ticket merged twice kept only its second, so a version built from its first couldn't be placed).
  */
 export async function allMergeOrder(db: Db, companyId: string): Promise<string[]> {
-  const rows = await db
-    .select({ mergeCommit: tickets.mergeCommit })
-    .from(tickets)
-    .where(and(eq(tickets.companyId, companyId), isNotNull(tickets.mergeCommit)))
-    .orderBy(asc(sql`coalesce(${tickets.mergedAt}, ${tickets.stateChangedAt})`));
-  return [...new Set(rows.map((r) => r.mergeCommit!.toLowerCase()))];
+  return [...new Set((await companyMerges(db, companyId)).map((m) => m.commit))];
 }
 
 /**
