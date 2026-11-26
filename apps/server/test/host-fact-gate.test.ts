@@ -352,9 +352,19 @@ describe("ownerTextReceiptRefusal (BOS-2741)", () => {
     "Google Search Console accepted the sitemap.",
     "Bing replied 204 for the sitemap.",
     "Google: sitemap sent. Pending, 0 errors.",
-    "GitHub CI is queued.",
   ])("holds %s and names the rewrite", (t) => {
     expect(ownerTextReceiptRefusal(t)).toContain("what the owner's screen shows");
+  });
+
+  it.each([
+    "Pushed to GitHub. Quick check queued.",
+    "GitHub CI pending.",
+    "GitHub CI is queued.",
+    "Merge pending, branch on GitHub.",
+    "Branch on GitHub; quick check queued.",
+    "Sent to Slack and ntfy; the push was sent.",
+  ])("lets routine engineering text through: %s", (t) => {
+    expect(ownerTextReceiptRefusal(t)).toBeNull();
   });
 
   it("passes a reading with a date, and text that names no outside service", () => {

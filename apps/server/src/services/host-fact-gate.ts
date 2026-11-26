@@ -150,12 +150,16 @@ export function ownerTextReceiptRefusal(text: string, opts: { allowReceipt?: boo
   const parts = text.split(/(?<=[.!?])\s+|[\n;]+/).map((s) => s.trim()).filter(Boolean);
   for (const [i, part] of parts.entries()) {
     const prev = parts[i - 1] ?? "";
-    if (!namesOutsideService(part) && !namesOutsideService(prev)) continue;
-    if (!opts.allowReceipt && RECEIPT.test(part)) return OWNER_TEXT_RECEIPT_REFUSAL;
-    if (zeroErrorsWithoutReadDate(`${prev} ${part}`)) return OWNER_TEXT_RECEIPT_REFUSAL;
+    // A receipt word counts only in the same sentence as the service's name, and not in CI, check, merge or review talk.
+    if (!opts.allowReceipt && OWNER_TEXT_SERVICE.test(part) && RECEIPT.test(part) && !ENGINEERING_TALK.test(part)) return OWNER_TEXT_RECEIPT_REFUSAL;
+    if ((OWNER_TEXT_SERVICE.test(part) || OWNER_TEXT_SERVICE.test(prev)) && zeroErrorsWithoutReadDate(`${prev} ${part}`)) return OWNER_TEXT_RECEIPT_REFUSAL;
   }
   return null;
 }
+
+/** BOS-2741: the services whose outcome the owner reads off their screen. Not the code host, CI or chat: "Pushed to GitHub, check queued" is routine. */
+const OWNER_TEXT_SERVICE = /\b(google|bing|search console|webmaster tools?|indexnow|sitemap|stripe|paypal|cloudflare|sendgrid|mailgun|twilio)\b/i;
+const ENGINEERING_TALK = /\b(ci|checks?|merge[sd]?|review|build|branch|commit)\b/i;
 
 /** The part of the note about criterion `n`: the segment (split on ; and newlines) that starts with its number, else the one that best repeats its words. */
 export function ownLine(note: string, n: number, text: string): string | null {
