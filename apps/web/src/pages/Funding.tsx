@@ -418,7 +418,8 @@ function SourceCard({ s }: { s: FundingStatus }) {
       ) : s.providerQuota ? (
         <ProviderQuotaBlock q={s.providerQuota} />
       ) : s.quota.length ? (
-        s.quota.map((q) => {
+        s.quota.map((q, _i, all) => {
+          const newestReport = all.reduce((m, x) => (x.observedAt > m ? x.observedAt : m), "");
           const label = windowLabel(q.window);
           // A reading whose window has already reset says nothing about the window now (BOS-1409):
           // every limit reads as empty, the same rule the hold uses, so Fable and This week never show last week's figure.
@@ -444,6 +445,11 @@ function SourceCard({ s }: { s: FundingStatus }) {
               <span className="muted" style={{ fontSize: 12 }}>
                 {beforeReset ? "No reading since its reset; updates on the next run" : `Resets ${when(q.resetsAt)}`}
                 {q.overageInUse ? " · using usage credits" : ""}
+              </span>
+            )}
+            {q.observedAt < newestReport && (
+              <span className="muted" style={{ fontSize: 12 }}>
+                Not in the latest report; last reported by {s.source.provider === "anthropic" ? "Claude" : "the account"} {when(q.observedAt)}
               </span>
             )}
             <Forecast f={s.forecasts[q.window]} />

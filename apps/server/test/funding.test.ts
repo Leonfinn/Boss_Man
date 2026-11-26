@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { windowHasReset } from "@boss-man/shared";
 import { engagements, quotaSamples } from "../src/db/schema.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
@@ -181,6 +181,24 @@ describe("subscription quota from the Claude adapter", () => {
     const again = (await get(`/api/funding-sources/${a.id}/status`)).json();
     expect(again.windowsSeen).toEqual(["five_hour", "seven_day", "seven_day_overage_included"]);
     expect(again.source.quotaDisabledWindows).toEqual(["five_hour"]);
+  });
+
+  // BOS-2676: a report that carries only some windows must not hide a limit an earlier real report had, until that limit's own reset.
+  it("keeps a limit the latest report left out until its own reset, and drops it after", async () => {
+    const future = Math.floor(Date.now() / 1000) + 3 * 86_400;
+    const report = (windows: Record<string, number>) => ({ "_claude/rateLimit": { unifiedWindows: Object.fromEntries(Object.entries(windows).map(([k, u]) => [k, { utilization: u, resetsAt: future }])) } });
+    const a = (await post("/api/funding-sources", { name: "Account A", kind: "subscription", provider: "anthropic" })).json();
+    await post("/api/quota-samples", { fundingSourceId: a.id, claudeMeta: report({ seven_day: 0.5, seven_day_overage_included: 0.4 }) });
+    await t.db.update(quotaSamples).set({ observedAt: new Date(Date.now() - 3_600_000) }).where(eq(quotaSamples.fundingSourceId, a.id));
+    await post("/api/quota-samples", { fundingSourceId: a.id, claudeMeta: report({ seven_day: 0.9 }) });
+    const kept = (await get(`/api/funding-sources/${a.id}/status`)).json();
+    expect(kept.windowsSeen).toEqual(["seven_day", "seven_day_overage_included"]);
+    const fable = kept.quota.find((q: { window: string }) => q.window === "seven_day_overage_included");
+    expect(fable.utilization).toBeCloseTo(0.4);
+    // Once the limit's own reset has passed and no report brought it back, it leaves.
+    await t.db.update(quotaSamples).set({ resetsAt: new Date(Date.now() - 1000) }).where(and(eq(quotaSamples.fundingSourceId, a.id), eq(quotaSamples.window, "seven_day_overage_included")));
+    const dropped = (await get(`/api/funding-sources/${a.id}/status`)).json();
+    expect(dropped.windowsSeen).toEqual(["seven_day"]);
   });
 
   it("keeps the hold threshold, extra-usage choice and window switches per source", async () => {
