@@ -71,6 +71,16 @@ describe("agent writes with a secret are refused (BOS-2731)", { timeout: 30_000 
     expect((await c.db.select().from(tickets).where(eq(tickets.title, "New work"))).length).toBe(0);
   });
 
+  it("text saved before the check is untouched and still readable", async () => {
+    const c = (ctx = await setup());
+    const [t] = await c.db.select().from(tickets).where(eq(tickets.id, c.ticketId));
+    await c.db.update(tickets).set({ body: `old text with ${key}` }).where(eq(tickets.id, t!.id));
+    const worker = await c.mcp(c.worker.id);
+    const read = await worker.callTool({ name: "tickets", arguments: { action: "read", ticketId: c.ticketId } });
+    expect(c.isError(read)).toBe(false);
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticketId)))[0]!.body).toBe(`old text with ${key}`);
+  });
+
   it("the same call without the key goes through", async () => {
     const c = (ctx = await setup());
     const worker = await c.mcp(c.worker.id);

@@ -44,6 +44,36 @@ describe("secretRefusal (BOS-2731)", () => {
     expect(secretRefusal("wiki", { action: "write", body: "Tokens look like sk-ant-... and are never written here." })).toBeNull();
   });
 
+  it("accepts what the merge gate accepts: placeholders in every guarded tool", () => {
+    const placeholders = ["sk-ant-api03-EXAMPLE…", "export K=${TOKEN}", "path {{host.env.file}}", "api_key = 'REPLACE-ME-your-key-0000000000000'", "AKIAIOSFODNN7EXAMPLE"];
+    for (const p of placeholders) {
+      for (const [tool, input] of [
+        ["wiki", { action: "write", body: p }],
+        ["wiki", { action: "append", entry: p }],
+        ["create_ticket", { body: p }],
+        ["update_ticket", { ownerSetup: p }],
+        ["ticket_reply", { text: p }],
+        ["set_ticket_state", { summary: p }],
+        ["raise_decision", { steps: [p] }],
+        ["nudge", { why: p }],
+      ] as Array<[string, Record<string, unknown>]>) expect(secretRefusal(tool, input), `${tool}: ${p}`).toBeNull();
+    }
+  });
+
+  it("does not apply the owner's private-details list: a host name or address is accepted", () => {
+    expect(secretRefusal("ticket_reply", { text: "Reach it at nas.home.example on 192.168.1.50" })).toBeNull();
+  });
+
+  it("uses the very same rule list as the merge-line scan script", async () => {
+    // @ts-expect-error the script is plain JavaScript with no declaration file
+    const script = (await import("../../../scripts/scan-added-lines.mjs")) as { SECRET_RULES: Array<[string, RegExp, unknown?]> };
+    const shared = (await import("@boss-man/shared")) as unknown as { findSecretKind: (t: string) => string | null };
+    const rules = (await import("../../../packages/shared/src/secret-rules.mjs")) as unknown as { SECRET_RULES: Array<[string, RegExp, unknown?]> };
+    expect(script.SECRET_RULES).toBe(rules.SECRET_RULES);
+    expect(script.SECRET_RULES.length).toBeGreaterThan(20);
+    expect(shared.findSecretKind(anthropic)).toBe(script.SECRET_RULES.find(([k]) => k === "anthropic-key")![0]);
+  });
+
   it("checks only the wiki's writing actions, and only the guarded tools", () => {
     expect(secretRefusal("wiki", { action: "read", slug: anthropic })).toBeNull();
     expect(secretRefusal("notes", { action: "save", body: anthropic })).toBeNull();
