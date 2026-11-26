@@ -7,6 +7,7 @@ import { and, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { DEPLOY_UNCHANGED_REASON, selfDeployService } from "../src/services/self-deploy.js";
 import { currentHold, FAILED_UPDATE_REASON, linkHold, releaseHold } from "../src/services/owner-holds.js";
+import { wakeWatchers } from "../src/services/watch-triggers.js";
 import { setOwnerTodoFacts } from "../src/services/decisions.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { openPglite } from "../src/db/client.js";
@@ -275,7 +276,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     const [byWords] = await watch(802, "the next real server update where the owner presses Ask agents to wrap up", null);
     const [runnerOnly] = await watch(803, "the runner swap", "runner_update");
     await watch(804, "a week with no new stuck alerts", null);
-    await watch(805, "GitHub on main", "github_main_failed");
+    const [onMain] = await watch(805, "a GitHub release", "github_main_failed");
     // The owner's wrap-up for it had already lifted (it lifts when the server is in) before the host's "ended" is read.
     await c.db.insert(updateHolds).values({ startedAt: new Date("2026-10-20T12:00:30Z"), kind: "wrapup", reason: "asking agents to wrap up for the server update", endedAt: new Date("2026-10-20T12:02:40Z") });
     const woken = async () => (await c.db.select().from(wakes)).filter((x) => x.reason === "watch trigger");
@@ -293,6 +294,13 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     await c.selfDeploy.sync();
     const runnerWake = (await woken()).find((w) => w.ticketId === runnerOnly!.id);
     expect(runnerWake?.note).toContain('runner update to bbbbbbbb ended "failed" from 14:00 UTC to 14:05 UTC on 2026-10-20; no wrap-up was pressed for it');
+    // Neither update woke the ticket watching for something else; its own (older) event still wakes it, and only it.
+    expect((await woken()).some((w) => w.ticketId === onMain!.id)).toBe(false);
+    const before = (await woken()).length;
+    expect(await wakeWatchers(c.db, (agentId, input) => c.scheduler.notify(agentId, input), "github_main_failed", "ci → test on main")).toBe(1);
+    const after = await woken();
+    expect(after).toHaveLength(before + 1);
+    expect(after.some((w) => w.ticketId === onMain!.id)).toBe(true);
   });
 
   it("raises one owner decision when main moves, and approving it writes the request file", async () => {

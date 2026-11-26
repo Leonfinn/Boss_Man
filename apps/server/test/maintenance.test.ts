@@ -210,6 +210,7 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     const [byWords] = await watch(902, "the next real runner update ends by itself", null);
     await watch(903, "a server update", "server_update");
     await watch(904, "a week with no new stuck alerts", null);
+    await watch(905, "a GitHub release", "github_main_failed");
     await c.db.update(runners).set({ imageCommit: "c".repeat(40) }).where(eq(runners.companyId, a.id));
     expect((await c.req("POST", "/api/maintenance/start", {})).statusCode).toBe(200);
     await c.maintenance.step();
