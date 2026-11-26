@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openPglite } from "../src/db/client.js";
 import { agents, companies, costEvents, fundingSources, projects, runs, tickets } from "../src/db/schema.js";
 import { kindCeiling } from "../src/services/alert-kinds.js";
-import { spendRateKey, spendRateSweep } from "../src/services/spend-rate.js";
+import { isSpike, SPIKE_FACTOR, SPIKE_FLOOR_MICROS, spendRateKey, spendRateSweep } from "../src/services/spend-rate.js";
 
 let db: Awaited<ReturnType<typeof openPglite>>["db"];
 let close: () => Promise<void>;
@@ -133,5 +133,30 @@ describe("spendRateKey", () => {
     const raised: Array<Record<string, unknown>> = [];
     expect((await sweep(NOW, raised).run()).raised).toBe(1);
     expect(raised[0]!.dedupeKey).toBe(spendRateKey(companyId, "2026-11-21"));
+  });
+});
+
+// BOS-2639: the spike rule on its own, with the floor and factor taken from the module.
+describe("isSpike (BOS-2639)", () => {
+  const facts = (todayMicros: number, averageMicros: number) => ({ todayMicros, averageMicros, historyDays: 7 });
+
+  it("is never a spike below the floor, however far above the average", () => {
+    expect(isSpike(facts(SPIKE_FLOOR_MICROS - 1, 0))).toBe(false);
+    expect(isSpike(facts(SPIKE_FLOOR_MICROS - 1, 1))).toBe(false);
+  });
+
+  it("is a spike above the floor when today is more than the factor times the average", () => {
+    const average = SPIKE_FLOOR_MICROS;
+    expect(isSpike(facts(SPIKE_FACTOR * average + 1, average))).toBe(true);
+  });
+
+  it("is not a spike at exactly the factor times the average, even above the floor", () => {
+    const average = SPIKE_FLOOR_MICROS;
+    expect(isSpike(facts(SPIKE_FACTOR * average, average))).toBe(false);
+  });
+
+  it("is not a spike above the floor but under the factor times the average", () => {
+    const average = SPIKE_FLOOR_MICROS;
+    expect(isSpike(facts(SPIKE_FACTOR * average - 1, average))).toBe(false);
   });
 });
