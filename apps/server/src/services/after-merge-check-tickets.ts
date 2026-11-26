@@ -6,10 +6,78 @@
 // BOS-2417: a merged parent whose only unreported criteria are tied to open check tickets may close at go-live (the
 // tie is not a reason to sit Blocked for a week); its watch moves to the check tickets, and the result still lands here.
 import { and, eq, isNotNull, ne, or, sql } from "drizzle-orm";
-import { checkTicketLine, criterionText, isAfterMerge, readCriteria, readVerdicts, ticketRef, unreportedAfterMerge } from "@boss-man/shared";
+import { checkTicketLine, criterionText, isAfterMerge, longWatchIndexes, longWatchPhrase, readCriteria, readVerdicts, ticketRef, unreportedAfterMerge } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { activity, agents, companies, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
+import { systemMoveTicket } from "./ticket-transition.js";
+import type { workService } from "./work.js";
+
+type Work = ReturnType<typeof workService>;
+
+/** BOS-2643: a check ticket Boss Man opened by itself for a build's long after-merge watch. */
+export type LongWatchCheck = { id: string; ref: string; criterion: number; phrase: string };
+
+const TITLE_MAX = 200;
+const fitTitle = (s: string) => (s.length > TITLE_MAX ? `${s.slice(0, TITLE_MAX - 3).trimEnd()}...` : s);
+
+/**
+ * BOS-2643: opens each after-merge criterion of a build ticket that names a watch of a day or more (longWatchPhrase) as
+ * its own check ticket, tied with checksCriterion, so the build can close at go-live (BOS-2417) instead of sitting open
+ * for the watch (BOS-2302, BOS-2298: merged in hours, open 3 days). Safe to repeat: a criterion with an open check
+ * already gets none. Nothing for a no-code build (it never merges, so its check would never start), a build that is
+ * itself a check ticket, or one already merged or done (criteria split after merge are the assignee's call, as before).
+ *
+ * The link is one way on purpose: the check waits on the build until merged, and the build does NOT wait on the check,
+ * unlike create_ticket checksCriterion on a merged ticket. On a build that hasn't started, "build waits on check until
+ * done" plus "check waits on build until merged" would hold both forever: openBlockers stops the build starting and
+ * holds its merge ("Passed, held"). Nothing needs that link: the report-back reads checksTicketId, the done gate reads
+ * closableChecks, and reportCheckTicket wakes the build's assignee.
+ *
+ * The check is created unassigned and the assignee is written after it is Blocked, so the assignee isn't woken for a
+ * ticket that can't start; the waits-on release wakes them when the build merges.
+ */
+export async function openLongWatchChecks(db: Db, work: Work, buildId: string, opts: { byAgentId: string | null; assigneeAgentId?: string | null; suggested?: string | null }): Promise<LongWatchCheck[]> {
+  const [row] = await db.select({ t: tickets, prefix: companies.ticketPrefix }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(eq(tickets.id, buildId));
+  if (!row) return [];
+  const { t, prefix } = row;
+  if (t.noCode || t.checksTicketId || t.mergeCommit || t.systemState === "done") return [];
+  const criteria = readCriteria(t.acceptanceCriteria);
+  const wanted = longWatchIndexes(criteria);
+  if (!wanted.length) return [];
+  const open = await db.select({ criterion: tickets.checksCriterion }).from(tickets).where(and(eq(tickets.checksTicketId, t.id), ne(tickets.systemState, "done")));
+  const have = new Set(open.map((o) => o.criterion));
+  const ref = ticketRef(prefix, t.number) ?? `"${t.title}"`;
+  const made: LongWatchCheck[] = [];
+  for (const i of wanted) {
+    const n = i + 1;
+    if (have.has(n)) continue;
+    const text = criterionText(criteria[i]!);
+    const phrase = longWatchPhrase(text)!;
+    const body = [
+      `**Why:** criterion ${n} of ${ref} ("${t.title}") needs a watch of a day or more ("${phrase}"), so Boss Man opened it as this check ticket when ${ref} was opened (BOS-2643). ${ref} can then close once it is live, and this ticket keeps the watch.`,
+      "",
+      ...(opts.suggested ? [`**Suggested assignee:** ${opts.suggested} (named by the closing agent; the CEO decides).`, ""] : []),
+      `**Done when:** ${text}`,
+      "",
+      `This ticket waits on ${ref}'s merge and starts by itself then. Once ${ref} is live, move this ticket to Blocked with blocked_until the end of the watch. When the watch is over, close it with a numbered result ("1 pass: <what you saw>" or "1 fail: <why>"): Boss Man writes it on criterion ${n} of ${ref} ([${ref}](#/tickets/${t.id})).`,
+    ].join("\n");
+    const c = await work.createTicket(t.projectId, { title: fitTitle(`Watch for ${ref} criterion ${n}: ${text}`), body, risk: t.risk ?? "medium", size: 1, state: "backlog", featureId: t.featureId, createdByAgentId: opts.byAgentId, noCode: true, acceptanceCriteria: [text] });
+    await db.update(tickets).set({ checksTicketId: t.id, checksCriterion: n }).where(eq(tickets.id, c.id));
+    await work.addDependency(c.id, { ticketId: t.id, until: "merged" }, opts.byAgentId);
+    await systemMoveTicket(db, { ticketId: c.id, from: ["backlog"], to: "blocked", reason: `Boss Man: waits on ${ref}'s merge (BOS-2643)`, now: new Date() });
+    if (opts.assigneeAgentId) await db.update(tickets).set({ assigneeAgentId: opts.assigneeAgentId }).where(eq(tickets.id, c.id));
+    const [numbered] = await db.select({ number: tickets.number }).from(tickets).where(eq(tickets.id, c.id));
+    const checkRef = ticketRef(prefix, numbered?.number) ?? `"${c.title}"`;
+    await record(db, { companyId: t.companyId, ticketId: t.id, agentId: opts.byAgentId, kind: "after_merge_check", summary: `Criterion ${n}'s watch ("${phrase}") is on its own check ticket ${checkRef}, so this ticket can close once it is live.`, detail: { checkTicketId: c.id, criterion: n } });
+    made.push({ id: c.id, ref: checkRef, criterion: n, phrase });
+  }
+  return made;
+}
+
+/** The line a tool reply adds for the checks openLongWatchChecks opened; empty when none. */
+export const longWatchNote = (checks: readonly LongWatchCheck[]): string =>
+  checks.length ? ` ${checks.map((c) => `Criterion ${c.criterion} needs a watch ("${c.phrase}"), so Boss Man opened it as check ticket ${c.ref} (${c.id}), which waits on this ticket's merge; this ticket can close once it is live, and the check reports its result here.`).join(" ")}` : "";
 
 /** The wake reason; "waiting" class in wake-classes.ts, so it is never dropped. */
 export const CHECK_REPORTED_REASON = "after-merge check reported";

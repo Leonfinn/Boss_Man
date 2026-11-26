@@ -12,7 +12,8 @@ import { openPglite } from "../src/db/client.js";
 import { activity, features, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { workflowService } from "../src/services/workflow.js";
 import { issueRunToken } from "../src/mcp.js";
-import { appendLine, CHECK_REPORTED_REASON, checkTicketDoneRefusal, checkTicketVerdict } from "../src/services/after-merge-check-tickets.js";
+import { appendLine, CHECK_REPORTED_REASON, checkTicketDoneRefusal, checkTicketVerdict, openLongWatchChecks } from "../src/services/after-merge-check-tickets.js";
+import { openBlockers } from "../src/services/ticket-links.js";
 import { wakeClass } from "../src/services/wake-classes.js";
 import { wakeWatchers } from "../src/services/watch-triggers.js";
 import { blockedSplit } from "../src/services/go-live-note.js";
@@ -119,7 +120,11 @@ async function setup() {
   };
   const row = async (id: string) => (await db.select().from(tickets).where(eq(tickets.id, id)))[0]!;
   const reportWakes = async () => db.select().from(wakes).where(and(eq(wakes.agentId, dev.id), eq(wakes.reason, CHECK_REPORTED_REASON)));
-  return { db, work: built.work, scheduler: built.scheduler, co, dev, other, parent: parent!, create, setState, row, reportWakes };
+  const call = async (as: string, name: string, args: Record<string, unknown>) => {
+    const r = (await (await agent(as)).callTool({ name, arguments: args })) as { content: Array<{ text: string }>; isError?: boolean };
+    return { text: r.content[0]!.text, isError: !!r.isError };
+  };
+  return { db, work: built.work, scheduler: built.scheduler, co, dev, other, project, parent: parent!, create, setState, call, row, reportWakes };
 }
 
 describe("check tickets: split out, then report back", () => {
@@ -363,5 +368,72 @@ describe("check tickets: split out, then report back", () => {
     expect((await c.row(linked.id!)).systemState).toBe("done");
     const unlinked = await c.setState(c.dev.id, { ticketId: plain.id!, state: "done", outcome: "completed", summary: "Pass: 79 GitHub runs, none failed" });
     expect(unlinked.text).not.toContain("is the check for criterion");
+  });
+});
+
+// BOS-2643: BOS-2302 and BOS-2298 merged within hours, then sat open 3 days on a "(checked after merge)" watch: the
+// watchdog flagged them and the CEO cleared urgent marks. Boss Man now opens such a watch as its own check ticket when
+// the build ticket is opened (or its criteria are set), so the build closes at go-live (BOS-2417) and the check reports.
+describe("BOS-2643: a watch of a day or more is opened as its own check ticket", () => {
+  const WATCH = { text: "Over 3 days live, no main CI run is cancelled for a higher priority waiting request", after: "merge" as const };
+  const ONCE = { text: "One go-live reading shows the new comment", after: "merge" as const };
+  const checksOf = async (c: Awaited<ReturnType<typeof setup>>, id: string) => c.db.select().from(tickets).where(eq(tickets.checksTicketId, id));
+
+  it("create_ticket opens the check with the build's assignee; the build closes at go-live and the check's pass lands on it", async () => {
+    const c = await setup();
+    const made = await c.create(c.co.ceo.id, { title: "Give each main commit its own CI group", noCode: false, assignee: "Dev", acceptanceCriteria: [BEFORE, WATCH, ONCE] });
+    expect(made.isError, made.text).toBe(false);
+    expect(made.text).toContain('Criterion 2 needs a watch ("Over 3 days live")');
+    const [check, ...more] = await checksOf(c, made.id!);
+    expect(more).toEqual([]);
+    expect([check!.checksCriterion, check!.assigneeAgentId, check!.systemState, check!.noCode]).toEqual([2, c.dev.id, "blocked", true]);
+    expect(check!.acceptanceCriteria).toEqual([WATCH.text]);
+    expect(check!.title).toMatch(/^Watch for [A-Z]+-\d+ criterion 2: Over 3 days live/);
+    // One way only: the check waits on the build's merge, and the build waits on nothing, so it can start and merge.
+    const deps = await c.db.select().from(ticketDependencies);
+    expect(deps.filter((d) => d.blockedTicketId === check!.id).map((d) => [d.blockerTicketId, d.until])).toEqual([[made.id, "merged"]]);
+    expect(deps.filter((d) => d.blockedTicketId === made.id)).toEqual([]);
+    expect(await openBlockers(c.db, made.id!)).toEqual([]);
+    expect((await openBlockers(c.db, check!.id)).map((b) => b.kind)).toEqual(["ticket"]);
+    // The build merges: the check is free to start.
+    await c.db.update(tickets).set({ mergeCommit: "b".repeat(40), systemState: "blocked", liveAt: new Date(), stateNote: "1 pass; 3 pass: the comment reads as merged" }).where(eq(tickets.id, made.id!));
+    expect(await openBlockers(c.db, check!.id)).toEqual([]);
+    // Once live, the build closes with only the tied watch left (BOS-2417), instead of sitting open for 3 days.
+    const closed = await c.setState(c.dev.id, { ticketId: made.id!, state: "done", summary: "1 pass; 3 pass: the comment reads as merged" });
+    expect(closed.isError, closed.text).toBe(false);
+    expect((await c.row(made.id!)).systemState).toBe("done");
+    // The watch ends: the check's pass is written on the build's criterion 2.
+    await c.db.update(tickets).set({ systemState: "in_progress" }).where(eq(tickets.id, check!.id));
+    const reported = await c.setState(c.dev.id, { ticketId: check!.id, state: "done", summary: "1 pass: no main run cancelled in 3 days" });
+    expect(reported.isError, reported.text).toBe(false);
+    expect((await c.row(made.id!)).stateNote).toMatch(/reported: 2 pass/);
+  });
+
+  it("update_ticket setting the criteria opens it too, once; a short after-merge check stays on the build", async () => {
+    const c = await setup();
+    const made = await c.create(c.co.ceo.id, { title: "Make the workflow comment honest", noCode: false, assignee: "Dev" });
+    expect(await checksOf(c, made.id!)).toEqual([]);
+    const set = await c.call(c.co.ceo.id, "update_ticket", { ticketId: made.id, acceptanceCriteria: [BEFORE, ONCE, { text: "A week on, every skipped publish is followed by a published one", after: "merge" }], reason: "criteria at assignment" });
+    expect(set.isError, set.text).toBe(false);
+    expect(set.text).toContain('Criterion 3 needs a watch ("A week on")');
+    // Setting them again doesn't open a second check for the same criterion.
+    await c.call(c.co.ceo.id, "update_ticket", { ticketId: made.id, acceptanceCriteria: [BEFORE, ONCE, { text: "A week on, every skipped publish is followed by a published one", after: "merge" }], reason: "same again" });
+    const checks = await checksOf(c, made.id!);
+    expect(checks.map((x) => [x.checksCriterion, x.assigneeAgentId])).toEqual([[3, c.dev.id]]);
+  });
+
+  it("nothing is opened for a no-code ticket, a merged one, a check ticket, or a watch checked before merge", async () => {
+    const c = await setup();
+    const base = { companyId: c.co.company.id, projectId: c.project.id, systemState: "ready" as const, assigneeAgentId: c.dev.id };
+    const [noCode] = await c.db.insert(tickets).values({ ...base, title: "Research", noCode: true, acceptanceCriteria: [WATCH] }).returning();
+    const [merged] = await c.db.insert(tickets).values({ ...base, title: "Merged", mergeCommit: "c".repeat(40), acceptanceCriteria: [WATCH] }).returning();
+    const [aCheck] = await c.db.insert(tickets).values({ ...base, title: "A check", checksTicketId: c.parent.id, checksCriterion: 2, acceptanceCriteria: [WATCH] }).returning();
+    const [inReview] = await c.db.insert(tickets).values({ ...base, title: "Review-time", acceptanceCriteria: [WATCH.text] }).returning();
+    for (const t of [noCode!, merged!, aCheck!, inReview!]) expect(await openLongWatchChecks(c.db, c.work, t.id, { byAgentId: null })).toEqual([]);
+    // The same call on a code ticket opens one, and a second call opens nothing more.
+    const [build] = await c.db.insert(tickets).values({ ...base, title: "Build", acceptanceCriteria: [WATCH] }).returning();
+    expect(await openLongWatchChecks(c.db, c.work, build!.id, { byAgentId: null })).toHaveLength(1);
+    expect(await openLongWatchChecks(c.db, c.work, build!.id, { byAgentId: null })).toEqual([]);
+    expect(await checksOf(c, build!.id)).toHaveLength(1);
   });
 });
