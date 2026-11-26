@@ -52,6 +52,15 @@ last="${*: -1}"
 [ ! -e "$FAKE/unsigned/${last##*@}" ]
 EOF
 chmod +x "$S/bin/gh" "$S/bin/docker" "$S/bin/cosign"
+# BOS-2666: the docs rule has its own tests (release-docs-gate.test.sh). Here a fake gate says "covered" unless the commit
+# is marked in fake/uncovered, so the pick's handling of an uncovered commit is tested on its own.
+mkdir -p "$S/fake/uncovered"
+cat >"$S/bin/fake-gate" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = covered ] || exit 99
+if [ -e "$FAKE/uncovered/$2" ]; then echo "docs were last checked up to 0123456789ab, and a later commit changed x" >&2; exit 1; fi
+EOF
+chmod +x "$S/bin/fake-gate"
 
 # --- a throw-away repository: c1 (the last release) .. c4 (main's head) ------------------------------------------------
 G="$S/repo"; mkdir -p "$G"
@@ -70,13 +79,13 @@ git -C "$G" update-ref refs/remotes/origin/main "$C4"
 tagof() { echo "sha-${1:0:12}"; }
 dig() { echo "sha256:$(printf '%s' "$1" | sha256sum | cut -c1-64)"; }
 reset() {
-  rm -f "$S/fake/ci/"* "$S/fake/img/"* "$S/fake/noarm/"* "$S/fake/unsigned/"*
+  rm -f "$S/fake/uncovered/"* "$S/fake/ci/"* "$S/fake/img/"* "$S/fake/noarm/"* "$S/fake/unsigned/"*
   echo '[{"tagName":"v0.1.0-beta.1"},{"tagName":"v0.1.0-beta.3"},{"tagName":"v0.1.0-beta.10"},{"tagName":"v0.1.0-rc"}]' >"$S/fake/releases.json"
   echo "$C1" >"$S/fake/target"
 }
 # A commit that is fully good: CI passed, both images published.
 good() { touch "$S/fake/ci/$1" "$S/fake/img/boss-man-server_$(tagof "$1")" "$S/fake/img/boss-man-launcher_$(tagof "$1")"; }
-pick() { (cd "$G" && env -i PATH="$S/bin:$PATH" HOME="$S" FAKE="$S/fake" GITHUB_REPOSITORY=acme/boss-man GITHUB_REPOSITORY_OWNER=acme \
+pick() { (cd "$G" && env -i PATH="$S/bin:$PATH" HOME="$S" FAKE="$S/fake" RELEASE_DOCS_GATE_SH="$S/bin/fake-gate" GITHUB_REPOSITORY=acme/boss-man GITHUB_REPOSITORY_OWNER=acme \
   PUBLISH_IMAGES="boss-man-server boss-man-launcher" "$REPO_ROOT/scripts/release-pick.sh" pick 2>"$S/err"); }
 field() { echo "$1" | sed -n "s/^$2=//p"; }
 
@@ -134,9 +143,25 @@ out="$(pick)"
 
 # 7. The depth limit: only the newest RELEASE_PICK_DEPTH commits are looked at.
 reset; good "$C2"
-out="$( (cd "$G" && env -i PATH="$S/bin:$PATH" HOME="$S" FAKE="$S/fake" GITHUB_REPOSITORY=acme/boss-man GITHUB_REPOSITORY_OWNER=acme \
+out="$( (cd "$G" && env -i PATH="$S/bin:$PATH" HOME="$S" FAKE="$S/fake" RELEASE_DOCS_GATE_SH="$S/bin/fake-gate" GITHUB_REPOSITORY=acme/boss-man GITHUB_REPOSITORY_OWNER=acme \
   PUBLISH_IMAGES="boss-man-server boss-man-launcher" RELEASE_PICK_DEPTH=1 "$REPO_ROOT/scripts/release-pick.sh" pick 2>/dev/null) )"
 case "$out" in skip=*) ;; *) fail "depth 1 looks only at the head, got: $out" ;; esac
+
+# 8. BOS-2666 docs rule. The head is green with images but has no recorded docs check: the newest covered commit is released.
+reset; good "$C3"; good "$C4"; touch "$S/fake/uncovered/$C4"
+out="$(pick)"
+[ "$(field "$out" sha)" = "$C3" ] || fail "an uncovered head must give way to the newest covered commit, got: $out"
+grep -q "docs were last checked" "$S/err" || fail "the docs reason should be printed"
+# 8b. Nothing is covered and the newest green commit is new since the last release: a refusal (the run fails), not a skip.
+reset; good "$C3"; good "$C4"; touch "$S/fake/uncovered/$C3" "$S/fake/uncovered/$C4"
+out="$(pick)"
+case "$out" in refuse=*"docs check"*) ;; *) fail "uncovered green commits must be refused, got: $out" ;; esac
+[ "$(echo "$out" | wc -l)" = 1 ] || fail "a refusal is exactly one line, got: $out"
+[ -z "$(field "$out" sha)" ] || fail "a refusal must name no commit"
+# 8c. The only uncovered commit is the last release's own (nothing new anyway): a quiet skip, not a refusal.
+reset; good "$C1"; touch "$S/fake/uncovered/$C1" "$S/fake/ci/$C1"
+out="$(pick)"
+case "$out" in skip=*) ;; *) fail "nothing new since the release is a skip, got: $out" ;; esac
 
 # --- notes -------------------------------------------------------------------------------------------------------------
 N="$REPO_ROOT/scripts/release-notes.sh"
