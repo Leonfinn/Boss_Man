@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { api } from "../../api";
 import { usePoll } from "../../hooks";
 import { useAction } from "./shared";
@@ -21,6 +22,12 @@ export function ReleaseNotice() {
       await api("/api/release-watch", { method: "PUT", body: patch });
       w.reload();
     });
+  return <ReleaseNoticeBody v={v} busy={act.busy} set={set} extra={act.view} />;
+}
+
+/** The release line and its two switches, apart from the polling so a browser test can render it with fixed data. */
+export function ReleaseNoticeBody({ v, busy, set, extra }: { v: Extract<ReleaseWatchView, { active: true }>; busy: boolean; set: (patch: { enabled?: boolean; ntfy?: boolean }) => void; extra?: ReactNode }) {
+  const act = { busy, view: extra };
   return (
     <div data-testid="release-notice" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       {v.available ? (
