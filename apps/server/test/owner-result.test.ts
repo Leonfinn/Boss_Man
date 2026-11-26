@@ -11,7 +11,21 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agents, decisions, notifications, ownerChatMessages, runs, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
-import { FOLLOW_HOURS, infoAskOf, INFO_ASK_MINUTES, mirrorLaterReply, noteResultReported, ownContentOf } from "../src/services/owner-result.js";
+import {
+  answerReceivedFlag,
+  answerReceivedLine,
+  ceoResultNote,
+  FOLLOW_HOURS,
+  infoAskOf,
+  INFO_ASK_MINUTES,
+  isInterimReply,
+  mirrorLaterReply,
+  noteResultReported,
+  ownContentOf,
+  reportBackNote,
+  resultWaitingFlag,
+  resultWaitingLine,
+} from "../src/services/owner-result.js";
 import { notificationsService } from "../src/services/notifications.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
@@ -87,6 +101,103 @@ describe("BOS-2593: which answers carry the owner's own content", () => {
     expect(ownContentOf({ ...steps, kind: "permission", context: { type: "permission" } }, "Allow", { note: "only this once" })).toBeNull();
     expect(ownContentOf({ ...steps, raisedByAgentId: null }, "Done", { note: "step 4 failed" })).toBeNull();
     expect(ownContentOf({ ...steps, context: { type: "rule_proposal" } }, "Add it", { note: "but narrower" })).toBeNull();
+  });
+});
+
+describe("the exact words the owner and the CEO read", () => {
+  const ticketId = "11111111-2222-4333-8444-555555555555";
+  const question = "Please paste the deploy log from the failed update.";
+
+  it("answerReceivedLine names the raiser and the question, and adds the ticket link only when there is one", () => {
+    const line = answerReceivedLine("Dougal", question, ticketId);
+    expect(line).toContain("Dougal");
+    expect(line).toContain(question);
+    expect(line).toContain(`Ticket: #/tickets/${ticketId}`);
+    expect(answerReceivedLine("Dougal", question, null)).not.toContain("#/tickets/");
+  });
+
+  it("answerReceivedLine squashes a long question with newlines and repeated spaces to one 120-character line", () => {
+    const messy = `${"Please paste the log. ".repeat(10)}\n\n   more   detail`;
+    const squashed = messy.replace(/\s+/g, " ").trim().slice(0, 120);
+    const line = answerReceivedLine("Dougal", messy, null);
+    expect(squashed.length).toBe(120);
+    expect(line).toContain(`"${squashed}"`);
+    expect(line).not.toContain("\n");
+    expect(line).not.toContain(messy.replace(/\s+/g, " ").trim().slice(0, 121));
+  });
+
+  it("answerReceivedFlag titles it with the raiser and links to the ticket or the notifications", () => {
+    const flag = answerReceivedFlag("Dougal", question, ticketId);
+    expect(flag.title).toBe("Your answer is with Dougal");
+    expect(flag.body).toContain(question);
+    expect(flag.link).toBe(`#/tickets/${ticketId}`);
+    expect(answerReceivedFlag("Dougal", question, null).link).toBe("#/notifications");
+  });
+
+  it("reportBackNote uses the ref when given, else the ticket id, names both reply tools, and cuts the question to 200", () => {
+    const withRef = reportBackNote({ ownerVoice: "The owner", question, ticketId, ref: "APP-42" });
+    expect(withRef).toContain("(APP-42)");
+    expect(withRef).not.toContain(ticketId);
+    expect(withRef).toContain("notAnAsk");
+    expect(withRef).toContain("closesOwnerLoop");
+    expect(reportBackNote({ ownerVoice: "The owner", question, ticketId, ref: null })).toContain(ticketId);
+    const long = "x ".repeat(300);
+    const cut = long.replace(/\s+/g, " ").trim().slice(0, 200);
+    expect(cut.length).toBe(200);
+    expect(reportBackNote({ ownerVoice: "The owner", question: long, ticketId, ref: null })).toContain(`"${cut}"`);
+  });
+
+  it("resultWaitingLine names the raiser and the CEO, and adds the ticket link only with a ticket", () => {
+    const line = resultWaitingLine("Dougal", "Rex", question, ticketId);
+    expect(line).toContain("Dougal");
+    expect(line).toContain("Rex");
+    expect(line).toContain(question);
+    expect(line).toContain(`Ticket: #/tickets/${ticketId}`);
+    expect(resultWaitingLine("Dougal", "Rex", question, null)).not.toContain("#/tickets/");
+  });
+
+  it("resultWaitingFlag names both, cuts the title to 60 characters, and links to the ticket or the notifications", () => {
+    const long = "a ".repeat(100);
+    const cut = long.replace(/\s+/g, " ").trim().slice(0, 60);
+    const flag = resultWaitingFlag("Dougal", "Rex", long, ticketId);
+    expect(cut.length).toBe(60);
+    expect(flag.title).toBe(`No result yet on "${cut}"`);
+    expect(flag.body).toContain("Dougal");
+    expect(flag.body).toContain("Rex");
+    expect(flag.link).toBe(`#/tickets/${ticketId}`);
+    expect(resultWaitingFlag("Dougal", "Rex", question, null).link).toBe("#/notifications");
+  });
+
+  it("ceoResultNote points at the ticket and keeps the follow-hours line when there is a ticket", () => {
+    const note = ceoResultNote({ ownerVoice: "The owner", raiser: "Dougal", question, answer: "It showed a stale image.", ticketId, ref: "APP-42", received: true });
+    expect(note).toContain(`#/tickets/${ticketId}`);
+    expect(note).toContain(`For the next ${FOLLOW_HOURS} hours`);
+    expect(note).toContain("what they sent is on the ticket's conversation");
+  });
+
+  it("ceoResultNote says to ask the raiser, and drops the follow-hours line and the ticket-only aside, without a ticket", () => {
+    const note = ceoResultNote({ ownerVoice: "The owner", raiser: "Dougal", question, answer: "It showed a stale image.", ticketId: null, ref: null, received: true });
+    expect(note).toContain("ask Dougal");
+    expect(note).not.toContain(`For the next ${FOLLOW_HOURS} hours`);
+    expect(note).not.toContain("what they sent is on the ticket's conversation");
+    expect(note).not.toContain("#/tickets/");
+  });
+
+  it("ceoResultNote shows the ticket aside only when the answer was received, and cuts the answer to 300", () => {
+    const long = "b ".repeat(400);
+    const cut = long.replace(/\s+/g, " ").trim().slice(0, 300);
+    expect(cut.length).toBe(300);
+    const notReceived = ceoResultNote({ ownerVoice: "The owner", raiser: "Dougal", question, answer: long, ticketId, ref: null, received: false });
+    expect(notReceived).toContain(`Their answer: ${cut}`);
+    expect(notReceived).not.toContain("what they sent is on the ticket's conversation");
+    expect(ceoResultNote({ ownerVoice: "The owner", raiser: "Dougal", question, answer: long, ticketId, ref: null, received: true })).toContain("what they sent is on the ticket's conversation");
+  });
+
+  it("isInterimReply treats 'still working' notes as interim, in any case, and a real result as not", () => {
+    expect(isInterimReply("Still checking the signatures.")).toBe(true);
+    expect(isInterimReply("BACK SHORTLY")).toBe(true);
+    expect(isInterimReply("We will report back once the build finishes.")).toBe(true);
+    expect(isInterimReply("The update finished; press Restart.")).toBe(false);
   });
 });
 
