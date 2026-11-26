@@ -9,6 +9,7 @@ import { QuickAdd } from "../Board";
 import { StarButton } from "../Agents";
 import { Section, useAction } from "./shared";
 import { buildCsv, download } from "../../csv";
+import { POINTS_EXPLAINED } from "@boss-man/shared";
 
 type CheckPreset = { id: string; label: string; command: string | null; plain: string; needs: string[] };
 type Presets = { detected: CheckPreset[]; standard: CheckPreset[]; none: CheckPreset; tools: Record<string, boolean> | null; error: string | null };
@@ -420,7 +421,7 @@ function ProjectCard({ p, go, agents, onStar, starBusy, onChanged, stats }: { p:
         </button>
       </div>
       <p className="muted" style={{ fontSize: 13, margin: "4px 0 0" }}>{summary}</p>
-      {stats && <p className="muted" style={{ fontSize: 13, margin: "2px 0 0" }}>{projectSummaryLine(stats)}</p>}
+      {stats && <p className="muted" style={{ fontSize: 13, margin: "2px 0 0" }} title={POINTS_EXPLAINED}>{projectSummaryLine(stats)}</p>}
       <div id={`settings-${p.id}`} hidden={!open} style={{ marginTop: 10 }}>
         <ProjectRow p={p} agents={agents} onChanged={onChanged} />
         <GithubWatch projectId={p.id} />
