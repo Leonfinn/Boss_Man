@@ -192,6 +192,15 @@ describe("BOS-2733: a Surfaces line at the move to review", () => {
     expect((await stateOf(c.id)).systemState).toBe("review");
   });
 
+  it("doesn't refuse a ticket already in review that is moved to review again", async () => {
+    ctx.runner.diff = HANDLER;
+    const t = await ctx.ticket();
+    await ctx.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+    const out = await toReview(t.id, { surfaces: undefined });
+    expect(out).not.toContain("needs a surfaces line");
+    expect((await stateOf(t.id)).systemState).toBe("review");
+  });
+
   it("refuses a too-short line and one given with another state", async () => {
     ctx.runner.diff = HANDLER;
     const t = await ctx.ticket();
