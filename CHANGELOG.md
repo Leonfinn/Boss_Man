@@ -28,16 +28,18 @@ Release step: adding to this file is part of every release (Release Manager, on 
    test gave (pass or fail, minutes) and whether the site was republished.
 7. Record the docs check, on every Monday docs-vs-code check (BOS-2667) as well as on a release wake: the Release
    workflow's docs gate (BOS-2666, scripts/release-docs-gate.sh) refuses a release whose docs check does not cover the
-   commit. That check is ONE line, at the very top of this file, above the heading and outside this comment:
-   "<!-- Docs checked up to <full 40-character sha of the commit main was checked at> -->". Update that one line; do not
-   add a second one (the gate refuses a file with two). Put the sha itself in this release steps comment if you want a
+   commit. The check is ONE line of its own, outside this comment and above the first dated heading: the words "Docs
+   checked up to", then the full 40-character sha of the commit main was checked at, then a space and a hyphen run of two
+   followed by a closing angle bracket, all wrapped in an HTML comment. Do not write that example line out in full here,
+   or its closing marker ends this comment early and the rest of these steps show up in the changelog. Update the one
+   recorded line each week; do not add a second one (the gate refuses a file with two). Put the sha itself in this release steps comment if you want a
    note of which check it came from. The rule (scripts/release-docs-gate.sh, rule 3): every commit after that sha up to the
    commit released may touch only the docs paths in scripts/release-docs-paths.txt. A code change after the checked sha
    must be checked and the line moved on before it can be released. On the weekly check, move the line only to a commit
    where the docs match the code; if the GitHub About box says an older stage than the code, tell the CEO before moving it.
 
 Check before committing: pnpm --filter @boss-man/site build (it stops on a heading that is not a date, or one out of order).
-Remember to put an empty line after any line you add outside this comment, so the comment's end (-->) still closes it.
+Remember to put an empty line after any line you add outside this comment, so the comment's own closing marker still closes it.
 -->
 
 <!-- Docs checked up to 688f2bc5a6c5f50810649a7cfa7af9e4bcec5d37 -->
