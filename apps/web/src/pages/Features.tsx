@@ -986,6 +986,54 @@ export function GoalSelect({ id, tree, value, onChange }: { id: string; tree: Tr
   );
 }
 
+type FeatureTask = { id: string; title: string; state: string; outcome: string | null; assignee: string | null };
+const TASK_FILTERS: Array<{ key: string; label: string; match: (t: FeatureTask) => boolean }> = [
+  { key: "all", label: "All", match: () => true },
+  { key: "open", label: "Open", match: (t) => t.state !== "done" },
+  { key: "backlog", label: "Backlog", match: (t) => t.state === "backlog" },
+  { key: "ready", label: "Ready", match: (t) => t.state === "ready" },
+  { key: "in_progress", label: "In progress", match: (t) => t.state === "in_progress" },
+  { key: "blocked", label: "Blocked", match: (t) => t.state === "blocked" },
+  { key: "review", label: "Review", match: (t) => t.state === "review" },
+  { key: "done", label: "Done", match: (t) => t.state === "done" && t.outcome !== "cancelled" },
+  { key: "cancelled", label: "Cancelled", match: (t) => t.state === "done" && t.outcome === "cancelled" },
+];
+
+/** A feature's tasks with status chips and counts. The list arrives whole, so it is filtered here. */
+export function TaskList({ tasks }: { tasks: FeatureTask[] }) {
+  const [pick, setPick] = useState("all");
+  const filters = TASK_FILTERS.filter((f) => f.key !== "cancelled" || tasks.some(f.match));
+  const active = filters.find((f) => f.key === pick) ?? filters[0]!;
+  const shown = tasks.filter(active.match);
+  return (
+    <>
+      <div role="group" aria-label="Filter tasks by status" style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "6px 0" }}>
+        {filters.map((f) => {
+          const n = tasks.filter(f.match).length;
+          return (
+            <button key={f.key} type="button" className="chip" aria-pressed={active.key === f.key} style={n === 0 && f.key !== "all" ? { opacity: 0.55 } : undefined} onClick={() => setPick(f.key)}>
+              {f.label} {n}
+            </button>
+          );
+        })}
+      </div>
+      {shown.length === 0 ? (
+        <p className="muted">No tasks with this status</p>
+      ) : (
+        <ul className="link-list">
+          {shown.map((t) => (
+            <li key={t.id}>
+              <a href={`#/tickets/${t.id}`}>{t.title}</a>
+              <span className={`tag ${t.state === "done" ? "green" : ""}`}>{t.outcome === "cancelled" ? "cancelled" : t.state.replace(/_/g, " ")}</span>
+              <span className="muted">{t.assignee ?? "unassigned"}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </>
+  );
+}
+
 function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go: (to: string) => void }) {
   const data = usePoll((signal) => api<FeatureDetail & { forecast?: FeatureForecastView | null }>(`/api/features/${id}`, { signal }), 30_000, `feature-${id}`);
   const list = usePoll((signal) => api<ScoredFeatures>(`/api/companies/${companyId}/features`, { signal }), 60_000, `fl-${companyId}`);
@@ -1394,15 +1442,7 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
           {d.tickets.length > 0 && (
             <div>
               <p className="label">Tasks delivering it</p>
-              <ul className="link-list">
-                {d.tickets.map((t) => (
-                  <li key={t.id}>
-                    <a href={`#/tickets/${t.id}`}>{t.title}</a>
-                    <span className={`tag ${t.state === "done" ? "green" : ""}`}>{t.outcome === "cancelled" ? "cancelled" : t.state.replace(/_/g, " ")}</span>
-                    <span className="muted">{t.assignee ?? "unassigned"}</span>
-                  </li>
-                ))}
-              </ul>
+              <TaskList tasks={d.tickets} />
             </div>
           )}
         </section>
