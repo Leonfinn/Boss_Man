@@ -50,6 +50,7 @@ import { createPermissionLog } from "./services/permission-log.js";
 import { permissionStore } from "./services/permission-store.js";
 import { selfDeployService } from "./services/self-deploy.js";
 import { deployWaitService } from "./services/deploy-wait.js";
+import { readUpdateChain } from "./services/update-chain.js";
 import { hostFactsService, OWNER_FACTS } from "./services/host-facts.js";
 import { gitTokenActionsProbe } from "./services/owner-record.js";
 import { netguardAllowReport } from "./services/netguard-allow.js";
@@ -592,8 +593,8 @@ export async function buildApp(opts: AppOptions) {
     landingMerges: () => review.landingMergesByCompany(),
     landingMergeIds: () => review.landingMergeIds(),
     landingEndsAt: async () => (await review.landingWaitFacts()).endsAt,
-    // BOS-2058: the owner's wrap-up pressed while a server update waits for a quiet machine belongs to it and lifts with it.
-    serverUpdateWaiting: async () => (await deployWait.get())?.phase === "waiting", // `deployWait` is built further down; this only runs on a pass
+    // BOS-2672: the owner's wrap-up is tied to the whole update chain it was pressed for (`deployWait` is built further down; this only runs on a pass).
+    updateChain: (tied) => readUpdateChain(db, { wait: () => deployWait.get(), trialUntil: () => selfDeploy.trialUntil(), facts: () => selfDeploy.chainFacts() }, tied),
     tick: () => scheduler.tick(),
     notify: (n) => notes.notify(n),
     // BOS-1377: the per-run Stop (runsSvc is built further down; this only runs when the owner answers a card).
