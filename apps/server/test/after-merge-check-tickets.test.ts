@@ -12,7 +12,7 @@ import { openPglite } from "../src/db/client.js";
 import { activity, features, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { workflowService } from "../src/services/workflow.js";
 import { issueRunToken } from "../src/mcp.js";
-import { appendLine, CHECK_REPORTED_REASON, checkTicketDoneRefusal, checkTicketVerdict, openLongWatchChecks } from "../src/services/after-merge-check-tickets.js";
+import { appendLine, CHECK_REPORTED_REASON, checkTicketDoneRefusal, checkTicketVerdict, LONG_WATCH_FROM, openLongWatchChecks } from "../src/services/after-merge-check-tickets.js";
 import { openBlockers } from "../src/services/ticket-links.js";
 import { wakeClass } from "../src/services/wake-classes.js";
 import { wakeWatchers } from "../src/services/watch-triggers.js";
@@ -422,14 +422,19 @@ describe("BOS-2643: a watch of a day or more is opened as its own check ticket",
     expect(checks.map((x) => [x.checksCriterion, x.assigneeAgentId])).toEqual([[3, c.dev.id]]);
   });
 
-  it("an open ticket from before the change is left as it is: no sweep, and other edits and moves open nothing", async () => {
+  it("an open ticket from before the change is left as it is: no sweep, and edits, moves and new criteria open nothing", async () => {
     const c = await setup();
-    // A row as an older server left it: a code ticket in progress with a 3-day watch and no check ticket.
-    const [old] = await c.db.insert(tickets).values({ companyId: c.co.company.id, projectId: c.project.id, title: "Old build with a watch", systemState: "ready", assigneeAgentId: c.dev.id, acceptanceCriteria: [BEFORE, WATCH] }).returning();
+    // A row as an older server left it: a code ticket with a 3-day watch and no check ticket, created before the change.
+    const before = new Date(LONG_WATCH_FROM.getTime() - 3_600_000);
+    const [old] = await c.db.insert(tickets).values({ companyId: c.co.company.id, projectId: c.project.id, title: "Old build with a watch", systemState: "ready", assigneeAgentId: c.dev.id, acceptanceCriteria: [BEFORE, WATCH], createdAt: before }).returning();
     const edited = await c.call(c.co.ceo.id, "update_ticket", { ticketId: old!.id, title: "Old build with a watch (renamed)", body: "More detail", reason: "tidy" });
     expect(edited.isError, edited.text).toBe(false);
     const moved = await c.setState(c.dev.id, { ticketId: old!.id, state: "in_progress" });
     expect(moved.isError, moved.text).toBe(false);
+    // The CEO's approval condition: even setting its criteria again changes nothing on a ticket from before.
+    const reset = await c.call(c.co.ceo.id, "update_ticket", { ticketId: old!.id, acceptanceCriteria: [BEFORE, WATCH], reason: "criteria again" });
+    expect(reset.isError, reset.text).toBe(false);
+    expect(reset.text).not.toContain("needs a watch");
     expect(await checksOf(c, old!.id)).toEqual([]);
     expect((await c.row(old!.id)).acceptanceCriteria).toEqual([BEFORE, WATCH]);
   });

@@ -18,6 +18,13 @@ type Work = ReturnType<typeof workService>;
 /** BOS-2643: a check ticket Boss Man opened by itself for a build's long after-merge watch. */
 export type LongWatchCheck = { id: string; ref: string; criterion: number; phrase: string };
 
+/**
+ * BOS-2643 (the CEO's approval condition): tickets open before this shipped are never changed, even when their
+ * criteria are set again later (update_ticket). A fixed date (the day it was built) rather than a mark on each ticket:
+ * the few tickets created between then and go-live are new work, opened after the decision, so splitting them is wanted.
+ */
+export const LONG_WATCH_FROM = new Date("2026-11-26T00:00:00Z");
+
 const TITLE_MAX = 200;
 const fitTitle = (s: string) => (s.length > TITLE_MAX ? `${s.slice(0, TITLE_MAX - 3).trimEnd()}...` : s);
 
@@ -26,7 +33,8 @@ const fitTitle = (s: string) => (s.length > TITLE_MAX ? `${s.slice(0, TITLE_MAX 
  * its own check ticket, tied with checksCriterion, so the build can close at go-live (BOS-2417) instead of sitting open
  * for the watch (BOS-2302, BOS-2298: merged in hours, open 3 days). Safe to repeat: a criterion with an open check
  * already gets none. Nothing for a no-code build (it never merges, so its check would never start), a build that is
- * itself a check ticket, or one already merged or done (criteria split after merge are the assignee's call, as before).
+ * itself a check ticket, one already merged or done (criteria split after merge are the assignee's call, as before), or
+ * one created before LONG_WATCH_FROM.
  *
  * The link is one way on purpose: the check waits on the build until merged, and the build does NOT wait on the check,
  * unlike create_ticket checksCriterion on a merged ticket. On a build that hasn't started, "build waits on check until
@@ -41,7 +49,7 @@ export async function openLongWatchChecks(db: Db, work: Work, buildId: string, o
   const [row] = await db.select({ t: tickets, prefix: companies.ticketPrefix }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(eq(tickets.id, buildId));
   if (!row) return [];
   const { t, prefix } = row;
-  if (t.noCode || t.checksTicketId || t.mergeCommit || t.systemState === "done") return [];
+  if (t.noCode || t.checksTicketId || t.mergeCommit || t.systemState === "done" || t.createdAt < LONG_WATCH_FROM) return [];
   const criteria = readCriteria(t.acceptanceCriteria);
   const wanted = longWatchIndexes(criteria);
   if (!wanted.length) return [];
