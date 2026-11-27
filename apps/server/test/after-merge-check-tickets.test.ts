@@ -583,7 +583,8 @@ describe("BOS-2643: a watch of a day or more is opened as its own check ticket",
       expect(await sweep(c, new Date(liveAt.getTime() + 3 * DAY), [])).toEqual({ warned: 0, closed: 1 });
       const c2 = await setup();
       const made2 = await c2.create(c2.co.ceo.id, { title: "Not merged", noCode: false, assignee: "Dev", acceptanceCriteria: [BEFORE, EVENT] });
-      expect(await sweep(c2, new Date(Date.now() + 30 * DAY), [])).toEqual({ warned: 0, closed: 0 });
+      const farFuture = new Date(liveAt.getTime() + 30 * DAY);
+      expect(await sweep(c2, farFuture, [])).toEqual({ warned: 0, closed: 0 });
       expect(made2.isError).toBe(false);
     });
   });
