@@ -49,13 +49,14 @@ describe("OwnerPreferences (BOS-2689, shared with BOS-2669)", () => {
   });
 
   it("a change names only what it changes, so a pin save doesn't turn the keys back on and vice versa", () => {
-    expect(OwnerPreferencesPatch.parse({ pinnedPages: ["updates"] })).toEqual({ pinnedPages: ["updates"] });
+    expect(OwnerPreferencesPatch.parse({ pinnedPages: [{ id: "updates" }] })).toEqual({ pinnedPages: [{ id: "updates" }] });
     expect(OwnerPreferencesPatch.parse({ singleLetterKeys: false })).toEqual({ singleLetterKeys: false });
     expect(OwnerPreferencesPatch.parse({ keyboardTipSeen: true })).toEqual({ keyboardTipSeen: true });
   });
 
-  it("refuses more than six pinned pages, and a key switch that isn't a yes or no", () => {
-    expect(OwnerPreferencesPatch.safeParse({ pinnedPages: ["a", "b", "c", "d", "e", "f", "g"] }).success).toBe(false);
+  it("refuses a key switch that isn't a yes or no; the shortcut list's cap is checked with a plain reason", () => {
     expect(OwnerPreferencesPatch.safeParse({ singleLetterKeys: "off" }).success).toBe(false);
+    // The list itself still has a cap when read back (the stored shape), so a bad row can never be drawn as valid.
+    expect(OwnerPreferences.safeParse({ pinnedPages: [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }, { id: "e" }, { id: "f" }, { id: "g" }] }).success).toBe(false);
   });
 });

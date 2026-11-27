@@ -1338,6 +1338,13 @@
       "when": 1795744497437,
       "tag": "0209_freezing_nocturne",
       "breakpoints": true
+    },
+    {
+      "idx": 210,
+      "version": "7",
+      "when": 1795744557437,
+      "tag": "0210_shortcut_entries",
+      "breakpoints": true
     }
   ]
 }

@@ -11,6 +11,7 @@ import type { deviceProfilesService } from "../services/device-profiles.js";
 import type { hostFactsService } from "../services/host-facts.js";
 import { NotifySettings, NtfyTopic, NtfyUrl, type notificationsService } from "../services/notifications.js";
 import type { ownerPreferencesService } from "../services/owner-preferences.js";
+import { ShortcutSaveError } from "../services/owner-preferences.js";
 import type { phoneApproveService } from "../services/phone-approve.js";
 import type { phoneLoginService } from "../services/phone-login.js";
 import type { secretsService } from "../services/secrets.js";
@@ -123,7 +124,15 @@ export function preferenceRoutes(
 ) {
   const { ownerPreferences, currentOwnerId } = deps;
   owner.get("/api/preferences", async (req) => ownerPreferences.get(await requireOwnerId(currentOwnerId, req)));
-  owner.patch("/api/preferences", async (req) => ownerPreferences.update(await requireOwnerId(currentOwnerId, req), req.body));
+  owner.patch("/api/preferences", async (req, reply) => {
+    try {
+      return await ownerPreferences.update(await requireOwnerId(currentOwnerId, req), req.body);
+    } catch (err) {
+      // A shortcut list that can't be saved comes back with the plain reason the page shows, not a generic error.
+      if (err instanceof ShortcutSaveError) return reply.code(400).send({ error: "invalid_request", message: err.message });
+      throw err;
+    }
+  });
 }
 
 // Notifications (R44): the feed.
