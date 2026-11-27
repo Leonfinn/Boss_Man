@@ -104,9 +104,34 @@ describe("secretRefusal (BOS-2731)", () => {
     expect(secretRefusal("wiki", { action: "write", body: `use ${url}` })).toMatch(/url-with-credentials/);
   });
 
-  it("checks only the wiki's writing actions, and only the guarded tools", () => {
+  it("skips only reads: the wiki's list, read and history, and the read-only tools", () => {
     expect(secretRefusal("wiki", { action: "read", slug: anthropic })).toBeNull();
-    expect(secretRefusal("notes", { action: "save", body: anthropic })).toBeNull();
+    expect(secretRefusal("tickets", { action: "find", q: anthropic })).toBeNull();
+    expect(secretRefusal("notes", { action: "list", q: anthropic })).toBeNull();
+  });
+
+  it("checks every other writing tool and action, so one added later is covered (BOS-2760)", () => {
+    const calls: Array<[string, Record<string, unknown>]> = [
+      ["github_reply", { text: anthropic }],
+      ["request_engagement", { message: anthropic }],
+      ["review", { action: "submit", summary: anthropic }],
+      ["notify_owner", { message: anthropic }],
+      ["handoff", { summary: anthropic }],
+      ["pa_reply", { text: anthropic, cites: [], confidence: "high" }],
+      ["submit_plan", { plan: anthropic }],
+      ["skills", { action: "review_verdict", note: anthropic }],
+      ["propose_rule", { rule: anthropic }],
+      ["update_instructions", { agent: "Kit", text: anthropic }],
+      ["notes", { action: "save", body: anthropic }],
+      ["request_note", { text: anthropic }],
+      ["wiki", { action: "attach", ticketId: "x", title: anthropic, url: "https://example.com" }],
+      ["wiki", { action: "restore", slug: anthropic }],
+      ["some_tool_added_next_year", { anything: anthropic }],
+      ["wiki", { action: "an_action_added_next_year", body: anthropic }],
+    ];
+    for (const [tool, input] of calls) expect(secretRefusal(tool, input), `${tool} ${String(input.action ?? "")}`).toContain("anthropic-key");
+    // a wiki call with no action at all is checked too, not skipped
+    expect(secretRefusal("wiki", { body: anthropic })).toContain("anthropic-key");
   });
 
   it("finds a secret in a deeply nested or later field, and one split from clean text", () => {
