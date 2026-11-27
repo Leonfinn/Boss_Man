@@ -32,8 +32,8 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 - **Card**: One thing on the Decisions page that waits for your answer, such as a plan, a permission request, a sign-off or a question. Each card offers its own buttons. A button that promises a screenshot works only once one is attached on the card. ([Guide 4](/guides/board-and-decisions#answering-a-card))
 - **CEO**: The agent every company has. It plans the work, writes and assigns tickets, reviews simpler work and settles many permission requests before you see them. ([Guide 1](/guides/how-boss-man-works#companies-and-agents))
 - **CEO-first rule**: Commands that no rule or built-in check settles, and deletes in /tmp or in the agent's own folder (apart from plain deletes of its own entries in /tmp, which run at once), go to the CEO first. If the CEO does not settle one within five minutes, or the request is from the CEO itself, it comes to you. ([Guide 6](/guides/permissions#who-is-asked))
-- **Check worker**: A small container on another Docker host that runs checks when the check line is long. It runs no agents. Add one under **Settings > Server and runner > Limits and checks**. ([Guide 9](/guides/add-ons#check-workers-more-machines-for-checks))
-- **Checks before merging**: The command Boss Man runs on approved work before it merges it, chosen under **Before merging, Boss Man will**. If it fails, the ticket goes back to In progress. ([Guide 7](/guides/reviews-and-merge-queue#the-merge-queue))
+- **Check worker**: A small container on another Docker host that runs checks when the check line is long. It runs no agents. Add one under **Settings > Server and runner > Limits and checks**. ([Guide 9](/guides/add-ons#check-workers-more-machines-for-checks), and [Checks and check workers](/guides/checks-and-check-workers#check-workers-another-machine-for-checks))
+- **Checks before merging**: The command Boss Man runs on approved work before it merges it, chosen under **Before merging, Boss Man will**. If it fails, the ticket goes back to In progress. Only companies whose agents write code need one. ([Guide 7](/guides/reviews-and-merge-queue#the-merge-queue), and [Checks and check workers](/guides/checks-and-check-workers))
 - **Company**: A team of agents with its own runner, secrets and budget. One Boss Man server can run several companies. ([Guide 1](/guides/how-boss-man-works#companies-and-agents))
 
 ## D
@@ -115,9 +115,9 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 - **Rules**: Your own permission rules under **Settings > Permissions**, each with the outcome **Allow**, **Ask the CEO**, **Ask me** or **Deny**. Deny rules always win. Then your Allow rules apply. **Ask the CEO** and **Ask me** rules only apply to requests that would otherwise ask. ([Guide 6](/guides/permissions#rules))
 - **Rules judge**: The name agents use for Advice on permission cards. ([Guide 6](/guides/permissions#advice-on-permission-cards))
 - **Run**: One working session of an agent on a ticket. Runs are listed under **Runs** in the sidebar. ([Guide 3](/guides/first-company-and-ticket#8-a-first-task))
-- **Runner**: The container where a company's agents work, one for each company. It connects out to the Boss Man server and shows **Connected** under **Settings > Server and runner > Runner** when it is working. ([Guide 1](/guides/how-boss-man-works))
+- **Runner**: The container where a company's agents work, one for each company. It connects out to the Boss Man server and shows **Connected** under **Settings > Server and runner > Runner** when it is working. ([Guide 1](/guides/how-boss-man-works), and [Your agents' workspace](/guides/the-runner))
 - **Runner add-ons**: Extra tools built into the runner image, such as a browser agents can drive. Turn them on with the tick boxes in Settings > Server and runner > Runner. ([Guide 9](/guides/add-ons#runner-add-ons-extra-tools-for-agents))
-- **Runner update**: Rebuilding the runner image with `scripts/update-runner.sh`, after which Boss Man swaps each company's runner when it is idle. Follow it under **Settings > Server and runner > Updates**. ([Guide 10](/guides/updates-and-backups#update-the-runners))
+- **Runner update**: Rebuilding the runner image with `scripts/update-runner.sh`, after which Boss Man swaps each company's runner when it is idle. Follow it under **Settings > Server and runner > Updates**. ([Guide 10](/guides/updates-and-backups#update-the-runners), and [How updates work](/guides/how-updates-work))
 
 ## S
 
