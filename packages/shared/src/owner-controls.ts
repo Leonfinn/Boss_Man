@@ -53,7 +53,7 @@ export const OWNER_CONTROLS = {
   "Log in": ["Create owner account", "Log in"],
   Setup: [
     "Create the company", "Add the project", "Check the token against …", "Add the task to …", "Continue", "Dismiss", "Saving",
-    "Back", "Next", "Skip for now", "Finish", "I know what I'm doing, let me get on with it",
+    "Back", "Next", "Skip for now", "Leave setup for now", "Skip setup for now", "Fix this",
     // The Claude and runner steps (BOS-1495), then the credentials, funding and project panels Setup shares with Settings and Projects.
     "Save the code", "Start the runner",
     "Save", "Check with Claude", "Check", "Remove", "Edit", "Delete", "Add funding source", "Cancel", "Re-detect",
