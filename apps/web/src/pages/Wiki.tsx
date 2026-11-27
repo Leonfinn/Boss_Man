@@ -564,7 +564,7 @@ function BriefView({ companyId }: { companyId: string }) {
   if (!brief.data) return <Loader label="Loading the company brief" />;
   return (
     <article className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      <h2 style={{ fontSize: 22, fontWeight: 600 }}>Company brief</h2>
+      <h2 style={{ fontSize: 22, fontWeight: 600 }}>Agents' briefing</h2>
       <Markdown text={brief.data.markdown} linkContext={{ companyId }} />
     </article>
   );
@@ -837,6 +837,26 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
     `${company?.id ?? "none"}/${q}`,
   );
   const pages = list.data ?? [];
+  // BOS-2828: the maintainer banner turns the agent on in one press (a plain un-pause, as on the Agents page).
+  const maintainer = company?.agents.find((a) => a.duty === "wiki" && a.paused);
+  const [turnedOn, setTurnedOn] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
+  const turnOn = async () => {
+    if (!maintainer) return;
+    setStarting(true);
+    setStartError(null);
+    try {
+      await api(`/api/agents/${maintainer.id}`, { method: "PATCH", body: { paused: false } });
+      setTurnedOn(true);
+    } catch (e) {
+      setStartError(e instanceof Error ? e.message : "unknown error");
+    } finally {
+      setStarting(false);
+    }
+  };
+  // With no page chosen, open the owner's most recently changed page; the brief is a last resort, not the front door.
+  const latest = [...pages].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0];
   const folders = [...new Set(pages.map((p) => p.folder).filter(Boolean))].sort();
   const create = async (v: Draft) => {
     const p = await api<{ slug: string }>(`/api/companies/${company!.id}/wiki`, { method: "POST", body: v });
@@ -853,10 +873,20 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
           <p className="sub">The company's shared pages: research, specs, how-tos. Agents write here too, and a page written for a task shows on that task.</p>
         </div>
       </header>
-      {company?.agents.some((a) => a.duty === "wiki" && a.paused) && (
+      {maintainer && !turnedOn && (
         <p className="banner" role="status">
           <span>
-            The Wiki Maintainer is paused. To have it file finished work and keep an Index page, choose its model and press Start on the <a href="#/agents">Agents</a> page.
+            The Wiki Maintainer (keeps these pages tidy) is off.{" "}
+            <button type="button" className="btn" disabled={starting} onClick={() => void turnOn()}>
+              Turn it on
+            </button>{" "}
+            {startError ? (
+              <>
+                It didn't start ({startError}). Choose its model and press Start on the <a href="#/agents">Agents</a> page.
+              </>
+            ) : (
+              <>It files finished work and keeps an Index page. It runs on the same account as your CEO unless you change it on the <a href="#/agents">Agents</a> page.</>
+            )}
           </span>
         </p>
       )}
@@ -890,18 +920,8 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
               <label htmlFor="wiki-q">Search</label>
               <input id="wiki-q" type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Titles and text" />
             </div>
-            {!q.trim() && (
-              <ul>
-                <li>
-                  <a href={`#/wiki/${company.id}/${BRIEF}`} aria-current={(pageSlug === BRIEF || !pageSlug) && creating === null ? "page" : undefined} onClick={() => (setCreating(null), closeDrawer())}>
-                    Company brief
-                    <small>read-only, as of now</small>
-                  </a>
-                </li>
-              </ul>
-            )}
             {list.error && !away(list.error) && <LoadError what="the page list" message={list.error.message} onRetry={list.reload} />}
-            {list.data && pages.length === 0 && <p className="muted">{q.trim() ? "No page matches." : "Only the company brief so far."}</p>}
+            {list.data && pages.length === 0 && <p className="muted">{q.trim() ? "No page matches." : "No pages yet."}</p>}
             <SemanticSettings companyId={company.id} />
             {!q.trim() && <RecentlyChanged pages={pages} companyId={company.id} current={creating === null ? pageSlug : undefined} onPick={() => (setCreating(null), closeDrawer())} />}
             {!q.trim() && pages.length > 0 && <StalePages pages={pages} companyId={company.id} current={creating === null ? pageSlug : undefined} onPick={() => (setCreating(null), closeDrawer())} />}
@@ -915,17 +935,37 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
               onToggle={onToggleFolder}
               onPick={() => (setCreating(null), closeDrawer())}
             />
+            {!q.trim() && (
+              <ul>
+                <li>
+                  <a href={`#/wiki/${company.id}/${BRIEF}`} aria-current={pageSlug === BRIEF && creating === null ? "page" : undefined} onClick={() => (setCreating(null), closeDrawer())}>
+                    Agents' briefing (written by Boss Man for your agents)
+                    <small>read-only, as of now</small>
+                  </a>
+                </li>
+              </ul>
+            )}
             {!q.trim() && <LinkHealth companyId={company.id} onPick={() => (setCreating(null), closeDrawer())} />}
             <DeletedPages companyId={company.id} go={go} onChanged={list.reload} />
           </nav>
           <div>
             {creating !== null ? (
               <Editor key={creating} draftKey={`wiki-new/${company.id}/${creating}`} initial={{ title: "", body: "", folder: creating }} folders={folders} onSave={create} onCancel={() => setCreating(null)} saveLabel="Create page" />
-            ) : pageSlug === BRIEF || !pageSlug ? (
-              // With no page chosen, the brief is the default: it is always there, so a new install isn't an empty pane.
+            ) : pageSlug === BRIEF ? (
               <BriefView companyId={company.id} />
+            ) : !pageSlug && !list.data ? (
+              <Loader label="Loading the pages" />
+            ) : !pageSlug && !latest ? (
+              <div className="card" role="status">
+                <p className="muted">Your agents' reports, research and how-tos will appear here.</p>
+                <button type="button" className="btn primary" onClick={() => setCreating("")}>
+                  New page
+                </button>
+              </div>
+            ) : !pageSlug && latest ? (
+              <PageView companyId={company.id} slug={latest.slug} section={section} folders={folders} go={go} onChanged={list.reload} onNewHere={setCreating} />
             ) : (
-              <PageView companyId={company.id} slug={pageSlug} section={section} folders={folders} go={go} onChanged={list.reload} onNewHere={setCreating} />
+              <PageView companyId={company.id} slug={pageSlug!} section={section} folders={folders} go={go} onChanged={list.reload} onNewHere={setCreating} />
             )}
           </div>
         </div>

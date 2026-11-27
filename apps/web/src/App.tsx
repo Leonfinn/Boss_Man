@@ -421,7 +421,7 @@ function Signed({ onLogout, username, initialPreferences }: { onLogout: () => vo
         onEnableNotifications={() => void Notification.requestPermission().then(setPermission)}
         onLogout={() => void api("/api/logout", { method: "POST" }).finally(onLogout)}
       />
-      <SearchPalette companyId={companyId} go={go} />
+      <SearchPalette companyId={companyId} go={go} prefix={current?.ticketPrefix} />
       <Shortcuts go={go} hasProjects={(current?.projects?.length ?? 0) > 0} singleLetterKeys={prefs.singleLetterKeys} onTurnKeysOn={() => void save({ singleLetterKeys: true })} keyboardTipSeen={prefs.keyboardTipSeen} onTipSeen={() => void save({ keyboardTipSeen: true }).catch(() => {})} />
       <main>
         <UpdateBanner m={maintenance.data} />
@@ -453,7 +453,7 @@ function Signed({ onLogout, username, initialPreferences }: { onLogout: () => vo
         ) : page === "merge-history" ? (
           <MergeHistory companies={list} companyId={companyId} />
         ) : page === "search" ? (
-          <SearchPage companyId={companyId} go={go} />
+          <SearchPage companyId={companyId} go={go} prefix={current?.ticketPrefix} />
         ) : page === "merge-queue" ? (
           <MergeQueue companies={list} companyId={companyId} />
         ) : page === "tickets" && route[1] ? (
