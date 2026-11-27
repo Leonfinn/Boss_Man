@@ -68,8 +68,17 @@ export function leftSentence(l: HandLeft, e: HandEvidence, cardLabel: string | n
   return `Nothing else is left to do${done.length ? `: ${done.join(", and ")}` : ""}.`;
 }
 
-/** The line a newer deploy card carries while a by-hand update's steps are still to do. */
+/**
+ * The line a newer one-click deploy card carries while a by-hand update's steps are still to do. A good automatic deploy
+ * copies the deployer script in by itself (BOS-1588: host-deployer.sh and deploy.sh run install-deployer.sh after a good
+ * deploy; a hand-apply's rebuild-live.sh does not), so that step is done by this card; the runner rebuild never is.
+ */
 export function newerCardLine(l: HandLeft, cardLabel: string): string {
-  const names = leftNames(l);
-  return `Still to do from the last by-hand update: ${names.join("; and ")}. Do the card "${cardLabel}" first: this deploy doesn't do ${names.length === 1 ? "it" : "them"}.`;
+  const parts: string[] = [];
+  if (l.deployer) parts.push("The host still runs the old deployer script; this deploy copies the new one in by itself once it succeeds.");
+  if (l.runner) parts.push(`The runners still need rebuilding, which this deploy doesn't do: see the card "${cardLabel}".`);
+  return `Left over from the last by-hand update: ${parts.join(" ")}`;
 }
+
+/** The card's own line when the deployer copy is left: the next good automatic deploy does it too (BOS-1588). */
+export const DEPLOYER_BY_DEPLOY = "The next automatic server update also copies the deployer script in by itself once it succeeds, so if one is waiting you can approve that instead of copying by hand.";

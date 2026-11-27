@@ -2728,8 +2728,10 @@ describe("a by-hand update's steps outside the server outlive its live commit (B
     expect(left).toBeDefined();
     const [newer] = (await c.open()).filter((d) => (d.context as { target: string }).target === "server");
     expect(newer!.id).not.toBe(card.id);
-    expect(newer!.question).toContain("Still to do from the last by-hand update: copy the deployer script into the deployer folder; and rebuild the runners");
-    expect(newer!.question).toContain('Do the card "Finish the by-hand update" first');
+    // A good automatic deploy copies the deployer script in by itself (BOS-1588); the runner rebuild it never does.
+    expect(newer!.question).toContain("Left over from the last by-hand update: The host still runs the old deployer script; this deploy copies the new one in by itself once it succeeds.");
+    expect(newer!.question).toContain('The runners still need rebuilding, which this deploy doesn\'t do: see the card "Finish the by-hand update".');
+    expect(left!.question).toContain("The next automatic server update also copies the deployer script in by itself");
     expect(((newer!.context as { doAfter?: { decisionId: string }[] }).doAfter ?? []).map((l) => l.decisionId)).toContain(left!.id);
     // The old hand card is withdrawn with a notice that its server part is live and two steps are left, not "everything".
     const old = await byId(c, card.id);

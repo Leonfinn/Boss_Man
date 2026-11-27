@@ -27,7 +27,7 @@ import { runnerImageCommit, runnerOnlyTickets } from "./runner-image.js";
 import type { BlueGreen } from "./bluegreen.js";
 import { withStagingLock } from "./staging-lock.js";
 import { runnerUpdateNeed, wakeCeoIfRunnerNeedUnknown, type RunnerNeed } from "./runner-update-need.js";
-import { anyLeft, handStepsLeft, leftNames, leftSentence, newerCardLine, type HandEvidence, type HandLeft } from "./hand-steps-left.js";
+import { anyLeft, DEPLOYER_BY_DEPLOY, handStepsLeft, leftNames, leftSentence, newerCardLine, type HandEvidence, type HandLeft } from "./hand-steps-left.js";
 
 type SelfDeployContext = Extract<DecisionContext, { type: "self_deploy" }>;
 
@@ -1667,7 +1667,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const steps = [...(dep?.steps ?? []), ...(left.runner ? [`${RUNNER_STEP[0]!.toUpperCase()}${RUNNER_STEP.slice(1)}.`] : [])];
     const names = leftNames(left);
     const one = names.length === 1;
-    const question = `${HAND_LEFT_LABEL}: the server already runs ${short(live)}, but the host hasn't confirmed ${one ? "this step" : "these steps"} of the by-hand update yet: ${names.join("; and ")}. This card holds only ${one ? "that step" : "those steps"} and closes by itself once the host confirms ${one ? "it" : "each one"}. If you have just done ${one ? "it" : "them"}, give it a couple of minutes.`;
+    const question = `${HAND_LEFT_LABEL}: the server already runs ${short(live)}, but the host hasn't confirmed ${one ? "this step" : "these steps"} of the by-hand update yet: ${names.join("; and ")}. This card holds only ${one ? "that step" : "those steps"} and closes by itself once the host confirms ${one ? "it" : "each one"}. If you have just done ${one ? "it" : "them"}, give it a couple of minutes.${left.deployer ? ` ${DEPLOYER_BY_DEPLOY}` : ""}`;
     const checks = [...(left.deployer ? ['Settings → Server and runner → This server says "Deployer script: current"'] : []), ...(left.runner ? ["the runners report the version the server runs (Settings → Server and runner → Updates)"] : [])];
     return { question, steps, check: `This card closes by itself once ${checks.join(" and ")}.`, ...(dep ? { rollback: dep.rollback } : {}) };
   }

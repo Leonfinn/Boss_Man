@@ -52,9 +52,10 @@ describe("the closing notice and the newer card name what is left (BOS-2783)", (
     expect(liveNotice({ commit: "b".repeat(40), liveAt: now, now }).stepsLeft).toBeUndefined();
   });
 
-  it("the newer card's line says this deploy doesn't do them", () => {
+  it("the newer card's line: the deploy copies the deployer script itself (BOS-1588), never rebuilds the runners", () => {
     expect(newerCardLine(BOTH, "Finish the by-hand update")).toBe(
-      'Still to do from the last by-hand update: copy the deployer script into the deployer folder; and rebuild the runners (Settings → Server and runner → Updates → Build and update runners). Do the card "Finish the by-hand update" first: this deploy doesn\'t do them.',
+      'Left over from the last by-hand update: The host still runs the old deployer script; this deploy copies the new one in by itself once it succeeds. The runners still need rebuilding, which this deploy doesn\'t do: see the card "Finish the by-hand update".',
     );
+    expect(newerCardLine({ deployer: false, runner: true }, "X")).not.toContain("deployer");
   });
 });
