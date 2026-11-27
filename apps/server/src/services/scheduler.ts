@@ -86,6 +86,8 @@ export type Limits = {
   quickBatchMs: number;
   /** Nudges one agent may send another in ten minutes (R86). */
   nudgesPerPairPer10Min: number;
+  /** How long a run may sit on a ticket already in review or done before a held Ready ticket of the same agent ends it (BOS-2780). */
+  idleRunAfterMs: number;
 };
 
 /** Wakes the owner asked for; never limited. A message counts only when no run sent it. */
@@ -212,7 +214,7 @@ function replayOfClosed(w: { reason: string; createdAt: Date }, t: { systemState
   return !t.stateChangedAt || w.createdAt.getTime() <= t.stateChangedAt.getTime();
 }
 
-export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, background: 2, maxDepth: 8, selfWakesPer10Min: 5, ticketlessPerHour: 6, staleWakeMs: 2 * 3_600_000, wikiBatchMs: 15 * 60_000, quotaHoldAt: 0.95, highPriority: 3, answerBatchMs: 2 * 60_000, answerBatchMaxMs: 5 * 60_000, quickBatchMs: 10_000, reviewBatchMs: 10_000, reviewHandoverMs: 10 * 60_000, nudgesPerPairPer10Min: 3 };
+export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, background: 2, maxDepth: 8, selfWakesPer10Min: 5, ticketlessPerHour: 6, staleWakeMs: 2 * 3_600_000, wikiBatchMs: 15 * 60_000, quotaHoldAt: 0.95, highPriority: 3, answerBatchMs: 2 * 60_000, answerBatchMaxMs: 5 * 60_000, quickBatchMs: 10_000, reviewBatchMs: 10_000, reviewHandoverMs: 10 * 60_000, nudgesPerPairPer10Min: 3, idleRunAfterMs: 10 * 60_000 };
 
 /** BOS-1555: a finished check's result wake; the agent picks it up before starting anything new. */
 const CHECK_RESULT_REASON = "check_result";
@@ -289,6 +291,8 @@ export function schedulerService(
     /** A task of this feature started, so its status may need to follow. */
     onFeature?: (featureId: string) => Promise<unknown>;
     limits?: Partial<Limits>;
+    /** BOS-2780: ends a run (the per-run Stop); used for an idle run that holds the slot a Ready ticket is waiting for. */
+    cancelRun?: (runId: string, reason?: string) => Promise<unknown>;
     now?: () => Date;
     /** The owner's quiet hours; agent wakes below high priority wait for them to end (R86). */
     quietHours?: () => Promise<QuietHours | null>;
@@ -1141,6 +1145,44 @@ export function schedulerService(
       .where(and(eq(wakes.agentId, agentId), inArray(wakes.status, ["queued", "deferred"]), isNull(wakes.runId), eq(tickets.assigneeAgentId, agentId), inArray(tickets.systemState, ["ready", "in_progress"])))
       .limit(1);
     return !!row;
+  }
+
+  /**
+   * BOS-2780: a wake for the agent's Ready or In progress ticket is held behind the agent's one run slot. When that run is
+   * on a ticket that has since gone to review or done, and has sat there for `idleRunAfterMs` with no check, reply or
+   * waiting wake of its own, the run has no work left and only keeps the slot (and a background slot). End it, so the held
+   * wake starts on its own ticket. Review, watch, chat and reply runs are never touched. Returns true when a run was ended.
+   */
+  async function endIdleRunFor(w: typeof wakes.$inferSelect): Promise<boolean> {
+    if (!deps.cancelRun || !w.ticketId || w.reason === CHAT_REASON || w.reason === REVIEW_REASON || isReplyLane(w.reason)) return false;
+    const [mine] = await db.select({ assignee: tickets.assigneeAgentId, state: tickets.systemState }).from(tickets).where(eq(tickets.id, w.ticketId));
+    if (!mine || mine.assignee !== w.agentId || (mine.state !== "ready" && mine.state !== "in_progress")) return false;
+    const before = new Date(now().getTime() - limits.idleRunAfterMs);
+    const live = await db
+      .select({ id: runs.id, ticketId: tickets.id, title: tickets.title, companyId: runs.companyId })
+      .from(runs)
+      .innerJoin(tickets, eq(tickets.id, runs.ticketId))
+      .where(
+        and(
+          eq(runs.agentId, w.agentId),
+          isNull(runs.endedAt),
+          isNull(runs.cancelRequestedAt),
+          or(isNull(runs.purpose), notInArray(runs.purpose, ["chat", REPLY_PURPOSE])),
+          or(isNull(runs.origin), notInArray(runs.origin, [REVIEW_REASON, WATCH_REASON])),
+          ne(runs.ticketId, w.ticketId),
+          inArray(tickets.systemState, ["review", "done"]),
+          lte(tickets.stateChangedAt, before),
+        ),
+      );
+    for (const r of live) {
+      if (await ownCheckLive(db, r.ticketId, w.agentId)) continue;
+      const [waiting] = await db.select({ id: wakes.id }).from(wakes).where(and(eq(wakes.agentId, w.agentId), eq(wakes.ticketId, r.ticketId), inArray(wakes.status, ["queued", "deferred"]))).limit(1);
+      if (waiting) continue;
+      await deps.cancelRun(r.id, "its ticket is in review or done and the agent has a Ready ticket waiting");
+      await record(db, { companyId: r.companyId, agentId: w.agentId, ticketId: w.ticketId, kind: "monitor", summary: `Ended an idle run on "${r.title}" (already in review or done) so this ticket can start`, at: now() });
+      return true;
+    }
+    return false;
   }
 
   /** The launch of one wake, or why it doesn't start (BOS-256); see launch(). */
@@ -2147,6 +2189,7 @@ export function schedulerService(
             }
             if (left !== w.note) await db.update(wakes).set({ note: left }).where(eq(wakes.id, w.id));
           }
+          if (held === HELD_AGENT) await endIdleRunFor(w).catch((err) => deps.log?.(`ending an idle run failed: ${(err as Error).message}`, w.companyId));
           await wait(held);
           continue;
         }

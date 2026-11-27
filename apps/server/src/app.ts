@@ -569,6 +569,8 @@ export async function buildApp(opts: AppOptions) {
     limits: opts.limits,
     workspaceRoot: opts.workspaceRoot,
     now: opts.now,
+    // BOS-2780: runsSvc is built further down; this only runs when a held Ready ticket ends an idle run.
+    cancelRun: (runId, reason) => runsSvc.cancel(runId, undefined, reason),
     quietHours: async () => (await notes.getSettings()).quietHours,
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     tickOnWake: opts.tickOnWake,
