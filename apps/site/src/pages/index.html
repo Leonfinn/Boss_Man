@@ -1,6 +1,6 @@
 ---
-title: Boss Man: AI agents that plan, build and review your software, on your own server
-description: Boss Man is free and self-hosted. Collect feedback, rank features and plan a roadmap, while AI agents write and review the code. Their questions come to one Decisions page.
+title: Boss Man: AI agents that plan, do and review your team's work, on your own server
+description: Boss Man is free and self-hosted. AI agents research, write reports or build software from a ticket board, and their questions come to one Decisions page. Code is optional.
 path: /
 nav: home
 ---
@@ -9,7 +9,7 @@ nav: home
   <div class="wrap">
     <div class="hero-text">
       <h1>Boss Man runs AI agents from a ticket board on your server</h1>
-      <p class="lead">Turn feedback into a ranked roadmap, and let AI agents plan, write and review the work on the board. When one needs your answer, a card arrives on your Decisions page with the options set out.</p>
+      <p class="lead">Turn feedback into a ranked roadmap, and let AI agents plan, write and review the work on the board. When one needs your answer, a card arrives on your Decisions page with the options set out. Code is optional: agents can research a market or draft a client report in your wiki, or change software in your git repository.</p>
       <div class="cta-col">
         <div class="actions">
           <a class="btn" href="/guides/install-boss-man">Install Boss Man</a>
@@ -185,7 +185,7 @@ nav: home
       </div>
       <div class="arrows" aria-hidden="true"><div>code</div><div>prompts</div></div>
       <div class="out">
-        <div><h3>Your git host</h3><p>GitHub or Gitea, with a token you make.</p></div>
+        <div><h3>Your git host</h3><p>GitHub or Gitea, with a token you make. Only if your agents work on code.</p></div>
         <div><h3>Your AI accounts</h3><p>A Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic. Billed to you.</p></div>
         <div class="none"><h3>A Boss Man cloud</h3><p>There isn't one. Nothing passes through us.</p></div>
       </div>
@@ -201,10 +201,11 @@ nav: home
       <p class="intro">Download two files from a release and run three Docker commands: Boss Man comes as ready-made images, so nothing is built on your machine. Two guides take you from there to your first task, with a check after each step: <a href="/guides/install-boss-man">Install Boss Man</a> (steps 1 to 6) and <a href="/guides/first-company-and-ticket">Your first company and task</a> (steps 7 to 12).</p>
       <ul class="need">
         <li>A 64-bit Linux machine (x86-64 or arm64) with Docker Engine and Docker Compose v2. A home server, NAS or Proxmox VM works.</li>
-        <li>A GitHub or Gitea account for the code your agents work on.</li>
-        <li>A Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic.</li>
+        <li>A Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic. <a href="/guides/connect-a-claude-account">Which Claude account to choose</a>.</li>
+        <li>Only if your agents will work on code: a GitHub or Gitea account.</li>
         <li>To be happy pasting commands into a terminal.</li>
       </ul>
+      <p><strong>What it costs:</strong> Boss Man itself is free. You pay for your own Claude plan, or for what you use on an API key. See <a href="/guides/what-agents-cost">What agents cost</a>.</p>
       <div class="why">
         <h3>Why Linux?</h3>
         <p>Boss Man runs on a 64-bit Linux machine with Docker. Two safety features use the Linux kernel: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. Settings shows whether each one is working on your machine.</p>
@@ -228,9 +229,9 @@ nav: home
           <li>Download the images and start</li>
           <li>Make your owner account</li>
           <li>Name your company</li>
-          <li>Add a project and wait for its runner</li>
-          <li>Connect your AI account and a git token</li>
-          <li>Choose the checks before merging</li>
+          <li>Say what your team works on: documents or code</li>
+          <li>Wait for the runner</li>
+          <li>Connect your Claude account (and, for code, a git token and checks)</li>
           <li>Set what pays for the CEO</li>
           <li class="goal">Give the CEO a first task</li>
         </ol>
