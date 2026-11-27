@@ -113,6 +113,17 @@ describe("daily backup alert", () => {
     expect(q).not.toContain("up -d backup");
   });
 
+  it("on an image install (BOS-2817) 37 hours with no backup raises the card with the image install's own commands, not the checkout's", async () => {
+    const raised: Array<Record<string, unknown>> = [];
+    const s = dailyBackupService(db, { now: () => hours(37), homeCompany: async () => "co-1", isOpen: async () => false, raise: async (i) => (raised.push(i), { id: "c" }), composeCmd: async () => null, imageInstall: () => true });
+    await put(LAST_KEY, { at: T0.toISOString(), file: "f", bytes: 1 });
+    await s.check();
+    const q = String(raised[0]!.question);
+    expect(q).toContain("docker compose --env-file images.env -f docker-compose.images.yml up -d backup");
+    expect(q).not.toContain("the checkout");
+    expect(q).not.toContain("--no-deps");
+  });
+
   it("raises when the newest backup is over 36 hours old and names the failure; a fresh one stays quiet", async () => {
     const raised: Array<Record<string, unknown>> = [];
     await put(LAST_KEY, { at: T0.toISOString(), file: "f", bytes: 1 });

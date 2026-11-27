@@ -105,7 +105,17 @@ docker compose --env-file images.env -f docker-compose.images.yml run --rm setup
 
 This writes the master key into a Docker volume called `config`, and the database password into one called `db-secret`. It is safe to run again: it never replaces a file that exists.
 
-**Back up both volumes**, and keep the copies off this machine. Without the master key, Boss Man cannot read your stored secrets again. Without the database password, the server cannot reach its database.
+**Back up both volumes**, and keep the copies off this machine. Without the master key, Boss Man cannot read your stored secrets again. Without the database password, the server cannot reach its database. After step 5, run these two in the same folder (they use the default project name `boss-man`; not yet run on a real install):
+
+```sh Copy the two key volumes into one file
+docker run --rm -v boss-man_config:/from/config:ro -v boss-man_db-secret:/from/db-secret:ro -v "$PWD":/to pgvector/pgvector:0.8.7-pg17-bookworm tar czf /to/boss-man-keys.tgz -C /from .
+```
+
+```sh Copy the database backups into a folder
+docker compose --env-file images.env -f docker-compose.images.yml cp backup:/backups/. ./boss-man-backups
+```
+
+Boss Man makes a database backup every day by itself (the newest 14 are kept on this machine, so copy them off now and then). Move `boss-man-keys.tgz` and the `boss-man-backups` folder to another machine or disk, and treat the keys file like a password. To restore onto a fresh install, follow "Daily database backup, copy-off and restore" in [`docs/35-install-from-images.md`](@repo/blob/main/docs/35-install-from-images.md).
 
 ### 4. Choose who can reach it
 
