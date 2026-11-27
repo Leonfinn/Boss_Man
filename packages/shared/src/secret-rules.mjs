@@ -38,7 +38,7 @@ export const SECRET_RULES = [
   ['jwt', /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/],
   [
     'url-with-credentials',
-    /\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@'"`]+:([^\s@/'"`]{8,})@[^\s'"`]+/i,
+    /\b[a-z][a-z0-9+.-]{0,31}:\/\/[^\s:/@'"`]+:([^\s@/'"`]{8,})@[^\s'"`]+/i,
     (v) => !PLACEHOLDER.test(v) && !/^(pass(word)?|secret|postgres|root|admin|user|test|token|boss|bossman)$/i.test(v),
   ],
   ['bearer-token', /Authorization['"]?\s*[:=]\s*['"`]?Bearer\s+([A-Za-z0-9._~+/=-]{20,})/i, (v) => !PLACEHOLDER.test(v)],

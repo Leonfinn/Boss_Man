@@ -86,6 +86,24 @@ describe("secretRefusal (BOS-2731)", () => {
     expect(hostile).toBeLessThan(baseline * 25);
   });
 
+  it("stays fast on 200 KB of scheme-like text (the url-with-credentials rule once took quadratic time)", () => {
+    const time = (text: string) => {
+      const t0 = performance.now();
+      secretRefusal("wiki", { action: "write", body: text });
+      return performance.now() - t0;
+    };
+    const baseline = time("b".repeat(200_000)) + 20;
+    // Each shape took 14 to 23 s before the cap on the scheme part; a linear scan stays near the baseline.
+    for (const text of ["a.".repeat(100_000), "a-".repeat(100_000), "sk-".repeat(66_000)]) {
+      expect(time(text)).toBeLessThan(baseline * 25);
+    }
+  });
+
+  it("still refuses a database URL with a password", () => {
+    const url = ["postgres", "://app:", "x7Kq2mZp9Lw", "@db.example.com/main"].join("");
+    expect(secretRefusal("wiki", { action: "write", body: `use ${url}` })).toMatch(/url-with-credentials/);
+  });
+
   it("checks only the wiki's writing actions, and only the guarded tools", () => {
     expect(secretRefusal("wiki", { action: "read", slug: anthropic })).toBeNull();
     expect(secretRefusal("notes", { action: "save", body: anthropic })).toBeNull();
