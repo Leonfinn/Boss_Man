@@ -68,7 +68,7 @@ if grep -v '^[[:space:]]*#' docker-compose.images.yml | grep -Eq '\b(openssl|sud
 # the settings rows the server reads. The loop is inline: the install has no scripts folder.
 echo "$cfg" | jq -e '.services.backup.volumes | map(.source) | contains(["backups"])' >/dev/null && ok "the backup service writes to the backups volume" || bad "backup service volume"
 echo "$cfg" | jq -r '.services.backup.command[0]' | grep -q 'daily_backup_last' && ok "the backup service records daily_backup_last" || bad "backup service does not record daily_backup_last"
-echo "$cfg" | jq -r ".services.backup.command[0]" | sed "s/\$\$/\$/g" | bash -n && ok "the backup loop is valid shell" || bad "backup loop has a shell syntax error"
+echo "$cfg" | jq -r '.services.backup.command[0]' | sed 's/\$\$/$/g' | bash -n && ok "the backup loop is valid shell" || bad "backup loop has a shell syntax error"
 [ -f docs/35-install-from-images.md ] && ok "the install guide exists" || bad "docs/35-install-from-images.md is missing"
 # BOS-2788: docker-compose.images.yml is not a default Compose file name, so every guide step that runs compose with images.env must
 # pass -f docker-compose.images.yml, as this test does. Both guides are read; a step with --env-file images.env and no -f fails.
