@@ -19,6 +19,10 @@ A one-minute tour (63 seconds), recorded from the real app with made-up data: th
 
 ## Install
 
+**New to Boss Man?** Start with the website's [Install Boss Man](https://bossman.website/guides/install-boss-man) guide, then [Your first company and task](https://bossman.website/guides/first-company-and-ticket). They take you from an empty machine to a first finished task, with a check after each step. You do not need to write code: agents can work on documents and research as well as software. Boss Man is free; you pay for your own Claude plan or API usage.
+
+The rest of this section is the same install in the repository's own docs.
+
 You need a Linux host with Docker (a plain Linux box, a Proxmox VM, or TrueNAS SCALE), and a Claude subscription or an Anthropic API key, or any OpenAI compatible API key (tested so far with OpenRouter, Ollama and Synthetic). You can install from ready-made Docker images, published as pre-releases on the [releases page](https://github.com/Leonfinn/Boss_Man/releases), or build the containers from the source on your server. A new image comes out once a week, on Tuesdays; building from source gets each change as soon as it is added. [What's new](CHANGELOG.md) says which image has each change.
 
 > **On Proxmox, use a VM, not an LXC container.** In most LXC containers the network guard cannot load, so agents' runners could reach your home network. See [docs/32-proxmox.md](docs/32-proxmox.md).

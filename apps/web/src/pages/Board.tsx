@@ -55,7 +55,7 @@ const projectTab = (s: string | undefined) => PROJECT_TABS.find((t) => t.id === 
 const DEFAULT_LABEL: Record<string, string> = { backlog: "Backlog", ready: "Ready", in_progress: "In progress", blocked: "Blocked", review: "Review", done: "Done" };
 /** One line shown in a column with no tasks. */
 const EMPTY_HINT: Record<string, string> = {
-  backlog: "Nothing waiting. Add a task to start.",
+  backlog: "Nothing waiting. Add a task to start, or ask the CEO in Chat to plan the work.",
   ready: "Nothing ready. Move a task here when it can start.",
   in_progress: "Nothing underway right now.",
   blocked: "Nothing is stuck.",
@@ -880,6 +880,20 @@ function TicketCard({ sameAs, waiters, t, mine, merging, who, name, prefix, tier
 export function Board({ companies, projectId, subpage, go, onCompaniesChanged, decisionsOpen }: { companies: Company[]; projectId: string | undefined; subpage?: string; go: (to: string) => void; onCompaniesChanged: () => void; /** The Decisions badge's figure, so the board can say how many open questions hold no task. */ decisionsOpen?: number | null }) {
   // The wheel over the sideways board must scroll the page even when the hand adds a little sideways movement (BOS-1915).
   const boardScrollRef = useWheelToPage();
+  // BOS-2828: columns that run off the right edge say so, until the owner has scrolled to the last one.
+  const [moreRight, setMoreRight] = useState(false);
+  useEffect(() => {
+    const el = document.querySelector<HTMLElement>(".board-scroll");
+    if (!el) return setMoreRight(false);
+    const measure = () => setMoreRight(el.scrollWidth - el.clientWidth - el.scrollLeft > 8);
+    measure();
+    el.addEventListener("scroll", measure, { passive: true });
+    window.addEventListener("resize", measure);
+    return () => {
+      el.removeEventListener("scroll", measure);
+      window.removeEventListener("resize", measure);
+    };
+  });
   const projects = usePoll(
     async (signal) => (await Promise.all(companies.map((c) => api<Project[]>(`/api/companies/${c.id}/projects`, { signal })))).flat(),
     60_000,
@@ -1387,6 +1401,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged, d
       )}
       {view === "features" && featureList.length > 0 && !visibleFeatures.length && <p className="muted">No features in the states you have switched on. Switch more states on above.</p>}
       {view === "features" && <FeatureCards features={visibleFeatures} onAddTask={(featureId) => { setNote(null); openForm({ mode: "task", featureId }); }} />}
+      {view !== "features" && moreRight &&<p className="board-more muted" role="note">More columns to the right: scroll sideways →</p>}
       {view !== "features" && (
       <div className="board-scroll" ref={boardScrollRef}>
         <div className="board">

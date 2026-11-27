@@ -33,6 +33,13 @@ describe("templates", () => {
     expect(t.instructions.length).toBeLessThan(3000);
   });
 
+  it("marks which roles are for code and which suit any work (BOS-2824)", () => {
+    // The Hire form shows these as two groups, with "For any kind of work" first.
+    expect(AGENT_TEMPLATES.filter((t) => t.worksOn === "any").map((t) => t.id)).toEqual(["researcher", "writer", "scrum-master", "assistant", "product-manager", "data-analytics", "support"]);
+    expect(AGENT_TEMPLATES.filter((t) => t.worksOn === "code").map((t) => t.id)).toEqual(["engineer", "designer", "qa", "senior-dev", "security-reviewer", "adversarial-reviewer", "senior-infra", "release-manager"]);
+    for (const t of ALL) expect(["any", "code"]).toContain(t.worksOn);
+  });
+
   it("does not repeat text Boss Man already adds to every prompt", () => {
     for (const t of ALL) {
       expect(t.instructions).not.toContain("Details:");

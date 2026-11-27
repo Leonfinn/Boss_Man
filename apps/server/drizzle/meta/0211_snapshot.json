@@ -1,5 +1,5 @@
 {
-  "id": "7f19aa69-7cd7-45d2-80e9-b1c718880efc",
+  "id": "a618c737-297b-4059-81dd-1c39c2fae362",
   "prevId": "52fea352-214e-4aef-96c0-fcac1199c3c4",
   "version": "7",
   "dialect": "postgresql",
@@ -1931,148 +1931,6 @@
         "check_results_ticket_id_tickets_id_fk": {
           "name": "check_results_ticket_id_tickets_id_fk",
           "tableFrom": "check_results",
-          "tableTo": "tickets",
-          "columnsFrom": [
-            "ticket_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.check_ticket_links": {
-      "name": "check_ticket_links",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "check_ticket_id": {
-          "name": "check_ticket_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "own_criterion": {
-          "name": "own_criterion",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "ticket_id": {
-          "name": "ticket_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "criterion": {
-          "name": "criterion",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "appended": {
-          "name": "appended",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "check_ticket_links_check": {
-          "name": "check_ticket_links_check",
-          "columns": [
-            {
-              "expression": "check_ticket_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "check_ticket_links_ticket": {
-          "name": "check_ticket_links_ticket",
-          "columns": [
-            {
-              "expression": "ticket_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "check_ticket_links_one": {
-          "name": "check_ticket_links_one",
-          "columns": [
-            {
-              "expression": "check_ticket_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "ticket_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "criterion",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "check_ticket_links_check_ticket_id_tickets_id_fk": {
-          "name": "check_ticket_links_check_ticket_id_tickets_id_fk",
-          "tableFrom": "check_ticket_links",
-          "tableTo": "tickets",
-          "columnsFrom": [
-            "check_ticket_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "check_ticket_links_ticket_id_tickets_id_fk": {
-          "name": "check_ticket_links_ticket_id_tickets_id_fk",
-          "tableFrom": "check_ticket_links",
           "tableTo": "tickets",
           "columnsFrom": [
             "ticket_id"
@@ -8630,6 +8488,18 @@
         },
         "woken_at": {
           "name": "woken_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reminded_at": {
+          "name": "reminded_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "escalated_at": {
+          "name": "escalated_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false

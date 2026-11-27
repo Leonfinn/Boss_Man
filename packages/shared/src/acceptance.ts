@@ -338,7 +338,7 @@ export function longWatchPhrase(text: string): string | null {
  */
 const EVENT_WATCH: readonly RegExp[] = [
   // the next release / beta release / weekly release / real server update / runner rebuild / install
-  /\bthe\s+next\s+(?:(?:real|live|published|public|beta|weekly|nightly|stable|full|routine|official|server|runner|host|image|app|boss\s+man)[\s-]+){0,3}(?:release|update|upgrade|install(?:ation)?|deploy(?:ment)?|rebuild|publish)s?\b(?![\s-]+(?:date|number|name|notes?|tag|version|button|time|card|link|field|list)\b)/i,
+  /\bthe\s+next\s+(?:(?:real|live|failed|published|public|beta|weekly|nightly|stable|full|routine|official|server|runner|host|image|app|boss\s+man)[\s-]+){0,3}(?:release|update|upgrade|install(?:ation)?|deploy(?:ment)?|rebuild|publish)s?\b(?![\s-]+(?:date|number|name|notes?|tag|version|button|time|card|link|field|list)\b)/i,
   // one real install, a real image install, another real update (from published images, on x86 and ARM...)
   /\b(?:one|a|another|two|three)\s+real\s+(?:[a-z0-9-]+\s+){0,2}?(?:install(?:ation)?|update|upgrade|release|deploy(?:ment)?)s?\b/i,
   // the first real stuck alert, first real update...

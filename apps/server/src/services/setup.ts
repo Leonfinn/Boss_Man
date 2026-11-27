@@ -8,7 +8,8 @@ import { agents, companies, owners, projects, runners, secretGrants, settings, t
 export type FirstMerge = { ref: string; ticketId: string; mergedAt: string; minutes: number };
 /** What the owner said the team works on (step 2): written documents and research, or code in a git repository. Not set until they choose. */
 export type SetupWork = "docs" | "code";
-export type SetupProgress = { dismissed: boolean; step: number; companyId: string | null; firstMerge: FirstMerge | null; work?: SetupWork };
+/** `left`: the owner closed the wizard (Leave setup for now); the checklist stays until `dismissed` or everything is done. */
+export type SetupProgress = { dismissed: boolean; left?: boolean; step: number; companyId: string | null; firstMerge: FirstMerge | null; work?: SetupWork };
 const KEY = "setup";
 
 /** "2 h 40 min", "35 min", "3 h", "2 d 4 h". */
