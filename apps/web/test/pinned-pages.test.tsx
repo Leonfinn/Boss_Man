@@ -37,7 +37,9 @@ describe("Add to shortcuts", () => {
     expect(chip.getAttribute("aria-pressed")).toBe("false");
     fireEvent.click(chip);
     await waitFor(() => expect(screen.getByRole("button", { name: /In shortcuts/ }).getAttribute("aria-pressed")).toBe("true"));
-    expect(screen.getByRole("status").textContent).toContain("Updates added to your shortcuts.");
+    // The button flips when the save lands; the toast is set one await later, so wait for it too (a read straight
+    // after the button check raced the toast on a slower machine).
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("Updates added to your shortcuts."));
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Undo" })));
     await waitFor(() => expect(screen.getByRole("button", { name: /Add to shortcuts/ }).getAttribute("aria-pressed")).toBe("false"));
   });

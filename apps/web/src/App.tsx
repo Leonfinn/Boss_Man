@@ -362,6 +362,23 @@ function Signed({ onLogout, username, initialPreferences }: { onLogout: () => vo
     `decisions-tally-${current?.id}`,
   );
   useEffect(() => decisionsTally.reload(), [current?.id]);
+  // (BOS-2818) "Setup: 2 of 5" at the top of the menu while setup is open: not dismissed, not all done.
+  const setupOpen = usePoll(
+    (signal) =>
+      current
+        ? api<{ dismissed: boolean }>("/api/setup-progress", { signal })
+            .then((p) =>
+              p.dismissed
+                ? null
+                : api<{ done: boolean }[]>(`/api/companies/${current.id}/setup-checklist`, { signal }).then((items) =>
+                    !items.length || items.every((i) => i.done) ? null : { done: items.filter((i) => i.done).length, total: items.length },
+                  ),
+            )
+            .catch(() => null)
+        : Promise.resolve(null),
+    60_000,
+    `setup-open-${current?.id}`,
+  );
   // (BOS-1485) The company switcher's figure for every company: the same tally call, once per company.
   const companyIds = (companies.data ?? []).map((c) => c.id);
   const companyTallies = usePoll(
@@ -393,8 +410,8 @@ function Signed({ onLogout, username, initialPreferences }: { onLogout: () => vo
     if (!firstLoad.current || companies.data === null) return;
     firstLoad.current = false;
     if (companies.data.length || page !== "dashboard") return;
-    void api<{ dismissed: boolean }>("/api/setup-progress").then((p) => {
-      if (!p.dismissed) go("setup");
+    void api<{ dismissed: boolean; left?: boolean }>("/api/setup-progress").then((p) => {
+      if (!p.dismissed && !p.left) go("setup");
     }, () => {});
   }, [companies.data, page, go]);
   return (
@@ -415,6 +432,7 @@ function Signed({ onLogout, username, initialPreferences }: { onLogout: () => vo
         onCreateCompany={createCompany}
         decisions={decisions.data ?? []}
         decisionsTally={decisionsTally.data}
+        setupOpen={setupOpen.data}
         companyTallies={companyTallies.data ?? undefined}
         unread={feed.data?.unread ?? 0}
         feedback={companyFigure(unprocessed.data, current?.id)}
@@ -424,7 +442,7 @@ function Signed({ onLogout, username, initialPreferences }: { onLogout: () => vo
         onEnableNotifications={() => void Notification.requestPermission().then(setPermission)}
         onLogout={() => void api("/api/logout", { method: "POST" }).finally(onLogout)}
       />
-      <SearchPalette companyId={companyId} go={go} />
+      <SearchPalette companyId={companyId} go={go} prefix={current?.ticketPrefix} />
       <Shortcuts go={go} hasProjects={(current?.projects?.length ?? 0) > 0} singleLetterKeys={prefs.singleLetterKeys} onTurnKeysOn={() => void save({ singleLetterKeys: true })} keyboardTipSeen={prefs.keyboardTipSeen} onTipSeen={() => void save({ keyboardTipSeen: true }).catch(() => {})} />
       <main>
         <UpdateBanner m={maintenance.data} />
@@ -456,7 +474,7 @@ function Signed({ onLogout, username, initialPreferences }: { onLogout: () => vo
         ) : page === "merge-history" ? (
           <MergeHistory companies={list} companyId={companyId} />
         ) : page === "search" ? (
-          <SearchPage companyId={companyId} go={go} />
+          <SearchPage companyId={companyId} go={go} prefix={current?.ticketPrefix} />
         ) : page === "merge-queue" ? (
           <MergeQueue companies={list} companyId={companyId} />
         ) : page === "tickets" && route[1] ? (

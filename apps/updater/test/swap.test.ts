@@ -29,6 +29,7 @@ describe("test 5: the swap's order, and nothing outside the allow-list", () => {
       "DELETE /containers/MIGRATE?force=1&v=1",
       "POST /containers/create?name=server-green",
       "POST /networks/test_launcher/connect",
+      "POST /networks/test_updater/connect",
       "POST /networks/test_front/connect",
       "POST /containers/server-green/start",
       "POST /containers/server-blue/kill?signal=SIGUSR1",
@@ -118,6 +119,22 @@ describe("test 6: the colour spec", () => {
     // The only values that differ between the colours are the override list's.
     const strip = (s: typeof blue) => JSON.stringify({ ...s, Hostname: "", Env: s.Env.filter((e) => !e.startsWith("BOSSMAN_COLOUR=")), Labels: { ...s.Labels, "com.bossman.colour": "" } });
     expect(strip(blue)).toBe(strip(green as unknown as typeof blue));
+  });
+
+  // BOS-2713: the server's link to the updater: its key folder read-only, its private network, and where to call it.
+  test("the colour can reach the updater: key folder read-only, the updater's network, its address and key file", () => {
+    const { blue } = both();
+    expect(blue.HostConfig.Mounts).toContainEqual({ Type: "volume", Source: "test_updater-key", Target: "/run/updater", ReadOnly: true });
+    // Only the key folder: never the updater's state folder.
+    expect(blue.HostConfig.Mounts.some((m) => m.Source === "test_updater-state")).toBe(false);
+    expect(blue.Env).toContain("BOSSMAN_UPDATER_URL=http://updater:3106");
+    expect(blue.Env).toContain("BOSSMAN_UPDATER_KEY_FILE=/run/updater/key");
+    expect(both().networks.blue.map((n) => n.network)).toContain("test_updater");
+    // An install that defines no key folder gives the colour no link, and no network to it.
+    const bare = { ...cfg, swap: { ...cfg.swap, selfMounts: cfg.swap.selfMounts.filter((m) => m.target !== "/run/updater") } } as SwapReady;
+    const spec = colourSpec(bare, { colour: "blue", image, version: "0.2.0", digest: D_SERVER, role: "standby" });
+    expect(spec.Env.some((e) => e.startsWith("BOSSMAN_UPDATER_"))).toBe(false);
+    expect(colourNetworks(bare, "blue", false).map((n) => n.network)).not.toContain("test_updater");
   });
 
   test("the new colour is created with only its own alias; `server-live` is added at the flip", () => {
