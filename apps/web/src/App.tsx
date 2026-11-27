@@ -363,8 +363,14 @@ function Signed({ onLogout, username, initialPreferences }: { onLogout: () => vo
   const setupOpen = usePoll(
     (signal) =>
       current
-        ? Promise.all([api<{ dismissed: boolean }>("/api/setup-progress", { signal }), api<{ done: boolean }[]>(`/api/companies/${current.id}/setup-checklist`, { signal })])
-            .then(([p, items]) => (p.dismissed || !items.length || items.every((i) => i.done) ? null : { done: items.filter((i) => i.done).length, total: items.length }))
+        ? api<{ dismissed: boolean }>("/api/setup-progress", { signal })
+            .then((p) =>
+              p.dismissed
+                ? null
+                : api<{ done: boolean }[]>(`/api/companies/${current.id}/setup-checklist`, { signal }).then((items) =>
+                    !items.length || items.every((i) => i.done) ? null : { done: items.filter((i) => i.done).length, total: items.length },
+                  ),
+            )
             .catch(() => null)
         : Promise.resolve(null),
     60_000,
