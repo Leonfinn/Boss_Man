@@ -11,6 +11,7 @@ on:
   workflow_run:
     workflows: ["Release"]
     types: [completed]
+    branches: [main] # BOS-2801: only a Release run on main starts this; a dispatched run on a branch carries that branch's release.yml
   workflow_dispatch:
     inputs:
       version:
@@ -242,11 +243,6 @@ jobs:
     steps:
       - name: Require the release's commit to be on main (BOS-2801)
         id: source
-        env:
-          # When the Release workflow started this run, the commit it was for is the base its run was started on. Checking
-          # against that, not today's main, keeps a normal release that lands before some later merge (already on the code
-          # that produced it) from being refused as "not on main". A hand run has no such base and checks today's main.
-          MAIN_BASE: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "::error::Version '$VERSION' is not like 0.1.0-beta.1."; exit 1; }
@@ -255,14 +251,16 @@ jobs:
             echo "::error::There is no release v$VERSION to republish the site from."; exit 1; }
           [ "$draft" = false ] || { echo "::error::Release v$VERSION is still a draft; not publishing it."; exit 1; }
           # The tag's commit must be on main, so a tag pushed to an unreviewed commit never runs its code here.
+          # Always today's main, never a commit taken from the run that triggered this (BOS-2801 security review): a Release
+          # run dispatched on a branch sets workflow_run.head_sha to a commit on that branch, which nothing proves is on main.
+          # Main only moves forward and is never force-pushed, so a commit that was on an older main is still on today's, and
+          # a normal release is never refused.
           git init --quiet "$RUNNER_TEMP/provenance"
           cd "$RUNNER_TEMP/provenance"
           git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
-          refspecs=("+refs/heads/main:refs/remotes/origin/main" "+refs/tags/v$VERSION:refs/tags/v$VERSION")
-          [ -z "$MAIN_BASE" ] || refspecs+=("+$MAIN_BASE:refs/remotes/origin/release-base")
-          git fetch --quiet --no-tags origin "${refspecs[@]}"
+          git fetch --quiet --no-tags origin "+refs/heads/main:refs/remotes/origin/main" "+refs/tags/v$VERSION:refs/tags/v$VERSION"
           tag_commit="$(git rev-parse --verify "refs/tags/v$VERSION^{commit}")"
-          base="$(git rev-parse --verify -q "refs/remotes/origin/release-base^{commit}" || git rev-parse "refs/remotes/origin/main^{commit}")"
+          base="$(git rev-parse "refs/remotes/origin/main^{commit}")"
           if ! git merge-base --is-ancestor "$tag_commit" "$base"; then
             echo "::error::v$VERSION points at $tag_commit, which is not on main. Refusing to run its code with the site's secrets."
             exit 1
