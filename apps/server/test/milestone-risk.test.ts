@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { ceoPlanWake, needsCeoPlan } from "@boss-man/shared";
-import { decisions, milestones as msTable, settings, ticketDependencies, tickets as ticketsTable, agents } from "../src/db/schema.js";
+import { decisions, milestones as msTable, settings, ticketDependencies, tickets as ticketsTable, agents, wakes as wakesTable } from "../src/db/schema.js";
 import { milestoneRiskService, reasonForWake } from "../src/services/milestone-risk.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
@@ -556,6 +556,25 @@ describe("milestone at risk: the wake is never lost (BOS-2627, kept through tell
     expect(c.woken).toHaveLength(1);
     expect(c.woken[0]!.note).toContain('"Ready for anyone to install"');
     expect(c.woken[0]!.note).toContain("is now At risk");
+  });
+
+  it("through the server's own sweep pass and scheduler, tickets added to a switched-on milestone save one CEO wake (BOS-2843)", async () => {
+    const c = await setup();
+    const o = await c.objective();
+    // The real pass reads the real clock, so the date is set from it: due in 10 days, nothing finished, so At risk.
+    const due = new Date(Date.now() + 10 * 86_400_000).toISOString().slice(0, 10);
+    const m = await c.milestone(o.id, "Ready for anyone to install", due);
+    await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
+    const made = await c.ticket("Fix one", { milestoneId: m.id, state: "ready" });
+    await c.db.update(ticketsTable).set({ size: 2 }).where(eq(ticketsTable.id, made.id));
+    await c.req("POST", "/api/sweep");
+    await c.req("POST", "/api/sweep");
+    const rows = await c.db.select({ agentId: wakesTable.agentId, status: wakesTable.status, note: wakesTable.note }).from(wakesTable).where(eq(wakesTable.reason, "milestone at risk"));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.agentId).toBe(c.ceo.id);
+    expect(rows[0]!.note).toContain("is now At risk");
+    const [kept] = await c.db.select({ value: settings.value }).from(settings).where(eq(settings.key, `milestone_risk:${m.id}`));
+    expect(kept?.value).toMatchObject({ status: "at_risk", woke: true });
   });
 
   it("with no way to read the wake's row, a status change is still sent exactly once (BOS-2650)", async () => {
