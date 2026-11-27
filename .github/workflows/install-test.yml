@@ -215,11 +215,17 @@ jobs:
   # and `record` still reports that version (result "fail") when no release exists, after which this job would check out
   # `v<version>`. If that tag pointed at an unreviewed commit, its pnpm install and publish script would run with the
   # Cloudflare token. So the first step here checks, before any repo code runs and before any secret is used (the Cloudflare
-  # secrets stay on the last step only), that the release exists, is not a draft, and that its tag's commit is already on
-  # main. A tag on an unreviewed commit, or a version that was never released, stops the job with a clear error.
+  # secrets stay on the last step only), that the release exists, is not a draft, and that its tag's commit is on main.
+  # The checkout then takes the very commit that step verified (`ref: ${{ steps.source.outputs.commit }}`), never the ref
+  # name: actions/checkout resolves a bare `v<version>` to a remote branch of that name before the tag, so a pushed branch
+  # `v0.1.0` would have won and run its own unreviewed code, and a tag moved between the check and the checkout would have
+  # slipped through too (BOS-2801 security review). The commit is on main, so its workflow files match main's.
   site:
+    # BOS-2801: this job holds the Cloudflare token through the `site` environment, and that environment is limited to runs
+    # of main (Deployment branches and tags), so GitHub hands out the secrets only when this outermost workflow is a main
+    # run: never when another workflow (say, one started from a branch) reactivates this run with its token.
     needs: record
-    if: ${{ always() && (needs.record.result == 'success' || needs.record.result == 'failure') && (needs.record.outputs.result == 'pass' || needs.record.outputs.result == 'fail') }}
+    if: ${{ always() && github.ref == 'refs/heads/main' && !contains(fromJSON('["pull_request","pull_request_target","release","issue_comment","workflow_call","repository_dispatch"]'), github.event_name) && (needs.record.result == 'success' || needs.record.result == 'failure') && (needs.record.outputs.result == 'pass' || needs.record.outputs.result == 'fail') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment: site
@@ -235,6 +241,12 @@ jobs:
       CF_PAGES_PROJECT: ${{ vars.CF_PAGES_PROJECT }}
     steps:
       - name: Require the release's commit to be on main (BOS-2801)
+        id: source
+        env:
+          # When the Release workflow started this run, the commit it was for is the base its run was started on. Checking
+          # against that, not today's main, keeps a normal release that lands before some later merge (already on the code
+          # that produced it) from being refused as "not on main". A hand run has no such base and checks today's main.
+          MAIN_BASE: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "::error::Version '$VERSION' is not like 0.1.0-beta.1."; exit 1; }
@@ -242,22 +254,27 @@ jobs:
           draft="$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" || {
             echo "::error::There is no release v$VERSION to republish the site from."; exit 1; }
           [ "$draft" = false ] || { echo "::error::Release v$VERSION is still a draft; not publishing it."; exit 1; }
-          # The tag's commit must already be on main, so a tag pushed to an unreviewed commit never runs its code here.
+          # The tag's commit must be on main, so a tag pushed to an unreviewed commit never runs its code here.
           git init --quiet "$RUNNER_TEMP/provenance"
           cd "$RUNNER_TEMP/provenance"
           git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
-          git fetch --quiet --no-tags origin \
-            "+refs/heads/main:refs/remotes/origin/main" \
-            "+refs/tags/v$VERSION:refs/tags/v$VERSION"
+          refspecs=("+refs/heads/main:refs/remotes/origin/main" "+refs/tags/v$VERSION:refs/tags/v$VERSION")
+          [ -z "$MAIN_BASE" ] || refspecs+=("+$MAIN_BASE:refs/remotes/origin/release-base")
+          git fetch --quiet --no-tags origin "${refspecs[@]}"
           tag_commit="$(git rev-parse --verify "refs/tags/v$VERSION^{commit}")"
-          if ! git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main; then
+          base="$(git rev-parse --verify -q "refs/remotes/origin/release-base^{commit}" || git rev-parse "refs/remotes/origin/main^{commit}")"
+          if ! git merge-base --is-ancestor "$tag_commit" "$base"; then
             echo "::error::v$VERSION points at $tag_commit, which is not on main. Refusing to run its code with the site's secrets."
             exit 1
           fi
+          # The checkout below must take this exact commit, never the ref name (see the comment above the job).
+          echo "commit=$tag_commit" >> "$GITHUB_OUTPUT"
           echo "v$VERSION ($tag_commit) is on main; safe to publish."
       - uses: actions/checkout@v7
         with:
-          ref: v${{ needs.record.outputs.version }}
+          # The commit the check above verified, not v<version>: a remote branch of the same name would win over the tag,
+          # and a tag moved since the check would be taken (BOS-2801 security review).
+          ref: ${{ steps.source.outputs.commit }}
           fetch-depth: 0 # the sitemap dates need the history
       - uses: actions/download-artifact@v4
         with:
