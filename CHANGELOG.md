@@ -70,6 +70,7 @@ Remember to put an empty line after any line you add outside this comment, so th
 
 ## 27 November 2026
 
+- The first time you move around Boss Man with the keyboard on a computer (pressing Tab outside a text box, or Ctrl K), a small tip at the bottom left says "Boss Man has keyboard shortcuts. Press ? any time to see them." Press Show shortcuts to open the list, or Got it (or Escape) to close it. It shows once per login, in any browser. It never shows on a phone, or if you have unticked "Use single-letter keys" in Settings → Account → Keyboard shortcuts.
 - Pin the pages you open most. Press **Add to shortcuts** beside the title of any page inside Product, Team, Activity or Settings (for example Settings → Server and runner → Updates). The page then appears in a Shortcuts section at the top of the menu, on every device you sign in from. You can have up to 6. Press the button again, or Undo, to take it out. The menu is unchanged until you add one.
 - **Edit** beside Shortcuts lets you rename, reorder or remove them. Nothing changes until you press Save.
 - With the keyboard, press g then 1 to open your first shortcut, g then 2 for the second, and so on up to 6. The numbers follow the order in the menu. Press ? to see which number opens which page.
