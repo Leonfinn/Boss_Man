@@ -5,10 +5,10 @@
 // assignee is woken. Closing the parent stays a person's step (out of scope on the ticket).
 // BOS-2417: a merged parent whose only unreported criteria are tied to open check tickets may close at go-live (the
 // tie is not a reason to sit Blocked for a week); its watch moves to the check tickets, and the result still lands here.
-import { and, eq, isNotNull, ne, or, sql } from "drizzle-orm";
-import { checkTicketLine, criterionText, isAfterMerge, longWatchIndexes, longWatchPhrase, readCriteria, readVerdicts, ticketRef, unreportedAfterMerge, watchPhrase } from "@boss-man/shared";
+import { and, asc, eq, inArray, isNotNull, ne, or, sql } from "drizzle-orm";
+import { checkTicketLine, criterionText, eventKey, isAfterMerge, longWatchIndexes, longWatchPhrase, readCriteria, readVerdicts, ticketRef, unreportedAfterMerge, watchPhrase, type Criterion } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { activity, agents, companies, tickets } from "../db/schema.js";
+import { activity, agents, checkTicketLinks, companies, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
 import { systemMoveTicket } from "./ticket-transition.js";
 import type { workService } from "./work.js";
@@ -16,7 +16,7 @@ import type { workService } from "./work.js";
 type Work = ReturnType<typeof workService>;
 
 /** BOS-2643: a check ticket Boss Man opened by itself for a build's long after-merge watch. */
-export type LongWatchCheck = { id: string; ref: string; criterion: number; phrase: string };
+export type LongWatchCheck = { id: string; ref: string; criterion: number; phrase: string; joined?: boolean };
 
 /**
  * BOS-2643 (the CEO's approval condition): tickets open before this shipped are never changed, even when their
@@ -54,8 +54,7 @@ export async function openLongWatchChecks(db: Db, work: Work, buildId: string, o
   const criteria = readCriteria(t.acceptanceCriteria);
   const wanted = longWatchIndexes(criteria);
   if (!wanted.length) return [];
-  const open = await db.select({ criterion: tickets.checksCriterion }).from(tickets).where(and(eq(tickets.checksTicketId, t.id), ne(tickets.systemState, "done")));
-  const have = new Set(open.map((o) => o.criterion));
+  const have = new Set((await openTies(db, t.id)).map((o) => o.criterion));
   const ref = ticketRef(prefix, t.number) ?? `"${t.title}"`;
   const made: LongWatchCheck[] = [];
   for (const i of wanted) {
@@ -63,6 +62,13 @@ export async function openLongWatchChecks(db: Db, work: Work, buildId: string, o
     if (have.has(n)) continue;
     const text = criterionText(criteria[i]!);
     const phrase = watchPhrase(text)!;
+    // BOS-2855: an open check for the same event takes this criterion too, so one reading isn't paid for twice.
+    const key = eventKey(text);
+    const joined = key ? await foldIntoEventCheck(db, work, { build: t, ref, criterion: n, text, key, byAgentId: opts.byAgentId }) : null;
+    if (joined) {
+      made.push({ id: joined.id, ref: joined.ref, criterion: n, phrase, joined: true });
+      continue;
+    }
     const why = longWatchPhrase(text) ? "needs a watch of a day or more" : "waits on a future event";
     const body = [
       `**Why:** criterion ${n} of ${ref} ("${t.title}") ${why} ("${phrase}"), so Boss Man opened it as this check ticket when ${ref} was opened (BOS-2643, BOS-2797). ${ref} can then close once it is live, and this ticket keeps the watch.`,
@@ -85,17 +91,113 @@ export async function openLongWatchChecks(db: Db, work: Work, buildId: string, o
   return made;
 }
 
-/** The line a tool reply adds for the checks openLongWatchChecks opened; empty when none. */
+/** The line a tool reply adds for the checks openLongWatchChecks opened or joined; empty when none. */
 export const longWatchNote = (checks: readonly LongWatchCheck[]): string =>
-  checks.length ? ` ${checks.map((c) => `Criterion ${c.criterion} needs a watch ("${c.phrase}"), so Boss Man opened it as check ticket ${c.ref} (${c.id}), which waits on this ticket's merge; this ticket can close once it is live, and the check reports its result here.`).join(" ")}` : "";
+  checks.length
+    ? ` ${checks
+        .map((c) =>
+          c.joined
+            ? `Criterion ${c.criterion} needs a watch ("${c.phrase}"), and open check ticket ${c.ref} (${c.id}) already waits on that event, so Boss Man added it there as one more criterion instead of opening another check (BOS-2855); it waits on this ticket's merge too, this ticket can close once it is live, and the check reports criterion ${c.criterion}'s own result here.`
+            : `Criterion ${c.criterion} needs a watch ("${c.phrase}"), so Boss Man opened it as check ticket ${c.ref} (${c.id}), which waits on this ticket's merge; this ticket can close once it is live, and the check reports its result here.`,
+        )
+        .join(" ")}`
+    : "";
+
+/** BOS-2855: a build criterion's open tie to a check ticket: the check's own (checksTicketId) or a folded link. */
+type Tie = { checkId: string; criterion: number };
+
+/** BOS-2855: every open check ticket tie of a build's criteria, the check's own and the folded ones. */
+async function openTies(db: Db, buildId: string): Promise<Tie[]> {
+  const own = await db.select({ checkId: tickets.id, criterion: tickets.checksCriterion }).from(tickets).where(and(eq(tickets.checksTicketId, buildId), ne(tickets.systemState, "done"), isNotNull(tickets.checksCriterion)));
+  const folded = await db
+    .select({ checkId: checkTicketLinks.checkTicketId, criterion: checkTicketLinks.criterion })
+    .from(checkTicketLinks)
+    .innerJoin(tickets, eq(tickets.id, checkTicketLinks.checkTicketId))
+    .where(and(eq(checkTicketLinks.ticketId, buildId), ne(tickets.systemState, "done")));
+  return [...own.map((o) => ({ checkId: o.checkId, criterion: o.criterion! })), ...folded];
+}
+
+/** A criterion is at most 500 characters (acceptanceCriteriaSchema). */
+const CRITERION_MAX = 500;
+
+/** BOS-2855: open check tickets of a project, oldest first, that can take one more criterion. */
+async function openChecksOf(db: Db, projectId: string) {
+  const rows = await db
+    .select({ id: tickets.id, number: tickets.number, title: tickets.title, criteria: tickets.acceptanceCriteria, companyId: tickets.companyId })
+    .from(tickets)
+    .where(and(eq(tickets.projectId, projectId), isNotNull(tickets.checksTicketId), ne(tickets.systemState, "done")))
+    .orderBy(asc(tickets.createdAt));
+  return rows.map((r) => ({ ...r, criteria: readCriteria(r.criteria) })).filter((r) => r.criteria.length && r.criteria.length < 10);
+}
+
+/**
+ * BOS-2855: adds a build's event criterion to the oldest open check ticket in its project that waits on the same event
+ * (eventKey), instead of opening another (BOS-2778 and BOS-2779 each read the same 27 Nov wrap-up). The check gets it as
+ * its own new criterion, a link back to the build's criterion (so the build gets that criterion's own pass or fail), and
+ * a wait on the build's merge, since its reading only counts once this build is live too. Null when no check fits or
+ * the wait can't be added (it would make two tickets wait on each other): the caller then opens a check as before.
+ */
+async function foldIntoEventCheck(db: Db, work: Work, x: { build: typeof tickets.$inferSelect; ref: string; criterion: number; text: string; key: string; byAgentId: string | null }): Promise<{ id: string; ref: string } | null> {
+  const target = (await openChecksOf(db, x.build.projectId)).find((c) => c.criteria.some((k) => eventKey(criterionText(k)) === x.key));
+  if (!target) return null;
+  try {
+    await work.addDependency(target.id, { ticketId: x.build.id, until: "merged" }, x.byAgentId);
+  } catch {
+    return null;
+  }
+  const head = `For ${x.ref} criterion ${x.criterion}, once ${x.ref} is live: `;
+  const own = target.criteria.length + 1;
+  await db.update(tickets).set({ acceptanceCriteria: [...target.criteria, `${head}${x.text}`.slice(0, CRITERION_MAX)] }).where(eq(tickets.id, target.id));
+  await db.insert(checkTicketLinks).values({ checkTicketId: target.id, ownCriterion: own, ticketId: x.build.id, criterion: x.criterion, appended: true });
+  const [co] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, target.companyId));
+  const checkRef = ticketRef(co?.prefix, target.number) ?? `"${target.title}"`;
+  await record(db, { companyId: target.companyId, ticketId: x.build.id, agentId: x.byAgentId, kind: "after_merge_check", summary: `Criterion ${x.criterion} waits on the same event as open check ticket ${checkRef} ("${x.key}"), so it was added there as criterion ${own} instead of opening another check.`, detail: { checkTicketId: target.id, criterion: x.criterion, ownCriterion: own } });
+  await record(db, { companyId: target.companyId, ticketId: target.id, agentId: x.byAgentId, kind: "after_merge_check", summary: `Criterion ${own} added: criterion ${x.criterion} of ${x.ref} waits on the same event ("${x.key}"). Its result is written on ${x.ref} when this closes; this ticket now also waits on ${x.ref}'s merge.`, detail: { buildTicketId: x.build.id, criterion: x.criterion, ownCriterion: own } });
+  return { id: target.id, ref: checkRef };
+}
+
+/** The same criterion in two places: case, spacing and the fold's "For X criterion N, once X is live:" head don't count. */
+const sameCriterion = (checkText: string, carried: string): boolean => {
+  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+  const k = norm(carried);
+  return !!k && norm(checkText.replace(/^For \S+ criterion \d+, once \S+ is live: /, "")) === k;
+};
+
+/**
+ * BOS-2855: a follow-up whose every carried criterion is already a criterion of one open check ticket in the project is
+ * not opened: each after-merge one of the closing ticket is linked to that check's criterion (so its own pass or fail
+ * still comes back here), and the caller says which ticket it joined. BOS-2847 was opened while the same live check
+ * was already held. Null when no single check holds them all.
+ */
+export async function foldFollowUpIntoCheck(db: Db, closing: { id: string; projectId: string; criteria: readonly Criterion[] }, carried: readonly Criterion[], byAgentId: string | null): Promise<{ id: string; ref: string } | null> {
+  if (!carried.length) return null;
+  for (const target of await openChecksOf(db, closing.projectId)) {
+    const at = carried.map((c) => target.criteria.findIndex((k) => sameCriterion(criterionText(k), criterionText(c))));
+    if (at.some((i) => i < 0)) continue;
+    const [co] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, target.companyId));
+    const checkRef = ticketRef(co?.prefix, target.number) ?? `"${target.title}"`;
+    const ties = await openTies(db, closing.id);
+    for (const [j, c] of carried.entries()) {
+      const n = closing.criteria.findIndex((k) => criterionText(k) === criterionText(c)) + 1;
+      if (n < 1 || !isAfterMerge(closing.criteria[n - 1]!) || ties.some((t) => t.checkId === target.id && t.criterion === n)) continue;
+      await db.insert(checkTicketLinks).values({ checkTicketId: target.id, ownCriterion: at[j]! + 1, ticketId: closing.id, criterion: n, appended: false }).onConflictDoNothing();
+    }
+    await record(db, { companyId: target.companyId, ticketId: closing.id, agentId: byAgentId, kind: "after_merge_check", summary: `A follow-up carrying ${carried.length > 1 ? "these criteria" : "this criterion"} was not opened: open check ticket ${checkRef} already holds ${carried.length > 1 ? "them" : "it"}, and reports ${carried.length > 1 ? "their" : "its"} result here.`, detail: { checkTicketId: target.id } });
+    return { id: target.id, ref: checkRef };
+  }
+  return null;
+}
 
 /** The wake reason; "waiting" class in wake-classes.ts, so it is never dropped. */
 export const CHECK_REPORTED_REASON = "after-merge check reported";
 
 /** What the check ticket's own verdicts say: any fail is a fail, all pass is a pass, anything else says nothing. */
-export function checkTicketVerdict(t: { outcome: string | null; acceptanceCriteria: unknown; stateNote: string | null }): "pass" | "fail" | null {
+export function checkTicketVerdict(t: { outcome: string | null; acceptanceCriteria: unknown; stateNote: string | null }, only?: (index: number) => boolean): "pass" | "fail" | null {
   if (t.outcome === "cancelled") return null;
-  const verdicts = readVerdicts(readCriteria(t.acceptanceCriteria), t.stateNote).map((r) => r.verdict);
+  // BOS-2855: `only` picks the criteria one tie reads (0-based); a folded criterion settles its own build only.
+  const verdicts = readVerdicts(readCriteria(t.acceptanceCriteria), t.stateNote)
+    .map((r) => r.verdict)
+    .filter((_, i) => !only || only(i));
   if (verdicts.includes("fail")) return "fail";
   return verdicts.length && verdicts.every((v) => v === "pass") ? "pass" : null;
 }
@@ -128,11 +230,14 @@ export type OpenCheck = { id: string; number: number | null; criterion: number; 
 export async function closableChecks(db: Db, parentId: string): Promise<OpenCheck[]> {
   const [p] = await db.select({ mergeCommit: tickets.mergeCommit }).from(tickets).where(eq(tickets.id, parentId));
   if (!p?.mergeCommit) return [];
+  const ties = await openTies(db, parentId);
+  if (!ties.length) return [];
   const rows = await db
-    .select({ id: tickets.id, number: tickets.number, criterion: tickets.checksCriterion, assigneeAgentId: tickets.assigneeAgentId, watchingFor: tickets.watchingFor, watchTrigger: tickets.watchTrigger })
+    .select({ id: tickets.id, number: tickets.number, assigneeAgentId: tickets.assigneeAgentId, watchingFor: tickets.watchingFor, watchTrigger: tickets.watchTrigger })
     .from(tickets)
-    .where(and(eq(tickets.checksTicketId, parentId), ne(tickets.systemState, "done"), isNotNull(tickets.checksCriterion)));
-  return rows.map((r) => ({ ...r, criterion: r.criterion! }));
+    .where(inArray(tickets.id, [...new Set(ties.map((t) => t.checkId))]));
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  return ties.flatMap((t) => (byId.has(t.checkId) ? [{ ...byId.get(t.checkId)!, criterion: t.criterion }] : []));
 }
 
 /** BOS-2417: 0-based indexes of the after-merge criteria an open check ticket settles. */
@@ -156,6 +261,7 @@ export async function holdableUnreported(db: Db, ticket: { id: string; mergeComm
     .from(tickets)
     .where(and(or(eq(tickets.checksTicketId, ticket.id), and(eq(tickets.id, ticket.id), isNotNull(tickets.checksCriterion))), ne(tickets.systemState, "done"), isNotNull(tickets.checksCriterion)))
     .limit(1);
+  if (!rows.length && (await openTies(db, ticket.id)).length) return false;
   return rows.length === 0 && readVerdicts(readCriteria(ticket.criteria), ticket.note).some((r) => r.verdict === null);
 }
 
@@ -195,26 +301,49 @@ export const appendLine = (note: string | null, line: string): string => {
  * After a ticket is done: when it checks a criterion of another ticket, write the result there and say whom to wake.
  * Once per close: keyed on the check ticket's close time, so a second done hook for the same move writes nothing,
  * while a ticket reopened and closed again reports again. Returns null when there is nothing to tell.
+ * BOS-2855: criteria folded in for another build (appended) are left out of this verdict; reportFoldedChecks sends those.
  */
 export async function reportCheckTicket(db: Db, ticketId: string, now: Date = new Date()): Promise<{ agentId: string; ticketId: string; note: string } | null> {
-  const [c] = await db
-    .select({ t: tickets, prefix: companies.ticketPrefix })
-    .from(tickets)
-    .innerJoin(companies, eq(companies.id, tickets.companyId))
-    .where(eq(tickets.id, ticketId));
-  if (!c || c.t.systemState !== "done" || !c.t.checksTicketId || !c.t.checksCriterion) return null;
+  const c = await closedCheck(db, ticketId);
+  if (!c?.t.checksTicketId || !c.t.checksCriterion) return null;
+  const appended = new Set((await db.select({ own: checkTicketLinks.ownCriterion }).from(checkTicketLinks).where(and(eq(checkTicketLinks.checkTicketId, ticketId), eq(checkTicketLinks.appended, true)))).map((l) => l.own - 1));
+  const verdict = checkTicketVerdict(c.t, (i) => !appended.has(i));
+  return reportOne(db, c, { parentId: c.t.checksTicketId, n: c.t.checksCriterion, verdict, key: `check-reported:${c.t.id}:${c.t.stateChangedAt.toISOString()}` }, now);
+}
+
+/** BOS-2855: after a check ticket is done, each folded build's criterion gets the verdict of the check's own criterion for it. */
+export async function reportFoldedChecks(db: Db, ticketId: string, now: Date = new Date()): Promise<{ agentId: string; ticketId: string; note: string }[]> {
+  const c = await closedCheck(db, ticketId);
+  if (!c) return [];
+  const links = await db.select().from(checkTicketLinks).where(eq(checkTicketLinks.checkTicketId, ticketId)).orderBy(asc(checkTicketLinks.createdAt));
+  const out: { agentId: string; ticketId: string; note: string }[] = [];
+  for (const l of links) {
+    const verdict = checkTicketVerdict(c.t, (i) => i === l.ownCriterion - 1);
+    // Keyed per build criterion as well, since two criteria of one build can be folded into the same check.
+    const wake = await reportOne(db, c, { parentId: l.ticketId, n: l.criterion, verdict, key: `check-reported:${c.t.id}:${c.t.stateChangedAt.toISOString()}:${l.criterion}` }, now);
+    if (wake) out.push(wake);
+  }
+  return out;
+}
+
+async function closedCheck(db: Db, ticketId: string) {
+  const [c] = await db.select({ t: tickets, prefix: companies.ticketPrefix }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(eq(tickets.id, ticketId));
+  return c && c.t.systemState === "done" ? c : null;
+}
+
+async function reportOne(db: Db, c: { t: typeof tickets.$inferSelect; prefix: string | null }, x: { parentId: string; n: number; verdict: "pass" | "fail" | null; key: string }, now: Date): Promise<{ agentId: string; ticketId: string; note: string } | null> {
   const check = c.t;
-  const [parent] = await db.select().from(tickets).where(and(eq(tickets.id, check.checksTicketId!), eq(tickets.companyId, check.companyId)));
+  const [parent] = await db.select().from(tickets).where(and(eq(tickets.id, x.parentId), eq(tickets.companyId, check.companyId)));
   if (!parent) return null;
-  const key = `check-reported:${check.id}:${check.stateChangedAt.toISOString()}`;
+  const key = x.key;
   const [told] = await db.select({ id: activity.id }).from(activity).where(and(eq(activity.ticketId, parent.id), eq(activity.kind, "after_merge_check"), sql`${activity.detail}->>'key' = ${key}`)).limit(1);
   if (told) return null;
 
   const ref = ticketRef(c.prefix, check.number) ?? check.id.slice(0, 8);
   const criteria = readCriteria(parent.acceptanceCriteria);
-  const n = check.checksCriterion!;
+  const n = x.n;
   const criterion = criteria[n - 1];
-  const verdict = checkTicketVerdict(check);
+  const verdict = x.verdict;
   const named = `${ref} "${check.title}"`;
   let note: string;
   let summary: string;

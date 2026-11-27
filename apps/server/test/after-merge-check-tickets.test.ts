@@ -3,13 +3,13 @@
 // linked the two. On the old code create_ticket has no checksCriterion and closing the check writes and wakes nothing.
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { checkTicketLine, readVerdicts, unreportedAfterMerge } from "@boss-man/shared";
+import { checkTicketLine, eventKey, readVerdicts, unreportedAfterMerge } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, features, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { activity, checkTicketLinks, features, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { workflowService } from "../src/services/workflow.js";
 import { issueRunToken } from "../src/mcp.js";
 import { appendLine, CHECK_REPORTED_REASON, checkTicketDoneRefusal, checkTicketVerdict, LONG_WATCH_FROM, openLongWatchChecks } from "../src/services/after-merge-check-tickets.js";
@@ -483,6 +483,107 @@ describe("BOS-2643: a watch of a day or more is opened as its own check ticket",
     expect(made.isError, made.text).toBe(false);
     expect(made.text).toContain(`Criterion 3 needs a watch ("${phrase}")`);
     expect((await checksOf(c, made.id!)).map((x) => [x.checksCriterion, x.acceptanceCriteria])).toEqual([[3, [text]]]);
+  });
+
+  // BOS-2855: BOS-2778 and BOS-2779 each read the same 27 Nov wrap-up on "the next real update"; BOS-2847 repeated a
+  // check already held. On the old code the second build opens a second check, and a follow-up is always opened.
+  it("the event key: filler words, plurals and \"server\" before update don't count; a duration watch has none", () => {
+    expect(eventKey("On the next real server update, the update card closes")).toBe("next update");
+    expect(eventKey("After the next update, the banner is gone")).toBe("next update");
+    expect(eventKey("The next live upgrade keeps the hold")).toBe("next update");
+    expect(eventKey("After the next beta release, the note shows")).toBe("next beta release");
+    expect(eventKey("After the next release, the note shows")).toBe("next release");
+    expect(eventKey("The next runner rebuild keeps the cache")).toBe("next runner rebuild");
+    expect(eventKey("One real install on x86 starts")).toBe("install");
+    expect(eventKey("Over 3 days live, after the next release, nothing breaks")).toBeNull();
+    expect(eventKey("The live page shows the entry")).toBeNull();
+  });
+
+  const UPDATE_A = { text: "On the next real server update, the update card closes by itself", after: "merge" as const };
+  const UPDATE_B = { text: "After the next real update, the wrap-up note names the commit", after: "merge" as const };
+
+  it("a second build waiting on the same event joins the open check: one ticket, each build gets its own result", async () => {
+    const c = await setup();
+    const a = await c.create(c.co.ceo.id, { title: "Update card closes", noCode: false, assignee: "Dev", acceptanceCriteria: [BEFORE, UPDATE_A] });
+    const [check, ...none] = await checksOf(c, a.id!);
+    expect(none).toEqual([]);
+    const b = await c.create(c.co.ceo.id, { title: "Wrap-up names the commit", noCode: false, assignee: "Other", acceptanceCriteria: [BEFORE, ONCE, UPDATE_B] });
+    expect(b.isError, b.text).toBe(false);
+    expect(b.text).toContain(`already waits on that event, so Boss Man added it there`);
+    expect(b.text).toContain(check!.id);
+    // No second check ticket: B's criterion 3 is criterion 2 of A's check, tied back to B.
+    expect(await checksOf(c, b.id!)).toEqual([]);
+    expect((await c.db.select().from(tickets).where(eq(tickets.projectId, c.project.id))).filter((x) => x.checksTicketId)).toHaveLength(1);
+    const folded = await c.row(check!.id);
+    expect(folded.acceptanceCriteria).toEqual([UPDATE_A.text, expect.stringMatching(/^For [A-Z]+-\d+ criterion 3, once [A-Z]+-\d+ is live: After the next real update/)]);
+    expect((await c.db.select().from(checkTicketLinks).where(eq(checkTicketLinks.checkTicketId, check!.id))).map((l) => [l.ownCriterion, l.ticketId, l.criterion, l.appended])).toEqual([[2, b.id, 3, true]]);
+    // The check waits on both merges, since its reading only counts once both are live.
+    const deps = await c.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, check!.id));
+    expect(deps.map((d) => [d.blockerTicketId, d.until]).sort()).toEqual([[a.id, "merged"], [b.id, "merged"]].sort());
+    // Setting B's criteria again doesn't fold it twice or open a check.
+    await c.call(c.co.ceo.id, "update_ticket", { ticketId: b.id, acceptanceCriteria: [BEFORE, ONCE, UPDATE_B], reason: "same again" });
+    expect((await c.row(check!.id)).acceptanceCriteria).toHaveLength(2);
+    expect(await checksOf(c, b.id!)).toEqual([]);
+    // Both merge and close at go-live: B's folded criterion is tied like the check's own.
+    for (const [id, note] of [[a.id!, "1 pass"], [b.id!, "1 pass; 2 pass: the note reads as merged"]] as const) {
+      await c.db.update(tickets).set({ mergeCommit: "b".repeat(40), systemState: "blocked", liveAt: new Date(), stateNote: note }).where(eq(tickets.id, id));
+      const closed = await c.setState(c.co.ceo.id, { ticketId: id, state: "done", summary: note });
+      expect(closed.isError, closed.text).toBe(false);
+    }
+    // The update comes: criterion 1 passes for A, criterion 2 fails for B. Each build gets its own.
+    await c.db.update(tickets).set({ systemState: "in_progress" }).where(eq(tickets.id, check!.id));
+    const refused = await c.setState(c.dev.id, { ticketId: check!.id, state: "done", summary: "1 pass: the card closed" });
+    expect(refused.isError).toBe(true);
+    const reported = await c.setState(c.dev.id, { ticketId: check!.id, state: "done", summary: "1 pass: the card closed; 2 fail: the note named no commit" });
+    expect(reported.isError, reported.text).toBe(false);
+    expect((await c.row(a.id!)).stateNote).toMatch(/reported: 2 pass/);
+    expect((await c.row(a.id!)).stateNote).not.toMatch(/fail/);
+    expect((await c.row(b.id!)).stateNote).toMatch(/reported: 3 fail/);
+    // B closed at go-live, so its fail wakes the CEO (BOS-2417); A's pass wakes nobody.
+    const ceoWakes = await c.db.select().from(wakes).where(and(eq(wakes.agentId, c.co.ceo.id), eq(wakes.reason, CHECK_REPORTED_REASON)));
+    expect(ceoWakes.map((w) => w.ticketId)).toEqual([b.id]);
+  });
+
+  it("a duration watch, another event or another project is never folded", async () => {
+    const c = await setup();
+    const WEEK = { text: "A week after the next release, no install has failed", after: "merge" as const };
+    const a = await c.create(c.co.ceo.id, { title: "Build A", noCode: false, assignee: "Dev", acceptanceCriteria: [BEFORE, WEEK, UPDATE_A] });
+    const b = await c.create(c.co.ceo.id, { title: "Build B", noCode: false, assignee: "Dev", acceptanceCriteria: [BEFORE, WEEK, { text: "After the next beta release, the note shows", after: "merge" }] });
+    expect((await checksOf(c, a.id!)).map((x) => x.checksCriterion).sort()).toEqual([2, 3]);
+    expect((await checksOf(c, b.id!)).map((x) => x.checksCriterion).sort()).toEqual([2, 3]);
+    const other = await server.built.app.inject({ method: "POST", url: `/api/companies/${c.co.company.id}/projects`, headers: { cookie: server.cookie }, payload: { name: "Website" } });
+    expect(other.statusCode, other.body).toBeLessThan(300);
+    const w = await c.create(c.co.ceo.id, { title: "Build W", project: "Website", noCode: false, assignee: "Dev", acceptanceCriteria: [BEFORE, UPDATE_B] });
+    expect(w.isError, w.text).toBe(false);
+    expect((await checksOf(c, w.id!)).map((x) => x.checksCriterion)).toEqual([2]);
+    expect(await c.db.select().from(checkTicketLinks).where(inArray(checkTicketLinks.ticketId, [a.id!, b.id!, w.id!]))).toEqual([]);
+  });
+
+  it("a follow-up whose criterion an open check already carries is not opened, and is tied to that check", async () => {
+    const c = await setup();
+    const a = await c.create(c.co.ceo.id, { title: "Update card closes", noCode: false, assignee: "Dev", acceptanceCriteria: [BEFORE, UPDATE_A] });
+    const [check] = await checksOf(c, a.id!);
+    // Another merged ticket left the same live check unreported and hands it on.
+    const [t] = await c.db.insert(tickets).values({ companyId: c.co.company.id, projectId: c.project.id, title: "Earlier card fix", systemState: "blocked", assigneeAgentId: c.dev.id, mergeCommit: "d".repeat(40), liveAt: new Date(), acceptanceCriteria: [BEFORE, UPDATE_A], stateNote: "1 pass" }).returning();
+    const before = (await c.db.select().from(tickets)).length;
+    const closed = await c.setState(c.co.ceo.id, { ticketId: t!.id, state: "done", summary: "1 pass; 2 handed on", followUps: [{ title: "Re-check the card on the next update", assignee: "Dev", why: "Not seen live yet", criterion: 2 }] });
+    expect(closed.isError, closed.text).toBe(false);
+    expect(closed.text).toContain(`was not opened: open check ticket`);
+    expect(closed.text).toContain(check!.id);
+    expect((await c.db.select().from(tickets)).length).toBe(before);
+    expect((await c.db.select().from(checkTicketLinks).where(eq(checkTicketLinks.checkTicketId, check!.id))).map((l) => [l.ownCriterion, l.ticketId, l.criterion, l.appended])).toEqual([[1, t!.id, 2, false]]);
+    // The check's own criteria are unchanged, and its pass reaches both tickets.
+    expect((await c.row(check!.id)).acceptanceCriteria).toEqual([UPDATE_A.text]);
+    await c.db.update(tickets).set({ mergeCommit: "b".repeat(40), systemState: "blocked", liveAt: new Date() }).where(eq(tickets.id, a.id!));
+    await c.db.update(tickets).set({ systemState: "in_progress" }).where(eq(tickets.id, check!.id));
+    const reported = await c.setState(c.dev.id, { ticketId: check!.id, state: "done", summary: "1 pass: the card closed" });
+    expect(reported.isError, reported.text).toBe(false);
+    expect((await c.row(a.id!)).stateNote).toMatch(/reported: 2 pass/);
+    expect((await c.row(t!.id)).stateNote).toMatch(/reported: 2 pass/);
+    // A follow-up carrying a criterion no check holds is opened as before.
+    const [u] = await c.db.insert(tickets).values({ companyId: c.co.company.id, projectId: c.project.id, title: "Other fix", systemState: "review", assigneeAgentId: c.dev.id, acceptanceCriteria: [BEFORE, ONCE] }).returning();
+    const handed = await c.setState(c.co.ceo.id, { ticketId: u!.id, state: "done", summary: "1 pass", followUps: [{ title: "Read the comment live", assignee: "Dev", why: "Needs go-live", criterion: 2 }] });
+    expect(handed.text).toContain("Boss Man opened the follow-up");
   });
 
   it("a ticket stored before the change, with an event criterion, is left as it is", async () => {

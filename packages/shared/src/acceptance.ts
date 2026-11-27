@@ -356,6 +356,30 @@ export function eventWatchPhrase(text: string): string | null {
   return null;
 }
 
+/** Words in an event phrase that don't change which event it is ("the next real update" is "the next update"). */
+const EVENT_FILLER = new Set(["the", "a", "an", "one", "another", "real", "live", "published", "public", "official", "full", "routine", "boss", "man", "own"]);
+const EVENT_NOUN: Record<string, string> = { releases: "release", updates: "update", upgrade: "update", upgrades: "update", installs: "install", installation: "install", installations: "install", deploys: "deploy", deployment: "deploy", deployments: "deploy", rebuilds: "rebuild", publishes: "publish" };
+
+/**
+ * BOS-2855: which event a criterion waits on, as a key two criteria share when one reading settles both, or null when
+ * it waits on no event. A duration watch ("over 3 days live") gives null even when it also names an event: each one
+ * starts at its own build's go-live, so two of them are never the same watch. The key is the EVENT_WATCH phrase without
+ * filler words and plurals; "server" is dropped before "update", since an update here is a server update unless it says
+ * runner, host, image or app.
+ */
+export function eventKey(text: string): string | null {
+  if (longWatchPhrase(text)) return null;
+  const phrase = eventWatchPhrase(text);
+  if (!phrase) return null;
+  const words = phrase
+    .toLowerCase()
+    .replace(/['’]/g, "")
+    .split(/[\s-]+/)
+    .filter((w) => w && !EVENT_FILLER.has(w))
+    .map((w) => EVENT_NOUN[w] ?? w);
+  return words.filter((w, i) => !(w === "server" && words[i + 1] === "update")).join(" ");
+}
+
 /** BOS-2643 + BOS-2797: the phrase that opens an after-merge criterion as its own check ticket (a long watch or a future event), or null. */
 export const watchPhrase = (text: string): string | null => longWatchPhrase(text) ?? eventWatchPhrase(text);
 

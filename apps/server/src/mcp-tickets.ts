@@ -972,8 +972,14 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
           const owed = await dueChatReport(db, ticketId, new Date(), scope.runId).catch(() => null);
           if (owed) await Promise.resolve(hooks.wake?.(owed.agentId, { reason: CHAT_REASON, note: "", priority: 4, causedByRunId: scope.runId })).catch(() => undefined);
         }
-        followUp += opened
-          ? `\n\nBoss Man opened ${opened.length === 1 ? "the follow-up" : "the follow-ups"}: ${opened.map((o) => `${o.ref} (#/tickets/${o.id}) "${o.title}" for ${o.assignee}${o.feature ? `, kept under the unreleased feature "${o.feature}" because it carries its unfinished criterion` : ", filed with no feature (a delivered feature is baselined)"}${o.carried.length ? `, carrying ${o.carried.length === 1 ? "this criterion" : `these ${o.carried.length} criteria`}: ${o.carried.map((c) => `"${c}"`).join(", ")}` : ""}${o.checks.length ? `, with its long watch on check ticket${o.checks.length > 1 ? "s" : ""} ${o.checks.join(", ")}` : ""}`).join("; ")}. Don't create them again.`
+        // BOS-2855: a follow-up an open check ticket already carries is not opened; say which ticket holds it.
+        const joined = opened?.filter((o) => o.joined) ?? [];
+        if (joined.length) followUp += `\n\n${joined.map((o) => `Follow-up "${o.title}" was not opened: open check ticket ${o.ref} (#/tickets/${o.id}) already carries ${o.carried.length === 1 ? "its criterion" : "its criteria"} (${o.carried.map((c) => `"${c}"`).join(", ")}) and reports the result on this ticket`).join("; ")}. If it was meant as separate work, create it with create_ticket.`;
+        const made = opened?.filter((o) => !o.joined) ?? null;
+        followUp += made && !made.length && joined.length
+          ? ""
+          : made
+          ? `\n\nBoss Man opened ${made.length === 1 ? "the follow-up" : "the follow-ups"}: ${made.map((o) => `${o.ref} (#/tickets/${o.id}) "${o.title}" for ${o.assignee}${o.feature ? `, kept under the unreleased feature "${o.feature}" because it carries its unfinished criterion` : ", filed with no feature (a delivered feature is baselined)"}${o.carried.length ? `, carrying ${o.carried.length === 1 ? "this criterion" : `these ${o.carried.length} criteria`}: ${o.carried.map((c) => `"${c}"`).join(", ")}` : ""}${o.checks.length ? `, with its long watch on check ticket${o.checks.length > 1 ? "s" : ""} ${o.checks.join(", ")}` : ""}`).join("; ")}. Don't create them again.`
           : `\n\nThe move worked, but Boss Man couldn't open the follow-ups. Create them with create_ticket.`;
       }
       // The check that counts is at the merge, but telling the agent now saves it waiting hours to
