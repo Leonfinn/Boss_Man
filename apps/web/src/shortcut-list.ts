@@ -1,6 +1,8 @@
 // The one list of keyboard shortcuts (BOS-2687). The key handler, the "?" dialog and (later) the menu
 // tooltips all read from here, so a key that works is a key that is listed. To add a shortcut, add a row.
 
+import { SHORTCUTS_MAX } from "@boss-man/shared";
+
 /** How long after "g" the second letter still counts. */
 export const G_WINDOW_MS = 1500;
 
@@ -21,6 +23,16 @@ export const JUMPS: Array<{ key: string; label: string; to: string }> = [
   { key: "f", label: "Features", to: "features" },
   { key: "s", label: "Settings", to: "settings" },
 ];
+
+/**
+ * "g" then a digit → the shortcut at that position in the owner's list (BOS-2669 ticket 4): g 1 opens the first,
+ * and so on up to the cap. The digits come from SHORTCUTS_MAX, so the cap has one home. Worked out at press time
+ * from the pinned list, so a reorder moves the numbers with the rows and the "?" list always shows the current ones.
+ */
+export const SHORTCUT_JUMPS: Array<{ key: string; position: number }> = Array.from({ length: SHORTCUTS_MAX }, (_, i) => ({
+  key: String(i + 1),
+  position: i,
+}));
 
 /** The window event the menu's keyboard button sends to open the list (BOS-2688). */
 export const SHOW_SHORTCUTS_EVENT = "bossman:show-shortcuts";
