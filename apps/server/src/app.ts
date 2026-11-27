@@ -122,7 +122,7 @@ import { meaningBriefLines, ticketMeaningEmbedLoop } from "./services/ticket-mea
 import { SecondOpinionSettings, secondOpinionService } from "./services/second-opinion.js";
 import { wikiService } from "./services/wiki.js";
 import { UPDATE_ALERT_REASON, DEFAULT_LIMITS, OWNER_OVERRIDE_PRIORITY, schedulerService, type Limits } from "./services/scheduler.js";
-import { memoryLine, readRunnerAgents } from "./services/check-limit.js";
+import { checksRunHere, memoryLine, readRunnerAgents } from "./services/check-limit.js";
 import { exportCompany } from "./services/company-export.js";
 import { applyPackage, ImportError, previewPackage, readPackage } from "./services/company-import.js";
 import { mcpRoutes } from "./mcp.js";
@@ -1991,7 +1991,7 @@ export async function buildApp(opts: AppOptions) {
       const [r] = await db.select().from(runnersTable).where(eq(runnersTable.companyId, id));
       const launcher = await launch.status(id);
       // BOS-1498: what this company's runner is given and why, for the wizard's runner step.
-      const memory = launcher ? memoryLine(await launch.checks(), launcher.slug) : null;
+      const memory = launcher ? memoryLine(await launch.checks(), launcher.slug, await checksRunHere(db, await checkWorkersSvc.list(), id)) : null;
       if (!r) return { registered: false, launcher, memoryLine: memory };
       const report = await runnerReport.companyPanel(id);
       // One entry per safety feature for Settings' cards (DR-049 point 1): proven, or the owner chose to run without it on this platform.
