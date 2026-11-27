@@ -12,8 +12,14 @@ import type { Plugin } from "vite";
  * The limits, set about 10% above the size after route splitting (raw 444.1 kB, gzip 141.2 kB, BOS-1843; before it: 1,367 kB raw, 393 kB gzip). Raise one only
  * on purpose, in a change that says why the first screen needs more; a new page or a new library belongs in a chunk
  * that loads when it is opened (`lazyPage` in src/lazy-page.tsx).
+ *
+ * gzip raised 155_000 → 157_000 on purpose (BOS-2701, 27 Nov): main measured 154,997 bytes, 3 under the old limit, and
+ * the entry script names every lazy chunk by its content hash, so editing any lazy page alone moved it ±6 bytes and
+ * failed the build with no first-load code changed. 2 kB of headroom still fails any of the bigger pages slipping in
+ * (Settings, Board, Ticket and Decisions are each over 20 kB gzipped). The shell itself has grown from 141.2 kB since BOS-1843: trimming
+ * it is its own job, not a reason to raise this again.
  */
-export const FIRST_LOAD_LIMIT = { rawBytes: 490_000, gzipBytes: 155_000 } as const;
+export const FIRST_LOAD_LIMIT = { rawBytes: 490_000, gzipBytes: 157_000 } as const;
 
 /** The JS files index.html loads up front: its scripts and modulepreloads, as paths under the build folder. */
 export function firstLoadFiles(html: string): string[] {
