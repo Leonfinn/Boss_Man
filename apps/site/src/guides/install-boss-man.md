@@ -152,6 +152,56 @@ The runner image does not contain Claude Code. The first time a runner starts, B
 - **TrueNAS SCALE.** Use the machine's shell, put the two files in a folder on a dataset, and follow the steps. First check that `docker compose version` works, because TrueNAS versions differ in how they run Docker. Not yet run on a real TrueNAS machine for this install. For snapshots and backups, see [`docs/06-install-truenas.md`](@repo/blob/main/docs/06-install-truenas.md).
 - **Docker Desktop (preview).** Follow the steps in a terminal. Not tried yet.
 
+### Start again from nothing
+
+This deletes everything this install made, including your company data, your keys and the database. Back up first if you want to keep anything. Do this only on a machine that runs just this install: step 2 removes every runner and network guard on the machine, not only this install's. `boss-man` below is the project name unless you set another with `-p` or `COMPOSE_PROJECT_NAME`; use your own name in its place. Run each command in the folder with `images.env`. A command that finds nothing to remove prints nothing, and that is fine.
+
+The order matters: the updater and launcher started some containers that Compose does not know, and they hold your volumes, so they go first.
+
+1. Remove every container this install owns:
+
+```sh Run in the folder with images.env
+docker ps -aq --filter label=com.bossman.install=boss-man | xargs -r docker rm -f
+```
+
+2. Remove the runners, then the network guards:
+
+```sh Run in the folder with images.env
+docker ps -aq --filter label=boss-man.launcher=1 | xargs -r docker rm -f
+```
+
+```sh Run in the folder with images.env
+docker ps -aq --filter label=boss-man.netguard=1 | xargs -r docker rm -f
+```
+
+3. Remove what Compose knows, with its volumes:
+
+```sh Run in the folder with images.env
+docker compose -f docker-compose.images.yml --env-file images.env down -v --remove-orphans
+```
+
+4. Remove the Claude pack volume. The second command catches one an older install made without the label:
+
+```sh Run in the folder with images.env
+docker volume ls -q --filter label=com.bossman.install=boss-man | xargs -r docker volume rm
+```
+
+```sh Run in the folder with images.env
+docker volume ls -q --filter name=boss-man-claude-pack | xargs -r docker volume rm
+```
+
+5. Check nothing is left. Both commands only list, and both must print nothing:
+
+```sh Run in the folder with images.env
+docker ps -a --format '{{.Names}}' --filter label=com.bossman.install=boss-man
+```
+
+```sh Run in the folder with images.env
+docker volume ls -q --filter name=boss-man
+```
+
+If either prints a name, run `docker ps -a` and remove that container with `docker rm -f` and its name, then repeat steps 3 to 5.
+
 ### Updating to a new release
 
 Nothing updates by itself. Take a release from Boss Man's own update screen: the updater checks the signed release, downloads every image of it by digest, backs up the database, switches the server over, watches it for 15 minutes (going back by itself if it fails), and then moves the rest of the release. Your data and keys stay, because they are in volumes.

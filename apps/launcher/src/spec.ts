@@ -34,6 +34,8 @@ export type LauncherConfig = {
   dataRoot: string;
   /** BOSSMAN_STACK: names a second stack on this host (BOS-69). Unset = today's names, labels and images. */
   stack?: string;
+  /** BOSSMAN_INSTALL_LABEL (BOS-2803): "key=value" stamped on runners, guards, the pack installer and the pack volume. Unset = no label. */
+  installLabel?: string;
   /** The compose network the server is on, e.g. boss-man_default. Never host. */
   network: string;
   /** Where runners dial the server. */
@@ -149,6 +151,20 @@ export const guardImage = (stack?: string) => `${prefix(stack)}-netguard:current
 /** What the launcher asks Docker to list: a named stack lists only its own containers; the default lists as before. */
 export const listLabel = (stack?: string) => (stack ? `${STACK_LABEL}=${stack}` : `${LABEL}=1`);
 const stackLabels = (stack?: string): Record<string, string> => (stack ? { [STACK_LABEL]: stack } : {});
+/**
+ * BOS-2803: the image install's label (BOSSMAN_INSTALL_LABEL, "com.bossman.install=<project>", given by the compose file through the
+ * updater). Put on every runner, network guard and the pack volume, so one label filter finds everything an install owns. Unset = none.
+ */
+export const installLabels = (cfg: { installLabel?: string }): Record<string, string> => {
+  const [k, ...rest] = (cfg.installLabel ?? "").split("=");
+  return k && rest.length ? { [k]: rest.join("=") } : {};
+};
+export function parseInstallLabel(v: string | undefined): string | undefined {
+  const s = (v ?? "").trim();
+  if (!s) return undefined;
+  if (!/^[a-z0-9][a-z0-9.-]{0,100}=[A-Za-z0-9][A-Za-z0-9._-]{0,100}$/.test(s)) throw new Error(`BOSSMAN_INSTALL_LABEL should be key=value, like com.bossman.install=boss-man, not ${v}`);
+  return s;
+}
 export const companyDir = (cfg: LauncherConfig, slug: string) => path.join(cfg.dataRoot, "companies", slug);
 /** The same folder as the Docker host sees it: what goes into a runner's Binds (BOS-974). */
 const hostCompanyDir = (cfg: LauncherConfig, slug: string) => path.join(cfg.hostDataRoot ?? cfg.dataRoot, "companies", slug);
@@ -277,7 +293,7 @@ export function containerSpec(cfg: LauncherConfig, slug: string, image?: string,
       // The runner has no Docker socket; it reports these with its kernel as the platform fingerprint (DR-049 point 1).
       ...(host ? [`BOSSMAN_HOST_DOCKER=${host.dockerVersion}`, `BOSSMAN_HOST_OS=${host.osType}`] : []),
     ],
-    Labels: { [LABEL]: "1", [COMPANY_LABEL]: slug, ...stackLabels(cfg.stack) },
+    Labels: { [LABEL]: "1", [COMPANY_LABEL]: slug, ...stackLabels(cfg.stack), ...installLabels(cfg) },
     HostConfig: {
       Binds: [...MOUNTS.map(([sub, target]) => `${path.join(dir, sub)}:${target}`), `${path.join(dir, "runner.token")}:${TOKEN_TARGET}:ro`, `${claudePackVolume(cfg.stack)}:${CLAUDE_PACK_TARGET}:ro`],
       NetworkMode: cfg.network,
@@ -391,7 +407,7 @@ export function netguardSpec(cfg: LauncherConfig, slug: string, runnerId: string
     Env: [`NETGUARD_ALLOW=${serverAddress(cfg.serverUrl)}`, ...(cfg.guardAllow?.length ? [`NETGUARD_EXTRA=${cfg.guardAllow.join(" ")}`] : [])],
     // Healthy once the table is loaded: the launcher waits for it before it counts the runner as guarded.
     Healthcheck: { Test: ["CMD", "nft", "list", "table", "inet", "bossman_netguard"], Interval: 1_000_000_000, Timeout: 3_000_000_000, Retries: 3 },
-    Labels: { [NETGUARD_LABEL]: "1", [COMPANY_LABEL]: slug, ...stackLabels(cfg.stack) },
+    Labels: { [NETGUARD_LABEL]: "1", [COMPANY_LABEL]: slug, ...stackLabels(cfg.stack), ...installLabels(cfg) },
     HostConfig: {
       Binds: [`${path.join(hostCompanyDir(cfg, slug), "netguard")}:/etc/netguard:ro`],
       NetworkMode: `container:${runnerId}`,

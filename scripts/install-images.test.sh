@@ -9,7 +9,9 @@
 # It pulls the published images by digest, runs setup twice (the second run must change nothing), starts the stack under its own
 # project name, waits for the server to answer, then asks the launcher to start a runner from the published runner image.
 #   INSTALL_RELEASE_JSON=release.json INSTALL_REGISTRY=ghcr.io/<owner> scripts/install-images.test.sh
-# It removes its own containers and volumes at the end (only those of its project) and touches nothing else on the host.
+# At the end it removes the install the way docs/35-install-from-images.md "Start again from nothing" says (BOS-2803) and fails if any
+# container labelled for its project, any runner or guard, or any <project>_ or pack volume remains. That removal takes every runner and
+# guard on the host, so the real install refuses to start on a host that already has some (INSTALL_ALLOW_SHARED_HOST=1 overrides).
 # SC2015: ok and bad only print and set a flag, so "test && ok || bad" cannot run both. SC2317: cleanup runs from the EXIT trap.
 # shellcheck disable=SC2015,SC2317
 set -uo pipefail
@@ -65,6 +67,15 @@ echo "$cfg" | jq -r '.services.updater.environment.UPDATER_SELF_MOUNTS' | grep -
 # No host tools in the compose file's own steps (comments excluded).
 if grep -v '^[[:space:]]*#' docker-compose.images.yml | grep -Eq '\b(openssl|sudo|chown|stat -c)\b'; then bad "compose file uses host tools"; else ok "no host openssl, chown, stat or sudo"; fi
 [ -f docs/35-install-from-images.md ] && ok "the install guide exists" || bad "docs/35-install-from-images.md is missing"
+# BOS-2803: the guide's removal steps, in order (the real half's cleanup runs the same commands for its own project).
+guide_cmds=('label=com.bossman.install=boss-man | xargs -r docker rm -f' 'label=boss-man.launcher=1 | xargs' 'label=boss-man.netguard=1 | xargs' 'down -v --remove-orphans' 'docker volume ls -q --filter label=com.bossman.install=boss-man' 'docker volume ls -q --filter name=boss-man-claude-pack')
+prev=0; order_ok=1
+for c in "${guide_cmds[@]}"; do
+  n="$(grep -nF -- "$c" docs/35-install-from-images.md | head -1 | cut -d: -f1)"
+  { [ -n "$n" ] && [ "$n" -gt "$prev" ]; } && prev="$n" || { order_ok=0; echo "guide step missing or out of order: $c"; }
+done
+[ "$order_ok" = 1 ] && ok "the guide removes labelled containers, runners, guards, then down -v, then the pack volume" || bad "the guide's removal steps are missing or out of order"
+echo "$cfg" | jq -r '.services.updater.environment.UPDATER_LAUNCHER_ENV' | grep -q '^BOSSMAN_INSTALL_LABEL=com.bossman.install=' && ok "the launcher gets the install label to stamp on runners, guards and the pack volume" || bad "UPDATER_LAUNCHER_ENV lacks BOSSMAN_INSTALL_LABEL"
 
 # BOS-2388: the real install half below only runs with a Docker daemon and INSTALL_RELEASE_JSON, so a workflow that builds its
 # test release.json by hand can drift from what the install needs and only GitHub notices. Check the contract here, with no daemon:
@@ -118,8 +129,32 @@ P="bminstall$$"
   echo "BOSSMAN_RUNNER_NETWORK=${P}_default"
 } > "$T/run.env"
 dc() { docker compose -p "$P" --env-file "$T/run.env" -f docker-compose.images.yml --profile images "$@"; }
-# The updater makes these (not compose), under fixed names, so they are removed here by name; `down -v` removes the volumes.
-cleanup() { docker rm -f "boss-man-runner-smoke" "boss-man-netguard-smoke" launcher launcher-next server-blue server-green updater-next >/dev/null 2>&1; dc down -v --remove-orphans >/dev/null 2>&1; rm -rf "$T"; }
+# BOS-2803: removal follows the guide's "Start again from nothing" (docs/35-install-from-images.md) step for step, then checks nothing is
+# left. The updater and the launcher made containers compose does not know; they hold the volumes, so they go before `down -v`.
+# The guide's steps 2 and 4 take every runner, guard and pack volume on the host, so the test refuses to start on a host that
+# already has any (INSTALL_ALLOW_SHARED_HOST=1 overrides, and then removes theirs too).
+if [ -z "${INSTALL_ALLOW_SHARED_HOST:-}" ] && [ -n "$(docker ps -aq --filter label=boss-man.launcher=1; docker ps -aq --filter label=boss-man.netguard=1)" ]; then
+  bad "this host already has Boss Man runners or guards, and the removal step would delete them (set INSTALL_ALLOW_SHARED_HOST=1 to allow)"; exit 1
+fi
+guide_removal() {
+  docker ps -aq --filter "label=com.bossman.install=$P" | xargs -r docker rm -f >/dev/null 2>&1
+  docker ps -aq --filter label=boss-man.launcher=1 | xargs -r docker rm -f >/dev/null 2>&1
+  docker ps -aq --filter label=boss-man.netguard=1 | xargs -r docker rm -f >/dev/null 2>&1
+  dc down -v --remove-orphans >/dev/null 2>&1
+  docker volume ls -q --filter "label=com.bossman.install=$P" | xargs -r docker volume rm >/dev/null 2>&1
+  docker volume ls -q --filter name=boss-man-claude-pack | xargs -r docker volume rm >/dev/null 2>&1
+}
+cleanup() {
+  rc=$?
+  guide_removal
+  # The guide's two look-only listings, plus the runners and guards: all must be empty.
+  left_c="$(docker ps -a --format '{{.Names}}' --filter "label=com.bossman.install=$P"; docker ps -a --format '{{.Names}}' --filter label=boss-man.launcher=1; docker ps -a --format '{{.Names}}' --filter label=boss-man.netguard=1)"
+  left_v="$(docker volume ls -q --filter "name=${P}_"; docker volume ls -q --filter "label=com.bossman.install=$P"; docker volume ls -q --filter name=boss-man-claude-pack)"
+  if [ -n "$left_c$left_v" ]; then bad "removal left behind (containers: ${left_c//$'\n'/ }; volumes: ${left_v//$'\n'/ })"; else ok "the guide's removal left no container and no volume behind"; fi
+  rm -rf "$T"
+  [ "$rc" -eq 0 ] || exit "$rc"
+  exit "$fail"
+}
 trap cleanup EXIT
 
 dc pull -q || { bad "pull by digest"; exit 1; }
