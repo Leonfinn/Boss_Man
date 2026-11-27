@@ -58,6 +58,11 @@ Remember to put an empty line after any line you add outside this comment, so th
 
 <!-- Docs checked up to 688f2bc5a6c5f50810649a7cfa7af9e4bcec5d37 -->
 
+## 27 November 2026
+
+- Pin the pages you open most. Press **Add to shortcuts** beside the title of any page inside Product, Team, Activity or Settings (for example Settings → Server and runner → Updates). The page then appears in a Shortcuts section at the top of the menu, on every device you sign in from. You can have up to 6. Press the button again, or Undo, to take it out. The menu is unchanged until you add one.
+- **Edit** beside Shortcuts lets you rename, reorder or remove them. Nothing changes until you press Save.
+
 ## 26 November 2026
 
 - A new beta release now goes out by itself every Tuesday morning (10:00 UTC), with that week's changes in its notes, as long as the newest code has passed its checks and its images are ready. If there is nothing new or nothing ready, it skips that week. You don't need to press anything.
