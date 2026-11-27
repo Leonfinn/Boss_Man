@@ -2865,7 +2865,9 @@ export async function buildApp(opts: AppOptions) {
         .object({
           answer: z.string().trim().min(1).max(OWNER_MESSAGE_MAX),
           assigneeAgentId: Uuid.optional(),
-          note: z.string().trim().max(2000).optional(),
+          // BOS-2798: a note can carry pasted command output, which the raiser's wake gets whole; 2000 refused most logs.
+          // What reads it for a short field (a lesson, a change reason) caps or checks it there.
+          note: z.string().trim().max(20_000).optional(),
           reasonLink: z.string().trim().max(400).optional(),
           custom: z.boolean().optional(),
           alwaysScope: z.enum(["agent", "company"]).optional(),

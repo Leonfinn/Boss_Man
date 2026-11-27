@@ -280,7 +280,7 @@ export const OWNER_FIELDS = {
     "When work is approved", "Before merging, Boss Man will", "For high-risk work, also",
   ],
   Decisions: [
-    "Harness", "Provider", "Model", "Paid from", "What went wrong (if a step failed)", "Note for",
+    "Harness", "Provider", "Model", "Paid from", "What went wrong (if a step failed)", "Note for", "Paste your output here for",
     "Why (shown on the Changes table, required)", "Wiki page that explains it (optional)",
     "Your answer, in your own words. It goes to …", "What's unclear (optional, one line)",
     "Every agent in this company",
