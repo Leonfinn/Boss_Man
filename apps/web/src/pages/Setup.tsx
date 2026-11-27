@@ -20,7 +20,7 @@ const STEPS = [
   { id: "company", title: "Your company", why: "Name it and say what it's for. The CEO plans the work from this." },
   { id: "project", title: "What will your team work on?", why: "Pick the kind of work your team does and name its first project. You can change this later in Settings." },
   { id: "runner", title: "The runner", why: "The runner is the container the company's agents work in. It connects out to this server, so it needs no open ports. The full panel is in Settings." },
-  { id: "credential", title: "Claude", why: "Agents need something to run on. Paste the setup token from your Claude Pro or Max subscription: it also pays for the CEO. Or use an API key instead." },
+  { id: "credential", title: "Claude", why: "Agents need something to run on. Paste the sign-in code from your Claude Pro or Max subscription: it also pays for the CEO. Or use an API key instead." },
   { id: "git", title: "A git token", why: "So agents can clone, push, and open pull requests on the project's repo." },
   { id: "checks", title: "Checks before merging", why: "Boss Man looks at the repo, through the runner, and proposes the check that runs before work merges. High-risk work can add a slower one." },
   { id: "funding", title: "What pays for the CEO", why: "Funding sources track cost and quota. Choose the one the CEO runs on; the Agents page sets the rest." },

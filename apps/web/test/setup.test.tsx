@@ -90,7 +90,14 @@ describe("setup wizard: what will your team work on (BOS-2813)", () => {
   it("goes from the runner and Claude steps straight on to funding without the code steps", async () => {
     mockDocs(3);
     render(<Setup companies={[company]} go={() => {}} onChanged={() => {}} />);
-    await screen.findByLabelText("Claude setup token");
+    await screen.findByLabelText("Claude sign-in code");
+    // A team that has never used git sees none of these words on the Claude step (criterion 5).
+    // The closed "Use an API key instead" fold is left out: it is hidden until opened.
+    const page = document.body.cloneNode(true) as HTMLElement;
+    page.querySelectorAll("details").forEach((d) => d.remove());
+    page.querySelectorAll("code").forEach((c) => c.remove()); // the command to type, `claude setup-token`
+    const wizardText = page.textContent ?? "";
+    expect(wizardText).not.toMatch(/\b(repo|branch|merge|merging|token)\b/i);
     fireEvent.click(screen.getByText("Skip for now"));
     expect((await screen.findByRole("heading", { level: 1 })).textContent).toBe("What pays for the CEO");
   });
@@ -116,11 +123,11 @@ describe("setup wizard: Claude and runner steps (BOS-1495)", () => {
       }),
     );
     render(<Setup companies={[withCeo]} go={() => {}} onChanged={() => {}} />);
-    const box = await screen.findByLabelText("Claude setup token");
+    const box = await screen.findByLabelText("Claude sign-in code");
     expect(screen.queryByLabelText("Add")).toBeTruthy(); // the general form is there, but inside the closed details
     expect(screen.getByText("Use an API key instead").closest("details")!.open).toBe(false);
     fireEvent.change(box, { target: { value: "sk-ant-oat01-made-up" } });
-    fireEvent.click(screen.getByText("Save the token"));
+    fireEvent.click(screen.getByText("Save the code"));
     await screen.findByText(/stored encrypted/);
     const mine = calls.filter((c) => c.method !== "GET" && c.url !== "/api/setup-progress");
     expect(mine.map((c) => `${c.method} ${c.url}`)).toEqual(["POST /api/secrets", "POST /api/secrets/s1/grants", "POST /api/funding-sources", "PATCH /api/agents/a1"]);
@@ -149,7 +156,7 @@ describe("setup wizard: Claude and runner steps (BOS-1495)", () => {
     const funded: Company = { ...company, agents: [{ id: "a1", name: "CEO", role: "ceo", fundingSourceId: "f1" } as Company["agents"][number]] };
     render(<Setup companies={[funded]} go={() => {}} onChanged={() => {}} />);
     expect(await screen.findByText("Connected")).toBeTruthy();
-    expect(screen.queryByLabelText("Claude setup token")).toBeNull();
+    expect(screen.queryByLabelText("Claude sign-in code")).toBeNull();
     expect(screen.getByText("What pays for the CEO").closest("li")!.className).toBe("done");
     expect(calls.filter((c) => !c.startsWith("GET") && !c.startsWith("PUT /api/setup-progress"))).toEqual([]);
   });
@@ -172,8 +179,8 @@ describe("setup wizard: Claude and runner steps (BOS-1495)", () => {
       }),
     );
     render(<Setup companies={[{ ...company, agents: [{ id: "a1", name: "CEO", role: "ceo", fundingSourceId: null } as Company["agents"][number]] }]} go={() => {}} onChanged={() => {}} />);
-    fireEvent.change(await screen.findByLabelText("Claude setup token"), { target: { value: "sk-ant-oat01-made-up" } });
-    fireEvent.click(screen.getByText("Save the token"));
+    fireEvent.change(await screen.findByLabelText("Claude sign-in code"), { target: { value: "sk-ant-oat01-made-up" } });
+    fireEvent.click(screen.getByText("Save the code"));
     await screen.findByText(/stored encrypted/);
     fireEvent.click(await screen.findByText("Next")); // Claude -> git token
     expect((await screen.findByRole("heading", { level: 1 })).textContent).toBe("A git token");
