@@ -13,7 +13,7 @@ import { activity, features, ticketDependencies, tickets, wakes } from "../src/d
 import { workflowService } from "../src/services/workflow.js";
 import { issueRunToken } from "../src/mcp.js";
 import { appendLine, CHECK_REPORTED_REASON, checkTicketDoneRefusal, checkTicketVerdict, LONG_WATCH_FROM, openLongWatchChecks } from "../src/services/after-merge-check-tickets.js";
-import { eventCheckEndSweep } from "../src/services/event-check-end.js";
+import { EVENT_CHECK_END_FROM, eventCheckEndSweep } from "../src/services/event-check-end.js";
 import { openBlockers } from "../src/services/ticket-links.js";
 import { wakeClass } from "../src/services/wake-classes.js";
 import { wakeWatchers } from "../src/services/watch-triggers.js";
@@ -508,6 +508,8 @@ describe("BOS-2643: a watch of a day or more is opened as its own check ticket",
       expect(made.isError, made.text).toBe(false);
       const liveAt = new Date(Date.now() - 6.5 * DAY);
       await c.db.update(tickets).set({ mergeCommit: "d".repeat(40), mergedAt: liveAt, liveAt, systemState: "done" }).where(eq(tickets.id, made.id!));
+      // Checks opened before the change keep today's behaviour; these are "new", whatever day the suite runs.
+      await c.db.update(tickets).set({ createdAt: new Date(EVENT_CHECK_END_FROM.getTime() + 3_600_000) }).where(eq(tickets.checksTicketId, made.id!));
       return { made, liveAt };
     }
     const sweep = (c: Awaited<ReturnType<typeof setup>>, at: Date, woken: Array<{ agentId: string; reason: string; ticketId: string }>) =>
@@ -553,9 +555,24 @@ describe("BOS-2643: a watch of a day or more is opened as its own check ticket",
       const event = checks.find((x) => x.checksCriterion === 2)!;
       await c.db.update(tickets).set({ systemState: "blocked", stateNote: "1 pass: saw it on the 3 Dec update" }).where(eq(tickets.id, event.id));
       await c.db.update(tickets).set({ systemState: "blocked" }).where(eq(tickets.id, checks.find((x) => x.checksCriterion === 3)!.id));
-      expect(await sweep(c, new Date(liveAt.getTime() + 20 * DAY), [])).toEqual({ warned: 0, closed: 1 });
+      expect(await sweep(c, new Date(liveAt.getTime() + 20 * DAY), [])).toEqual({ warned: 0, closed: 0 });
+      expect((await c.row(event.id)).systemState).toBe("blocked");
       expect((await c.row(event.id)).stateNote).toBe("1 pass: saw it on the 3 Dec update");
       expect((await c.row(checks.find((x) => x.checksCriterion === 3)!.id)).systemState).toBe("blocked");
+    });
+
+    it("a check stored before the change, with or without a watch date, is never closed or warned by it", async () => {
+      const c = await setup();
+      const { made, liveAt } = await mergedBuild(c, [EVENT]);
+      const [check] = await checksOf(c, made.id!);
+      const old = new Date(EVENT_CHECK_END_FROM.getTime() - 3_600_000);
+      for (const watchUntil of [null, new Date(liveAt.getTime() + 2 * DAY)]) {
+        await c.db.update(tickets).set({ systemState: "blocked", createdAt: old, watchUntil }).where(eq(tickets.id, check!.id));
+        const woken: Array<{ agentId: string; reason: string; ticketId: string }> = [];
+        expect(await sweep(c, new Date(liveAt.getTime() + 30 * DAY), woken)).toEqual({ warned: 0, closed: 0 });
+        expect(woken).toEqual([]);
+      }
+      expect((await c.row(check!.id)).systemState).toBe("blocked");
     });
 
     it("an author's earlier end date wins, and a build not yet live has no end", async () => {

@@ -18,6 +18,9 @@ export function isEventCriterion(text: string): boolean {
   return !!eventWatchPhrase(text) && !longWatchPhrase(text);
 }
 
+/** Checks opened before this shipped keep today's behaviour (their assignee reports; nothing closes them). A fixed date, as LONG_WATCH_FROM. */
+export const EVENT_CHECK_END_FROM = new Date("2026-11-27T18:00:00Z");
+
 export type EventCheckDeps = {
   now?: () => Date;
   /** Wakes the check ticket's assignee (never dropped: the reason is in the waiting class). */
@@ -37,6 +40,7 @@ export async function eventCheckEndSweep(db: Db, deps: EventCheckDeps): Promise<
   let warned = 0;
   let closed = 0;
   for (const { t: check, prefix } of rows) {
+    if (check.createdAt < EVENT_CHECK_END_FROM) continue;
     const [parent] = await db.select().from(tickets).where(and(eq(tickets.id, check.checksTicketId!), eq(tickets.companyId, check.companyId)));
     // The watch starts at go-live: a build not merged yet, or merged and still waiting for the update, has no end.
     if (!parent?.mergeCommit || (parent.goLiveWait && !parent.liveAt)) continue;
@@ -57,9 +61,10 @@ export async function eventCheckEndSweep(db: Db, deps: EventCheckDeps): Promise<
       continue;
     }
     // Past its end and still unreported: the line is the check's result (criterion 1 of the check ticket is the event's own).
-    // A real reading the assignee already wrote on the check is kept; only an unreported check gets the line.
+    // A real reading the assignee already wrote on the check is kept and the check is left to them to close.
     const reported = readVerdicts(readCriteria(check.acceptanceCriteria), check.stateNote).some((r) => r.verdict !== null);
-    if (!reported) await db.update(tickets).set({ stateNote: `1 pass: ${EVENT_WATCH_NOT_OBSERVED}`, stateNoteAt: now }).where(eq(tickets.id, check.id));
+    if (reported) continue;
+    await db.update(tickets).set({ stateNote: `1 pass: ${EVENT_WATCH_NOT_OBSERVED}`, stateNoteAt: now }).where(eq(tickets.id, check.id));
     await record(db, { companyId: check.companyId, ticketId: check.id, kind: "after_merge_check", summary: `Event check ended: ${EVENT_WATCH_NOT_OBSERVED}.`, detail: { key: `event-check-ended:${check.id}` }, at: now });
     await deps.close(check.id);
     closed++;
