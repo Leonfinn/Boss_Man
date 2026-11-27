@@ -7,7 +7,9 @@ import { agents, companies, owners, projects, runners, secretGrants, settings, t
 
 /** The first merge, stored once when first seen so a later revert or delete doesn't change it. `minutes` runs from the owner account's creation (setup start) to the merge. */
 export type FirstMerge = { ref: string; ticketId: string; mergedAt: string; minutes: number };
-export type SetupProgress = { dismissed: boolean; step: number; companyId: string | null; firstMerge: FirstMerge | null };
+/** What the owner said the team works on (step 2): written documents and research, or code in a git repository. Not set until they choose. */
+export type SetupWork = "docs" | "code";
+export type SetupProgress = { dismissed: boolean; step: number; companyId: string | null; firstMerge: FirstMerge | null; work?: SetupWork };
 const KEY = "setup";
 
 /** "2 h 40 min", "35 min", "3 h", "2 d 4 h". */
@@ -67,17 +69,40 @@ export function setupService(db: Db, deps: { isConnected: (runnerId: string) => 
       const envs = (await db.select({ env: secretGrants.envName }).from(secretGrants).where(and(eq(secretGrants.companyId, companyId), inArray(secretGrants.envName, [...RUN_CREDENTIALS, "GIT_TOKEN"])))).map((g) => g.env);
       const [ceo] = await db.select({ fundingSourceId: agents.fundingSourceId }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo")));
       const [ticketCount] = await db.select({ n: sql<number>`count(*)::int` }).from(tickets).where(eq(tickets.companyId, companyId));
-      const { firstMerge } = await this.progress();
-      return [
+      const { firstMerge, work } = await this.progress();
+      const [anyProject] = await db.select({ id: projects.id }).from(projects).where(eq(projects.companyId, companyId)).limit(1);
+      const base = [
         { id: "company", label: "Say what the company is for", done: !!c.mission?.trim() },
-        { id: "project", label: "Add a project with its repo", done: withRepo.length > 0 },
         { id: "runner", label: "Start the runner", done: !!runner && deps.isConnected(runner.id) },
         { id: "credential", label: "Add a Claude setup-token or API key", done: envs.some((e) => RUN_CREDENTIALS.includes(e)) },
-        { id: "git", label: "Add a git token", done: envs.includes("GIT_TOKEN") },
-        { id: "checks", label: "Choose the check before merging", done: withRepo.length > 0 && withRepo.every((p) => !!p.verify?.trim()) },
         { id: "funding", label: "Choose what pays for the CEO", done: !!ceo?.fundingSourceId },
         { id: "ticket", label: "Write a first ticket", done: (ticketCount?.n ?? 0) > 0 },
-        { id: "merged", label: firstMerge ? `First ticket merged: ${firstMerge.ref}, ${formatSetupDuration(firstMerge.minutes)} after setup started` : "First ticket merged", done: !!firstMerge },
+      ];
+      const at = (id: string) => base.findIndex((i) => i.id === id);
+      // A company with a repo (or one that chose "Code") keeps the code items. Otherwise it gets a path that can finish:
+      // whether a no-repo task sets mergedAt doesn't matter, "First task finished" counts tasks in the done state.
+      if (withRepo.length > 0 || work === "code") {
+        return [
+          base[at("company")]!,
+          { id: "project", label: "Add a project with its repo", done: withRepo.length > 0 },
+          base[at("runner")]!,
+          base[at("credential")]!,
+          { id: "git", label: "Add a git token", done: envs.includes("GIT_TOKEN") },
+          { id: "checks", label: "Choose the check before merging", done: withRepo.length > 0 && withRepo.every((p) => !!p.verify?.trim()) },
+          base[at("funding")]!,
+          base[at("ticket")]!,
+          { id: "merged", label: firstMerge ? `First ticket merged: ${firstMerge.ref}, ${formatSetupDuration(firstMerge.minutes)} after setup started` : "First ticket merged", done: !!firstMerge },
+        ];
+      }
+      const [finished] = await db.select({ n: sql<number>`count(*)::int` }).from(tickets).where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done"), sql`${tickets.outcome} is distinct from 'cancelled'`));
+      return [
+        base[at("company")]!,
+        { id: "project", label: "Choose what you work on", done: !!anyProject },
+        base[at("runner")]!,
+        base[at("credential")]!,
+        base[at("funding")]!,
+        base[at("ticket")]!,
+        { id: "merged", label: "First task finished", done: (finished?.n ?? 0) > 0 },
       ];
     },
   };

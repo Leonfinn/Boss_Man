@@ -54,6 +54,54 @@ describe("setup wizard checks", () => {
   });
 });
 
+describe("setup wizard: what will your team work on (BOS-2813)", () => {
+  const docsProject = { ...project, repoUrl: null };
+  function mockDocs(step: number, work?: "docs" | "code") {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const body = url === "/api/setup-progress" ? { dismissed: false, step, companyId: "c1", ...(work ? { work } : {}) } : url.endsWith("/projects") ? [docsProject] : [];
+        return new Response(JSON.stringify(body), { status: 200 });
+      }),
+    );
+  }
+
+  it("defaults to Documents: no repo fields, no git-token or checks steps, 'Step 2 of 6'", async () => {
+    mockDocs(1);
+    render(<Setup companies={[company]} go={() => {}} onChanged={() => {}} />);
+    expect(((await screen.findByLabelText("Documents, research and writing", { exact: false })) as HTMLInputElement).checked).toBe(true);
+    expect(screen.queryByLabelText("Git repo")).toBeNull();
+    expect(screen.queryByText(/A git token/)).toBeNull();
+    expect(screen.queryByText(/Checks before merging/)).toBeNull();
+    expect(screen.getByText(/Step 2 of 6/)).toBeTruthy();
+  });
+
+  it("Code shows the repo fields, saves the choice and brings the two steps back", async () => {
+    mockDocs(1);
+    render(<Setup companies={[company]} go={() => {}} onChanged={() => {}} />);
+    fireEvent.click(await screen.findByLabelText("Code in a git repository", { exact: false }));
+    expect(await screen.findByLabelText("Git repo")).toBeTruthy();
+    expect(screen.getByText(/A git token/)).toBeTruthy();
+    expect(screen.getByText(/Step 2 of 8/)).toBeTruthy();
+    const put = vi.mocked(fetch).mock.calls.find(([u, i]) => u === "/api/setup-progress" && (i as RequestInit | undefined)?.method === "PUT");
+    expect(JSON.parse(String((put![1] as RequestInit).body))).toEqual({ work: "code" });
+  });
+
+  it("goes from the runner and connect steps straight on to funding without the code steps", async () => {
+    mockDocs(3);
+    render(<Setup companies={[company]} go={() => {}} onChanged={() => {}} />);
+    // The connect step is a closed list of equal rows, so no command or token box shows until a row is opened.
+    await screen.findByRole("list", { name: "Ways to connect an agent" });
+    // A team that has never used git sees none of these words on the connect step (criterion 5).
+    const page = document.body.cloneNode(true) as HTMLElement;
+    page.querySelectorAll("code").forEach((c) => c.remove()); // any command a provider's step names
+    const wizardText = page.textContent ?? "";
+    expect(wizardText).not.toMatch(/\b(repo|branch|merge|merging|token)\b/i);
+    fireEvent.click(screen.getByText("Skip for now"));
+    expect((await screen.findByRole("heading", { level: 1 })).textContent).toBe("What pays for the CEO");
+  });
+});
+
 describe("setup wizard: connect and runner steps (BOS-1495, BOS-2815)", () => {
   const withCeo: Company = { ...company, agents: [{ id: "a1", name: "CEO", role: "ceo", fundingSourceId: null } as Company["agents"][number]] };
 

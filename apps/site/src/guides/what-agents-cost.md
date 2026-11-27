@@ -1,34 +1,53 @@
 ---
 title: "What agents cost: funding sources and limits"
-description: How Boss Man tracks what your agents spend, which limits you can set, what happens when one is reached, and where to see the figures.
-group: Start here
-order: 4
-lead: Your agents' work is billed by whichever account they run on. A funding source is Boss Man's record of that account, so it can show what the work costs and stop it before it runs away.
+description: How Boss Man pays for your agents' work, the limits you can set, what happens when a limit is reached, and where to see what your agents have spent.
+group: Set it up your way
+order: 5
+lead: Every agent's work is paid from the account it runs on: a Claude or ChatGPT plan, or an API key. Boss Man records what each one spends, and you can set limits so a bill never surprises you.
 ---
 
-## A funding source is the account agents run on
+## Funding sources
 
-When you connect an account in the setup wizard, Boss Man also makes a **funding source** for it: the same account, with a name, and a note of whether it is a fixed monthly plan or pay as you go. Every run is counted against the funding source of the agent that did it.
+A funding source is the account agents' work is charged to, with its limits: a Claude plan or Anthropic API key, a ChatGPT plan or OpenAI API key, or another provider such as Ollama Cloud, Synthetic or OpenRouter. Each agent is paid from one funding source. You choose it under **Paid from** when you hire the agent, and you can change it on the **Agents** page.
 
-You can see and change them under **Settings → Funding**. An existing company keeps what it has; connecting a second account adds a second funding source.
+There are two kinds you will meet first:
 
-## Limits you can set
+- **A plan** (Claude Pro or Max, or a ChatGPT plan). You pay a fixed monthly price to the provider. Agents' work uses up the plan's allowance, not money, so Boss Man shows it in tokens, not dollars.
+- **An API key** (pay as you go). Each piece of work costs money from your provider's credit. Boss Man shows an estimate in dollars at list prices. It is not a bill: the provider's website has the real figure.
 
-- **Where the account sets one.** An API account has its own monthly spend limit and credit balance, on the provider's website (Anthropic's Console, for example). Once agents reach that limit, the provider refuses their work until the next month or until you raise it.
-- **Per task.** A project can have a cap on what one task may cost in API or credit runs. When a task reaches it, the agents stop and ask you.
-- **Per project, per month.** A project can have a monthly cap too, for the same kind of runs.
-- **A plan's allowance.** A Claude plan's usage resets every 5 hours and every week. Boss Man sees how much of it is used and can pause routine work before it runs out.
+When you connect an account in the setup wizard's **How do you want to connect your first agent?** step, Boss Man makes its funding source and points the CEO at it, whichever option you pick. To add or change one, open **Settings → Funding**. To choose between a plan and a key, see [Connect a Claude account](/guides/connect-a-claude-account).
 
-Runs paid from a fixed monthly plan are left out of the dollar figures: the plan's price doesn't change with use, so its limits are the allowance, not money.
+## The limits you can set
 
-## What happens at a limit
+| Limit | Where | What it counts | At the limit |
+|---|---|---|---|
+| **Monthly spend cap** for a project | **Projects**, your project, **Config** tab | API-key work only, per calendar month (UTC) | No new work starts on the project. A Decisions card asks you to **Raise the cap by half** or **Keep it paused**. |
+| **Cost cap per task** | the same form | All work on one task, plan work included at list prices | Work on that task stops. A card asks you to **Raise the cap by half** or **Stop work on it**. |
+| **Spending limit per month** for a project | **Projects**, your project, **Budget** tab | API-key work | You choose under **At the limit**: **Ask me** or **Pause**. |
+| **Hold routine work at** for a plan | **Settings → Funding**, on the plan's card | How much of the plan's allowance is used | Routine work waits until the allowance resets. Chats and reviews carry on. |
 
-Work pauses rather than failing. Boss Man stops starting new runs on that account, tells you what was reached, and asks how to carry on: wait for the reset, raise the limit, or move the work to another account. Work already finished is not lost.
+Work that is already running always finishes. A limit only stops new work from starting.
 
-## Where to see the spend
+**Ask me or Pause.** With **Ask me**, work carries on and a Decisions card tells you the limit has been passed. You choose **Raise it by half**, **Make it a hard stop** or **Leave it**. With **Pause**, no new work starts until the next month.
 
-- **Funding** shows each funding source, what it has used and what is left.
-- **A project's Budget tab** shows that project's cost for API and credit runs, with its caps.
-- **The Spend report** adds it up by day and by project.
+**A plan's allowance.** A Claude plan has an allowance that resets every 5 hours and every week. When it reaches the hold level (95% unless you change it), Boss Man pauses routine work and tells you. Tasks marked **Priority 1** and your extra-usage setting can change that: see [When a plan is nearly used up](/guides/agents-and-models#when-a-plan-is-nearly-used-up).
 
-The figures are estimates at list price, not a bill: the provider's website is the final word on what you are charged.
+## Limits outside Boss Man
+
+Boss Man's caps count its own estimates. They do not see extra usage or top-up credit you buy on a plan. Set a limit with Anthropic too, so the real bill has a ceiling:
+
+- For an API key, set a **Monthly spend limit** in the Claude Console. [Connect a Claude account](/guides/connect-a-claude-account#3-set-a-monthly-spend-limit) shows how.
+- For a plan, check your usage in claude.ai under **Settings → Usage**. If you turn on usage credits there, set a limit on them as well.
+
+## Where to see what agents spend
+
+- **Dashboard.** One card shows this month's spend: **API spend this month** in dollars, or **Subscription tokens this month** for a plan. Choose it for more detail.
+- **Spend.** Spend by day, by agent and by feature, and the costliest tickets. Open it from the Dashboard card, or from a project's **Budget** tab with **See spend by day, agent and feature**.
+- **A project's Budget tab.** This month's pay-as-you-go spend against its cap, with a forecast of when it reaches the limit, and its costliest tasks.
+- **Settings → Funding.** Each funding source, each plan's allowance, and the **Spending limits** table with how much of each limit is used.
+
+## Related
+
+- [Connect a Claude account](/guides/connect-a-claude-account): plan or API key, and how to connect each.
+- [Agents and models](/guides/agents-and-models): several Claude plans, other AI accounts, and what waits when a plan is nearly used up.
+- [Stopping work](/guides/stopping-work): pause one agent, or everything at once.

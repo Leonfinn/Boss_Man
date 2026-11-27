@@ -30,7 +30,7 @@ Wait for the runner to say **Connected**. This can take up to a minute. If it sa
 
 ## 4. How do you want to connect your first agent?
 
-The step shows every account an agent can run on as a plain list of equal rows: your Claude Pro or Max plan, an Anthropic API key, the ChatGPT plan, an OpenAI API key, Ollama Cloud, Synthetic, OpenRouter, and one row for Amazon Bedrock, Microsoft Foundry and LLM gateways. Nothing is marked as the best or picked for you. Pick the one you already have, and the row opens its own short steps.
+The step shows every account an agent can run on as a plain list of equal rows: your Claude Pro or Max plan, an Anthropic API key, the ChatGPT plan, an OpenAI API key, Ollama Cloud, Synthetic, OpenRouter, and one row for Amazon Bedrock, Microsoft Foundry and LLM gateways. Nothing is marked as the best or picked for you. Pick the one you already have, and the row opens its own short steps. For every step on a Mac or Windows, see [Connect a Claude account: plan or API key?](/guides/connect-a-claude-account).
 
 - **Claude Pro or Max plan.** If Claude Code isn't on your computer yet, install it first: the step links the page for a Mac and a Windows PC. Then run `claude setup-token`, sign in, and paste the token it prints; it is shown once and lasts a year. Its token starts `sk-ant-oat01-`.
 - **Anthropic API key.** Everything is in your browser on [platform.claude.com](https://platform.claude.com/): buy credit, set a monthly spend limit, create the key, and paste it; it starts `sk-ant-api`.
@@ -55,7 +55,7 @@ Under **Before merging, Boss Man will**, choose the command Boss Man runs before
 
 ## 7. What pays for the CEO
 
-If you saved a Claude token in step 4, this step is already done, and **Next** skips it. Otherwise, under **Funding sources**, name your plan, for example "Claude Max", and choose a **Kind**. Choose **Add funding source**, then pick it under "The CEO runs on". Boss Man uses this to track cost and quota.
+If you saved a Claude token in step 4, this step is already done, and **Next** skips it. Otherwise, under **Funding sources**, name your plan, for example "Claude Max", and choose a **Kind**. Choose **Add funding source**, then pick it under "The CEO runs on". Boss Man uses this to track cost and quota. To learn about limits and where to see spend, see [What agents cost](/guides/what-agents-cost).
 
 ## 8. A first task
 

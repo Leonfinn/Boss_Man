@@ -13,7 +13,7 @@ import { Funding } from "./settings/Funding";
 import { ProjectRow } from "./settings/Projects";
 import { ClaudeStep, fundingHint, RunnerStep } from "./SetupClaude";
 
-type Progress = { dismissed: boolean; step: number; companyId: string | null; firstMerge?: { ref: string; minutes: number } | null };
+type Progress = { dismissed: boolean; step: number; companyId: string | null; firstMerge?: { ref: string; minutes: number } | null; work?: "docs" | "code" };
 export type ChecklistItem = { id: string; label: string; done: boolean };
 
 /** The connect step's title (BOS-2815), also used as the wizard's heading so it reads the same in both places. */
@@ -21,7 +21,7 @@ export const CONNECT_TITLE = "How do you want to connect your first agent?";
 
 const STEPS = [
   { id: "company", title: "Your company", why: "Name it and say what it's for. The CEO plans the work from this." },
-  { id: "project", title: "A project", why: "A project is a repo the agents work in, on GitHub or your Gitea. The checks that run before work merges come after the runner and git token." },
+  { id: "project", title: "What will your team work on?", why: "Pick the kind of work your team does and name its first project. You can change this later in Settings." },
   { id: "runner", title: "The runner", why: "The runner is the container the company's agents work in. It connects out to this server, so it needs no open ports. The full panel is in Settings." },
   { id: "credential", title: CONNECT_TITLE, why: "Your agents need an account to run on, and that account is what you pay for their work. Pick whichever you already have; saving it also sets what pays for the CEO." },
   { id: "git", title: "A git token", why: "So agents can clone, push, and open pull requests on the project's repo." },
@@ -84,7 +84,33 @@ function CompanyStep({ company, onCreated }: { company: Company | undefined; onC
   );
 }
 
-function ProjectStep({ company, onChanged }: { company: Company; onChanged: () => void }) {
+export type Work = "docs" | "code";
+
+/** The two cards on step 2. Side by side when there is room, stacked on a phone. */
+export function WorkChoice({ work, onWork }: { work: Work; onWork: (w: Work) => void }) {
+  return (
+    <fieldset className="work-choice" style={{ border: 0, padding: 0, margin: 0, display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(min(240px, 100%), 1fr))" }}>
+      <legend className="sr-only">What will your team work on?</legend>
+      {(
+        [
+          { id: "docs", title: "Documents, research and writing", note: "Most teams" },
+          { id: "code", title: "Code in a git repository", note: "Agents clone, push and open pull requests" },
+        ] as const
+      ).map((c) => (
+        <label key={c.id} className="card" style={{ display: "flex", gap: 8, alignItems: "flex-start", cursor: "pointer", borderColor: work === c.id ? "var(--link)" : undefined }}>
+          <input type="radio" name="setup-work" checked={work === c.id} onChange={() => onWork(c.id)} />
+          <span>
+            {c.title}
+            <br />
+            <small className="muted">{c.note}</small>
+          </span>
+        </label>
+      ))}
+    </fieldset>
+  );
+}
+
+function ProjectStep({ company, work, onWork, onChanged }: { company: Company; work: Work; onWork: (w: Work) => void; onChanged: () => void }) {
   const projects = usePoll((signal) => api<Project[]>(`/api/companies/${company.id}/projects`, { signal }), 30_000, `setup-projects-${company.id}`);
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -102,11 +128,13 @@ function ProjectStep({ company, onChanged }: { company: Company; onChanged: () =
   const list = projects.data ?? [];
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <WorkChoice work={work} onWork={onWork} />
       {list.length === 0 && (
         <form onSubmit={add} style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
           <div className="field" style={{ flex: "1 1 240px" }}>
             <label htmlFor="setup-project">Project name</label>
-            <input id="setup-project" required maxLength={80} placeholder="e.g. Boss Man" value={name} onChange={(e) => setName(e.target.value)} />
+            <input id="setup-project" required maxLength={80} placeholder={work === "code" ? "e.g. Boss Man" : "e.g. Market research"} value={name} onChange={(e) => setName(e.target.value)} />
+            <small className="muted">A project is one body of work; its tasks sit together on one board.</small>
           </div>
           <button type="submit" className="btn primary" disabled={!name.trim()}>
             Add the project
@@ -118,12 +146,20 @@ function ProjectStep({ company, onChanged }: { company: Company; onChanged: () =
           {error}
         </p>
       )}
-      {list.map((p) => (
-        <ProjectRow key={p.id} p={p} only="repo" onChanged={onChanged} />
-      ))}
-      <p className="muted" style={{ fontSize: 13, margin: 0 }}>
-        The checks that run before merging are chosen at the "Checks before merging" step, once the runner and git token are set up.
-      </p>
+      {list.map((p) =>
+        work === "code" ? (
+          <ProjectRow key={p.id} p={p} only="repo" onChanged={onChanged} />
+        ) : (
+          <p key={p.id} style={{ margin: 0, fontWeight: 600 }}>
+            {p.name}
+          </p>
+        ),
+      )}
+      {work === "code" && (
+        <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+          The checks that run before merging are chosen at the "Checks before merging" step, once the runner and git token are set up.
+        </p>
+      )}
     </div>
   );
 }
@@ -265,7 +301,7 @@ function TicketStep({ company }: { company: Company }) {
       setNote({ ok: false, text: (err as Error).message });
     }
   };
-  if (!project) return <p className="muted">Add a project first (step 2), then come back for this.</p>;
+  if (!project) return <p className="muted">Name a project first (step 2), then come back for this.</p>;
   return (
     <form onSubmit={add} style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 640 }}>
       <div className="field">
@@ -359,6 +395,7 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
   // Saving any option in the connect step also made the funding source, so "What pays for the CEO" is skipped
   // (BOS-1495 for the setup token, BOS-2815 for every option); until an earlier load shows the checklist item done.
   const [connected, setConnected] = useState(false);
+  const [chosen, setChosen] = useState<Work | null>(null);
   useEffect(() => {
     if (progress.data && step === null) {
       setStep(Math.min(progress.data.step, STEPS.length - 1));
@@ -367,7 +404,17 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
   }, [progress.data, step]);
   const company = companies.find((c) => c.id === companyId) ?? (companyId ? undefined : companies[0]);
   const list = usePoll((signal) => (company ? api<ChecklistItem[]>(`/api/companies/${company.id}/setup-checklist`, { signal }) : Promise.resolve([])), 3_000, `setup-steps-${company?.id ?? "none"}`);
+  const projs = usePoll((signal) => (company ? api<Project[]>(`/api/companies/${company.id}/projects`, { signal }) : Promise.resolve([] as Project[])), 15_000, `setup-work-${company?.id ?? "none"}`);
   if (step === null) return null;
+  // Documents is the default; a project with a repo means Code whatever was clicked.
+  const work: Work = (Array.isArray(projs.data) ? projs.data : []).some((p) => p.repoUrl) ? "code" : chosen ?? progress.data?.work ?? "docs";
+  const setWork = (w: Work) => {
+    setChosen(w);
+    save({ work: w });
+    list.reload();
+  };
+  const CODE_ONLY = ["git", "checks"];
+  const visible = STEPS.map((x, i) => ({ x, i })).filter(({ x }) => work === "code" || !CODE_ONLY.includes(x.id));
   // After any save in a step: re-read the checklist (so "Next" appears now) and the companies (the CEO's funding).
   const refresh = () => (list.reload(), onChanged());
   const save = (patch: Partial<Progress>) => void api("/api/setup-progress", { method: "PUT", body: patch }).catch(() => {});
@@ -384,21 +431,24 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
   const done = (id: string) => list.data?.find((i) => i.id === id)?.done ?? false;
   const FUNDING = STEPS.findIndex((x) => x.id === "funding");
   // Going forward steps over the funding step once the connect step has done it; Back and the stepper still reach it.
-  const next = step + 1 === FUNDING && connected && done("funding") ? step + 2 : step + 1;
+  const after = (from: number) => visible.find(({ i }) => i > from)?.i ?? from + 1;
+  const next = after(step) === FUNDING && connected && done("funding") ? after(FUNDING) : after(step);
+  const pos = Math.max(0, visible.findIndex(({ i }) => i === step));
+  const last = visible[visible.length - 1]!.i;
   return (
     <>
       <header className="page-head">
         <div>
-          <p className="label">Setting up</p>
+          <p className="label">Setting up{pos > 0 ? ` · Step ${pos + 1} of ${visible.length}` : ""}</p>
           <h1>{s.title}</h1>
           <p className="sub">{s.why}</p>
         </div>
       </header>
       <ol className="stepper" aria-label="Setup steps">
-        {STEPS.map((x, i) => (
+        {visible.map(({ x, i }, n) => (
           <li key={x.id} aria-current={i === step ? "step" : undefined} className={done(x.id) ? "done" : ""}>
             <button type="button" className="linkish" onClick={() => company && move(i)} disabled={!company && i > 0}>
-              <span aria-hidden="true">{done(x.id) ? "✓" : i + 1}</span> {x.title}
+              <span aria-hidden="true">{done(x.id) ? "✓" : n + 1}</span> {x.title}
             </button>
           </li>
         ))}
@@ -415,7 +465,7 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
             }}
           />
         )}
-        {step === 1 && company && <ProjectStep company={company} onChanged={refresh} />}
+        {step === 1 && company && <ProjectStep company={company} work={work} onWork={setWork} onChanged={refresh} />}
         {step === 2 && company && <RunnerStep company={company} onChanged={refresh} />}
         {step === 3 && company && <ClaudeStep company={company} onChanged={refresh} onSaved={() => setConnected(true)} />}
         {step === 4 && company && <GitStep company={company} onChanged={refresh} />}
@@ -424,11 +474,11 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
         {step === 7 && company && <TicketStep company={company} />}
         <div className="setup-nav">
           {step > 0 && (
-            <button type="button" className="btn" onClick={() => move(step - 1)}>
+            <button type="button" className="btn" onClick={() => move([...visible].reverse().find(({ i }) => i < step)?.i ?? step - 1)}>
               Back
             </button>
           )}
-          {step < STEPS.length - 1 ? (
+          {step < last ? (
             <>
               <button type="button" className={done(s.id) ? "btn primary" : "btn"} disabled={!company} onClick={() => move(next)}>
                 {done(s.id) ? "Next" : "Skip for now"}

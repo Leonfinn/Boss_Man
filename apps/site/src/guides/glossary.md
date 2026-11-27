@@ -52,7 +52,7 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 
 - **Feature**: Something users would notice or ask for, kept on the **Features** page with a status, demand, effort and priority. A feature does no work itself: one or more tasks deliver it. Agents also call it a feature request. ([Guide 1](/guides/how-boss-man-works#features-tasks-and-sub-tasks))
 - **Flag**: The notification level that shows on the Notifications page and as a browser notification. Tick **Also send flags** to get them on your phone too. ([Guide 8](/guides/phone-notifications#notification-levels))
-- **Funding source**: A named account that pays for agents, such as your Claude Max plan, added under **Settings > Funding**. Boss Man uses it to track cost and quota. ([Guide 3](/guides/first-company-and-ticket#7-what-pays-for-the-ceo))
+- **Funding source**: A named account that pays for agents, such as your Claude Max plan, added under **Settings > Funding**. Boss Man uses it to track cost and quota. ([Guide 3](/guides/first-company-and-ticket#7-what-pays-for-the-ceo), and [What agents cost](/guides/what-agents-cost))
 
 ## H
 
@@ -123,7 +123,7 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 
 - **Scrum Master**: An optional agent you can hire. It chases tickets that stay stuck. What it may do is set under **Settings > Watchdog**. ([Guide 5](/guides/agents-and-models#hire-an-agent))
 - **Secrets**: The tokens and keys Boss Man stores encrypted under **Settings > Secrets**, such as a Claude setup-token or a git token. Boss Man never shows a secret again after you save it. ([Guide 5](/guides/agents-and-models#add-an-account))
-- **Setup-token**: A long-lived token for your Claude Pro or Max plan, made by running `claude setup-token` on your own computer. ([Guide 3](/guides/first-company-and-ticket#4-how-do-you-want-to-connect-your-first-agent))
+- **Setup-token**: A long-lived token for your Claude Pro or Max plan, made by running `claude setup-token` on your own computer. It lasts one year. ([Connect a Claude account](/guides/connect-a-claude-account#connect-a-claude-plan-with-a-setup-token))
 - **Setup wizard**: The eight steps that open after you make the owner account, to create a company, connect your accounts and start a first ticket. Run it again with **Settings > Run the setup wizard**. ([Guide 3](/guides/first-company-and-ticket))
 - **Sign-off**: Your approval before Boss Man merges high or critical work, asked for on a card after the reviewer approves. The card lists the reviews, the last quick check and how many files changed. Choose **Approve and merge** or **Send it back**. ([Guide 7](/guides/reviews-and-merge-queue#your-sign-off))
 - **Skills**: Extra know-how for agents, added from a link, a draft or an upload. A Security Reviewer can check each one, and you approve every one. Open **Skills** in the sidebar. ([Guide 9](/guides/add-ons))

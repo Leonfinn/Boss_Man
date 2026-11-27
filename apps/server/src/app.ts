@@ -38,6 +38,7 @@ import { runnerWatchService } from "./services/runner-watch.js";
 import { runnerReportService } from "./services/runner-report.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
 import { serverStatusService } from "./services/server-status.js";
+import { WRAP_LINE } from "./services/watch-triggers.js";
 import { failuresForStatus } from "./services/merge-failures.js";
 import { raiseCostAlert } from "./services/cost-check.js";
 import { addonsService, mergeHostAddons, unknownAddons } from "./services/addons.js";
@@ -177,7 +178,8 @@ const OWNER_TZ = timeZoneOr(process.env.TZ);
 /** Set on the blue/green colours only (deploy/truenas-bluegreen.yml); null on a single server. */
 const colour = () => (process.env.BOSSMAN_COLOUR === "blue" || process.env.BOSSMAN_COLOUR === "green" ? process.env.BOSSMAN_COLOUR : null);
 const STARTED_AT = new Date().toISOString();
-const SERVER_VERSION = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
+// BOS-2799: an image install is told its release by the updater (BOSSMAN_VERSION); package.json stays 0.0.0 until the package is stamped.
+const SERVER_VERSION = process.env.BOSSMAN_VERSION?.trim() || (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
 
 export type AppOptions = {
   db: Db;
@@ -706,6 +708,7 @@ export async function buildApp(opts: AppOptions) {
     netguardAllow,
     runLimits: (id) => scheduler.runLimits(id),
     mergeFailures: (id) => failuresForStatus(db, id),
+    holdRecords: async () => (await maintenance.history(5)).map((r) => ({ startedAt: r.startedAt.toISOString(), kind: r.kind, endedAt: r.endedAt?.toISOString() ?? null, endTitle: r.endTitle, wrapUpLines: r.events.filter((e) => e.text === "Wrap-up asked" || WRAP_LINE.test(e.text)).map((e) => `${e.at}: ${e.text}`) })),
     mergeTrain: (id) => mergeTrainStatus(db, id, undefined, (ticketId) => review.seatPhase(ticketId)),
     // BOS-2119: read when server_status is asked, after `review` below is built.
     landingTurns: (id) => review.landingTurnStatus(id),
@@ -2865,7 +2868,9 @@ export async function buildApp(opts: AppOptions) {
         .object({
           answer: z.string().trim().min(1).max(OWNER_MESSAGE_MAX),
           assigneeAgentId: Uuid.optional(),
-          note: z.string().trim().max(2000).optional(),
+          // BOS-2798: a note can carry pasted command output, which the raiser's wake gets whole; 2000 refused most logs.
+          // What reads it for a short field (a lesson, a change reason) caps or checks it there.
+          note: z.string().trim().max(20_000).optional(),
           reasonLink: z.string().trim().max(400).optional(),
           custom: z.boolean().optional(),
           alwaysScope: z.enum(["agent", "company"]).optional(),

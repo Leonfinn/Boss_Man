@@ -37,22 +37,26 @@ const counted = isNull(feedbackNotes.confirmTokenHash);
 const planningTicket = (t: { title: string; planFirst: boolean }) => t.planFirst || /^(plan|design)\s*[(:]/i.test(t.title.trim());
 
 /**
- * BOS-2686: whether a ticket is delivery work for its feature. Delivery is what the feature promised: a ticket on it
- * from before it first went live (features.liveBaselineAt). A ticket added after that is a follow-up, and plan and
- * design tickets are never delivery. With no baseline (an unreleased feature) every ticket is delivery.
+ * BOS-2686 / BOS-2835: whether a ticket is delivery work for its feature. Delivery is what the feature promised: a
+ * ticket on it that nobody filed as a follow-up. Only a follow-up (a ticket handed on from another ticket, so it has a
+ * parent; BOS-2682) shows on the feature without holding it or reopening it, and plan and design tickets are never
+ * delivery. A ticket created after the feature first went live is still delivery: a fix nobody asked for is work the
+ * feature owns until it is live (BOS-2835), not a follow-up that releases it straight away. A follow-up recorded from
+ * a plan ticket is still a parent ticket, so it too is a follow-up.
  */
-export function isDeliveryTicket(t: { createdAt: Date; title: string; planFirst: boolean }, liveBaselineAt: Date | null | undefined): boolean {
+export function isDeliveryTicket(t: { title: string; planFirst: boolean; parentTicketId?: string | null }): boolean {
+  if (t.parentTicketId) return false;
   if (planningTicket(t)) return false;
-  return !liveBaselineAt || t.createdAt.getTime() <= liveBaselineAt.getTime();
+  return true;
 }
 
 /**
  * BOS-2686: when a feature first went live, from its tickets' recorded go-live: the earliest liveAt or liveMarkedAt of
  * a delivery ticket, or null when none says. A baseline already stored on the feature is never moved.
  */
-export function liveBaselineOf(rows: Array<{ createdAt: Date; title: string; planFirst: boolean; liveAt: Date | null; liveMarkedAt: Date | null }>): Date | null {
+export function liveBaselineOf(rows: Array<{ title: string; planFirst: boolean; parentTicketId?: string | null; liveAt: Date | null; liveMarkedAt: Date | null }>): Date | null {
   const stamps = rows
-    .filter((t) => isDeliveryTicket(t, null))
+    .filter((t) => isDeliveryTicket(t))
     .map((t) => t.liveAt ?? t.liveMarkedAt)
     .filter((d): d is Date => !!d);
   return stamps.length ? new Date(Math.min(...stamps.map((d) => d.getTime()))) : null;
@@ -693,16 +697,18 @@ export function feedbackService(
      *   3. released earlier, and a delivery ticket is open: in progress.
      *   4. a delivery ticket is in progress or in review: in progress (from idea, considering or planned).
      *   5. otherwise: unchanged.
-     * A delivery ticket is one on the feature from before it first went live (features.liveBaselineAt); a ticket added
-     * after that is a follow-up, and plan/design tickets are not delivery work, so neither holds the feature nor
-     * reopens it. Once a ticket of it is live the first time, the feature is live and that is baselineAt from then on.
+     * A delivery ticket is one on the feature that nobody filed as a follow-up, so it holds the feature open and can
+     * reopen it; only follow-ups (handed on from another ticket, so they have a parent) and plan/design tickets are
+     * not delivery. BOS-2835: a ticket created after the feature first went live is delivery too, so a fix filed on a
+     * released feature keeps it open (and a manual In progress stands) until it is live. Once a ticket of it is live
+     * the first time, the feature is live and that is baselineAt from then on.
      */
     async syncFeature(featureId: string | null | undefined) {
       if (!featureId) return null;
       const [f] = await db.select().from(features).where(eq(features.id, featureId));
       if (!f || f.status === "declined") return null;
       const rows = await db.select().from(tickets).where(and(eq(tickets.featureId, featureId), isNull(tickets.parentTicketId)));
-      const delivery = rows.filter((t) => isDeliveryTicket(t, f.liveBaselineAt));
+      const delivery = rows.filter((t) => isDeliveryTicket(t));
       const live = new Map<string, boolean>();
       const isLive = async (t: (typeof tickets.$inferSelect)) => {
         if (!live.has(t.id)) live.set(t.id, await this.ticketLive(t, f));
@@ -716,14 +722,14 @@ export function feedbackService(
           break;
         }
       }
-      // The feature is live once a delivery ticket is: from then on, a ticket added to it is a follow-up (rule 3).
+      // The feature is live once a delivery ticket is; from then on the baseline is on record (BOS-2686).
       let baseline = f.liveBaselineAt;
       if (!baseline) {
         for (const t of delivery) if (await isLive(t)) baseline = t.liveAt ?? t.liveMarkedAt ?? now();
         baseline ??= liveBaselineOf(rows);
       }
-      // Rule 3: a follow-up never reopens a released feature; only a delivery ticket still open does (and it would
-      // have to be dated before the feature went live). Rule 4: delivery work in progress or in review.
+      // Rule 3: a delivery ticket still open reopens a released feature; a follow-up does not (BOS-2835). Rule 4:
+      // delivery work in progress or in review.
       const active = delivery.some((t) => t.systemState === "in_progress" || t.systemState === "review");
       const next: FeatureStatus | null = released
         ? "released"

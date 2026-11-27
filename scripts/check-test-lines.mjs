@@ -1,9 +1,11 @@
 #!/usr/bin/env node
-// Ratchet for the four test-line shapes behind most GitHub-only flakes (BOS-1720 sweep, fix 6; CLAUDE.md "Writing tests"):
-//   bare-sleep       a fixed sleep (`await new Promise(r => setTimeout(r, 300))`, `sleep(500)`) outside a polling loop
+// Ratchet for the five test-line shapes behind most GitHub-only flakes (BOS-1720 sweep, fix 6; CLAUDE.md "Writing tests"):
+//   bare-sleep       a fixed sleep (`await new Promise(r => setTimeout(r, 300))`, `sleep(500))` outside a polling loop
 //   elapsed-limit    `expect(elapsed).toBeLessThan(n)`: a wall-clock limit tuned to one machine
 //   fresh-date-sum   a sum or difference on a fresh `Date.now()` inside an `expect` (the clock moved between the two reads)
 //   fixed-length-read  `readFileSync(other).slice(0, N)`: a fixed number of characters of another file's text
+//   hidden-stderr    `2>/dev/null`, `2> /dev/null`, `&>/dev/null`, `>/dev/null 2>&1`, `2>&-` on a test step (BOS-2794):
+//                    matched on the raw line, since the redirect usually sits inside a string passed to execSync/spawn
 // scripts/test-lines-baseline.json holds today's count per rule and file. A file may not have MORE hits of a rule than its
 // baseline (existing lines stay until touched); a lower count passes with a hint to run `--update`, so two branches that each
 // remove a hit don't conflict on a failing check. Usage: check-test-lines.mjs [--update] [--root <dir>]
@@ -41,11 +43,15 @@ export const RULES = {
   "elapsed-limit": { fix: "time the work against a baseline run in turn on the same machine, or give GitHub its own LIMIT_MS and say what it still catches" },
   "fresh-date-sum": { fix: "read Date.now() once into a constant and compare to that, or use vi.useFakeTimers() and vi.setSystemTime()" },
   "fixed-length-read": { fix: "read the whole file, or match the one line or marker you mean, so the test doesn't depend on where the text happens to fall" },
+  "hidden-stderr": { fix: "let the error show, or capture it and assert on it; if the step is allowed to fail, say why with `test-lines-ok: <why>`" },
 };
+
+// Matched on the raw line: in a .ts test the redirect is inside a string passed to execSync/spawn, which sanitize() blanks.
+const HIDDEN_STDERR = /(?:2>\s*\/dev\/null|&>\s*\/dev\/null|>\s*\/dev\/null\s+2>&1|2>&-)/;
 
 // ---- code view: comments and string insides blanked, newlines kept ----
 /** @returns {{ code: string, markers: Set<number> }} markers = 0-based lines covered by a comment carrying test-lines-ok */
-export function sanitize(src) {
+export function sanitize(src, { shell = false } = {}) {
   let out = "";
   const markers = new Set();
   let line = 0, recent = "", i = 0;
@@ -54,6 +60,11 @@ export function sanitize(src) {
   const code = (ch) => { out += ch; if (ch === "\n") line++; else if (!/\s/.test(ch)) recent = (recent + ch).slice(-12); };
   while (i < n) {
     const c = src[i], d = src[i + 1];
+    if (shell && c === "#" && (i === 0 || /[\s;&|(]/.test(src[i - 1]))) {
+      let j = src.indexOf("\n", i); if (j < 0) j = n;
+      if (/test-lines-ok:/.test(src.slice(i, j))) markers.add(line);
+      out += " ".repeat(j - i); i = j; continue;
+    }
     if (c === "/" && d === "/") {
       let j = src.indexOf("\n", i); if (j < 0) j = n;
       if (/test-lines-ok:/.test(src.slice(i, j))) markers.add(line);
@@ -144,9 +155,35 @@ function isParam(code, idx, id) {
   return new RegExp(String.raw`(?:\([^()]*\b${e}\b[^()]*\)\s*(?::[^=;{]*)?=>|\b${e}\s*=>|function\s*\w*\s*\([^()]*\b${e}\b)`).test(before);
 }
 
+/** The line with its trailing comment removed (unquoted `#` in shell, `//` in JS/TS); the redirect can sit in a string. */
+function stripComment(line, shell) {
+  let q = null;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (q) { if (c === "\\" && q === '"') i++; else if (c === q) q = null; continue; }
+    if (c === "'" || c === '"') { q = c; continue; }
+    if (shell && c === "#" && (i === 0 || /[\s;&|(]/.test(line[i - 1]))) return line.slice(0, i);
+    if (!shell && c === "/" && line[i + 1] === "/") return line.slice(0, i);
+  }
+  return line;
+}
+
+/** hidden-stderr, on the raw line so a redirect inside a string is still seen: whole-line comments never count. */
+function scanHiddenStderr(text, markers, raw, shell) {
+  const out = [];
+  for (let l = 0; l < raw.length; l++) {
+    if (markers.has(l - 1) || markers.has(l)) continue;
+    const line = stripComment(raw[l], shell);
+    if (!HIDDEN_STDERR.test(line)) continue;
+    if (shell && /^\s*#/.test(raw[l])) continue;
+    out.push({ rule: "hidden-stderr", line: l + 1, text: raw[l].trim() });
+  }
+  return out;
+}
+
 /** @returns {{ rule: string, line: number, text: string }[]} */
-export function scanText(text) {
-  const { code, markers } = sanitize(text);
+export function scanText(text, { shell = false } = {}) {
+  const { code, markers } = sanitize(text, { shell });
   const raw = text.split("\n"), lines = code.split("\n");
   const starts = [0];
   for (let i = 0; i < code.length; i++) if (code[i] === "\n") starts.push(i + 1);
@@ -199,10 +236,13 @@ export function scanText(text) {
     for (const u of code.matchAll(use)) if (u.index >= end) add("fixed-length-read", u.index);
   }
 
-  return [...found].sort((a, b) => a[0] - b[0]).map(([l, rule]) => ({ rule, line: l + 1, text: raw[l].trim() }));
+  const onCode = [...found].sort((a, b) => a[0] - b[0]).map(([l, rule]) => ({ rule, line: l + 1, text: raw[l].trim() }));
+  // hidden-stderr joins the result; at most one hit per line (a code hit there wins, as in `found`).
+  const taken = new Set(onCode.map((h) => h.line));
+  return [...onCode, ...scanHiddenStderr(text, markers, raw, shell).filter((h) => !taken.has(h.line))].sort((a, b) => a.line - b.line || a.rule.localeCompare(b.rule));
 }
 
-const TEST_FILE = /(?:^|\/)test\/.*\.(?:ts|tsx|mjs|js)$|\.(?:test|spec)\.(?:ts|tsx|mjs|js)$/;
+const TEST_FILE = /(?:^|\/)test\/.*\.(?:ts|tsx|mjs|js)$|\.(?:test|spec)\.(?:ts|tsx|mjs|js)$|\.test\.sh$/;
 // This lint's own tests quote the patterns on purpose.
 const SKIP_FILE = /^scripts\/check-test-lines\.test\.mjs$/;
 
@@ -212,7 +252,7 @@ export function scanRepo(root) {
   const found = {};
   for (const rel of listed) {
     if (!TEST_FILE.test(rel) || SKIP_FILE.test(rel) || /(^|\/)node_modules\//.test(rel) || !existsSync(path.join(root, rel))) continue;
-    for (const h of scanText(readFileSync(path.join(root, rel), "utf8"))) ((found[h.rule] ??= {})[rel] ??= []).push(h);
+    for (const h of scanText(readFileSync(path.join(root, rel), "utf8"), { shell: rel.endsWith(".test.sh") })) ((found[h.rule] ??= {})[rel] ??= []).push(h);
   }
   return found;
 }
