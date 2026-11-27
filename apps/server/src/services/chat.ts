@@ -329,7 +329,7 @@ export function chatService(
         ...(await reportBackSection(db, companyId, agentId, new Date()).catch(() => [])),
         "",
         "The conversation so far, oldest first:",
-        ...recent.map((m) => `${m.role === "owner" ? "Owner" : m.role === "assistant" ? "You" : "Boss Man"}: ${m.text}`),
+        ...recent.map((m) => `${m.role === "owner" ? "Owner" : m.role === "assistant" ? "You" : "Boss Man"}: ${m.role === "assistant" ? stripChangeLines(m.text) : m.text}`),
       ].join("\n");
     },
 

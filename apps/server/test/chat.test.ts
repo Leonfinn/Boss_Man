@@ -836,6 +836,29 @@ describe("owner chat", () => {
     expect(saved.text.match(/Done in this reply:/g)).toHaveLength(1);
   });
 
+  it("does not show the CEO the what-changed lines saved under its earlier replies (BOS-2852)", async () => {
+    const c = await setup();
+    await c.db.delete(wakes);
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Tell me when you're done." });
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Start => x.type === "run.start")!;
+    const client = await c.mcp(start.runId);
+    await client.callTool({ name: "notify_owner", arguments: { level: "note", title: "Probe note" } });
+    await client.close();
+    await c.emit({ type: "run.update", runId: start.runId, update: { kind: "agent_message", text: "I told the owner." } });
+    await c.settle();
+    const saved = (await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items.at(-1) as { text: string };
+    expect(saved.text).toContain("Done in this reply: sent the owner a note.");
+    // The saved line stays on screen, but the next prompt must not carry it, or the model copies it.
+    await c.emit({ type: "run.ended", runId: start.runId, stopReason: "end_turn", error: null });
+    await c.settle();
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "And again?" });
+    await c.scheduler.tick();
+    const next = c.sent.filter((x): x is Start => x.type === "run.start").at(-1)!.prompt;
+    expect(next).toContain("You: I told the owner.");
+    expect(next).not.toContain("Done in this reply");
+  });
+
   it("counts neither a read nor a failed call as a change, and names an updated or moved ticket by its ref (BOS-806, QA BOS-821)", async () => {
     const c = await setup();
     await c.db.delete(wakes);
