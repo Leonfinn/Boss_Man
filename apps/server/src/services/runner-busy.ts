@@ -73,11 +73,13 @@ export async function checkJobsByCompany(db: Db, onRunnerOnly = false, at: Date 
  * `SERVER_WAIT_BLOCKS` in update-waits.ts, read by both.
  */
 export async function serverWaitChecks(db: Db): Promise<number> {
-  const [row] = await db
-    .select({ n: sql<number>`count(*)::int` })
-    .from(checkJobs)
-    .where(and(eq(checkJobs.state, "running"), sql`(${checkJobs.workerId} is null or ${checkJobs.kind} = 'merge' or ${checkJobs.scope} = 'full')`));
+  const [row] = await db.select({ n: sql<number>`count(*)::int` }).from(checkJobs).where(serverWaitWhere());
   return row?.n ?? 0;
+}
+
+/** The running jobs serverWaitChecks counts: one condition for the count and for the Merge queue's marks (BOS-2861). */
+function serverWaitWhere() {
+  return and(eq(checkJobs.state, "running"), sql`(${checkJobs.workerId} is null or ${checkJobs.kind} = 'merge' or ${checkJobs.scope} = 'full')`);
 }
 
 export type RunnerBusy = { runs: Map<string, number>; checks: Map<string, number>; byCompany: Map<string, number>; runsTotal: number; checksTotal: number };
@@ -94,7 +96,7 @@ export async function runnerBusy(db: Db, onRunnerOnly = false, at: Date = new Da
   return { runs: r, checks: c, byCompany, runsTotal: sum(r), checksTotal: sum(c) };
 }
 
-export type RunnerCheck = { companyId: string; ticket: string | null; kind: string; scope: string; startedAt: string | null; runningForMinutes: number; usuallyMinutes: number | null };
+export type RunnerCheck = { id: string; companyId: string; ticket: string | null; kind: string; scope: string; startedAt: string | null; runningForMinutes: number; usuallyMinutes: number | null };
 
 /** The check job's ticket reference ("BOS-12"), or null without a ticket number. */
 const jobTicketRef = () => sql<string | null>`(select case when t."number" is null then null else coalesce(nullif(c."ticket_prefix", ''), 'T') || '-' || t."number"::text end from "tickets" t left join "companies" c on c."id" = t."company_id" where t."id" = ${checkJobs.ticketId})`;
@@ -104,9 +106,9 @@ const jobTicketRef = () => sql<string | null>`(select case when t."number" is nu
  * waits for them (BOS-2108: swapping a runner doesn't touch the worker), so the banner and server_status name them as
  * "not waited for", which is what the owner saw running on 24 Nov while the update waited for something else.
  */
-export async function workerChecks(db: Db): Promise<Array<{ companyId: string; ticket: string | null; kind: string; scope: string }>> {
+export async function workerChecks(db: Db): Promise<Array<{ id: string; companyId: string; ticket: string | null; kind: string; scope: string }>> {
   return db
-    .select({ companyId: checkJobs.companyId, ticket: jobTicketRef(), kind: checkJobs.kind, scope: checkJobs.scope })
+    .select({ id: checkJobs.id, companyId: checkJobs.companyId, ticket: jobTicketRef(), kind: checkJobs.kind, scope: checkJobs.scope })
     .from(checkJobs)
     .where(and(eq(checkJobs.state, "running"), isNotNull(checkJobs.workerId)))
     .orderBy(checkJobs.startedAt);
@@ -119,6 +121,7 @@ export async function workerChecks(db: Db): Promise<Array<{ companyId: string; t
 export async function runnerChecks(db: Db, at: Date): Promise<RunnerCheck[]> {
   const live = await db
     .select({
+      id: checkJobs.id,
       companyId: checkJobs.companyId,
       kind: checkJobs.kind,
       scope: checkJobs.scope,
@@ -142,7 +145,41 @@ export async function runnerChecks(db: Db, at: Date): Promise<RunnerCheck[]> {
         .limit(5);
       usual.set(key, done.length ? Math.max(1, Math.round(done.reduce((a, d) => a + d.secs, 0) / done.length / 60)) : null);
     }
-    out.push({ companyId: j.companyId, ticket: j.ticket, kind: j.kind, scope: j.scope, startedAt: j.startedAt ? new Date(j.startedAt).toISOString() : null, runningForMinutes: j.startedAt ? Math.max(0, Math.round((at.getTime() - new Date(j.startedAt).getTime()) / 60_000)) : 0, usuallyMinutes: usual.get(key) ?? null });
+    out.push({ id: j.id, companyId: j.companyId, ticket: j.ticket, kind: j.kind, scope: j.scope, startedAt: j.startedAt ? new Date(j.startedAt).toISOString() : null, runningForMinutes: j.startedAt ? Math.max(0, Math.round((at.getTime() - new Date(j.startedAt).getTime()) / 60_000)) : 0, usuallyMinutes: usual.get(key) ?? null });
   }
   return out;
+}
+
+/** BOS-2861: one running check as the Merge queue marks it while an update drains: does that update wait for it? */
+export type CheckUpdateMark = { jobId: string; ticketId: string | null; kind: string; holdsUpdate: boolean };
+
+/**
+ * BOS-2861: the company's running checks an update waits for (`holdsUpdate`) or lets run, from the very reads the waits use:
+ * a runner drain waits for runnerChecks and lets workerChecks run (BOS-2108); a server update's quiet wait counts
+ * serverWaitChecks (every check on the runner, and a merge or full check anywhere) and lets a worker's quick checks run
+ * (BOS-1748). With both on, a check either one waits for holds the update. A running check neither read names (a dead row
+ * on the runner past the stuck window) gets no mark. On 27 Nov the owner read a worker's new quick check as 20 more minutes
+ * of a runner update, because the Merge queue showed it as plain "Running" under a banner saying the update waits for checks.
+ */
+export async function updateCheckMarks(db: Db, companyId: string, waits: { runner: boolean; server: boolean }, at: Date = new Date()): Promise<CheckUpdateMark[]> {
+  if (!waits.runner && !waits.server) return [];
+  const waited = new Set<string>(); // not state: local to this call
+  const letRun = new Set<string>(); // not state: local to this call
+  if (waits.runner) {
+    const [onRunner, onWorker] = await Promise.all([runnerChecks(db, at), workerChecks(db)]);
+    for (const c of onRunner) waited.add(c.id);
+    for (const c of onWorker) letRun.add(c.id);
+  }
+  if (waits.server) {
+    const [counted, onWorker] = await Promise.all([db.select({ id: checkJobs.id }).from(checkJobs).where(serverWaitWhere()), workerChecks(db)]);
+    for (const c of counted) waited.add(c.id);
+    for (const c of onWorker) letRun.add(c.id);
+  }
+  const ids = new Set([...waited, ...letRun]);
+  if (!ids.size) return [];
+  const rows = await db
+    .select({ id: checkJobs.id, ticketId: checkJobs.ticketId, kind: checkJobs.kind })
+    .from(checkJobs)
+    .where(and(eq(checkJobs.companyId, companyId), eq(checkJobs.state, "running")));
+  return rows.filter((r) => ids.has(r.id)).map((r) => ({ jobId: r.id, ticketId: r.ticketId, kind: r.kind, holdsUpdate: waited.has(r.id) }));
 }
