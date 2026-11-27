@@ -9,11 +9,15 @@ lead: Short answers to the questions people ask first.
 
 ## What is Boss Man?
 
-A web app on your own machine where AI agents build your software. You collect feedback, rank features and plan the roadmap. Agents plan, write and review the work as tasks on a board ([what features and tasks are](/guides/how-boss-man-works#features-tasks-and-sub-tasks)), and when they need you, a card arrives on your Decisions page.
+A web app on your own machine where a team of AI agents does your work. You collect feedback, rank features and plan the roadmap. Agents plan, write and review the work as tasks on a board ([what features and tasks are](/guides/how-boss-man-works#features-tasks-and-sub-tasks)), and when they need you, a card arrives on your Decisions page.
+
+## Do I need to write code?
+
+No. Boss Man works for documents and research as well as code. When you set up a company, the wizard asks **What will your team work on?** Choose **Documents, research and writing**, and the agents write their results in your company's Wiki. For example: "Compare the three biggest garden centres near us and write a one-page summary", or "Draft this month's client report from these notes". Choose **Code in a git repository** if your agents will change software. See [Your first company and task](/guides/first-company-and-ticket#what-will-your-team-work-on).
 
 ## What does it cost?
 
-Boss Man is free and open source under the Apache 2.0 licence. You pay for your own machine and your own AI accounts.
+Boss Man is free and open source under the Apache 2.0 licence. You pay for your own machine and your own AI accounts: a Claude plan's monthly price, or what you use on an API key. See [What agents cost](/guides/what-agents-cost).
 
 ## Which AI does it use?
 
@@ -47,7 +51,7 @@ Start with the CEO and one or two agents. All of them share one plan's allowance
 
 ## What do I need to run it?
 
-A 64-bit Linux machine (x86-64 or arm64) with Docker and Docker Compose v2, a GitHub or Gitea account, and an AI account: a Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic. You need to be comfortable copying commands into a shell. Plan on 16 GB of memory for one company with the default settings, or 8 GB if fewer agents run at once: see [What machine do I need](/guides/install-boss-man#what-machine-do-i-need).
+A 64-bit Linux machine (x86-64 or arm64) with Docker and Docker Compose v2, and an AI account: a Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic. You pay for that account, and Boss Man itself is free. You need a GitHub or Gitea account only if your agents will work on code. You need to be comfortable copying commands into a shell. Plan on 16 GB of memory for one company with the default settings, or 8 GB if fewer agents run at once: see [What machine do I need](/guides/install-boss-man#what-machine-do-i-need).
 
 The main install uses ready-made images: you download two files from a release and run three Docker commands, with nothing built on your machine. See [Install from ready-made images](/guides/install-boss-man#install-from-ready-made-images). You can still build from source instead.
 
