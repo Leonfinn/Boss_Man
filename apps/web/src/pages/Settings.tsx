@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { AddToShortcuts } from "../pinned-pages";
 import type { Company } from "../api";
 import { NoCompany } from "../components/NoCompany";
 import { CompanyReviews } from "../components/ReviewPolicy";
@@ -431,6 +432,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             {current.label}
             {current.allCompanies && <span className="tag set-scope">All companies</span>}
           </h1>
+          <AddToShortcuts settingsPage={current.id} />
           <p className="sub">{current.help}</p>
         </div>
         <div className="set-head-wizard">{wizard}</div>

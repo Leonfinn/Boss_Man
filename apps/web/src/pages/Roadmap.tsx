@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { AddToShortcuts } from "../pinned-pages";
 import { NoCompany } from "../components/NoCompany";
 import { api, FEATURE_STATUS_LABEL, today, type Company, type FeatureRoadmapCompany, type Horizon, type RoadmapCompany, type RoadmapFeature, type RoadmapMilestone, type RoadmapObjective } from "../api";
 import { MilestoneLeft, type MilestoneTicketRow } from "./MilestoneLeft";
@@ -637,6 +638,7 @@ export function Roadmap({ companies, tab: tabParam, go }: { companies: Company[]
       <header className="page-head">
         <div>
           <h1>Roadmap</h1>
+          <AddToShortcuts page="roadmap" />
         </div>
         <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
           {tab === "timeline" && (
