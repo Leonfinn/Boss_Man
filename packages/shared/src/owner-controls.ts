@@ -22,6 +22,8 @@ export const OWNER_CONTROLS = {
     "Agents", "Skills", "Runs", "Merge queue", "Scrum Master log", "Workflow report", "Engagements", "Settings",
     // BOS-2669: the chip beside a page's title (26 pages), its toast's Undo, the gone-page screen's button, the menu section.
     "Add to shortcuts", "In shortcuts", "Undo", "Remove this shortcut",
+    // BOS-2669 ticket 3: the menu's Edit button and the full toast's link (the dialog's row buttons are named by page).
+    "Edit", "Edit shortcuts",
     "Switch company", "Create", "Creating", "New company", "Close menu", "Menu …", "Log out", "Keyboard shortcuts",
     "Save", "Saving", "Saved", "Attach file", "Attaching", "Remove", "Try again", "OK", "Cancel",
     // The error line a page shows when its first load fails (Features, Chat).

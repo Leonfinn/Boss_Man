@@ -84,6 +84,8 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "App.tsx": "Any screen",
   // BOS-2669: the Add to shortcuts chip (26 pages), its toast and the gone-page screen.
   "pinned-pages.tsx": "Any screen",
+  // BOS-2669 ticket 3: the Edit shortcuts dialog, opened from the menu on any screen.
+  "shortcuts-editor.tsx": "Any screen",
   "components/ImageAttach.tsx": "Any screen",
   // The Dashboard's "Company paused" notice has a Resume button: the same "Resume" the stop-all banner lists.
   "components/DashboardPanels.tsx": "Any screen",
