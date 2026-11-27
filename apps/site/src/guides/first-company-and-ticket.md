@@ -16,7 +16,7 @@ The top of each wizard page says which step you are on, for example "Step 2 of 6
 
 ## Your company
 
-Type a **Company name** and a sentence or two under **What it's for**, for example "We write market research reports for small shops". The CEO plans the work from this. Choose **Create the company**, then **Next**.
+Type a **Company name** and a sentence or two under **What it's for**, for example "We write market research reports for small shops". The CEO, the agent in charge of your company, plans the work from this. See [The CEO](/guides/the-ceo). Choose **Create the company**, then **Next**.
 
 Boss Man creates the company's CEO agent and a paused Wiki Maintainer. If the launcher is on (the image install always turns it on, and the build install sets `BOSSMAN_LAUNCHER=1` in `.env`, as [Install Boss Man](/guides/install-boss-man#build-from-source) shows), Boss Man also starts the company's runner. If it is off, you start the runner yourself at the runner step.
 
@@ -64,7 +64,7 @@ If you saved a Claude sign-in code at the Claude step, this step is already done
 
 ## A first task
 
-A task is one piece of work for an agent. To see how tasks differ from features, see [Features, tasks and sub-tasks](/guides/how-boss-man-works#features-tasks-and-sub-tasks).
+A task is one piece of work for an agent. For how to write a good one, with examples, see [Tasks and the board](/guides/tasks-and-the-board). To see how tasks differ from features, see [Features, tasks and sub-tasks](/guides/how-boss-man-works#features-tasks-and-sub-tasks).
 
 Type a **Title** and, under **Description**, say what you want back. For example:
 
