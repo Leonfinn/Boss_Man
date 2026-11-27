@@ -472,4 +472,27 @@ describe("BOS-2643: a watch of a day or more is opened as its own check ticket",
     const deps = await c.db.select().from(ticketDependencies);
     expect(deps.filter((d) => d.blockedTicketId === check!.id).map((d) => [d.blockerTicketId, d.until])).toEqual([[made.id, "merged"]]);
   });
+
+  it.each([
+    ["on the next real server update", "On the next real server update, the update card closes by itself", "the next real server update"],
+    ["one real install on x86 and ARM", "One real install on an x86 machine and an ARM machine starts from the published images", "One real install"],
+  ])("%s opens its own check; a one-time go-live reading stays on the build", async (_, text, phrase) => {
+    const c = await setup();
+    const READING = { text: "The live What's new page shows the entry", after: "merge" as const };
+    const made = await c.create(c.co.ceo.id, { title: "Event build", noCode: false, assignee: "Dev", acceptanceCriteria: [BEFORE, READING, { text, after: "merge" }] });
+    expect(made.isError, made.text).toBe(false);
+    expect(made.text).toContain(`Criterion 3 needs a watch ("${phrase}")`);
+    expect((await checksOf(c, made.id!)).map((x) => [x.checksCriterion, x.acceptanceCriteria])).toEqual([[3, [text]]]);
+  });
+
+  it("a ticket stored before the change, with an event criterion, is left as it is", async () => {
+    const c = await setup();
+    const EVENT = { text: "After the next beta release, a real image install shows the note", after: "merge" as const };
+    const before = new Date(LONG_WATCH_FROM.getTime() - 3_600_000);
+    const [old] = await c.db.insert(tickets).values({ companyId: c.co.company.id, projectId: c.project.id, title: "Old build with an event", systemState: "ready", assigneeAgentId: c.dev.id, acceptanceCriteria: [BEFORE, EVENT], createdAt: before }).returning();
+    const reset = await c.call(c.co.ceo.id, "update_ticket", { ticketId: old!.id, acceptanceCriteria: [BEFORE, EVENT], reason: "criteria again" });
+    expect(reset.isError, reset.text).toBe(false);
+    expect(await checksOf(c, old!.id)).toEqual([]);
+    expect((await c.row(old!.id)).acceptanceCriteria).toEqual([BEFORE, EVENT]);
+  });
 });

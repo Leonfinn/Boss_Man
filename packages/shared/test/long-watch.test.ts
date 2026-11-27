@@ -56,6 +56,7 @@ describe("eventWatchPhrase", () => {
 
   it.each([
     "The live page shows the new line",
+    "The live What's new page shows the entry",
     "One go-live reading of /api/health shows ok",
     "On the owner's host, Settings → Updates shows the commit",
     "Settings → Updates shows the next release date",
