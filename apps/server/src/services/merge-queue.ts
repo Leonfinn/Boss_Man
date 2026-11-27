@@ -525,6 +525,8 @@ export function mergeQueueService(
     runnerConnected?: (companyId: string) => Promise<boolean>;
     /** BOS-1486: a runner update is holding the line (a wrap-up hold is not one). */
     runnerUpdateOn?: () => Promise<boolean>;
+    /** BOS-2786: a wrap-up (the owner's or Boss Man's own) is holding new checks. */
+    wrapUpOn?: () => Promise<boolean>;
     /** BOS-1486: whether the launcher is on, so the screen may point at Start runner in Settings. */
     launcherOn?: () => boolean;
     /** BOS-1486: what holds the check slots and whether a red main holds checks back (server mode only). */
@@ -791,6 +793,7 @@ export function mergeQueueService(
       // BOS-1486: live state for the reason a merge waits. Absent deps (older callers, tests) mean "unknown", never a reason.
       const runnerUp = deps.runnerConnected ? await deps.runnerConnected(companyId).catch(() => null) : null;
       const runnerUpdateOn = deps.runnerUpdateOn ? await deps.runnerUpdateOn().catch(() => false) : false;
+      const wrapUpOn = deps.wrapUpOn ? await deps.wrapUpOn().catch(() => false) : false;
       const detail = deps.queueDetail && queue?.mode === "server" ? await deps.queueDetail(companyId).catch(() => null) : null;
       // BOS-2508: tickets the merge train itself holds waiting for a seat (1 = seated next). Such a merge has no check job yet,
       // so the check queue knows nothing of it; without this it fell through to the company-wide "ahead" count.
@@ -959,6 +962,11 @@ export function mergeQueueService(
         if (runnerUpdateOn) {
           blockerOf.set(r.id, "A runner update is holding new checks.");
           waiting.push({ ...base, state: "waiting_for_slot", label: `waiting for the runner update${why}`, stuck: false, next: "New checks start once the runner update is done (runs in progress finish first, then each runner is swapped).", actor: "system", decisionId: null });
+          continue;
+        }
+        if (wrapUpOn) {
+          blockerOf.set(r.id, "A wrap-up is holding new checks.");
+          waiting.push({ ...base, state: "waiting_for_slot", label: `waiting: agents are wrapping up for an update${why}`, stuck: false, next: "New checks start once the wrap-up ends; it lifts by itself with the update it is for (Settings → Server and runner → Updates).", actor: "system", decisionId: null });
           continue;
         }
         if (held) {

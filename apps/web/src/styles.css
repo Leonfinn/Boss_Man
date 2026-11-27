@@ -887,7 +887,7 @@ button.preset-card { cursor: pointer; }
 }
 @media (max-width: 899px) {
   /* "‹ Settings" at the top takes the page back to the menu (the menu is the phone's opening screen). */
-  .set-back { display: inline-flex; }
+  .set-back { display: flex; }
   /* A page shows only that back link, not the whole menu above it (BOS-1224); the bare #/settings menu is outside .set-layout. */
   .set-layout .set-nav { display: none; }
   /* The menu is the phone's opening screen: each row carries its hint and a chevron. */
@@ -2030,3 +2030,21 @@ details.pushes[open] > summary { margin-bottom: 8px; }
 .chat-find p { flex: 1 0 100%; margin: 0; font-size: 13px; }
 .find-hit { background: #ffe58a; color: inherit; border-radius: 2px; }
 .find-hit.current { background: #ffb020; outline: 2px solid var(--badge); }
+
+/* ---------- Custom shortcuts (BOS-2669 ticket 2) ---------- */
+/* The chip beside a page's title: the title shrinks to its words so the chip sits on its line, and wraps under on a phone. */
+.page-head h1:has(+ .pin-chip) { display: inline-block; margin-right: 12px; vertical-align: middle; }
+.pin-chip { display: inline-flex; align-items: center; gap: 6px; vertical-align: middle; min-height: 32px; padding: 4px 12px; border-radius: 999px; border: 1px solid var(--line-strong); background: var(--card); color: var(--ink); font-size: 13px; cursor: pointer; }
+.pin-chip:hover { border-color: var(--link); }
+.pin-chip[aria-pressed="true"] { background: var(--raise); color: var(--head); font-weight: 600; }
+@media (max-width: 640px) { .pin-chip { min-height: 44px; } }
+/* The menu's Shortcuts section: the heading is small, rows are the menu's own rows. */
+.side .side-shortcuts-title { margin: 0; padding: 0 10px 4px; font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--side-muted); }
+.side a.nav.just-added { outline: 2px solid var(--badge); outline-offset: -2px; }
+.side a.nav.gone svg { color: var(--amber-ink); }
+.side.collapsed .side-shortcuts-title { display: none; }
+.side.collapsed .nav-groups .side-shortcuts + section { border-top: 1px solid var(--line); padding-top: 8px; }
+/* The toast after a press: bottom centre, above everything but the menu sheet, with room for Undo. */
+.pin-toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 60; display: flex; align-items: center; gap: 14px; max-width: min(520px, calc(100vw - 24px)); padding: 10px 16px; border-radius: 10px; background: var(--raise); color: var(--head); border: 1px solid var(--line-strong); box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4); font-size: 14px; }
+.pin-toast-undo { flex: none; min-height: 36px; padding: 4px 12px; border: 0; border-radius: 8px; background: none; color: var(--link); font: inherit; font-weight: 600; text-decoration: underline; cursor: pointer; }
+@media (max-width: 640px) { .pin-toast-undo { min-height: 44px; } }

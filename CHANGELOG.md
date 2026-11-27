@@ -22,8 +22,13 @@ Release step: adding to this file is part of every release (Release Manager, on 
 6. The install guide's "Last tested on ..." line comes from the release's Install test, which starts when the Release
    workflow ends and takes 10 minutes or more, so the publish in step 5 shows the previous result. Before you finish the
    wake, check the new release (`gh release view v<version>`, or the releases page): it has an `install-result.json` file
-   once the test is done. Wait for it (schedule_check, do not poll), then run `scripts/publish-site.sh` a second time so the
-   guide shows the new result. If the release title ends "(install test FAILED)", also raise a ticket for the CEO with
+   once the test is done. Wait for it (schedule_check, do not poll). Since BOS-2787 the Install test's "site" job then
+   republishes the site by itself (scripts/republish-site-after-install.sh); check the live guide shows the new date,
+   version and minutes. Also read the release notes (`gh release view v<version>`) and the job (`gh run list
+   --workflow install-test.yml --limit 3`, then `gh run view <id>`): a failed or skipped republish shows there, as a
+   "Website republish FAILED" or "Website NOT republished" line and a red `site` job (a workflow cannot message Boss Man).
+   On either line, run `scripts/publish-site.sh` a second time yourself and, for "NOT republished", raise a ticket for
+   the Infrastructure Engineer to set up the "site" environment (docs/18-website.md). If the release title ends "(install test FAILED)", also raise a ticket for the CEO with
    `create_ticket` (project Development, risk high, size 1), saying which release failed. In the log entry say what the
    test gave (pass or fail, minutes) and whether the site was republished.
 7. Record the docs check, on every Monday docs-vs-code check (BOS-2667) as well as on a release wake: the Release

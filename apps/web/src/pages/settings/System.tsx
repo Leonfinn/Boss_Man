@@ -564,7 +564,7 @@ export function WrapUpRuns({ s, busy, onStop }: { s: WrapUpStatus; busy: boolean
             <li key={run.runId} style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "baseline" }}>
               <strong title={run.agent ?? undefined}>{run.agent ? run.agent.split(/\s+[-–]\s+/)[0] : "An agent"}</strong>
               <span className="muted">
-                {run.ticket ? `${run.ticket}${run.ticketTitle ? `: ${run.ticketTitle}` : ""}` : "no ticket"} · asked to wrap up {run.sinceWrapUpMinutes} min ago
+                {run.ticket ? `${run.ticket}${run.ticketTitle ? `: ${run.ticketTitle}` : ""}` : "no ticket"} · {run.askAt ? `Boss Man asks it to finish at ${atTime(run.askAt)}` : `asked to wrap up ${run.sinceWrapUpMinutes} min ago`}
                 {step ? ` · running ${step.title} for ${step.sinceMinutes} min` : ""}
               </span>
               {onCard ? (
