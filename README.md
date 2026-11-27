@@ -23,7 +23,7 @@ A one-minute tour (63 seconds), recorded from the real app with made-up data: th
 
 The rest of this section is the same install in the repository's own docs.
 
-You need a Linux host with Docker (a plain Linux box, a Proxmox VM, or TrueNAS SCALE), and a Claude subscription or an Anthropic API key, or any OpenAI compatible API key (tested so far with OpenRouter, Ollama and Synthetic). You can install from ready-made Docker images, published as pre-releases on the [releases page](https://github.com/Leonfinn/Boss_Man/releases), or build the containers from the source on your server.
+You need a Linux host with Docker (a plain Linux box, a Proxmox VM, or TrueNAS SCALE), and a Claude subscription or an Anthropic API key, or any OpenAI compatible API key (tested so far with OpenRouter, Ollama and Synthetic). You can install from ready-made Docker images, published as pre-releases on the [releases page](https://github.com/Leonfinn/Boss_Man/releases), or build the containers from the source on your server. A new image comes out once a week, on Tuesdays; building from source gets each change as soon as it is added. [What's new](CHANGELOG.md) says which image has each change.
 
 > **On Proxmox, use a VM, not an LXC container.** In most LXC containers the network guard cannot load, so agents' runners could reach your home network. See [docs/32-proxmox.md](docs/32-proxmox.md).
 
