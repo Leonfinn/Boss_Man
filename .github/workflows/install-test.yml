@@ -211,6 +211,12 @@ jobs:
   # website): a warning and a "Website NOT republished" line in the release notes, nothing published. A failed publish fails
   # this job and adds "Website republish FAILED" to the release notes; the old page stays live. The Release Manager reads
   # those lines on its "Release log: record" wake (CHANGELOG.md step 6); a workflow cannot message Boss Man itself.
+  # BOS-2801: the main-only environment is not enough on its own. A workflow_dispatch started on main can name any version,
+  # and `record` still reports that version (result "fail") when no release exists, after which this job would check out
+  # `v<version>`. If that tag pointed at an unreviewed commit, its pnpm install and publish script would run with the
+  # Cloudflare token. So the first step here checks, before any repo code runs and before any secret is used (the Cloudflare
+  # secrets stay on the last step only), that the release exists, is not a draft, and that its tag's commit is already on
+  # main. A tag on an unreviewed commit, or a version that was never released, stops the job with a clear error.
   site:
     needs: record
     if: ${{ always() && (needs.record.result == 'success' || needs.record.result == 'failure') && (needs.record.outputs.result == 'pass' || needs.record.outputs.result == 'fail') }}
@@ -228,6 +234,27 @@ jobs:
       SITE_URL: ${{ vars.SITE_URL }}
       CF_PAGES_PROJECT: ${{ vars.CF_PAGES_PROJECT }}
     steps:
+      - name: Require the release's commit to be on main (BOS-2801)
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "::error::Version '$VERSION' is not like 0.1.0-beta.1."; exit 1; }
+          # The release must exist and be published: a hand-run with a made-up version has nothing to publish.
+          draft="$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" || {
+            echo "::error::There is no release v$VERSION to republish the site from."; exit 1; }
+          [ "$draft" = false ] || { echo "::error::Release v$VERSION is still a draft; not publishing it."; exit 1; }
+          # The tag's commit must already be on main, so a tag pushed to an unreviewed commit never runs its code here.
+          git init --quiet "$RUNNER_TEMP/provenance"
+          cd "$RUNNER_TEMP/provenance"
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          git fetch --quiet --no-tags origin \
+            "+refs/heads/main:refs/remotes/origin/main" \
+            "+refs/tags/v$VERSION:refs/tags/v$VERSION"
+          tag_commit="$(git rev-parse --verify "refs/tags/v$VERSION^{commit}")"
+          if ! git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main; then
+            echo "::error::v$VERSION points at $tag_commit, which is not on main. Refusing to run its code with the site's secrets."
+            exit 1
+          fi
+          echo "v$VERSION ($tag_commit) is on main; safe to publish."
       - uses: actions/checkout@v7
         with:
           ref: v${{ needs.record.outputs.version }}
