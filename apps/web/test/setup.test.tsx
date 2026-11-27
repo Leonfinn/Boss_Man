@@ -54,6 +54,13 @@ describe("setup wizard checks", () => {
   });
 });
 
+function mockDocsLocal() {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => new Response(JSON.stringify(url === "/api/setup-progress" ? { dismissed: false, step: 1, companyId: "c1" } : url.endsWith("/projects") ? [{ id: "p1", name: "Market research", repoUrl: null }] : []), { status: 200 })),
+  );
+}
+
 describe("setup wizard: what will your team work on (BOS-2813)", () => {
   const docsProject = { ...project, repoUrl: null };
   function mockDocs(step: number, work?: "docs" | "code") {
@@ -66,14 +73,14 @@ describe("setup wizard: what will your team work on (BOS-2813)", () => {
     );
   }
 
-  it("defaults to Documents: no repo fields, no git-token or checks steps, 'Step 2 of 7'", async () => {
+  it("defaults to Documents: no repo fields, no git-token or checks steps, 'step 2 of 7'", async () => {
     mockDocs(1);
     render(<Setup companies={[company]} go={() => {}} onChanged={() => {}} />);
     expect(((await screen.findByLabelText("Documents, research and writing", { exact: false })) as HTMLInputElement).checked).toBe(true);
     expect(screen.queryByLabelText("Git repo")).toBeNull();
     expect(screen.queryByText(/A git token/)).toBeNull();
     expect(screen.queryByText(/Checks before merging/)).toBeNull();
-    expect(screen.getByText(/Step 2 of 7/)).toBeTruthy();
+    expect(screen.getByText(/step 2 of 7/)).toBeTruthy();
   });
 
   it("Code shows the repo fields, saves the choice and brings the two steps back", async () => {
@@ -82,13 +89,13 @@ describe("setup wizard: what will your team work on (BOS-2813)", () => {
     fireEvent.click(await screen.findByLabelText("Code in a git repository", { exact: false }));
     expect(await screen.findByLabelText("Git repo")).toBeTruthy();
     expect(screen.getByText(/A git token/)).toBeTruthy();
-    expect(screen.getByText(/Step 2 of 9/)).toBeTruthy();
+    expect(screen.getByText(/step 2 of 9/)).toBeTruthy();
     const put = vi.mocked(fetch).mock.calls.find(([u, i]) => u === "/api/setup-progress" && (i as RequestInit | undefined)?.method === "PUT");
     expect(JSON.parse(String((put![1] as RequestInit).body))).toEqual({ work: "code" });
   });
 
-  it("goes from the runner and Claude steps straight on to funding without the code steps", async () => {
-    mockDocs(3);
+  it("goes from the Claude and runner steps straight on to funding without the code steps", async () => {
+    mockDocs(2);
     render(<Setup companies={[company]} go={() => {}} onChanged={() => {}} />);
     await screen.findByLabelText("Claude sign-in code");
     // A team that has never used git sees none of these words on the Claude step (criterion 5).
@@ -98,7 +105,9 @@ describe("setup wizard: what will your team work on (BOS-2813)", () => {
     page.querySelectorAll("code").forEach((c) => c.remove()); // the command to type, `claude setup-token`
     const wizardText = page.textContent ?? "";
     expect(wizardText).not.toMatch(/\b(repo|branch|merge|merging|token)\b/i);
-    fireEvent.click(screen.getByText("Skip for now"));
+    fireEvent.click(screen.getByText("Skip this step"));
+    expect((await screen.findByRole("heading", { level: 1 })).textContent).toBe("Your agents' workspace");
+    fireEvent.click(await screen.findByText("Skip this step"));
     expect((await screen.findByRole("heading", { level: 1 })).textContent).toBe("What pays for the CEO");
   });
 });
@@ -114,7 +123,7 @@ describe("setup wizard: Claude and runner steps (BOS-1495)", () => {
         const method = init?.method ?? "GET";
         calls.push({ url, method, body: init?.body ? JSON.parse(String(init.body)) : null });
         const body =
-          url === "/api/setup-progress" ? { dismissed: false, step: 3, companyId: "c1" }
+          url === "/api/setup-progress" ? { dismissed: false, step: 2, companyId: "c1" }
           : url === "/api/secrets" && method === "POST" ? { secret: { id: "s1" }, warnings: [] }
           : url === "/api/funding-sources" && method === "POST" ? { id: "f1" }
           : url.endsWith("/setup-checklist") || url.endsWith("/grants") || url === "/api/secrets" ? []
@@ -146,7 +155,7 @@ describe("setup wizard: Claude and runner steps (BOS-1495)", () => {
       vi.fn(async (url: string, init?: RequestInit) => {
         calls.push(`${init?.method ?? "GET"} ${url}`);
         const body =
-          url === "/api/setup-progress" ? { dismissed: false, step: 3, companyId: "c1" }
+          url === "/api/setup-progress" ? { dismissed: false, step: 2, companyId: "c1" }
           : url.endsWith("/grants") ? [{ id: "g1", envName: "CLAUDE_CODE_OAUTH_TOKEN", secretId: "s1", secretName: "App Co Claude setup-token", hint: null, deployTargetId: null, agentIds: [] }]
           : url.endsWith("/setup-checklist") ? allDone
           : [];
@@ -167,7 +176,7 @@ describe("setup wizard: Claude and runner steps (BOS-1495)", () => {
       vi.fn(async (url: string, init?: RequestInit) => {
         const method = init?.method ?? "GET";
         const body =
-          url === "/api/setup-progress" ? { dismissed: false, step: 3, companyId: "c1" }
+          url === "/api/setup-progress" ? { dismissed: false, step: 2, companyId: "c1" }
           : url === "/api/secrets" && method === "POST" ? { secret: { id: "s1" }, warnings: [] }
           : url === "/api/funding-sources" && method === "POST" ? { id: "f1" }
           : url.endsWith("/setup-checklist") ? allDone
@@ -182,25 +191,27 @@ describe("setup wizard: Claude and runner steps (BOS-1495)", () => {
     fireEvent.change(await screen.findByLabelText("Claude sign-in code"), { target: { value: "sk-ant-oat01-made-up" } });
     fireEvent.click(screen.getByText("Save the code"));
     await screen.findByText(/stored encrypted/);
-    fireEvent.click(await screen.findByText("Next")); // Claude -> git token
+    fireEvent.click(await screen.findByText(/^Next: /)); // Claude -> the agents' workspace
+    expect((await screen.findByRole("heading", { level: 1 })).textContent).toBe("Your agents' workspace");
+    fireEvent.click(await screen.findByText(/^Next: /)); // workspace -> git token
     expect((await screen.findByRole("heading", { level: 1 })).textContent).toBe("A git token");
-    fireEvent.click(await screen.findByText("Next")); // git token -> checks
+    fireEvent.click(await screen.findByText(/^Next: /)); // git token -> checks
     await screen.findByText("Before merging, Boss Man will");
-    fireEvent.click(screen.getByText("Next")); // checks -> would be funding, goes to the first task
-    expect((await screen.findByRole("heading", { level: 1 })).textContent).toBe("A first task");
+    fireEvent.click(screen.getByText(/^Next: /)); // checks -> would be funding, goes to the first task
+    expect((await screen.findByRole("heading", { level: 1 })).textContent).toBe("First task");
   });
 
   it("shows the runner as one line, with the one thing to do when it is not connected", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string) => {
-        const body = url === "/api/setup-progress" ? { dismissed: false, step: 2, companyId: "c1" } : url.endsWith("/runner") ? { registered: false } : [];
+        const body = url === "/api/setup-progress" ? { dismissed: false, step: 3, companyId: "c1" } : url.endsWith("/runner") ? { registered: false } : [];
         return new Response(JSON.stringify(body), { status: 200 });
       }),
     );
     render(<Setup companies={[company]} go={() => {}} onChanged={() => {}} />);
     expect((await screen.findByTestId("setup-runner-line")).textContent).toContain("not connected");
-    expect(screen.getByText("Settings → Server and runner → Runner").getAttribute("href")).toBe("#/settings/c1/runner");
+    expect(screen.getByText("the runner guide").getAttribute("href")).toContain("docs/29-tune-and-troubleshoot.md");
     expect(screen.queryByText("Add-ons")).toBeNull();
     expect(screen.queryByTestId("setup-runner-memory")).toBeNull(); // no launcher line: nothing shown
   });
@@ -210,7 +221,7 @@ describe("setup wizard: Claude and runner steps (BOS-1495)", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string) => {
-        const body = url === "/api/setup-progress" ? { dismissed: false, step: 2, companyId: "c1" } : url.endsWith("/runner") ? { registered: false, launcher: null, memoryLine: line } : [];
+        const body = url === "/api/setup-progress" ? { dismissed: false, step: 3, companyId: "c1" } : url.endsWith("/runner") ? { registered: false, launcher: null, memoryLine: line } : [];
         return new Response(JSON.stringify(body), { status: 200 });
       }),
     );
@@ -222,7 +233,7 @@ describe("setup wizard: Claude and runner steps (BOS-1495)", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string) => {
-        const body = url === "/api/setup-progress" ? { dismissed: false, step: 2, companyId: "c1" } : url.endsWith("/runner") ? runner : [];
+        const body = url === "/api/setup-progress" ? { dismissed: false, step: 3, companyId: "c1" } : url.endsWith("/runner") ? runner : [];
         return new Response(JSON.stringify(body), { status: 200 });
       }),
     );
@@ -269,6 +280,20 @@ describe("docs/29 anchors the runner step links to (BOS-1895)", () => {
   });
 });
 
+describe("setup wizard frame (BOS-2826)", () => {
+  it("shows a progress bar, one main Next with the step's name, and Skip as a plain link", async () => {
+    mockDocsLocal();
+    render(<Setup companies={[company]} go={() => {}} onChanged={() => {}} />);
+    expect(await screen.findByText(/Setting up · step 2 of 7/)).toBeTruthy();
+    const bar = screen.getByLabelText("Setup progress") as HTMLProgressElement;
+    expect([bar.value, bar.max]).toEqual([2, 7]);
+    const next = screen.getByText(/^Next: /) as HTMLButtonElement;
+    expect(next.textContent).toBe("Next: Claude account");
+    expect(next.className).toContain("primary");
+    expect(screen.getByText("Skip this step").className).toBe("linkish");
+  });
+});
+
 describe("setup wizard refresh", () => {
   it("shows Next right after the CEO's funding is saved, without waiting for a poll", async () => {
     let saved = false;
@@ -287,10 +312,10 @@ describe("setup wizard refresh", () => {
     );
     const withCeo: Company = { ...company, agents: [{ id: "a1", name: "CEO", role: "ceo", fundingSourceId: null } as Company["agents"][number]] };
     render(<Setup companies={[withCeo]} go={() => {}} onChanged={() => {}} />);
-    expect(await screen.findByText("Skip for now")).toBeTruthy();
+    expect(await screen.findByText("Skip this step")).toBeTruthy();
     await screen.findByRole("option", { name: "Max" });
     fireEvent.change(await screen.findByLabelText("The CEO runs on"), { target: { value: "f1" } });
-    expect(await screen.findByText("Next")).toBeTruthy();
+    expect(await screen.findByText(/^Next: /)).toBeTruthy();
   });
 });
 
@@ -346,7 +371,7 @@ describe("Before you go, leaving and the checklist count (BOS-2818)", () => {
     expect(screen.getByText(/treated as No/)).toBeTruthy();
     expect(screen.getByText("Get a push on your phone when agents need you").getAttribute("href")).toBe("#/settings/notifications");
     fireEvent.click(screen.getByText("Fix this"));
-    expect((await screen.findByRole("heading", { level: 1 })).textContent).toBe("Claude");
+    expect((await screen.findByRole("heading", { level: 1 })).textContent).toBe("Claude account");
   });
 
   it("Leave setup for now closes the wizard without dismissing the checklist", async () => {
