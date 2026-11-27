@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { ApiError } from "./api";
 import { sharedGet } from "./shared-get";
 
@@ -180,4 +180,14 @@ export function useMediaQuery(query: string): boolean {
     return () => mql.removeEventListener("change", on);
   }, [query]);
   return matches;
+}
+
+/**
+ * BOS-2819: whether this company has a code project (some project has a repo address). A company with none sees no
+ * merge queue, merge lines or "Files changed". App.tsx provides the answer; with no provider, or before the
+ * projects load, it is true, so a code company never sees its screens flicker away.
+ */
+export const HasCodeContext = createContext<boolean>(true);
+export function useHasCode(): boolean {
+  return useContext(HasCodeContext);
 }
