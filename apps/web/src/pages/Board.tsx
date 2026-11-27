@@ -1506,7 +1506,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged, d
                     </button>
                   </p>
                 ) : (
-                  shown.length === 0 && <p className="lane-empty">{merging ? (heldCount > 0 ? `Nothing is merging right now. ${heldCount === 1 ? "1 approved task is" : `${heldCount} approved tasks are`} held, waiting: see "Passed, held" next.` : "Nothing approved is waiting to merge.") : (EMPTY_HINT[col.systemState] ?? "No tasks here.")}</p>
+                  shown.length === 0 && <p className="lane-empty">{merging ? (heldCount > 0 ? `Nothing is merging right now. ${heldCount === 1 ? "1 approved task is" : `${heldCount} approved tasks are`} held, waiting: see "Passed, held" next.` : hasCode ? "Nothing approved is waiting to merge." : "Nothing approved yet.") : (EMPTY_HINT[col.systemState] ?? "No tasks here.")}</p>
                 )}
                 {done ? (
                   <>

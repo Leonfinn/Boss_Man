@@ -270,7 +270,7 @@ export function Dashboard({ company, decisions = null, tally = null, onChanged }
             </small>
           )}
           <small className="muted">
-            {s.awaitingReview != null && s.approvedToMerge != null ? `${s.awaitingReview} awaiting review, ${s.approvedToMerge} approved, waiting to merge` : `${s.inReview} in review`}, {s.open} open, {s.blocked} blocked{s.waitingLiveCheck ? `, ${s.waitingLiveCheck} merged, waiting for a live check` : ""}
+            {s.awaitingReview != null && s.approvedToMerge != null ? `${s.awaitingReview} awaiting review, ${s.approvedToMerge} approved${hasCode ? ", waiting to merge" : ""}` : `${s.inReview} in review`}, {s.open} open, {s.blocked} blocked{s.waitingLiveCheck ? `, ${s.waitingLiveCheck} merged, waiting for a live check` : ""}
           </small>
         </a>
         {s.blocked > 0 && <OldestBlocked oldest={s.oldestBlocked} />}
