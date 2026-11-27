@@ -8,8 +8,8 @@ import { imageRef, pullByDigest } from "./pull.js";
 import { getVerifiedRelease } from "./release.js";
 import { compareVersions } from "./schema.js";
 import { selfUpdate } from "./selfupdate.js";
-import { colourNetworks, colourSpec, frontAlias, LABEL_RELEASE } from "./spec.js";
-import { findColours, isSwap, liveColour, realClock, releaseOf, waitReady, type SwapDeps } from "./swap.js";
+import { colourNetworks, colourSpec, frontAlias, LABEL_RELEASE, LIVE_ALIAS, updaterLink } from "./spec.js";
+import { digestOf, findColours, httpProbe, isSwap, liveColour, realClock, releaseOf, runSwap, waitReady, type SwapDeps } from "./swap.js";
 import type { MoveDeps } from "./move.js";
 
 async function ensureImage(d: SwapDeps, name: string, digest: string) {
@@ -122,6 +122,44 @@ export async function reconcile(d: MoveDeps): Promise<string[]> {
   }
   state.update({ reconcile: { at: new Date().toISOString(), notes } });
   return notes;
+}
+
+/** Env name the server reads its updater link from (spec.ts updaterLink). */
+const LINK_ENV = "BOSSMAN_UPDATER_URL=";
+
+/**
+ * BOS-2717: a server colour made before the Install button existed has no link to this updater. When the install can give one
+ * (its key folder is mounted by the updater) the serving release is made again beside the old one with the link and switched to,
+ * with no backup or migration (same release, same data). Quiet: no owner report, a note in the log. Tried once per updater start,
+ * so a failure is not repeated every five minutes; a restart tries again. Never runs during another move.
+ */
+export async function relinkServer(d: MoveDeps, tried: { done: boolean }): Promise<string[]> {
+  if (!isSwap(d) || tried.done || !updaterLink(d.cfg)) return [];
+  const st = d.state.get();
+  if (st.stage !== "idle" && st.stage !== "done" && st.stage !== "failed" && st.stage !== "rolled-back") return [];
+  const cols = await findColours(d.docker);
+  const live = liveColour(cols, d.cfg.swap.frontNetwork);
+  const c = live ? cols[live] : undefined;
+  const env = c?.Config.Env ?? [];
+  const version = releaseOf(c);
+  const digest = digestOf(c);
+  // Only a server this updater made for an image install (it carries the release labels and the image-install flag).
+  if (!c || !version || !digest || !env.includes("BOSSMAN_IMAGE_INSTALL=1") || env.some((e) => e.startsWith(LINK_ENV))) return [];
+  tried.done = true;
+  const probe = await (d.probe ?? httpProbe)(LIVE_ALIAS);
+  if (!probe?.ok || probe.role !== "leader" || !probe.commit) return ["The serving server has no link to the updater, but it is not answering as leader right now, so the link was not added. It is tried again at the next start of the updater."];
+  try {
+    d.state.begin(version, digest);
+    d.state.update({ stage: "starting-colour" });
+    await runSwap(d, { commit: probe.commit }, { version, serverDigest: digest }, false, true);
+  } catch (e) {
+    d.state.update({ stage: "failed", error: null, report: null });
+    return [`Adding the updater link to the serving server did not work (${e instanceof UpdaterError ? e.message : "unexpected problem"}). The serving server is unchanged; it is tried again at the next start of the updater.`];
+  }
+  const after = d.state.get().stage;
+  // The owner is not told about this move: it is a repair, not a release.
+  d.state.update({ report: null });
+  return [after === "done" ? "The serving server was made again with a link to the updater, so the Install button works." : "Adding the updater link to the serving server was rolled back by itself; the previous server serves."];
 }
 
 /**
