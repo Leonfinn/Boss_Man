@@ -28,11 +28,11 @@ describe("shortcuts list focus and touch line (BOS-2761)", () => {
   });
 
   it("shows the line when no pointer is fine, and not when there is a mouse", () => {
-    vi.stubGlobal("matchMedia", (q: string) => ({ matches: false, media: q }));
+    vi.stubGlobal("matchMedia", (q: string) => ({ matches: false, media: q, addEventListener() {}, removeEventListener() {} }));
     render(<Shortcuts go={() => {}} hasProjects initialOpen />);
     expect(document.querySelector(".shortcuts-note")!.textContent).toMatch(/^These need a keyboard\./);
     cleanup();
-    vi.stubGlobal("matchMedia", (q: string) => ({ matches: true, media: q }));
+    vi.stubGlobal("matchMedia", (q: string) => ({ matches: true, media: q, addEventListener() {}, removeEventListener() {} }));
     render(<Shortcuts go={() => {}} hasProjects initialOpen />);
     expect(document.querySelector(".shortcuts-note")!.textContent).not.toMatch(/need a keyboard/);
   });
