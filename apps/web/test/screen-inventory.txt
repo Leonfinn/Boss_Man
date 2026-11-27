@@ -35,7 +35,6 @@ reads:
 
 ## #/board
 sections: 
-  - Approved, merging
   - Being checked
   - Costliest tasks
   - Filter tasks
