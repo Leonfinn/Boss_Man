@@ -235,7 +235,15 @@ The release list comes from the repository the install was set up with, so it wo
 
 An image install made before this feature existed starts watching only after its next update made by the updater, because that is when the updater gives it the settings it checks with.
 
-Installing the release is still done as described in docs/35; this note only tells you it exists.
+### Installing it with one button
+
+The same line has an **Install 0.1.0-beta.3** button (with your version's number). Press it and the updater does what docs/35 describes: it checks the signed release, downloads the images, backs up the database, starts the new server beside the old one, switches over, and watches the new one for about 15 minutes, going back by itself if it misbehaves. The line shows which step it is on; you can leave the page. When it ends, the line says what happened (updated, or went back and why) with a **Got it** button to clear it.
+
+- The button needs the server to be able to reach the updater. A server made by an updater that has this change reaches it over the updater's own private network and reads its key read-only; nothing else can. A server made earlier cannot, and shows "install this release by hand" instead of a button. Install that one by hand as in docs/35; the server that update makes has the button.
+- The server only passes on the version and the image digest from the release's `release.json`. The updater checks the release's signature and that digest itself, so a wrong request is refused with a plain message and nothing is changed.
+- Only the owner's page can press it. If an update is already running, a second press is refused and the progress is shown.
+
+By hand, as in docs/35, still works for every install.
 
 ## Common problems
 
