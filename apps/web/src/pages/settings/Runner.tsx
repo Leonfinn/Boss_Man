@@ -256,7 +256,28 @@ export function SafetyCards({ companyId, safety, connected, onChanged }: { compa
   );
 }
 
+/** While the setup wizard is still open, Settings → Runner offers the way back to it (BOS-2826). */
+export function BackToSetup() {
+  const progress = usePoll((signal) => api<{ dismissed: boolean; left?: boolean }>("/api/setup-progress", { signal }), 60_000, "runner-setup-progress");
+  const p = progress.data;
+  if (!p || p.dismissed || p.left) return null;
+  return (
+    <p style={{ margin: 0 }}>
+      <a href="#/setup">Back to setup</a>
+    </p>
+  );
+}
+
 export function Runner({ company, onChanged }: { company: Company; onChanged?: () => void }) {
+  return (
+    <>
+      <BackToSetup />
+      <RunnerPanel company={company} onChanged={onChanged} />
+    </>
+  );
+}
+
+function RunnerPanel({ company, onChanged }: { company: Company; onChanged?: () => void }) {
   const status = usePoll((signal) => api<RunnerStatus>(`/api/companies/${company.id}/runner`, { signal }), 10_000, company.id);
   const [token, setToken] = useState<string | null>(null);
   const act = useAction();
