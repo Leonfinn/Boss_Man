@@ -364,7 +364,9 @@ function whatsNewPage(changelog, ctx) {
   const content = `<div class="wrap guide news">
 <main id="main" class="g-main" tabindex="-1">
 <h1>What's new</h1>
-<p class="g-lead">The changes you will notice in Boss Man, newest first, in plain words. Each day's entry covers what was added that day. Boss Man has no numbered releases: to get these changes, <a href="/guides/updates-and-backups">update your server</a>.</p>
+<p class="g-lead">The changes you will notice in Boss Man, newest first, in plain words. Each date says which ready-made image has its changes. To get them, <a href="/guides/updates-and-backups">update your server</a>.</p>
+<p><strong>When you get each change.</strong> If you built Boss Man from source, you get each change as soon as it is added: update your server to pick it up. If you installed the ready-made Docker images, a new image comes out once a week, on Tuesdays, with every change up to then. A newer change waits for the next weekly image, so a feature listed here may not be in your install yet.</p>
+<p><strong>Which do I have?</strong> Open Settings → Server and runner → Updates. An image install says which image it runs there, for example "You run 0.1.0-beta.3". An install built from source shows no image number.</p>
 ${ctx.feed ? `<p class="g-meta"><a href="/whats-new.xml">Follow by feed</a></p>\n` : ""}${html}
 <p class="g-edit muted">The full history, with every change, is in the <a href="${ctx.vars.repo}/commits/main">list of changes on GitHub</a>.</p>
 </main>
