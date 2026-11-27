@@ -92,6 +92,34 @@ describe("an option that says the answer is in the note (BOS-2798, DR-078)", () 
   });
 });
 
+describe("a pasted log of any size is accepted (BOS-2874)", () => {
+  it("a 60,000-character note of repeated lines is accepted; the wake has the summary and the attachment id; the file holds it all", async () => {
+    const c = (ctx = await setup());
+    const d = await c.ask([PASTED, "It failed"], { noteOptions: [PASTED] });
+    // 40 near-identical stack traces, as the log on card d00e9fd0 printed, with a distinct first and last line.
+    const trace = Array.from({ length: 25 }, (_, i) => `    at Object.run (/srv/app/dist/worker-${i}.js:${100 + i}:13)`).join("\n");
+    const output = ["FIRST-LINE start of log", ...Array.from({ length: 40 }, () => `Error: connect ECONNREFUSED 192.168.1.50:5432\n${trace}`), "LAST-LINE end of log"].join("\n");
+    const padded = `${output}\n${"x".repeat(Math.max(0, 60_000 - output.length))}`;
+    expect(padded.length).toBeGreaterThanOrEqual(60_000);
+    const r = await c.answer(d.id, { answer: PASTED, note: padded });
+    expect(r.statusCode).toBe(200);
+    expect((await c.card(d.id)).status).toBe("answered");
+    const kept = (await c.card(d.id)).context as { answerNote?: string };
+    expect(kept.answerNote!.length).toBeLessThanOrEqual(20_000);
+    expect(kept.answerNote).toContain("FIRST-LINE");
+    expect(kept.answerNote).toContain("(same line ×40)");
+    const id = /\/api\/ticket-images\/([0-9a-f-]{36})/.exec(kept.answerNote!)![1]!;
+    const woken = await c.db.select().from(wakes).where(and(eq(wakes.agentId, c.worker.id), eq(wakes.reason, "decision answered")));
+    const wakeText = woken.map((w) => w.note ?? "").join("\n");
+    expect(wakeText).toContain(id);
+    expect(wakeText).toContain("open_attachment");
+    // Nothing lost: the attachment is the whole text.
+    const file = await c.req("GET", `/api/ticket-images/${id}`);
+    expect(file.statusCode).toBe(200);
+    expect(file.body).toBe(padded.trim());
+  });
+});
+
 describe("raising a card whose option promises a hand-over (DR-078 N2)", () => {
   it("raise_decision refuses 'Done, link below' with no flag, and nothing is raised", async () => {
     const c = (ctx = await setup());

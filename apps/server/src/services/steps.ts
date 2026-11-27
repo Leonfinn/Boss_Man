@@ -415,6 +415,13 @@ const DOC_POINTERS: Array<[RegExp, string]> = [
  * drain and no wake afterwards (6 Nov 16:00: a setting change applied with recreate-all). Setting changes go through
  * `scripts/update-runner.sh --settings`, new images through Build and update runners; both drain first.
  */
+/** A command that reads a log (docker/kubectl/journalctl logs, cat or tail -f of a .log file) with nothing that bounds its output: a warning, never a refusal. */
+const LOG_READ = /\b(docker(?:\s+compose)?\s+logs|kubectl\s+logs|journalctl|cat\s+\S*\.log\b|zcat\s+\S*\.log)/;
+const LOG_BOUND = /\|\s*(?:tail|head|wc|uniq|grep\s+-c|less)\b|--tail[ =]\d+|--lines[ =]\d+|(?:^|\s)-n\s*\d+|>\s*\S+/;
+export function unboundedLogRead(command: string): boolean {
+  return command.split("\n").some((l) => LOG_READ.test(l) && !LOG_BOUND.test(l));
+}
+
 const RUNNER_RECREATE: Array<[RegExp, string]> = [
   [/\brecreate-all\b/, "recreates every runner at once"],
   [/\bupdate-runner\.sh\b[^\n|;&]*\s--now\b/, "recreates every runner at once (--now)"],
@@ -1038,6 +1045,8 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[],
     if (!hostStep && code.some((c) => HOST_COMMAND.test(c))) hostStep = step;
     if (LINK.test(prose)) warn.push({ step, rule: "warn", problem: "links to a wiki page or ticket; fine as background, but the step itself must be complete" });
     if (blocks.length > 1) warn.push({ step, rule: "warn", problem: `has ${blocks.length} commands; one per step is easier to follow` });
+    const longRead = blocks.find(unboundedLogRead);
+    if (longRead) warn.push({ step, rule: "warn", problem: `reads a log without cutting the output short ("${longRead.slice(0, 80)}"); a log can print thousands of lines for the owner to paste. End it with \`| tail -n 5\` or \`| sort | uniq -c | sort -rn | head\`` });
     const hedge = code.length ? HEDGES.exec(prose) : null;
     if (hedge) warn.push({ step, rule: "warn", problem: `hedges ("${hedge[0]}") next to a command` });
     // BOS-1571 usability gate: a duty the owner repeats is a cost that grows with every update; name how often, or automate it.
