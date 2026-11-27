@@ -57,6 +57,8 @@ const WAKE_TABLE = {
   "a result for the owner": "waiting",
   // BOS-2288: a merged ticket's named watch trigger happened (a gate CI failure, a main CI failure). Never dropped.
   "watch trigger": "waiting",
+  // BOS-2863: an event check ends within a day; the assignee may still report a real reading. Never dropped.
+  "event check ending": "waiting",
   // Scheduled by Boss Man.
   "ticket watch": "scheduled",
   "tree stopped": "scheduled",

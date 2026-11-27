@@ -107,6 +107,7 @@ import { secretScanService } from "./services/secret-scan.js";
 import { PRIORITY_WATCH_REASON, priorityWatchService } from "./services/priority-watch.js";
 import { checkIdleService, IDLE_CHECK_SLOT_REASON, idleView } from "./services/check-idle.js";import { MERGE_STALL_REASON, mergeStallService, mergeTrainStatus } from "./services/merge-stall.js";
 import { milestoneRiskService } from "./services/milestone-risk.js";
+import { eventCheckEndSweep } from "./services/event-check-end.js";
 import { landingTurnAlertSweep, usualCiWait, usualMergeCheck } from "./services/landing-turn-eta.js";
 import { softHold } from "./services/deploy-wait-hold.js";
 import { checkGate } from "./services/check-gate.js";
@@ -961,6 +962,8 @@ export async function buildApp(opts: AppOptions) {
     priorityWatch: () => priorityWatch.run(),
     // BOS-2581: a milestone the owner put in the CEO's hands turning At risk or Late; tells only.
     milestoneRisk: () => milestoneRisk.run(),
+    // BOS-2863: an event check ends 7 days after go-live; it closes as "not observed" and its assignee is warned a day before.
+    eventChecks: () => eventCheckEndSweep(db, { now: opts.now, notify: (agentId, input) => scheduler.notify(agentId, input), close: (ticketId) => work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true }) }),
     mergeStall: async () => {
       await landingTurnAlert.run(); // BOS-2359
       return mergeStall.run();
