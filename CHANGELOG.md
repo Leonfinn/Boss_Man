@@ -68,6 +68,12 @@ Remember to put an empty line after any line you add outside this comment, so th
 
 <!-- Docs checked up to 688f2bc5a6c5f50810649a7cfa7af9e4bcec5d37 -->
 
+## 27 November 2026
+
+- Pin the pages you open most. Press **Add to shortcuts** beside the title of any page inside Product, Team, Activity or Settings (for example Settings → Server and runner → Updates). The page then appears in a Shortcuts section at the top of the menu, on every device you sign in from. You can have up to 6. Press the button again, or Undo, to take it out. The menu is unchanged until you add one.
+- **Edit** beside Shortcuts lets you rename, reorder or remove them. Nothing changes until you press Save.
+- With the keyboard, press g then 1 to open your first shortcut, g then 2 for the second, and so on up to 6. The numbers follow the order in the menu. Press ? to see which number opens which page.
+
 ## 26 November 2026
 
 **Not in an image yet:** comes with the next weekly image (Tuesdays).
