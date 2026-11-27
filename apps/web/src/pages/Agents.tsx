@@ -20,7 +20,7 @@ import { DraftTextarea } from "../components/DraftTextarea";
 import { MoreAbout } from "../components/MoreAbout";
 
 type AgentRecord = { days: number; finished: number; runs: number; failedRuns: number; passedFirstTime: number; sendBacks: number; medianMergeMs: number | null; costPerFinishedMicros: number | null; recent: Array<{ id: string; ref: string | null; title: string; size: number | null; finishedAt: string; sendBacks: number; costMicros: number }> };
-type Template = { id: string; title: string; role: "manager" | "worker"; modelTier: string; summary: string; instructions: string };
+type Template = { id: string; title: string; role: "manager" | "worker"; modelTier: string; summary: string; /** BOS-2824: "code" or "any", which group of roles the Hire form shows it in. */ worksOn?: "any" | "code"; instructions: string };
 export type AgentRow = {
   id: string;
   name: string;
@@ -400,15 +400,28 @@ function Hire({ companyId, templates, sources, lists, refresh, onDone }: { compa
         <legend className="section-label" style={{ marginBottom: 8 }}>
           Start from
         </legend>
+        {/* BOS-2824: most work is not software, so the roles that suit any work come first. */}
+        {([["any", "For any kind of work"], ["code", "For code"]] as const).map(([group, label]) => {
+          const inGroup = templates.filter((t) => (t.worksOn ?? "any") === group);
+          return inGroup.length ? (
+            <div key={group} style={{ marginBottom: 10 }}>
+              <p className="muted" style={{ fontSize: 13, fontWeight: 600, margin: "0 0 6px" }}>
+                {label}
+              </p>
+              <div className="template-grid">
+                {inGroup.map((t) => (
+                  <label key={t.id} className={`template${tpl?.id === t.id ? " on" : ""}`}>
+                    <input type="radio" name="template" className="sr-only" checked={tpl?.id === t.id} onChange={() => choose(t)} />
+                    <strong>{t.title}</strong>
+                    <span>{t.summary}</span>
+                    <small className="muted">Suggested model: {t.modelTier}</small>
+                  </label>
+                ))}
+              </div>
+            </div>
+          ) : null;
+        })}
         <div className="template-grid">
-          {templates.map((t) => (
-            <label key={t.id} className={`template${tpl?.id === t.id ? " on" : ""}`}>
-              <input type="radio" name="template" className="sr-only" checked={tpl?.id === t.id} onChange={() => choose(t)} />
-              <strong>{t.title}</strong>
-              <span>{t.summary}</span>
-              <small className="muted">Suggested model: {t.modelTier}</small>
-            </label>
-          ))}
           <label className={`template${tpl === null ? " on" : ""}`}>
             <input type="radio" name="template" className="sr-only" checked={tpl === null} onChange={() => choose(null)} />
             <strong>Blank</strong>

@@ -64,15 +64,19 @@ describe("decision queue", () => {
     vi.stubGlobal("fetch", fetch);
     const plan = decision({
       kind: "approval",
-      question: "Team plan for Site: the CEO proposes 2 hires.",
+      question: "Hire 2 agents for Site?\n\nAlready covered: Engineer builds the site.\n\nOn your Claude Max: no extra cost\n\nQuinn: QA · qa\nChecks releases.",
       options: ["Hire the ticked ones", "Not now"],
       recommendedOption: "Hire the ticked ones",
-      context: { type: "team_plan", hires: [{ name: "Quinn", template: "qa", reason: "Checks releases.", skills: ["dogfood"] }, { name: "Rae", reason: "Writes the copy." }] },
+      context: { type: "team_plan", covered: "Engineer builds the site.", costLine: "On your Claude Max: no extra cost", hires: [{ name: "Quinn", template: "qa", title: "QA", harness: "claude", provider: "anthropic", model: "claude-sonnet-4-5", fundingSourceName: "Claude Max", fundingSourceKind: "subscription", reason: "Checks releases.", skills: ["dogfood"] }, { name: "Rae", reason: "Writes the copy." }] },
     });
-    render(<Decisions decisions={[plan]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
-    expect(screen.getByText("Skills: dogfood.", { exact: false })).toBeTruthy();
+    const { container } = render(<Decisions decisions={[plan]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("Gets from the start: dogfood", { exact: false })).toBeTruthy();
     fireEvent.click(screen.getByRole("checkbox", { name: /Rae/ }));
     fireEvent.click(screen.getByRole("button", { name: "Hire the ticked ones, recommended" }));
+    // (BOS-2824) The model setup is folded into "Technical details" and the plain cost line is on the card,
+    // so the card says each hire once.
+    expect(container.textContent).toContain("On your Claude Max: no extra cost");
+    expect(container.querySelector("summary")?.textContent).toBe("Technical details");
     await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/decisions/d1/answer", expect.objectContaining({ body: JSON.stringify({ answer: "Hire the ticked ones", picks: [0] }) })));
   });
 
