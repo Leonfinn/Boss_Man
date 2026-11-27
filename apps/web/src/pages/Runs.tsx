@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { AddToShortcuts } from "../pinned-pages";
 import { runLabel, type RunOrigin } from "@boss-man/shared";
 import { api, usd, type Company, type RunRow } from "../api";
 import { hashQuery, usePoll } from "../hooks";
@@ -548,6 +549,7 @@ export function Runs({ companies }: { companies: Company[] }) {
       <header className="page-head">
         <div>
           <h1>Runs</h1>
+          <AddToShortcuts page="runs" />
           <p className="sub">Each time an agent is started, why, and what it cost. Open one to read along, send it a message or stop it.</p>
         </div>
       </header>

@@ -7,11 +7,12 @@ import { and, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { DEPLOY_UNCHANGED_REASON, selfDeployService } from "../src/services/self-deploy.js";
 import { currentHold, FAILED_UPDATE_REASON, linkHold, releaseHold } from "../src/services/owner-holds.js";
+import { wakeWatchers } from "../src/services/watch-triggers.js";
 import { setOwnerTodoFacts } from "../src/services/decisions.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { openPglite } from "../src/db/client.js";
 import { commandProblem, lintOwnerSteps, parseStep, sh, step } from "../src/services/steps.js";
-import { agents, companies, activity, decisions, notifications, ownerHolds, projects, runners, runs, settings, tickets, wakes } from "../src/db/schema.js";
+import { agents, companies, activity, decisions, notifications, ownerHolds, projects, runners, runs, settings, tickets, updateHolds, wakes } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -261,6 +262,48 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     await c.available({ checkedAt: "2026-10-20T12:00:00Z" });
     await c.selfDeploy.sync();
     expect(await c.open()).toHaveLength(0);
+  });
+
+  // BOS-2755: on 26 Nov a server update with a wrap-up went in and woke none of the tickets watching for one.
+  it("wakes the server_update watchers once when a server update ends, naming it and the wrap-up pressed for it", async () => {
+    const c = (ctx = await setup());
+    const [co] = await c.db.select().from(companies).limit(1);
+    const [ceo] = await c.db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, co!.id), eq(agents.role, "ceo")));
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Dev" }).returning();
+    const watch = (number: number, watchingFor: string, watchTrigger: string | null) => c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: `watcher ${number}`, number, assigneeAgentId: ceo!.id, systemState: "blocked", mergeCommit: A, watchingFor, watchTrigger }).returning();
+    const [byTrigger] = await watch(801, "the next server update", "server_update");
+    // A watch set before the trigger existed names the update only in words.
+    const [byWords] = await watch(802, "the next real server update where the owner presses Ask agents to wrap up", null);
+    const [runnerOnly] = await watch(803, "the runner swap", "runner_update");
+    await watch(804, "a week with no new stuck alerts", null);
+    const [onMain] = await watch(805, "a GitHub release", "github_main_failed");
+    // The owner's wrap-up for it had already lifted (it lifts when the server is in) before the host's "ended" is read.
+    await c.db.insert(updateHolds).values({ startedAt: new Date("2026-10-20T12:00:30Z"), kind: "wrapup", reason: "asking agents to wrap up for the server update", endedAt: new Date("2026-10-20T12:02:40Z"), events: [{ at: "2026-10-20T12:00:30Z", text: "Wrap-up tied to: the server update (approved)" }, { at: "2026-10-20T12:00:30Z", text: "Wrap-up banner said: Wrapping up for the server update you approved at 11:58 UTC." }, { at: "2026-10-20T12:02:40Z", text: "Wrap-up lifted (update live): Wrap-up over" }, { at: "2026-10-20T12:00:31Z", text: "Stop-and-update-now chosen: runs still going are stopped" }] });
+    const woken = async () => (await c.db.select().from(wakes)).filter((x) => x.reason === "watch trigger");
+    await c.status({ id: randomUUID(), result: "deployed", to_commit: B });
+    await c.selfDeploy.sync();
+    await c.selfDeploy.sync();
+    const first = await woken();
+    expect(first.map((w) => w.ticketId).sort()).toEqual([byTrigger!.id, byWords!.id].sort());
+    expect(first[0]!.note).toContain('a server update ended (server update to bbbbbbbb ended "deployed" from 12:01 UTC to 12:03 UTC on 2026-10-20; a wrap-up was pressed for it (asked 12:00 UTC) Recorded wrap-up lines:');
+    // BOS-2811: the woken agent is given the recorded lines to quote, and only the wrap-up ones.
+    expect(first[0]!.note).toContain("[12:00 UTC: Wrap-up tied to: the server update (approved)] [12:00 UTC: Wrap-up banner said: Wrapping up for the server update you approved at 11:58 UTC.] [12:02 UTC: Wrap-up lifted (update live): Wrap-up over]");
+    expect(first[0]!.note).not.toContain("Stop-and-update-now");
+    // A failed runner build ends the runner update: its watchers are woken; a refused one is not an update.
+    await c.status({ id: randomUUID(), target: "runner", result: "rejected", to_commit: B, ended: "2026-10-20T13:00:00Z" });
+    await c.selfDeploy.sync();
+    expect((await woken()).some((w) => w.ticketId === runnerOnly!.id)).toBe(false);
+    await c.status({ id: randomUUID(), target: "runner", result: "failed", to_commit: B, started: "2026-10-20T14:00:00Z", ended: "2026-10-20T14:05:00Z" });
+    await c.selfDeploy.sync();
+    const runnerWake = (await woken()).find((w) => w.ticketId === runnerOnly!.id);
+    expect(runnerWake?.note).toContain('runner update to bbbbbbbb ended "failed" from 14:00 UTC to 14:05 UTC on 2026-10-20; no wrap-up was pressed for it');
+    // Neither update woke the ticket watching for something else; its own (older) event still wakes it, and only it.
+    expect((await woken()).some((w) => w.ticketId === onMain!.id)).toBe(false);
+    const before = (await woken()).length;
+    expect(await wakeWatchers(c.db, (agentId, input) => c.scheduler.notify(agentId, input), "github_main_failed", "ci → test on main")).toBe(1);
+    const after = await woken();
+    expect(after).toHaveLength(before + 1);
+    expect(after.some((w) => w.ticketId === onMain!.id)).toBe(true);
   });
 
   it("raises one owner decision when main moves, and approving it writes the request file", async () => {
@@ -1874,7 +1917,7 @@ describe("after a failed update the next card is held while it is diagnosed (BOS
     const [held] = await c.db.select().from(decisions).where(eq(decisions.id, r.decisionId));
     expect(held!.recommendedOption).toBe("Not now");
     // BOS-2609: no project to open a diagnosis ticket in here, so the card says nobody is assigned, never "being looked into".
-    expect(held!.question).toMatch(/^Held: the last server update \(to bbbbbbbb\) failed at [^.]*\. Not picked up yet: nobody is assigned to diagnose it; the CEO was woken at \d\d:\d\d UTC\./);
+    expect(held!.question).toMatch(/^Held: the last server update \(to bbbbbbbb\) failed at [^.]*\. The CEO was alerted: raised at \d\d:\d\d UTC, nobody has picked it up yet\./);
     expect(held!.question).not.toContain("being looked into");
     expect(held!.question).toContain("If a card asks you for the update's log, answer that one first.");
     const hold = (await currentHold(c.db, "server_deploy"))!;
@@ -2037,7 +2080,7 @@ describe("after a failed update the next card is held while it is diagnosed (BOS
     await c.available({ deployed: B, tip: B });
     await c.status({ id: randomUUID(), target: "runner", result: "failed", message: "The runner image build failed.", from_commit: B, to_commit: B, ended: "2026-10-20T12:10:00Z" });
     await c.selfDeploy.sync();
-    expect(await c.selfDeploy.updateRunners()).toMatchObject({ queued: true, message: expect.stringContaining("The last runner update failed and the runners can't be updated until we know a retry is safe. Not picked up yet:") });
+    expect(await c.selfDeploy.updateRunners()).toMatchObject({ queued: true, message: expect.stringContaining("The last runner update failed and the runners can't be updated until we know a retry is safe. The CEO was alerted: raised at") });
     await c.selfDeploy.sync();
     expect(await readdir(path.join(c.dir, "inbox"))).not.toContain("request.json");
     await release(c, "retry_safe", "Fixed.");
@@ -2203,24 +2246,24 @@ describe("a failed update is picked up by someone, and the panel says who (BOS-2
     expect((await c.db.select().from(wakes)).some((w) => w.agentId === ceo.id && w.ticketId === t!.id && w.reason === FAILED_UPDATE_REASON)).toBe(true);
   });
 
-  it("the panel says 'Not picked up yet' until the assignee's run starts, then who and since when", async () => {
+  it("the panel says no run has started until the assignee's run starts, then who and since when", async () => {
     const c = (ctx = await setup());
     const { co, infra } = await team(c, { infra: true });
     await fail(c);
     const [t] = await diagnoses(c);
     const ref = await refOf(c, t!);
-    expect(await words(c)).toMatch(new RegExp(`^Held: the last runner update \\(built from bbbbbbbb\\) failed at [^.]*\\. Not picked up yet: Dougal woken at \\d\\d:\\d\\d UTC \\(${ref}\\)\\.`));
-    expect(await words(c)).not.toContain("being looked into");
+    expect(await words(c)).toMatch(new RegExp(`^Held: the last runner update \\(built from bbbbbbbb\\) failed at [^.]*\\. ${ref} is assigned to Dougal, woken at \\d\\d:\\d\\d UTC; no run has started on it yet\\.`));
+    expect(await words(c)).not.toContain("started work");
     // A chat about the ticket, or a run from before the failure, is not the diagnosis.
     const hold = (await currentHold(c.db, "runner_update"))!;
     await c.db.insert(runs).values({ companyId: co.id, agentId: infra!.id, ticketId: t!.id, purpose: "chat", startedAt: new Date(hold.createdAt.getTime() + 60_000) });
     await c.db.insert(runs).values({ companyId: co.id, agentId: infra!.id, ticketId: t!.id, startedAt: new Date(hold.createdAt.getTime() - 60_000), endedAt: hold.createdAt });
-    expect(await words(c)).toContain("Not picked up yet: Dougal woken at");
+    expect(await words(c)).toContain("no run has started on it yet");
     const at = new Date(Date.UTC(2030, 0, 1, 16, 5));
     await c.db.insert(runs).values({ companyId: co.id, agentId: infra!.id, ticketId: t!.id, startedAt: at });
-    expect(await words(c)).toContain(`Being looked into by Dougal on ${ref} (started 16:05 UTC).`);
+    expect(await words(c)).toContain(`Dougal started work on it on ${ref} at 16:05 UTC.`);
     // The owner's own Build and update runners press says the same, read at that moment.
-    expect(await c.selfDeploy.updateRunners()).toMatchObject({ message: expect.stringContaining(`Being looked into by Dougal on ${ref} (started 16:05 UTC).`) });
+    expect(await c.selfDeploy.updateRunners()).toMatchObject({ message: expect.stringContaining(`Dougal started work on it on ${ref} at 16:05 UTC.`) });
   });
 
   it("a repeat failure while the ticket is open opens no second ticket; the hold keeps it and the assignee is woken again", async () => {
@@ -2254,7 +2297,7 @@ describe("a failed update is picked up by someone, and the panel says who (BOS-2
     await c.available({ deployed: B, tip: B });
     await c.selfDeploy.sync();
     expect((await rexWakes()).map((w) => w.ticketId)).toEqual([other.id]);
-    expect(await words(c)).toMatch(new RegExp(`Not picked up yet: Rex woken at \\d\\d:\\d\\d UTC \\(${await refOf(c, other)}\\)\\.`));
+    expect(await words(c)).toMatch(new RegExp(`${await refOf(c, other)} is assigned to Rex, woken at \\d\\d:\\d\\d UTC; no run has started on it yet\\.`));
     await c.available({ deployed: B, tip: B });
     await c.selfDeploy.sync();
     expect(await rexWakes()).toHaveLength(1);
@@ -2276,7 +2319,7 @@ describe("a failed update is picked up by someone, and the panel says who (BOS-2
     await fresh.sync();
     expect(woken.map((w) => [w.agentId, w.reason])).toEqual([[ceo.id, FAILED_UPDATE_REASON]]);
     expect(woken[0]!.note).toContain(`${await refOf(c, t!)}, assigned to Dougal`);
-    expect(woken[0]!.note).toContain('says "Not picked up yet"');
+    expect(woken[0]!.note).toContain("says nobody has picked it up");
     expect(await currentHold(c.db, "runner_update")).toMatchObject({ ticketId: t!.id, releasedAt: null, chasedAt: expect.any(Date) });
     // Only once.
     await c.available({ deployed: B, tip: B });
@@ -2285,6 +2328,27 @@ describe("a failed update is picked up by someone, and the panel says who (BOS-2
     // A hold whose diagnosis has started is never chased.
     await c.db.update(ownerHolds).set({ chasedAt: null });
     await c.db.insert(runs).values({ companyId: co.id, agentId: infra!.id, ticketId: t!.id, startedAt: new Date() });
+    await c.available({ deployed: B, tip: B });
+    await fresh.sync();
+    expect(woken).toHaveLength(1);
+  });
+
+  it("a hold linked to an unassigned ticket with no wake time still chases the CEO after 15 minutes, once (BOS-2624)", async () => {
+    const c = (ctx = await setup());
+    const { ceo, project } = await team(c, { infra: true });
+    await fail(c);
+    const other = (await c.req("POST", `/api/projects/${project.id}/tickets`, { title: "Nobody's ticket" })).json() as { id: string };
+    expect((await linkHold(c.db, { ticketId: other.id })).ok).toBe(true);
+    expect(await currentHold(c.db, "runner_update")).toMatchObject({ ticketId: other.id, wokenAt: null });
+    const woken: { agentId: string; reason: string; note: string }[] = [];
+    const fresh = selfDeployService(c.db, { dir: c.dir, notify: async () => undefined, wake: async (agentId, input) => void woken.push({ agentId, ...input }) });
+    await c.available({ deployed: B, tip: B });
+    await fresh.sync();
+    expect(woken).toHaveLength(0); // not 15 minutes yet
+    await c.db.update(ownerHolds).set({ createdAt: new Date(Date.now() - 16 * 60_000) });
+    await c.available({ deployed: B, tip: B });
+    await fresh.sync();
+    expect(woken.map((w) => [w.agentId, w.reason])).toEqual([[ceo.id, FAILED_UPDATE_REASON]]);
     await c.available({ deployed: B, tip: B });
     await fresh.sync();
     expect(woken).toHaveLength(1);
@@ -2535,6 +2599,28 @@ describe("an approval when main moves on before the host runs it (BOS-753)", () 
       expect((await c.db.select().from(decisions).where(eq(decisions.dedupeKey, "self-deploy:deployer-script"))).length).toBe(0);
     });
 
+    // BOS-2684: the host script going live wakes the tickets that watch for it, once each, and nobody else.
+    it("wakes the host_script_live watchers when the script catches up, once, and not for other triggers", async () => {
+      const c = (ctx = await setup());
+      const [co] = await c.db.select().from(companies).limit(1);
+      const [ceo] = await c.db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, co!.id), eq(agents.role, "ceo")));
+      const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Dev" }).returning();
+      const watch = (number: number, trigger: string) => c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: `watcher ${number}`, number, assigneeAgentId: ceo!.id, systemState: "blocked", mergeCommit: "a".repeat(40), watchingFor: "host script live", watchTrigger: trigger }).returning();
+      const [w] = await watch(701, "host_script_live");
+      await watch(702, "gate_ci_failed");
+      const woken = async () => (await c.db.select().from(wakes)).filter((x) => x.reason === "watch trigger");
+      await report(c, { scriptSha: OLD, repoSha: NEW });
+      await c.selfDeploy.sync();
+      expect((await c.selfDeploy.deployerScript()).state).toBe("behind");
+      expect(await woken()).toHaveLength(0);
+      await report(c, { scriptSha: NEW, repoSha: NEW });
+      await c.selfDeploy.sync();
+      await c.selfDeploy.sync();
+      const after = await woken();
+      expect(after).toHaveLength(1);
+      expect(after[0]!.ticketId).toBe(w!.id);
+    });
+
     it("keeps the line (BOS-1057) when host.json is unreadable after a report was recorded", async () => {
       const c = (ctx = await setup());
       await report(c, { scriptSha: OLD, repoSha: NEW });
@@ -2548,6 +2634,145 @@ describe("an approval when main moves on before the host runs it (BOS-753)", () 
       await report(c, { scriptSha: OLD, repoSha: NEW });
       expect((await c.req("GET", "/api/host-facts")).json()).toMatchObject({ deployerScript: { state: "behind" }, facts: { "deployer.scriptSha": { value: OLD }, "deployer.repoSha": { value: NEW } } });
     });
+  });
+});
+
+// BOS-2783 (27 Nov): the owner applied a by-hand update (pin, rebuild-live.sh, copy host-deployer.sh, Build and update
+// runners). As soon as the server ran its commit the card closed with "You don't need to finish these steps", and a new
+// one-click card said it "brings in everything this one did", while the host still ran the old deployer script and the
+// runners an older image. The steps outside the server now move to one card that closes on the host's own evidence.
+describe("a by-hand update's steps outside the server outlive its live commit (BOS-2783)", () => {
+  const OLD = "1".repeat(64);
+  const NEW = "2".repeat(64);
+  const PATHS = { install: "/srv/bm", src: "/srv/bm/src", deployer: "/srv/bm/deployer" };
+  const HAND = { infraPaths: ["docker-compose.yml", "scripts/host-deployer.sh"], paths: ["docker-compose.yml", "scripts/host-deployer.sh", "apps/runner/x.ts"], runnerChanged: true, ...LAYOUT };
+  // The host's own report of its deployer script; the offer file is rewritten too, so the poller runs its pass (BOS-414).
+  const deployer = async (c: Awaited<ReturnType<typeof setup>>, scriptSha: string, over: Record<string, unknown> = {}) => {
+    await writeFile(path.join(c.dir, "outbox", "host.json"), JSON.stringify({ version: 1, name: "nas01", writtenAt: "2026-10-20T12:00:00Z", ownership: [], paths: PATHS, deployer: { scriptSha, repoSha: NEW } }));
+    await c.available(over);
+  };
+  const handLeft = async (c: Awaited<ReturnType<typeof setup>>) => (await c.todos()).filter((d) => d.dedupeKey === "self-deploy:hand-left");
+  const byId = async (c: Awaited<ReturnType<typeof setup>>, id: string) => (await c.db.select().from(decisions).where(eq(decisions.id, id)))[0]!;
+  const notice = (d: { context: unknown }) => (d.context as { closedNotice?: { text: string; stepsLeft?: boolean } }).closedNotice;
+  /** A hand card for B (deployer copy + runner rebuild) raised while the live commit is A, the runners built from A. */
+  const handCard = async () => {
+    const c = (ctx = await setup());
+    const [co] = await c.db.select().from(companies).limit(1);
+    await c.db.insert(runners).values({ companyId: co!.id, tokenHash: "x", imageCommit: A });
+    await deployer(c, NEW, HAND);
+    await c.selfDeploy.sync();
+    const [card] = await c.open();
+    expect(card!.context).toMatchObject({ infra: true, update: { needsDeployerCopy: true, needsRunnerUpdate: true } });
+    return { c, co: co!, card: card! };
+  };
+
+  it("the server reaching the commit while the deployer script is old leaves one card with only the copy and the rebuild", async () => {
+    const { c, card } = await handCard();
+    await c.req("POST", `/api/decisions/${card.id}/answer`, { answer: "Approve" });
+    const [todo] = (await c.todos()).filter((d) => (d.context as { target?: string }).target === "server");
+    // The owner ran the pin and rebuild-live.sh: the server runs B. The copy step isn't done (the host still runs OLD).
+    await deployer(c, OLD, { ...HAND, deployed: B, tip: B });
+    await c.selfDeploy.sync();
+    // The hand to-do closes on the live commit, but its notice says what is still to do and where, never "you can stop".
+    const closed = await byId(c, todo!.id);
+    expect(closed.status).toBe("answered");
+    expect(notice(closed)!.text).toContain("still to do: copy the deployer script into the deployer folder; and rebuild the runners");
+    expect(notice(closed)!.text).toContain('on the card "Finish the by-hand update"');
+    expect(notice(closed)!.text).not.toContain("You don't need to finish these steps");
+    expect(notice(closed)!.stepsLeft).toBe(true);
+    // One card holds only those two steps, with the host's own folders.
+    const [left] = await handLeft(c);
+    expect(left).toBeDefined();
+    expect(left!.question).toContain("Finish the by-hand update: the server already runs bbbbbbbb");
+    const steps = (left!.context as { steps: string[] }).steps.join("\n");
+    expect(steps).toContain("BOSSMAN_DEPLOYER=/srv/bm/deployer /srv/bm/src/scripts/install-deployer.sh");
+    expect(steps).toContain("Build and update runners");
+    expect(steps).not.toContain("rebuild-live.sh");
+    expect(steps).not.toContain("git merge --ff-only");
+    expect(left!.context).toMatchObject({ handLeft: { deployer: true, runner: true } });
+    // The separate deployer-script card isn't raised beside it, even after its grace.
+    const value = { state: "behind", since: new Date(Date.now() - 60 * 60_000).toISOString() };
+    await c.db.insert(settings).values({ key: "deployer_script_state", value }).onConflictDoUpdate({ target: settings.key, set: { value } });
+    await c.available({ ...HAND, deployed: B, tip: B });
+    await c.selfDeploy.sync();
+    expect((await c.todos()).filter((d) => d.dedupeKey === "self-deploy:deployer-script")).toHaveLength(0);
+    expect(await handLeft(c)).toHaveLength(1);
+  });
+
+  it("drops each step the host confirms and closes once none is left, saying what was confirmed", async () => {
+    const { c, co, card } = await handCard();
+    await c.req("POST", `/api/decisions/${card.id}/answer`, { answer: "Approve" });
+    await deployer(c, OLD, { ...HAND, deployed: B, tip: B });
+    await c.selfDeploy.sync();
+    const [first] = await handLeft(c);
+    // The owner copies the script: the host now runs NEW. Only the rebuild is left, on the same card.
+    await deployer(c, NEW, { ...HAND, deployed: B, tip: B });
+    await c.selfDeploy.sync();
+    const [second] = await handLeft(c);
+    expect(second!.id).toBe(first!.id);
+    expect(second!.context).toMatchObject({ handLeft: { deployer: false, runner: true } });
+    expect((second!.context as { steps: string[] }).steps.join("\n")).not.toContain("install-deployer.sh");
+    // The runners are rebuilt from B: nothing is left and the card closes by itself.
+    await c.db.update(runners).set({ imageCommit: B }).where(eq(runners.companyId, co.id));
+    await c.available({ ...HAND, deployed: B, tip: B });
+    await c.selfDeploy.sync();
+    expect(await handLeft(c)).toHaveLength(0);
+    const done = await byId(c, first!.id);
+    expect(done.status).toBe("answered");
+    expect(done.answer).toContain("Nothing else is left to do: the host runs the current deployer script, and the runners are built from the version the server runs");
+  });
+
+  it("a newer one-click card raised while the steps are left names them and lists their card first; the hand card's notice says so", async () => {
+    // The 27 Nov path: the hand card was never approved, and main moved on to C (one click) as the server came up on B.
+    const { c, card } = await handCard();
+    await deployer(c, OLD, { deployed: B, tip: C, commits: [{ sha: C, subject: "Add a button" }], paths: ["apps/server/src/x.ts"], infraPaths: [], runnerChanged: false });
+    await c.selfDeploy.sync();
+    const [left] = await handLeft(c);
+    expect(left).toBeDefined();
+    const [newer] = (await c.open()).filter((d) => (d.context as { target: string }).target === "server");
+    expect(newer!.id).not.toBe(card.id);
+    // A good automatic deploy copies the deployer script in by itself (BOS-1588); the runner rebuild it never does.
+    expect(newer!.question).toContain("Left over from the last by-hand update: The host still runs the old deployer script; this deploy copies the new one in by itself once it succeeds.");
+    expect(newer!.question).toContain('The runners still need rebuilding, which this deploy doesn\'t do: see the card "Finish the by-hand update".');
+    expect(left!.question).toContain("The next automatic server update also copies the deployer script in by itself");
+    expect(((newer!.context as { doAfter?: { decisionId: string }[] }).doAfter ?? []).map((l) => l.decisionId)).toContain(left!.id);
+    // The old hand card is withdrawn with a notice that its server part is live and two steps are left, not "everything".
+    const old = await byId(c, card.id);
+    expect(old.status).toBe("withdrawn");
+    expect(notice(old)!.text).toContain("This card's server part is already live.");
+    expect(notice(old)!.text).toContain("two steps are still to do");
+    expect(notice(old)!.text).not.toContain("brings in everything this one did");
+  });
+
+  it("holds the remaining-steps card on an R6 refusal: the owner gets none and the CEO gets the fix card", async () => {
+    const { c, card } = await handCard();
+    await c.req("POST", `/api/decisions/${card.id}/answer`, { answer: "Approve" });
+    await deployer(c, OLD, { ...HAND, deployed: B, tip: B });
+    setOwnerTodoFacts(async () => ({ serverHost: "other-box", hosts: [{ name: "other-box", ownership: [] }] }));
+    try {
+      await c.selfDeploy.sync();
+    } finally {
+      setOwnerTodoFacts(null);
+    }
+    expect(await handLeft(c)).toHaveLength(0);
+    const fix = (await c.db.select().from(decisions)).filter((d) => d.dedupeKey === "owner-todo-fix:self-deploy:hand-left");
+    expect(fix).toHaveLength(1);
+    expect(fix[0]!.tier).toBe("ceo");
+    expect(fix[0]!.question).toContain(`but Boss Man runs on "other-box"`); // the R6 host fence
+  });
+
+  it("a hand card whose steps outside the server are all confirmed closes saying nothing is left, and leaves no card", async () => {
+    const { c, co, card } = await handCard();
+    await c.req("POST", `/api/decisions/${card.id}/answer`, { answer: "Approve" });
+    const [todo] = (await c.todos()).filter((d) => (d.context as { target?: string }).target === "server");
+    // Everything was done before Boss Man looked: the host runs NEW and the runners are built from B.
+    await c.db.update(runners).set({ imageCommit: B }).where(eq(runners.companyId, co.id));
+    await deployer(c, NEW, { ...HAND, deployed: B, tip: B });
+    await c.selfDeploy.sync();
+    expect(await handLeft(c)).toHaveLength(0);
+    const closed = await byId(c, todo!.id);
+    expect(notice(closed)!.text).toContain("Nothing else is left to do: the host runs the current deployer script, and the runners are built from the version the server runs.");
+    expect(notice(closed)!.stepsLeft).toBeUndefined();
   });
 });
 
@@ -2893,6 +3118,82 @@ describe("runner updates queue instead of being refused (BOS-1086)", () => {
     await hostTicks(c, "2026-11-10T17:17:30Z");
     await c.selfDeploy.sync();
     expect(JSON.parse(await readFile(inbox(c), "utf8"))).toMatchObject({ target: "runner", commit: B });
+  });
+});
+
+// BOS-2701 (26 Nov 13:19): the host removes available.json after every deploy and rewrites it on its next tick. The
+// trial banner says "press Build and update runners" in that very minute, and the press was refused with "reading main
+// again... try again in a minute". Every stage now queues the press; only a deployer that never reported or is late refuses.
+describe("Build and update runners just after a server update is queued, not refused (BOS-2701)", () => {
+  afterEach(() => vi.useRealTimers());
+  const inbox = (c: Awaited<ReturnType<typeof setup>>) => path.join(c.dir, "inbox", "request.json");
+  const hostTicks = (c: Awaited<ReturnType<typeof setup>>, at: string) => writeFile(path.join(c.dir, "outbox", "host.json"), JSON.stringify({ version: 1, name: "nas01", writtenAt: at, ownership: [] }));
+  const offerGone = (c: Awaited<ReturnType<typeof setup>>) => rm(path.join(c.dir, "outbox", "available.json"));
+  const deployedB = { id: randomUUID(), target: "server", result: "deployed", from_commit: A, to_commit: B, started: "2026-11-26T13:14:00Z", ended: "2026-11-26T13:18:00Z" };
+
+  it("a press within 2 minutes of the deploy, offer file gone and the poller not yet run, is queued for the trial's end and starts by itself", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-26T13:19:00Z"));
+    const c = (ctx = await setup());
+    await hostTicks(c, "2026-11-26T13:18:30Z");
+    await c.status(deployedB);
+    await offerGone(c).catch(() => undefined);
+    const press = await c.req("POST", "/api/self-deploy/update-runners");
+    expect(press.statusCode).toBe(200);
+    expect(press.json()).toMatchObject({ queued: true, startsAt: "2026-11-26T13:33:00.000Z" });
+    expect(press.json().message).toContain("Runners will update at");
+    expect(JSON.stringify(press.json())).not.toContain("Try again");
+    // The poller then reads the deploy (finished() keeps the press) and the host rewrites its offer: still queued.
+    vi.setSystemTime(new Date("2026-11-26T13:20:00Z"));
+    await c.available({ deployed: B, tip: B, commits: [], checkedAt: "2026-11-26T13:20:00Z" });
+    await hostTicks(c, "2026-11-26T13:20:00Z");
+    await c.selfDeploy.sync();
+    await expect(readFile(inbox(c), "utf8")).rejects.toThrow();
+    // After the trial the runner update goes to the host for B, with no card and no second press.
+    vi.setSystemTime(new Date("2026-11-26T13:33:30Z"));
+    await hostTicks(c, "2026-11-26T13:33:30Z");
+    await c.selfDeploy.sync();
+    expect(JSON.parse(await readFile(inbox(c), "utf8"))).toMatchObject({ target: "runner", commit: B });
+    expect((await c.open()).filter((d) => (d.context as { target: string }).target === "runner")).toHaveLength(0);
+  });
+
+  it("a press during the trial, after the poller read the deploy and the offer is still gone, is queued for the trial's end", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-26T13:18:30Z"));
+    const c = (ctx = await setup());
+    await hostTicks(c, "2026-11-26T13:18:30Z");
+    await c.status(deployedB);
+    await c.selfDeploy.sync();
+    vi.setSystemTime(new Date("2026-11-26T13:25:00Z"));
+    const press = await c.selfDeploy.updateRunners();
+    expect(press).toMatchObject({ queued: true, startsAt: "2026-11-26T13:33:00.000Z" });
+    expect(press).not.toHaveProperty("error");
+  });
+
+  it("a press after the trial with the offer still gone is queued and sent on the next pass", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-26T13:18:30Z"));
+    const c = (ctx = await setup());
+    await hostTicks(c, "2026-11-26T13:18:30Z");
+    await c.status(deployedB);
+    await c.selfDeploy.sync();
+    vi.setSystemTime(new Date("2026-11-26T13:40:00Z"));
+    await hostTicks(c, "2026-11-26T13:39:30Z");
+    const press = await c.selfDeploy.updateRunners();
+    expect(press).toMatchObject({ queued: true, startsAt: null, message: expect.stringContaining("starts by itself within a minute or two") });
+    vi.setSystemTime(new Date("2026-11-26T13:40:30Z"));
+    await hostTicks(c, "2026-11-26T13:40:30Z");
+    await c.selfDeploy.sync();
+    expect(JSON.parse(await readFile(inbox(c), "utf8"))).toMatchObject({ target: "runner", commit: B });
+  });
+
+  it("is still refused, with what to check, when the deployer is late", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-26T14:00:00Z"));
+    const c = (ctx = await setup());
+    await hostTicks(c, "2026-11-26T13:18:30Z");
+    await c.status(deployedB);
+    expect(await c.selfDeploy.updateRunners()).toMatchObject({ error: expect.stringContaining("Check that its cron job is running.") });
   });
 });
 

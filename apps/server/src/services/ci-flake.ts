@@ -15,13 +15,21 @@ export const FLAKE_RETRY_KIND = "ci_flake_retry";
 export const GATE_RERUN_MARK = "# boss-man: re-run of tests GitHub CI failed (BOS-1733)";
 /** The re-run command's exit code for "can't re-run this here" (not a vitest repo, file missing, nothing ran): no retry. */
 export const CANT_RERUN_EXIT = 78;
+/**
+ * BOS-2758: the re-run command's exit code for "the branch touches this shell test": the repo's own rule
+ * (scripts/shell-tests-for-changes.sh, the one check-quick uses to pick the shell tests whose subject changed) counts the
+ * test as touched by the merge commit's change, so its failure is the branch's and the ticket goes back.
+ */
+export const TOUCHED_EXIT = 79;
+/** BOS-2758: a shell test (test-shell's convention: every tracked *.test.sh). */
+export const isShellTest = (f: string): boolean => f.endsWith(".test.sh");
 
 /**
  * A repo-relative test file path that is safe to put in a shell command. The names come from annotations that the branch's
  * own tests write, so they are attacker-shaped: no quotes, spaces, `$`, backslashes, `..` or leading `/` are allowed, and
- * the path must end in a test file name. Anything else means no retry.
+ * the path must end in a test file name: a vitest file, or (BOS-2758) a shell test, *.test.sh. Anything else means no retry.
  */
-export const SAFE_TEST_PATH = /^(?!.*\.\.)(?!\/)(?!-)[A-Za-z0-9_@.\/-]+\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$/;
+export const SAFE_TEST_PATH = /^(?!.*\.\.)(?!\/)(?!-)[A-Za-z0-9_@.\/-]+(?:\.(?:test|spec)\.(?:ts|tsx|js|jsx|mjs|cjs|mts|cts)|\.test\.sh)$/;
 
 /** One failed GitHub job, as the gate read it: its name and the paths of its failure annotations (null: unreadable). */
 export type FailedJobEvidence = { job: string; paths: string[] | null };
@@ -219,18 +227,52 @@ const READ_JSON_RESULT =
  * package's vitest on the file. Exit CANT_RERUN_EXIT means "can't re-run this here" (no lockfile, missing file, no vitest,
  * the file isn't a test vitest runs, no JSON result, or no test passed, e.g. all skipped without a browser): never read as a
  * pass. Whether tests passed comes from vitest's JSON reporter (BOS-2082); the terminal output is only shown.
+ *
+ * BOS-2758: a shell test (*.test.sh) is re-run the way the repo's shell tests run everywhere else (test-shell's conventions:
+ * scripts/test-shell.sh runs it in a scrubbed environment, scripts/shell-tests-for-changes.sh says which tests a change
+ * touches). First the repo's own rule is asked whether the merge commit's change (against its first parent, the branch it
+ * merges into) touches the test: then it exits TOUCHED_EXIT and the ticket goes back. A repo without those two scripts, or a
+ * test whose last line says it skipped, is CANT_RERUN_EXIT.
  */
 export function gateRerunCommand(files: string[]): string {
   for (const f of files) if (!SAFE_TEST_PATH.test(f)) throw new Error(`unsafe test path: ${f}`);
   const cant = CANT_RERUN_EXIT;
+  // Shell tests alone need no install to be judged; one that runs node finds what the lockfile installs when there is one.
+  const install = files.some((f) => !isShellTest(f))
+    ? [
+        'if [ -f pnpm-lock.yaml ]; then pnpm install --frozen-lockfile --prefer-offline || cant "pnpm install failed";',
+        'elif [ -f package-lock.json ]; then npm ci || cant "npm ci failed";',
+        'else cant "no pnpm-lock.yaml or package-lock.json"; fi',
+      ]
+    : [
+        'if [ -f pnpm-lock.yaml ]; then pnpm install --frozen-lockfile --prefer-offline || cant "pnpm install failed";',
+        'elif [ -f package-lock.json ]; then npm ci || cant "npm ci failed"; fi',
+      ];
+  const shell = files.some(isShellTest)
+    ? [
+        "rerun_sh() {",
+        '  f=$1; [ -f "$root/$f" ] || cant "$f is not in the merge commit"',
+        '  [ -x "$root/scripts/test-shell.sh" ] && [ -x "$root/scripts/shell-tests-for-changes.sh" ] || cant "no scripts/test-shell.sh and scripts/shell-tests-for-changes.sh to run $f with"',
+        '  git rev-parse -q --verify "HEAD^1" >/dev/null || cant "the merge commit has no parent to compare with"',
+        '  changed=$(git diff --name-only "HEAD^1" HEAD) || cant "git could not list what the merge commit changes"',
+        '  touched=$(printf \'%s\\n\' "$changed" | "$root/scripts/shell-tests-for-changes.sh") || cant "scripts/shell-tests-for-changes.sh failed"',
+        `  if printf '%s\\n' "$touched" | grep -qxF -- "$f"; then echo "boss-man re-run: $f: the branch changes what it tests (scripts/shell-tests-for-changes.sh)"; exit ${TOUCHED_EXIT}; fi`,
+        '  echo "boss-man re-run: $f (scripts/test-shell.sh)"',
+        '  (cd "$root" && scripts/test-shell.sh "$f") > "$out" 2>&1; rc=$?; cat "$out"',
+        '  [ "$rc" -eq 0 ] || exit 1',
+        // A shell test that can't run here (no caddy, no docker) says SKIP and exits 0: that is no pass.
+        "  last=$(grep -v '^[[:space:]]*$' \"$out\" | tail -n 1)",
+        `  if printf '%s\\n' "$last" | grep -qiE '(^|[^a-z])skip(ped)?([^a-z]|$)'; then cant "$f skipped here ($last)"; fi`,
+        '  echo "boss-man re-run: $f: passed (scripts/test-shell.sh)"',
+        "}",
+      ]
+    : [];
   const lines = [
     GATE_RERUN_MARK,
     "set -u",
     `cant() { echo "boss-man re-run: $1"; exit ${cant}; }`,
     'root=$(pwd)',
-    'if [ -f pnpm-lock.yaml ]; then pnpm install --frozen-lockfile --prefer-offline || cant "pnpm install failed";',
-    'elif [ -f package-lock.json ]; then npm ci || cant "npm ci failed";',
-    'else cant "no pnpm-lock.yaml or package-lock.json"; fi',
+    ...install,
     // In the throwaway checkout, not $TMPDIR: a fenced job may not be allowed to write /tmp.
     'out="$root/.boss-man-rerun.out"',
     'json="$root/.boss-man-rerun.json"',
@@ -253,7 +295,8 @@ export function gateRerunCommand(files: string[]): string {
     '  [ "${passed:-0}" -gt 0 ] 2>/dev/null || cant "no test in $f passed (skipped here?)"',
     '  echo "boss-man re-run: $f: $passed passed (vitest JSON result)"',
     "}",
-    ...files.map((f) => `rerun ${sq(f)}`),
+    ...shell,
+    ...files.map((f) => `${isShellTest(f) ? "rerun_sh" : "rerun"} ${sq(f)}`),
     'echo "boss-man re-run: passed"',
   ];
   return lines.join("\n");

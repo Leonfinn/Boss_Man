@@ -11,10 +11,14 @@ import { checkNow, serverDown, subscribeServer } from "./server-watch";
 import { Auth } from "./pages/Auth";
 import { lazyPage, PageSuspense } from "./lazy-page";
 import { settingsRedirect } from "./pages/settings-redirect";
+import { wrapUpWords, type WrapTieView } from "@boss-man/shared";
 import { atTime, drainTiming, updateWaitExtras, waitingFor, wrapUpBannerText, type RunnerCheckView, type WorkerCheckView } from "./pages/settings/updates";
 import { inLineOf, MergesStuckBannerFor } from "./components/MergesStuckBanner";
 import { SearchPalette } from "./components/SearchPalette";
 import { Shortcuts } from "./components/Shortcuts";
+import { PinnedProvider, ShortcutGone } from "./pinned-pages";
+import { DEFAULT_PREFERENCES, PreferencesContext, type Preferences } from "./preferences";
+import type { OwnerPreferences } from "@boss-man/shared";
 
 // BOS-1843: every page below loads when it is first opened. Login, the shell and the banners stay in the entry file.
 const Board = lazyPage(() => import("./pages/Board"), "Board");
@@ -47,7 +51,7 @@ const Roadmap = lazyPage(() => import("./pages/Roadmap"), "Roadmap");
 const Setup = lazyPage(() => import("./pages/Setup"), "Setup");
 const SetupChecklist = lazyPage(() => import("./pages/Setup"), "SetupChecklist");
 
-type Session = { state: "loading" } | { state: "setup" } | { state: "login" } | { state: "in"; username: string } | { state: "offline" };
+type Session = { state: "loading" } | { state: "setup" } | { state: "login" } | { state: "in"; username: string; preferences: OwnerPreferences } | { state: "offline" };
 
 const notifySupported = () => typeof window !== "undefined" && "Notification" in window;
 
@@ -110,7 +114,7 @@ function rememberCollapsed(off: boolean, set: (off: boolean) => void) {
   }
 }
 
-type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; reason: string; since: string; deadline: string; runs: number; companies: number; /** BOS-1600: checks on a runner that the swap waits on. */ checks?: number; checksList?: RunnerCheckView[]; /** BOS-2404: the owner's chat answers; false only while a runner is being swapped, until chatBackBy at the latest. */ chatOpen: boolean; chatBackBy?: string | null; /** BOS-1414: false once the drain is past its deadline and waits on the owner, so nothing is held for it. */ blocking?: boolean; /** BOS-1877: the drain's phase, forecast and whether it ran past it. */ phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean; /** BOS-1951: merges being pushed to main (named by ticket), and a wait on nothing Boss Man can name. */ merges?: number; mergesList?: { ticket: string | null }[]; unknownWait?: boolean; /** BOS-2479: checks on a check worker (not waited for) and the latest go-ahead. */ workerChecksList?: WorkerCheckView[]; goAheadAt?: string | null; /** BOS-2056: when the owner's wrap-up was asked and which update it is for. */ wrapSince?: string; wrapForUpdate?: "server" | "runner" | "none" };
+type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; reason: string; since: string; deadline: string; runs: number; companies: number; /** BOS-1600: checks on a runner that the swap waits on. */ checks?: number; checksList?: RunnerCheckView[]; /** BOS-2404: the owner's chat answers; false only while a runner is being swapped, until chatBackBy at the latest. */ chatOpen: boolean; chatBackBy?: string | null; /** BOS-1414: false once the drain is past its deadline and waits on the owner, so nothing is held for it. */ blocking?: boolean; /** BOS-1877: the drain's phase, forecast and whether it ran past it. */ phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean; /** BOS-1951: merges being pushed to main (named by ticket), and a wait on nothing Boss Man can name. */ merges?: number; mergesList?: { ticket: string | null }[]; unknownWait?: boolean; /** BOS-2479: checks on a check worker (not waited for) and the latest go-ahead. */ workerChecksList?: WorkerCheckView[]; goAheadAt?: string | null; /** BOS-2056: when the owner's wrap-up was asked and which update it is for. */ wrapSince?: string; wrapForUpdate?: "server" | "runner" | "none"; /** BOS-2672: the update chain the wrap-up is tied to. */ wrapTie?: WrapTieView };
 
 /** On every page while a runner update is draining (docs/09-self-deploy.md): nothing new starts until the runs below finish. */
 function UpdateBanner({ m }: { m: Maintenance | null }) {
@@ -155,7 +159,7 @@ function UpdateBanner({ m }: { m: Maintenance | null }) {
           <a href="#/settings/updates">choose in Settings → Server and runner → Updates</a> to stop the checks and update now, keep waiting, or cancel the update. Nothing that has started is stopped unless you choose that. The chat keeps answering meanwhile.{" "}
         </>
       ) : null}
-      {m.wrapSince ? `Wrapping up for this update (asked at ${atTime(m.wrapSince)}): it ends by itself when the update goes in. ` : ""}
+      {m.wrapTie ? `${wrapUpWords(m.wrapTie, 0, atTime).banner} ` : m.wrapSince ? `Wrapping up for this update (asked at ${atTime(m.wrapSince)}): it ends by itself when the update goes in. ` : ""}
       {m.runs > 0 && !m.wrapSince
         ? 'To end the runs sooner, use "Ask agents to wrap up" on Settings → Server and runner → Updates.'
         : (m.checks ?? 0) > 0
@@ -260,7 +264,16 @@ export function ServerBanner() {
   );
 }
 
-function Signed({ onLogout }: { onLogout: () => void }) {
+function Signed({ onLogout, username, initialPreferences }: { onLogout: () => void; username: string; initialPreferences: OwnerPreferences }) {
+  // The owner's per-login preferences (BOS-2689): they arrive with the sign-in answer, so nothing is drawn
+  // with the wrong choice, and a save on the settings page shows here too. A failed save leaves the old one.
+  const [prefs, setPrefs] = useState<OwnerPreferences>(initialPreferences);
+  const save = useCallback(async (patch: Partial<OwnerPreferences>) => {
+    const saved = await api<OwnerPreferences>("/api/preferences", { method: "PATCH", body: patch });
+    setPrefs(saved);
+    return saved;
+  }, []);
+  const preferences: Preferences = { prefs, save };
   const [rawRoute, go] = useRoute();
   const companies = usePoll((signal) => api<Company[]>("/api/companies", { signal }), 30_000, "companies");
   // The old Settings addresses keep working (BOS-1019): the redirect runs before anything renders, so an old
@@ -382,11 +395,14 @@ function Signed({ onLogout }: { onLogout: () => void }) {
     }, () => {});
   }, [companies.data, page, go]);
   return (
+    <PreferencesContext.Provider value={preferences}>
+    <PinnedProvider companyId={companyId}>
     <div className={`app${collapsed ? " side-collapsed" : ""}`}>
       <Sidebar
         collapsed={collapsed}
         onToggleCollapsed={() => rememberCollapsed(!collapsed, setCollapsed)}
         narrow={narrow}
+        route={route}
         active={page === "funding" || page === "rules" || page === "secrets" ? "settings" : page}
         activeAgent={route[2]}
         activeProject={route[1]}
@@ -406,7 +422,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         onLogout={() => void api("/api/logout", { method: "POST" }).finally(onLogout)}
       />
       <SearchPalette companyId={companyId} go={go} />
-      <Shortcuts go={go} hasProjects={(current?.projects?.length ?? 0) > 0} />
+      <Shortcuts go={go} hasProjects={(current?.projects?.length ?? 0) > 0} singleLetterKeys={prefs.singleLetterKeys} onTurnKeysOn={() => void save({ singleLetterKeys: true })} keyboardTipSeen={prefs.keyboardTipSeen} onTipSeen={() => void save({ keyboardTipSeen: true }).catch(() => {})} />
       <main>
         <UpdateBanner m={maintenance.data} />
         <HoldBanner />
@@ -458,6 +474,8 @@ function Signed({ onLogout }: { onLogout: () => void }) {
           </Settings>
         ) : page === "engagements" ? (
           route[1] ? <Engagement id={route[1]} /> : <Engagements />
+        ) : page === "shortcut-gone" && route[1] ? (
+          <ShortcutGone id={route[1]} />
         ) : page === "setup" ? (
           <Setup companies={list} go={go} onChanged={companies.reload} />
         ) : page === "decisions" ? (
@@ -469,6 +487,8 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         </PageGuard>
       </main>
     </div>
+    </PinnedProvider>
+    </PreferencesContext.Provider>
   );
 }
 
@@ -479,7 +499,10 @@ export function App() {
       const { needsSetup } = await api<{ needsSetup: boolean }>("/api/setup");
       if (needsSetup) return setSession({ state: "setup" });
       const me = await api<{ username: string }>("/api/me");
-      setSession({ state: "in", username: me.username });
+      // The per-login preferences (BOS-2689) come with the sign-in answer, so no screen is drawn with the
+      // wrong choice; a server that can't answer reads as every default rather than holding the app up.
+      const prefs = await api<OwnerPreferences>("/api/preferences").catch(() => DEFAULT_PREFERENCES);
+      setSession({ state: "in", username: me.username, preferences: prefs });
     } catch (err) {
       setSession(err instanceof ApiError && err.status === 401 ? { state: "login" } : { state: "offline" });
     }
@@ -511,9 +534,10 @@ export function App() {
       );
     case "setup":
     case "login":
-      return <Auth firstRun={session.state === "setup"} onDone={(username) => setSession({ state: "in", username })} />;
+      // Signing in re-reads the session, and with it this login's preferences (BOS-2689).
+      return <Auth firstRun={session.state === "setup"} onDone={() => check()} />;
     case "in":
-      return <Signed onLogout={loggedOut} />;
+      return <Signed onLogout={loggedOut} username={session.username} initialPreferences={session.preferences} />;
   }
 }
 

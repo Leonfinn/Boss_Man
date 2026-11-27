@@ -111,6 +111,23 @@ export function drainEndsAt(hold: { since: string; deadline?: string; swapWhenDo
 /** A wrap-up with no update behind it lifts by itself after this long. */
 export const STANDALONE_WRAPUP_MS = WAIT_RULES.wrapup.endMin * 60_000;
 
+/**
+ * BOS-2786: a runner update queued behind a server update's trial gets Boss Man's own wrap-up (maintenance.ts autoWrap).
+ * New work and checks are held from the press: a merge check on the company runner takes 18 min at the median and 26 at
+ * the 90th percentile (270 merge checks, 24 to 27 Nov), longer than the whole 15-minute trial, so no shorter lead lets one
+ * that starts in the trial end with it (on 27 Nov four started 09:59 to 10:03, inside 62e77f40's trial). Running agents
+ * are asked to finish this many minutes before the trial ends: a told agent ends within about a minute of reading the
+ * message (15 of 15 runs since 11 Nov), and reads it when the tool call it is in ends, which is minutes for an ordinary
+ * step such as a test file in the quick lane. Until then they keep working.
+ */
+export const AUTO_WRAPUP_TELL_LEAD_MIN = 10;
+/**
+ * BOS-2786: Boss Man's own wrap-up gives up when its runner update is still only queued this long after the trial's end
+ * (something else holds it back, such as a failed update being diagnosed): the host takes a request within a minute or
+ * two, and all work must not stay held for the runner-queued wait's 180 minutes for a press that is not moving.
+ */
+export const AUTO_WRAPUP_QUEUED_GRACE_MIN = 10;
+
 /** Does this wait's hold stop `cls` from starting? Gates call this instead of keeping their own list. */
 export const blocksClass = (kind: WaitKind, cls: WorkClass): boolean => WAIT_RULES[kind].blocks.includes(cls);
 

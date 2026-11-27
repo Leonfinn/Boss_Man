@@ -233,6 +233,8 @@ An install from the published images (docs/35) looks at its own GitHub repositor
 
 The release list comes from the repository the install was set up with, so it works for a fork too. To read it from another address (an internal mirror), set `BOSSMAN_RELEASE_API` on the server.
 
+An image install made before this feature existed starts watching only after its next update made by the updater, because that is when the updater gives it the settings it checks with.
+
 ### Installing it with one button
 
 The same line has an **Install 0.1.0-beta.3** button (with your version's number). Press it and the updater does what docs/35 describes: it checks the signed release, downloads the images, backs up the database, starts the new server beside the old one, switches over, and watches the new one for about 15 minutes, going back by itself if it misbehaves. The line shows which step it is on; you can leave the page. When it ends, the line says what happened (updated, or went back and why) with a **Got it** button to clear it.

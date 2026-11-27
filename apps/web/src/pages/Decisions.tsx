@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { figureText, HARNESSES, harnessLabel, modelFitProblem, parseStep, providerLabel, splitStepSource, type AlwaysTtl, type StepPiece, type StepSource, type Where } from "@boss-man/shared";
+import { ATTACH_FIRST, figureText, HARNESSES, harnessLabel, modelFitProblem, NOTE_FIRST, optionNeeds, parseStep, providerLabel, splitStepSource, type AlwaysTtl, type StepPiece, type StepSource, type Where } from "@boss-man/shared";
 import { api, ApiError, type AdvisedDecision, type ClosedNoticeCard, type Company, type Decision, type DecisionTally, type DeployUpdate, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
 import { art } from "../brand";
 import { copyText, selectText } from "../clipboard";
@@ -673,6 +673,16 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
   // is the card whose box is open, so an upload goes to that card's ticket.
   const answering = useRef<string | undefined>(undefined);
   const img = useImageAttach(companies[0]?.id, undefined, { ticketIdOf: () => answering.current });
+  // BOS-2742: the card the attachments belong to. One page-wide attach list serves every card, so a picture added on
+  // one card is dropped (not sent) when the owner starts attaching on another, and only its own card shows or sends it.
+  const [attachFor, setAttachFor] = useState<string | null>(null);
+  const attachTo = (d: Decision) => {
+    answering.current = cardTicketId(d);
+    if (attachFor === d.id) return;
+    img.clear();
+    setAttachFor(d.id);
+  };
+  const attachedTo = (id: string) => (attachFor === id ? img.attached : []);
   // A team plan's ticked hires, by position; all of them until the owner unticks one.
   const [picks, setPicks] = useState<Record<string, number[]>>({});
   // A model-change card being edited before approval.
@@ -811,7 +821,7 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
       const ticketId = d.context?.type === "risk_review" ? d.context.ticketId ?? undefined : d.context?.blockerTicketId ?? undefined;
       const markdown = await uploadText(d.companyId, ticketId || cardTicketId(d), long);
       // Anything pasted into the box goes with the file too, so nothing the owner attached is lost.
-      await api(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: withAttachments(`${ANSWER_IN_FILE}\n\n${markdown}`, img.attached), custom: true } });
+      await api(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: withAttachments(`${ANSWER_IN_FILE}\n\n${markdown}`, attachedTo(d.id)), custom: true } });
       setAnswered((a) => ({ ...a, [d.id]: ANSWER_IN_FILE }));
       forgetOwn(d.id);
       img.clear();
@@ -828,8 +838,26 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
   // Sends an answer in the owner's own words; it needs some text or an attachment (BOS-759).
   const sendOwn = (d: Decision) => {
     const text = ownWords[d.id]?.trim() ?? "";
-    if (!text && !img.attached.length) return;
+    if (!text && !attachedTo(d.id).length) return;
     void answer(d, text, { custom: true });
+  };
+  // BOS-2742: an option that promises a screenshot is pressed only with one attached on this card; otherwise the card
+  // stays open and says so (the server refuses it too).
+  const pressOption = (d: Decision, o: string) => {
+    const need = optionNeeds(o, d.context);
+    if (need === "attachment" && !attachedTo(d.id).length) {
+      setErrors((e) => ({ ...e, [d.id]: `${ATTACH_FIRST}: paste it into the box under the answers, or use Attach file, then press "${o}" again.` }));
+      document.getElementById(`note-${d.id}`)?.focus();
+      return;
+    }
+    // BOS-2798 (DR-078): an option that needs a note is disabled while the note is empty; this catches any other way of
+    // pressing it (a keyboard shortcut) with the same words the server uses.
+    if (need === "note" && !notes[d.id]?.trim() && !attachedTo(d.id).length) {
+      setErrors((e) => ({ ...e, [d.id]: `${NOTE_FIRST}: paste or write it in the box above the answers, then press "${o}" again.` }));
+      document.getElementById(`note-${d.id}`)?.focus();
+      return;
+    }
+    void answer(d, o);
   };
   const answer = async (d: Decision, option: string, extra: { custom?: boolean; modelConfig?: ModelConfigView; assigneeAgentId?: string } = {}) => {
     const isAlways = d.context?.always?.some((a) => a.label === option) ?? false;
@@ -839,16 +867,20 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
     setBusy(d.id);
     // An own-word answer carries its pictures and files on the end, as a message does (BOS-759). Only
     // for this card: the box sends what is shown, and the server refuses a custom answer anywhere else.
-    const answerText = extra.custom && ownWords[d.id] !== undefined ? withAttachments(option.trim(), img.attached).trim() : option;
+    const answerText = extra.custom && ownWords[d.id] !== undefined ? withAttachments(option.trim(), attachedTo(d.id)).trim() : option;
     try {
-      const note = notes[d.id]?.trim();
+      // BOS-2742: a button answer carries this card's pictures in its note, where the server and the agent's wake read them.
+      const note = (extra.custom ? notes[d.id] ?? "" : withAttachments(notes[d.id]?.trim() ?? "", attachedTo(d.id))).trim();
       const reasonLink = reasonLinks[d.id]?.trim();
       const r = await api<{ endedHere?: boolean }>(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: answerText, ...(note ? { note } : {}), ...(reasonLink ? { reasonLink } : {}), ...(extra.custom ? { custom: true } : {}), ...(isAlways ? { alwaysScope: d.context?.alwaysAgent ? (alwaysScopes[d.id] ?? "agent") : "company", alwaysTtl: alwaysTtls[d.id] ?? "always" } : {}), ...(extra.modelConfig ? { modelConfig: extra.modelConfig } : {}), ...(extra.assigneeAgentId ? { assigneeAgentId: extra.assigneeAgentId } : {}), ...(d.context?.hires && option === "Hire the ticked ones" ? { picks: picks[d.id] ?? d.context.hires.map((_, i) => i) } : {}) } });
       setAnswered((a) => ({ ...a, [d.id]: option }));
       // The card is answered, so its kept note and answer are done with, and the attachments went with it.
       forgetNote(d.id);
       forgetOwn(d.id);
-      img.clear();
+      if (attachFor === d.id) {
+        img.clear();
+        setAttachFor(null);
+      }
       setModelEdits(({ [d.id]: _, ...rest }) => rest);
       if (r?.endedHere) setEndedHere((x) => ({ ...x, [d.id]: true }));
       setErrors(({ [d.id]: _, ...rest }) => rest);
@@ -1494,8 +1526,56 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
                             const effects = new Map(d.options.map((o) => [o, modelEdits[d.id] ? null : effectOf(d, o, who)] as const));
                             const stacked = d.options.some((o) => effects.get(o));
                             const recTag = <span className="tag blue rec-tag">Recommended</span>;
+                            // The note box. It names the button that sends it (BOS-1236). BOS-2742: options that need a screenshot get
+                            // a paste/attach area in it, and a to-do's "What went wrong" box takes a picture too. BOS-2798 (DR-078):
+                            // when an option needs a note it moves above the buttons, named for that option, and the option stays
+                            // disabled until the note has text, so the card can't close with its answer missing.
+                            const noted = d.options.some((o) => o === "Keep planning" || o === "Send it back" || o === "A step failed" || (o === "Edit" && d.options.includes("Add")));
+                            const shotFor = d.options.filter((o) => optionNeeds(o, d.context) === "attachment");
+                            const attachable = shotFor.length > 0 || d.context?.type === "owner_todo";
+                            const noteFor = d.options.filter((o) => optionNeeds(o, d.context) === "note");
+                            const noteEmpty = !notes[d.id]?.trim() && !attachedTo(d.id).length;
+                            const hasBase = noted || d.context?.type === "owner_todo";
+                            const shotLine = shotFor.length ? `Screenshot for "${shotFor.join('" or "')}": paste it here or use Attach file.` : attachable ? "Paste a screenshot here or use Attach file." : null;
+                            const mine = attachedTo(d.id);
+                            const noteField =
+                              !noted && !attachable && !noteFor.length ? null : (
+                                <div className="field" data-testid={noteFor.length ? "card-note" : attachable ? "card-attach" : undefined}>
+                                  {/* The wording stays inline in the label: the owner-controls list guard reads field labels from here. */}
+                                  <label htmlFor={`note-${d.id}`}>
+                                    {noteFor.length ? `Paste your output here for "${noteFor.join('" or "')}"` : d.options.includes("Edit") && d.options.includes("Add") ? "Your one-line reason, or the corrected lesson (needed for Edit)" : d.context?.type === "owner_todo" ? "What went wrong (if a step failed)" : noted ? `Note for ${d.context?.type === "risk_review" ? (d.context.builder ?? "the builder") : agentOf(d)}, sent with "${d.options.find((o) => o === "Keep planning" || o === "Send it back")}"` : null}
+                                    {(hasBase || noteFor.length) && shotLine ? `. ${shotLine}` : shotLine}
+                                  </label>
+                                  <DraftTextarea
+                                    draftKey={draftNote(d.id)}
+                                    id={`note-${d.id}`}
+                                    rows={noteFor.length ? 4 : 2}
+                                    value={notes[d.id] ?? ""}
+                                    onChange={(text) => editNote(d.id, text)}
+                                    onPaste={
+                                      attachable
+                                        ? (e) => {
+                                            if (!e.clipboardData.files.length) return;
+                                            attachTo(d);
+                                            img.onPaste(e);
+                                          }
+                                        : undefined
+                                    }
+                                  />
+                                  {attachable && (
+                                    <>
+                                      {mine.length > 0 && <ImagePreviews attached={mine} onRemove={img.remove} />}
+                                      {attachFor === d.id && img.error && <p className="error" role="alert">{img.error}</p>}
+                                      <div className="actions" onClickCapture={() => attachTo(d)}>
+                                        {img.button}
+                                      </div>
+                                    </>
+                                  )}
+                                </div>
+                              );
                             return (
                               <>
+                                {noteFor.length > 0 && noteField}
                                 {!modelEdits[d.id] && <p className="answer-label" id={`answer-label-${d.id}`}>Your answer</p>}
                                 <div className={`actions${stacked ? " stacked" : d.kind === "question" ? " wide" : ""}`} role="group" data-shortcut-open aria-labelledby={modelEdits[d.id] ? undefined : `answer-label-${d.id}`} onClickCapture={(e) => {
                                   const target = e.target as HTMLElement | null;
@@ -1507,8 +1587,9 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
                                     const rec = o === eff.option;
                                     const effect = effects.get(o);
                                     const effectId = `effect-${d.id}-${i}`;
+                                    const waitsForNote = noteEmpty && noteFor.includes(o);
                                     const button = (
-                                      <button type="button" key={o} className={`btn${rec ? " primary" : ""}`} aria-label={rec ? `${o}, recommended` : undefined} aria-describedby={effect ? effectId : undefined} disabled={busy === d.id || (d.context?.type === "workflow_change" && !notes[d.id]?.trim())} title={d.context?.type === "workflow_change" && !notes[d.id]?.trim() ? "Type a reason above to Apply or Skip" : undefined} onClick={() => (d.context?.type === "model_change" && o === "Edit" ? setModelEdits((m) => ({ ...m, [d.id]: true })) : o === "Reassign" && d.context?.type === "stale_blocker" && d.context.blockerTicketId ? void openReassign(d) : void answer(d, o))}>
+                                      <button type="button" key={o} className={`btn${rec ? " primary" : ""}`} aria-label={rec ? `${o}, recommended` : undefined} aria-describedby={effect ? effectId : waitsForNote ? `note-first-${d.id}` : undefined} disabled={busy === d.id || waitsForNote || (d.context?.type === "workflow_change" && !notes[d.id]?.trim())} title={waitsForNote ? `${NOTE_FIRST}: the box above` : d.context?.type === "workflow_change" && !notes[d.id]?.trim() ? "Type a reason above to Apply or Skip" : undefined} onClick={() => (d.context?.type === "model_change" && o === "Edit" ? setModelEdits((m) => ({ ...m, [d.id]: true })) : o === "Reassign" && d.context?.type === "stale_blocker" && d.context.blockerTicketId ? void openReassign(d) : pressOption(d, o))}>
                                         {o}
                                         {rec && !stacked && recTag}
                                       </button>
@@ -1523,14 +1604,14 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
                                   {d.context?.type === "workflow_change" && !notes[d.id]?.trim() && (
                                     <p className="muted" style={{ fontSize: 13 }}>Type a reason above to Apply or Skip</p>
                                   )}
+                                  {!modelEdits[d.id] && noteFor.length > 0 && noteEmpty && (
+                                    <p className="muted" id={`note-first-${d.id}`} style={{ fontSize: 13 }}>
+                                      {NOTE_FIRST}: &quot;{noteFor.join('" or "')}&quot; can be pressed once the box above has your output or answer.
+                                    </p>
+                                  )}
                                 </div>
-                                {/* The note keeps its place under the answers, and names the button that sends it (BOS-1236). */}
-                                {d.options.some((o) => o === "Keep planning" || o === "Send it back" || o === "A step failed" || (o === "Edit" && d.options.includes("Add"))) && (
-                                  <div className="field">
-                                    <label htmlFor={`note-${d.id}`}>{d.options.includes("Edit") && d.options.includes("Add") ? "Your one-line reason, or the corrected lesson (needed for Edit)" : d.context?.type === "owner_todo" ? "What went wrong (if a step failed)" : `Note for ${d.context?.type === "risk_review" ? (d.context.builder ?? "the builder") : agentOf(d)}, sent with "${d.options.find((o) => o === "Keep planning" || o === "Send it back")}"`}</label>
-                                    <DraftTextarea draftKey={draftNote(d.id)} id={`note-${d.id}`} rows={2} value={notes[d.id] ?? ""} onChange={(text) => editNote(d.id, text)} />
-                                  </div>
-                                )}
+                                {/* Otherwise the note keeps its place under the answers. */}
+                                {noteFor.length === 0 && noteField}
                                 {!modelEdits[d.id] && d.kind === "question" && (
                                   <div className="card-foot">
                                     <button type="button" className="linkish" disabled={busy === d.id} onClick={() => editOwn(d.id, readDraft(draftOwn(d.id)))}>
@@ -1563,7 +1644,7 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
                                 onChange={(text) => editOwn(d.id, text)}
                                 onPaste={(e) => {
                                   // A pasted picture or file is attached, unless text was copied with it (BOS-759).
-                                  answering.current = cardTicketId(d);
+                                  if (e.clipboardData.files.length) attachTo(d);
                                   img.onPaste(e);
                                 }}
                                 onKeyDown={(e) => {
@@ -1577,7 +1658,7 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
                                 attaching={attaching === d.id || img.busy}
                                 error={img.error}
                               >
-                                {img.attached.length > 0 && <ImagePreviews attached={img.attached} onRemove={img.remove} />}
+                                {attachedTo(d.id).length > 0 && <ImagePreviews attached={attachedTo(d.id)} onRemove={img.remove} />}
                               </OwnerMessageBox>
                               {d.recommendedOption && !ownWords[d.id] && (
                                 <button type="button" className="use-suggestion" onClick={() => editOwn(d.id, d.recommendedOption!)}>
@@ -1586,11 +1667,11 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
                               )}
                             </div>
                             <div className="actions">
-                              {img.button}
-                              <button type="submit" className="btn primary" disabled={busy === d.id || img.busy || (!ownWords[d.id]?.trim() && !img.attached.length) || tooLongToSend(ownWords[d.id] ?? "", img.attached)}>
+                              <span onClickCapture={() => attachTo(d)}>{img.button}</span>
+                              <button type="submit" className="btn primary" disabled={busy === d.id || img.busy || (!ownWords[d.id]?.trim() && !attachedTo(d.id).length) || tooLongToSend(ownWords[d.id] ?? "", attachedTo(d.id))}>
                                 Send my answer
                               </button>
-                              <button type="button" className="btn" onClick={() => { answering.current = undefined; img.clear(); forgetOwn(d.id); }}>
+                              <button type="button" className="btn" onClick={() => { answering.current = undefined; if (attachFor === d.id) { img.clear(); setAttachFor(null); } forgetOwn(d.id); }}>
                                 Back to the options
                               </button>
                             </div>

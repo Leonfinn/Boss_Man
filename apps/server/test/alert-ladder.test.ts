@@ -382,6 +382,15 @@ describe("the alert ladder (BOS-64)", () => {
     expect(isError(await (await client(ctx.sm.id)).callTool({ name: "watchdog", arguments: { action: "pass_alert", alertId: b.id, reason: "too late" } }))).toBe(true);
   });
 
+  it("raising a host_warning alert queues a CEO wake straight away (BOS-2721)", async () => {
+    await ctx.switchOn();
+    const d = (await ctx.alerts.raise({ companyId: ctx.companyId, kind: "host_warning", from: "ceo", question: "Settings → This host has shown a check", dedupeKey: "alert:host-warning:check.container_status.unhealthy", clearWhen: [{ kind: "hostWarningGone", key: "check.container_status.unhealthy" }] }))!;
+    expect(d.rung).toBe("ceo");
+    const ws = await alertWakes();
+    expect(ws.map((w) => w.agentId)).toEqual([ctx.ceo.id]);
+    expect(ws[0]).toMatchObject({ reason: "ceo reply", status: "queued" });
+  });
+
   it("the CEO rung has an hourly cap; past it an owner-ceiling alert goes to the owner", async () => {
     for (let i = 0; i < 6; i++) await ctx.db.insert(watchdogActions).values({ companyId: ctx.companyId, kind: "alert_hop", targetAgentId: ctx.ceo.id, reason: "x", createdAt: ctx.now() });
     const d = (await ownerRaise())!;

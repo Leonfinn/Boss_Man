@@ -15,7 +15,8 @@ afterAll(async () => {
 });
 const out = process.env.BOSSMAN_SCRATCH;
 const day = 86_400_000;
-const stuck = (days: number) => ({ rule: "stale_in_progress", idleMs: days * day, since: new Date(Date.now() - days * day).toISOString() });
+const CLAIM = "The Scrum Master was alerted: raised at 15:30 UTC, nobody has picked it up yet.";
+const stuck = (days: number) =>({ rule: "stale_in_progress", idleMs: days * day, since: new Date(Date.now() - days * day).toISOString() });
 const t = (id: string, state: string, n: number, over: Record<string, unknown> = {}) => ({
   id, title: `Made-up ticket ${n}`, number: n, systemState: state, outcome: null, assigneeAgentId: "a1", assignedToOwner: false, dueDate: null, blockedBy: [], branch: "b", risk: "low", size: 2,
   planFirst: false, plan: null, planApprovedAt: null, featureId: null, body: null, lastActivityAt: new Date().toISOString(), waitingOnOwner: false, reviewStage: null, ...over,
@@ -27,7 +28,8 @@ const boardWith = (withStuck: boolean) => ({
   withoutTicket: [],
   columns: [
     col("c-ready", "ready", [t("r1", "ready", 1, { nextUp: true })]),
-    col("c-prog", "in_progress", [t("p1", "in_progress", 10, withStuck ? { looksStuck: stuck(3) } : {}), t("p2", "in_progress", 11)], 3),
+    // BOS-2737: p1 carries the server's actionClaim line; b1 has none (an older server), so its line claims nobody.
+    col("c-prog", "in_progress", [t("p1", "in_progress", 10, withStuck ? { looksStuck: { ...stuck(3), claim: CLAIM } } : {}), t("p2", "in_progress", 11)], 3),
     col("c-blk", "blocked", [t("b1", "blocked", 20, withStuck ? { looksStuck: stuck(1) } : {})]),
     col("c-rev", "review", [t("v1", "review", 30, { reviewStage: "checking" })]),
     col("c-done", "done", []),
@@ -46,6 +48,11 @@ describe.skipIf(!can)("Looks stuck shots (BOS-1910)", () => {
         expect(await page.getByTestId("standing-stuck").count()).toBe(withStuck ? 1 : 0);
         expect(await page.getByTestId("board-looks-stuck-note").count()).toBe(withStuck ? 2 : 0);
         if (withStuck) expect(await page.getByTestId("standing-stuck").textContent()).toContain("2 looks stuck");
+        if (withStuck) {
+          const lines = (await page.getByTestId("board-looks-stuck-note").allTextContents()) as string[];
+          expect(lines.find((l) => l.includes("3 days"))).toContain(CLAIM);
+          expect(lines.find((l) => !l.includes(CLAIM))).not.toMatch(/has been told|looking into|picked it up/);
+        }
         if (out) {
           mkdirSync(out, { recursive: true });
           await page.screenshot({ path: path.join(out, `bos1910-${size.name}-${withStuck ? "stuck" : "none"}.png`), fullPage: true });

@@ -311,11 +311,15 @@ fi
   # BOS-1549: two guides in docs/ must not share a number, counting pages main added since this branch left it. Runs on
   # every branch (it takes well under a second), since a clash can come from main even when the branch touched no doc.
   step "docs numbers are unique" node scripts/check-doc-numbers.mjs "$base"
+  # BOS-2732: the branch must not add proof files (core dumps, logs, scratch folders, screenshots and recordings outside docs/
+  # and the shipped image folders). Files main already has are never flagged. Runs on every branch; it reads only added paths.
+  step "no added proof files" node scripts/check-proof-files.mjs "$base"
   # BOS-1894: a secret file docker-compose.yml names must be created in step 3 of docs/00 (compose refuses to start without it).
   if has '^docker-compose\.yml$|^docs/00-first-time-install\.md$|^scripts/check-compose-secrets-docs'; then step "compose secrets are in the install guide" node scripts/check-compose-secrets-docs.mjs; fi
   # The in-memory-state lint (BOS-460, 492, 516, 702) now runs with the other list guards, first (BOS-1727).
   # BOS-1728: the ratchet for bare sleeps, elapsed-time limits, fresh Date.now() sums and fixed-length reads in test files (CLAUDE.md "Writing tests").
-  if has '(^|/)test/|\.(test|spec)\.(ts|tsx|mjs|js)$|^scripts/(check-test-lines|test-lines-baseline)'; then step "test-lines ratchet" node scripts/check-test-lines.mjs; fi
+  # BOS-2794: a fifth shape, hidden stderr, and *.test.sh files are scanned too.
+  if has '(^|/)test/|\.(test|spec)\.(ts|tsx|mjs|js)$|\.test\.sh$|^scripts/(check-test-lines|test-lines-baseline)'; then step "test-lines ratchet" node scripts/check-test-lines.mjs; fi
 if has '^scripts/.*\.mjs$'; then step "script tests" node --test scripts/*.test.mjs; fi
   # Compose files and CI workflows (BOS-1036): validated by the Docker CLI's compose plugin (no daemon, no socket) and actionlint.
   # A runner image built before they were added has neither tool: that is a SKIP naming the fix, not a failure.
@@ -594,33 +598,13 @@ if [ "$need_slot" -eq 1 ]; then
 fi
 if has '\.sh$'; then step "ShellCheck" scripts/check-shell.sh; fi
 # BOS-2286: the shell tests (*.test.sh) whose subject changed. Before this only the full check and GitHub ran them, so a queued
-# check passed where GitHub then failed (negated-redirect.test.sh, BOS-2176). A test runs when
-#   - it changed, or it names a changed file by its repo path (deploy/ntfy.yml, docker-compose.yml, .github/workflows/ci.yml),
-#   - or it names a changed file of its own folder by file name (scripts/x.test.sh runs "$here/x.sh" and the helpers beside it),
-#   - or it reads the whole repo's file list (a `git ls-files` code line with no `cd` into a temp repo: negated-redirect and
-#     shell-tests-needed, 1 and 3 s), whatever changed. host-deployer.test.sh lists files of its own temp repo (cd "$T/src")
-#     and takes 7 minutes, so it runs only for its own subject.
+# check passed where GitHub then failed (negated-redirect.test.sh, BOS-2176). Which tests count is scripts/shell-tests-for-changes.sh
+# (BOS-2758: one rule, shared with the merge gate's re-run of a shell test GitHub CI failed).
 # Through scripts/test-shell.sh, so each runs in the same scrubbed environment as in the full check and on GitHub. Only where
 # the whole-repo tests run (queued checks and the gate; CHECK_QUICK_WHOLE_REPO=1 on a hand run). Not for BOSSMAN_FULL_CHECK_NEXT:
 # that full check runs every shell test itself.
-shell_tests_for_changes() { # prints the tracked shell tests to run for $changed, one per line
-  local t dir c base
-  git ls-files '*.test.sh' | while IFS= read -r t; do
-    # A whole-repo line runs git ls-files as code: not in a comment or a quoted string (check-quick.test.sh writes such lines
-    # into its fixtures), and not after a cd into a temp repo.
-    if grep -qxF -- "$t" <<<"$changed" || { grep -E "^[^'#]*git( -C \"[^\"]*\")? ls-files" "$t" | grep -qv 'cd '; } \
-      || grep -qF -f <(printf '%s\n' "$changed") "$t"; then echo "$t"; continue; fi
-    dir="$(dirname "$t")"
-    while IFS= read -r c; do
-      [ "$(dirname "$c")" = "$dir" ] || continue
-      base="$(basename "$c")"
-      # The file name as a whole word: x.sh must not match check-x.sh.
-      if grep -qE "(^|[^A-Za-z0-9_.-])${base//./\\.}([^A-Za-z0-9_.-]|$)" "$t"; then echo "$t"; break; fi
-    done <<<"$changed"
-  done
-}
 if whole_repo_on; then
-  shell_tests="$(shell_tests_for_changes)"
+  shell_tests="$(scripts/shell-tests-for-changes.sh <<<"$changed")"
   # shellcheck disable=SC2086  # one argument per file; tracked shell test paths have no spaces
   [ -z "$shell_tests" ] || step "shell tests ($(grep -c . <<<"$shell_tests"): $(tr '\n' ' ' <<<"$shell_tests" | sed 's/ $//'))" scripts/test-shell.sh $shell_tests
 fi

@@ -50,6 +50,8 @@ export type ServerStatusDeps = {
   permissions?: (companyId: string) => unknown;
   /** Synthetic's cached quota reading, its age, history and this company's agents paid from it (BOS-239). */
   syntheticUsage?: (companyId: string) => Promise<unknown>;
+  /** Each Claude subscription's newest stored quota reports, window by window, read-only (funding.claudeQuotaReports, BOS-2676). */
+  claudeQuota?: () => Promise<unknown>;
   /** Which add-ons are running (addons.ts, DR-023): server-wide, like commit. Absent: null. */
   addons?: () => Promise<AddonFacts>;
   /** The host's settings record (host-facts.ts, BOS-419): each fact's value, source and any conflict. Absent: null. */
@@ -60,6 +62,8 @@ export type ServerStatusDeps = {
   runLimits?: (companyId: string) => Promise<unknown>;
   /** Failed merge attempts in the last hour, grouped by reason (merge-failures.ts, BOS-1461). Absent: null. */
   mergeFailures?: (companyId: string) => Promise<unknown>;
+  /** BOS-2811: the last 5 update-hold records (start, kind, end title, wrap-up lines), read-only. Absent: null. */
+  holdRecords?: () => Promise<unknown>;
   /** The merge train per project on this server: seats, who is seated and waits, tickets held to land alone, stall clocks (merge-stall.ts, BOS-1515). Absent: null. */
   mergeTrain?: (companyId: string) => Promise<unknown>;
   /** BOS-2119: each project's landing turn on this server: holder, cap, the line in order, and what each waiter shows (merge-status.ts). Absent: null. */
@@ -256,6 +260,8 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         mergeTrainOn: await checkQueue(db).train().catch(() => null),
         landingTurns: deps.landingTurns ? await deps.landingTurns(companyId).catch(() => null) : null,
         maintenance: await deps.hold(),
+        // BOS-2811: past holds, so "what did the banner say" is read, not worked out. Server-wide update facts, no error text.
+        holdRecords: deps.holdRecords ? await deps.holdRecords().catch(() => null) : null,
         // BOS-2058: every update wait that is on (what it waits on, since when, when it ends): the owner's screens read the same list.
         updateWaits: deps.updateWaits ? await deps.updateWaits().catch(() => null) : null,
         // The check queue (DR-003): what runs, who waits and at which place, the last results, and whether main is red.
@@ -290,6 +296,8 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         // it are scoped to this company (see funding.syntheticUsage). A failed reading is unknown,
         // never an error, and never blocks this view.
         syntheticUsage: deps.syntheticUsage ? await deps.syntheticUsage(companyId).catch(() => []) : [],
+        // The newest stored reports per Claude account (BOS-2676): which windows each real report carried, to tell "Anthropic stopped reporting a limit" from "one report carries only some".
+        claudeQuota: deps.claudeQuota ? await deps.claudeQuota().catch(() => []) : [],
         // ntfy, Tailscale and Penpot: state (not_set_up, stopped, needs_login, running, unknown), since and source (DR-023).
         // Only "running" means the add-on is up; never tell the owner otherwise.
         addons: deps.addons ? await deps.addons() : null,

@@ -60,6 +60,12 @@ import {
   realUseWalkthrough,
   usabilityGated,
   type StepSource,
+  ATTACH_FIRST,
+  attachmentIds,
+  NOTE_FIRST,
+  handOverRefusal,
+  optionNeeds,
+  type OptionNeedFlags,
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import type { SecondOpinionCard, SecondOpinionResult } from "./second-opinion.js";
@@ -76,7 +82,7 @@ import type { Addon } from "./addons.js";
 import { type CardOpening, type OwnerOnlyKind, routeAgentCard, CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, isSystemCard, ceoAnswerRefusal, OWNER_ONLY_ANSWER_TYPES, fileList } from "./card-check.js";
 import { addTicketDependency, blockedHolds } from "./ticket-links.js";
 import { revokeApproveTokens } from "./approve-tokens.js";
-import { ATTACHMENT_LINK, seenImageDates } from "./ticket-images.js";
+import { seenImageDates } from "./ticket-images.js";
 import { screenMismatchSites } from "./outside-site-mismatch.js";
 import type { Ladder } from "./alert-ladder.js";
 import { recordGoalAnswer } from "./goal-check.js";
@@ -85,11 +91,11 @@ import { APPLY_CHANGE, REVERT_CHANGE, checkChangeLink, checkChangeReason } from 
 import { ADD_RULE, notExpired, policyRulesService } from "./policy-rules.js";
 import { effectivePolicy, resolveActor } from "./review-policy.js";
 import { LESSONS_CAP, LESSON_DONT_ADD, LESSON_EDIT, LESSON_DROP, LESSON_MAX, lessonsFrom, lessonsPageRow, normalizeLesson, writeLesson } from "./project-brief.js";
-import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, notifications, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, watchdogActions, wikiPages } from "../db/schema.js";
+import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, notifications, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, ticketImages, ticketMessages, tickets, wakes, watchdogActions, wikiPages } from "../db/schema.js";
 import type { ClearWhen } from "./alert-clearing.js";
 import { unlinkedWaiters } from "./owner-todo.js";
 import { openAlertsLine } from "./go-live-card.js";
-import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer, similarQuestion } from "./stale-requests.js";
+import { askedQuestion, decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer, similarQuestion } from "./stale-requests.js";
 import { infoAskOf, ownContentOf, reportBackNote, startedInfoAnswer } from "./owner-result.js";
 import { openReviewProposal } from "./skill-proposals.js";
 import { lineEvent } from "./merge-line.js";
@@ -176,6 +182,16 @@ async function keepOpenInCompany<T extends OrderLink>(db: Db, companyId: string,
   return { ...(kept.length ? { kept } : {}), dropped };
 }
 
+/**
+ * Is another connection waiting for one agent's raise lock (BOS-2739)? Run on its own connection, outside a transaction,
+ * before this raise takes the lock: a raise that finds a waiter is behind one that took the lock first, so its card is the
+ * repeat to close. A lock is "waiting", in pg_locks, when it is requested but not granted.
+ */
+async function lockWaiterExists(db: Db, agentId: string): Promise<boolean> {
+  const r = await db.execute(sql`select 1 from pg_locks where locktype = 'advisory' and not granted and objid = hashtext(${`decision-raise:${agentId}`})`);
+  return (Array.isArray(r) ? r : []).length > 0;
+}
+
 /** One ticket a Boss Man update brings, as the owner sees it on a deploy card (BOS-213). */
 export type DeployChange = { ticketId: string; ref: string; title: string };
 /**
@@ -254,7 +270,7 @@ export function readyHeading(items: Array<{ symptom: string; ref: string }>): st
 export type DecisionContext =
   | { type: "permission"; runnerId: string; runId: string; requestId: string; /** The tool call this was raised for and its title: a later request for the same call is covered by an Allow here. */ toolCallId?: string; toolTitle?: string | null; /** The whole tool input, normalised, so only an exact repeat matches this card (BOS-376). */ toolInput?: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; /** What the rules judge made of it and the company setting at the time (BOS-337); the human's answer is logged next to it. */ judge?: JudgeNote; always?: AlwaysChoice[]; /** The agent that asked, so an "always" rule can be limited to it (BOS-294). */ alwaysAgent?: { id: string; name: string }; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Deletes in the agent's working copy, sent to the CEO first (BOS-120). */ workingCopy?: WorkingCopy; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled; /** A repeat of a command this run already had an Allow once for (BOS-376): the card answered at once, with sameAs. */ settledByRepeat?: { sameAs: string; at: string }; /** A repeat of the same command in the same run, settled from this card when its answer arrives (BOS-376). */ repeats?: Array<{ requestId: string; runnerId: string; at: string; settled?: "allow" | "deny" }> }
   | { type: "engagement"; engagementId: string }
-  | { type: "question"; /** Why only the owner can take this card (BOS-1318). Counted by Moony; the CEO may never answer one. */ ownerOnly?: OwnerOnlyKind; ownerOnlyWhy?: string; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something, with no checker tags (BOS-1665). */ steps?: string[]; /** Where each step's clicks came from (R19), by step; the owner reads a muted line from it, never the tag. */ stepSources?: Array<StepSource | null>; /** Why this ask is still fresh even though the owner answered something like it before (BOS-123). */ stillNeeded?: string; /** The card opening: why and minutes from the agent, where generated from the steps (BOS-1660). */ opening?: CardOpening; /** The owner has to act (BOS-243 rule 1: never phone-approvable). */ ownerMustDo?: true; /** The raiser marked it as holding the linked ticket's merge until it is answered (BOS-1078); without it the card never holds a merge. */ holdsMerge?: true; /** One line, by the asking agent, on what the recommended option does: the phone Approve text (BOS-243). */ approveSummary?: string; /** What the owner-step lint flagged, and a CEO override (BOS-417). */ lint?: CardLint; /** A plan put by submit_plan for a plan-first ticket that has no ExitPlanMode (BOS-531): approving it sets planApprovedAt. */ plan?: boolean; ticketId?: string; /** The after-merge criteria this card settles, as 0-based indexes into the ticket's list (BOS-963): the owner's answer records those, whatever its wording. Unset means the card's own words decide. */ criterionIndexes?: number[]; /** What each option means for those criteria, by option text: pass, fail or none (BOS-1155). The only thing that turns an answer into a verdict. */ optionVerdicts?: Record<string, "pass" | "fail" | "none">; /** Ordering against other owner cards (BOS-551): this one has to be done after these. */ doAfter?: OrderLink[]; /** Ordering against other owner cards: this one has to be done before these. */ doBefore?: OrderLink[]; /** A restart of the server would reset what this card measures, so a server update card lists it to do first (BOS-551). */ resetsOnRestart?: boolean; /** BOS-2085 (R54): the card asks the owner to put something live; a repo security alert opening or closing sends it back for a re-check. */ goLive?: true; /** The full commit sha the card's question or steps name as the one to release. */ releasesCommit?: string }
+  | { type: "question"; /** Why only the owner can take this card (BOS-1318). Counted by Moony; the CEO may never answer one. */ ownerOnly?: OwnerOnlyKind; ownerOnlyWhy?: string; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something, with no checker tags (BOS-1665). */ steps?: string[]; /** Where each step's clicks came from (R19), by step; the owner reads a muted line from it, never the tag. */ stepSources?: Array<StepSource | null>; /** Why this ask is still fresh even though the owner answered something like it before (BOS-123). */ stillNeeded?: string; /** The card opening: why and minutes from the agent, where generated from the steps (BOS-1660). */ opening?: CardOpening; /** The owner has to act (BOS-243 rule 1: never phone-approvable). */ ownerMustDo?: true; /** The raiser marked it as holding the linked ticket's merge until it is answered (BOS-1078); without it the card never holds a merge. */ holdsMerge?: true; /** One line, by the asking agent, on what the recommended option does: the phone Approve text (BOS-243). */ approveSummary?: string; /** What the owner-step lint flagged, and a CEO override (BOS-417). */ lint?: CardLint; /** A plan put by submit_plan for a plan-first ticket that has no ExitPlanMode (BOS-531): approving it sets planApprovedAt. */ plan?: boolean; ticketId?: string; /** The after-merge criteria this card settles, as 0-based indexes into the ticket's list (BOS-963): the owner's answer records those, whatever its wording. Unset means the card's own words decide. */ criterionIndexes?: number[]; /** What each option means for those criteria, by option text: pass, fail or none (BOS-1155). The only thing that turns an answer into a verdict. */ optionVerdicts?: Record<string, "pass" | "fail" | "none">; /** Ordering against other owner cards (BOS-551): this one has to be done after these. */ doAfter?: OrderLink[]; /** Ordering against other owner cards: this one has to be done before these. */ doBefore?: OrderLink[]; /** A restart of the server would reset what this card measures, so a server update card lists it to do first (BOS-551). */ resetsOnRestart?: boolean; /** BOS-2085 (R54): the card asks the owner to put something live; a repo security alert opening or closing sends it back for a re-check. */ goLive?: true; /** The full commit sha the card's question or steps name as the one to release. */ releasesCommit?: string; /** BOS-2742: options the raiser marked as needing a screenshot (raise_decision needsAttachment), on top of the ones whose words promise one. */ attachOptions?: string[]; /** BOS-2798: options the raiser marked as needing text in the note (raise_decision needsNote), on top of the ones whose words promise it. */ noteOptions?: string[] }
   | { type: "stale_blocker"; dependencyId: string; blockedTicketId: string; blockerTicketId: string | null; blockerEngagementId: string | null }
   | { type: "stalled_run"; runnerId: string; runId: string }
   | { type: "deploy"; deployId: string; /** BOS-1516: the owner's Priority 1 work is in this deploy: the card is marked urgent, headed "Ready to put live". */ urgent?: DeployUrgent }
@@ -270,7 +286,7 @@ export type DecisionContext =
    * commit differs, the hand-apply reached the host (BOS-122). `lastFailure` keeps the owner's note from
    * "A step failed" on the card.
    */
-  | { type: "owner_todo"; ofDecisionId: string; steps: string[]; ownerMustDo?: true; check?: string; rollback?: string; /** What the to-do applies: a self-deploy's target and commit, or a deploy target's deploy id. */ target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; lastFailure?: { note: string; at: string }; /** What the approved update contains, so the to-do says the same as the card (BOS-213). */ update?: DeployUpdate; /** Owner cards that must be done first, because this update restarts the server (BOS-551). */ doAfter?: OrderLink[]; /** When the owner last opened its steps (BOS-739). */ ownerOpenedAt?: string; /** Why Boss Man closed it, shown where it was (BOS-739). */ closedNotice?: ClosedNotice; /** A server update's quiet-machine check, while the owner waits to apply it by hand (BOS-420). */ quiet?: { ready: boolean; runs: number; checks: number; freeMb: number | null; needMb: number | null; why: string[]; at: string } }
+  | { type: "owner_todo"; ofDecisionId: string; steps: string[]; ownerMustDo?: true; check?: string; rollback?: string; /** BOS-2742: options that need a screenshot attached (the R19 "My screen looks different" stop). */ attachOptions?: string[];/** What the to-do applies: a self-deploy's target and commit, or a deploy target's deploy id. */ target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; lastFailure?: { note: string; at: string }; /** What the approved update contains, so the to-do says the same as the card (BOS-213). */ update?: DeployUpdate; /** Owner cards that must be done first, because this update restarts the server (BOS-551). */ doAfter?: OrderLink[]; /** When the owner last opened its steps (BOS-739). */ ownerOpenedAt?: string; /** Why Boss Man closed it, shown where it was (BOS-739). */ closedNotice?: ClosedNotice; /** A server update's quiet-machine check, while the owner waits to apply it by hand (BOS-420). */ quiet?: { ready: boolean; runs: number; checks: number; freeMb: number | null; needMb: number | null; why: string[]; at: string }; /** BOS-2783: the steps of a by-hand update still to do after its server part went live (no target: it isn't an update of its own). */ handLeft?: { deployer: boolean; runner: boolean } }
   /**
    * The owner's setup steps for a ticket, raised by Boss Man once the ticket's change is live (DR-011).
    * `ticketId` links it back; `commit` is the live commit it was raised on, so a later switch-back to
@@ -543,6 +559,16 @@ export const handBackKey = (decisionId: string) => `hand-back:${decisionId}`;
  * sits on the alert ladder with HAND_BACK_MINUTES, so an unanswered one reaches the owner's queue as an alert.
  * One per answered card (dedupe key). Returns the new card's id, or null when there is no CEO or one is already open.
  */
+/**
+ * BOS-2742: the wake's line on what the owner attached to an answer (in their own words, or in the note sent with a
+ * button): every image id, so the agent opens them at once instead of hunting for them. Empty when nothing was attached.
+ */
+export function attachedLine(answer: string, note?: string | null): string {
+  const ids = attachmentIds(`${answer}\n${note ?? ""}`);
+  if (!ids.length) return "";
+  return ` They attached ${ids.length === 1 ? "a picture or file" : `${ids.length} pictures or files`} (id${ids.length === 1 ? "" : "s"} ${ids.join(", ")}): open each with open_attachment, passing the id, before you act on the answer.`;
+}
+
 export async function raiseOwnerHandBack(
   db: Db,
   input: { companyId: string; decisionId: string; question: string; answer: string; note: string | null; ticketId: string | null; why: string; wake?: ((w: { agentId: string; ticketId: string | null; reason: string; priority?: number; note: string }) => Promise<unknown>) | null; now?: Date },
@@ -550,7 +576,7 @@ export async function raiseOwnerHandBack(
   const at = (input.now ?? new Date()).toISOString();
   const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, input.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
   if (!ceo) return null;
-  const said = [`Answer: ${input.answer}`, input.note ? `Their note: ${input.note}` : null].filter(Boolean).join("\n");
+  const said = [`Answer: ${input.answer}`, input.note ? `Their note: ${input.note}` : null, attachedLine(input.answer, input.note).trim() || null].filter(Boolean).join("\n");
   const [row] = await db
     .insert(decisions)
     .values({
@@ -583,7 +609,7 @@ export function ceoFirstMergeNote(title: string, cardId: string, what: string) {
  */
 export async function raiseOwnerTodo(
   db: Db,
-  t: { companyId: string; question: string; key: string; steps: string[]; check?: string; rollback?: string; ofDecisionId: string; raisedByAgentId?: string | null; target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; update?: DeployUpdate; doAfter?: OrderLink[]; /** Offer "Quiet the machine first" (a hand-applied server update, BOS-420). */ quietFirst?: boolean; /** An extra answer that closes the card for good (the CI-identity card's "Keep the emails"); "A step failed" never does. */ extraOption?: string; /** BOS-2336: host facts for the step check; absent = the provider app.ts wires (setOwnerTodoFacts). */ facts?: OwnerSetupFacts },
+  t: { companyId: string; question: string; key: string; steps: string[]; check?: string; rollback?: string; ofDecisionId: string; raisedByAgentId?: string | null; target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; update?: DeployUpdate; doAfter?: OrderLink[]; /** Offer "Quiet the machine first" (a hand-applied server update, BOS-420). */ quietFirst?: boolean; /** An extra answer that closes the card for good (the CI-identity card's "Keep the emails"); "A step failed" never does. */ extraOption?: string; /** BOS-2336: host facts for the step check; absent = the provider app.ts wires (setOwnerTodoFacts). */ facts?: OwnerSetupFacts; /** BOS-2783: a by-hand update's remaining steps card. */ handLeft?: { deployer: boolean; runner: boolean } },
 ) {
   // BOS-2336: Boss Man's own cards pass the same step checks as an agent's card and a ticket's setup (R19, R19b, R19c,
   // the host fences). A refused step list never reaches the owner: the CEO gets a card with the findings instead.
@@ -605,7 +631,7 @@ export async function raiseOwnerTodo(
       tier: "owner",
       raisedByAgentId: t.raisedByAgentId ?? null,
       dedupeKey: t.key,
-      context: { type: "owner_todo", ofDecisionId: t.ofDecisionId, steps, ownerMustDo: true, ...(t.check ? { check: t.check } : {}), ...(t.rollback ? { rollback: t.rollback } : {}), ...(t.target ? { target: t.target } : {}), ...(t.commit ? { commit: t.commit } : {}), ...(t.fromCommit ? { fromCommit: t.fromCommit } : {}), ...(t.deployId ? { deployId: t.deployId } : {}), ...(t.update ? { update: t.update } : {}), ...(t.doAfter?.length ? { doAfter: t.doAfter } : {}) } satisfies DecisionContext,
+      context: { type: "owner_todo", ofDecisionId: t.ofDecisionId, steps, ownerMustDo: true, ...(sendsToSite ? { attachOptions: [SCREEN_DIFFERENT_OPTION] } : {}), ...(t.check ? { check: t.check } : {}), ...(t.rollback ? { rollback: t.rollback } : {}), ...(t.target ? { target: t.target } : {}), ...(t.commit ? { commit: t.commit } : {}), ...(t.fromCommit ? { fromCommit: t.fromCommit } : {}), ...(t.deployId ? { deployId: t.deployId } : {}), ...(t.update ? { update: t.update } : {}), ...(t.doAfter?.length ? { doAfter: t.doAfter } : {}), ...(t.handLeft ? { handLeft: t.handLeft } : {}) } satisfies DecisionContext,
     })
     .onConflictDoNothing()
     .returning({ id: decisions.id });
@@ -619,13 +645,25 @@ export async function raiseOwnerTodo(
 }
 
 const HAND_APPLY_KEY = "owner-todo:self-deploy:";
+
+/**
+ * A hand-apply card keeps the steps written when the owner was asked, so a card held by the card check is raised again
+ * with text from the code of that day. Two older shapes now fail the check, and this brings them up to what
+ * self-deploy.ts writes today: the host-deployer copy that kept the source's open mode (cp, chown, chmod; BOS-2527), and
+ * the "has the new server taken charge" step that names the standby colour (R31c; BOS-2619). Current steps pass through unchanged.
+ */
+export function currentHandSteps(steps: string[]): string[] {
+  return steps
+    .filter((s) => !/docker compose (?:exec|kill)\b[^\n]*\bserver-(?:blue|green)\b/.test(s))
+    .map((s) => s.replace(/^cp -v (\S+\/host-deployer\.sh) (\S+) && chown root:root \2 && chmod 750 \2$/m, "install -v -m 0750 -o root -g root $1 $2"));
+}
 /** The hand-apply to-do of an approved infra update (BOS-122), raised when the owner approves and again by reraiseHeldHandApply. */
 export async function raiseHandApplyTodo(db: Db, d: { id: string; companyId: string; question: string; raisedByAgentId: string | null }, ctx: SelfDeployCtx, quietFirst: boolean) {
   return raiseOwnerTodo(db, {
     companyId: d.companyId,
     question: `"${d.question.split("\n\n")[0]}" was approved. It's waiting for you to apply it by hand on the machine that runs Boss Man.`,
     key: `${HAND_APPLY_KEY}${ctx.commit}`,
-    steps: ctx.handSteps?.length ? ctx.handSteps : ["Apply the approved change by hand on the server that runs Boss Man."],
+    steps: ctx.handSteps?.length ? currentHandSteps(ctx.handSteps) : ["Apply the approved change by hand on the server that runs Boss Man."],
     check: ctx.check,
     rollback: ctx.rollback,
     ofDecisionId: d.id,
@@ -2163,9 +2201,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       return { outcome, rule, decisionId: row?.id ?? null };
     },
 
-    async raise(input: { /** The open question card this one replaces (BOS-1193): it closes as superseded in the same call. Your own card, or any card for the CEO. */ replaces?: string; companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; /** Other tickets this one card holds too, so one answer releases them all (BOS-1591). */ alsoBlocksTicketIds?: string[]; /** Hold blocksTicketId's merge until this is answered (BOS-1078). */ holdsMerge?: boolean; triedFirst?: string; steps?: string[]; stepSources?: Array<StepSource | null>; stillNeeded?: string; ownerMustDo?: boolean; /** BOS-1660: the opening of a card with steps. */ opening?: CardOpening; approveSummary?: string; lint?: CardLint; setsUp?: Addon; /** Checkable conditions that close the card by itself (BOS-1161), already validated by the tool. */ clearWhen?: ClearWhen[]; /** The after-merge criteria this card settles, 0-based indexes into the ticket's list (BOS-963). */ criterionIndexes?: number[]; /** What each option means for those criteria (BOS-1155). */ optionVerdicts?: Record<string, "pass" | "fail" | "none">; /** The ticket's plan (BOS-531): stored on the ticket; approving the card sets planApprovedAt. */ plan?: string; doAfter?: OrderLink[]; doBefore?: OrderLink[]; resetsOnRestart?: boolean; /** Why only the owner can take this card (BOS-1318); it stays on the owner's queue. */ ownerOnly?: OwnerOnlyKind; /** The one-line reason an owner_choice card is the owner's. */ ownerOnlyWhy?: string; /** An agent's card via raise_decision (BOS-1318): goes to the CEO first unless it needs the owner. Plans and system cards leave it out and keep their routing. */ ceoFirst?: boolean; /** BOS-1797: the card asks what Boss Man's record has a value for; with ceoFirst it goes to the CEO first. */ recordSays?: boolean; /** BOS-2085: stored as goLive on the card, with the commit it names. */ goLive?: boolean; releasesCommit?: string }) {
+    async raise(input: { /** The open question card this one replaces (BOS-1193): it closes as superseded in the same call. Your own card, or any card for the CEO. */ replaces?: string; companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; /** Other tickets this one card holds too, so one answer releases them all (BOS-1591). */ alsoBlocksTicketIds?: string[]; /** Hold blocksTicketId's merge until this is answered (BOS-1078). */ holdsMerge?: boolean; triedFirst?: string; steps?: string[]; stepSources?: Array<StepSource | null>; stillNeeded?: string; ownerMustDo?: boolean; /** BOS-1660: the opening of a card with steps. */ opening?: CardOpening; approveSummary?: string; lint?: CardLint; setsUp?: Addon; /** Checkable conditions that close the card by itself (BOS-1161), already validated by the tool. */ clearWhen?: ClearWhen[]; /** The after-merge criteria this card settles, 0-based indexes into the ticket's list (BOS-963). */ criterionIndexes?: number[]; /** What each option means for those criteria (BOS-1155). */ optionVerdicts?: Record<string, "pass" | "fail" | "none">; /** The ticket's plan (BOS-531): stored on the ticket; approving the card sets planApprovedAt. */ plan?: string; doAfter?: OrderLink[]; doBefore?: OrderLink[]; resetsOnRestart?: boolean; /** Why only the owner can take this card (BOS-1318); it stays on the owner's queue. */ ownerOnly?: OwnerOnlyKind; /** The one-line reason an owner_choice card is the owner's. */ ownerOnlyWhy?: string; /** An agent's card via raise_decision (BOS-1318): goes to the CEO first unless it needs the owner. Plans and system cards leave it out and keep their routing. */ ceoFirst?: boolean; /** BOS-1797: the card asks what Boss Man's record has a value for; with ceoFirst it goes to the CEO first. */ recordSays?: boolean; /** BOS-2085: stored as goLive on the card, with the commit it names. */ goLive?: boolean; releasesCommit?: string; /** BOS-2742: options that need a screenshot attached; each must be one of the options. */ attachOptions?: string[]; /** BOS-2798: options that need text in the note; each must be one of the options. */ noteOptions?: string[] }) {
       // BOS-1318: where this card goes. Decided by routeAgentCard from the card's structure, never its wording.
       if (input.ownerOnly === "owner_choice" && !input.ownerOnlyWhy?.trim()) throw new AnswerError("ownerOnly owner_choice needs ownerOnlyWhy: one line saying why this choice is the owner's.");
+      // DR-078 (BOS-2798): an agent's option that promises a hand-over ("output pasted in my note", "link below") must be
+      // flagged, so the card asks for it. Boss Man's own cards (no agentId) are proven clean by a test over their strings
+      // rather than refused here, where a refusal would lose a system alert.
+      const handOver = input.agentId ? handOverRefusal(input.options, { attachOptions: input.attachOptions, noteOptions: input.noteOptions }) : null;
+      if (handOver) throw new AnswerError(handOver);
       let route: { tier: "owner" | "ceo"; why: string } = { tier: "owner", why: "unchanged" };
       let ceoRow: { id: string } | undefined;
       if (input.ceoFirst && !input.plan) {
@@ -2193,7 +2236,33 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // BOS-1219: a plan on a ticket whose plan the owner already approved amends it; the approval stays.
       const [approvedOf] = input.plan && input.blocksTicketId ? await db.select({ at: tickets.planApprovedAt }).from(tickets).where(eq(tickets.id, input.blocksTicketId)) : [];
       const questionText = `${input.question}${amendsText(approvedOf?.at)}`;
+      // BOS-2739: the open card asking the same thing, found under a lock taken before this card is written, so two
+      // raises at once can't both find no other card. A card that offers other choices, or recommends another, is a
+      // different ask (BOS-195): it stays. The record line at a card's head is not part of the ask.
+      let repeatedId: string | null = null;
+      // Set when this raise lost a race: the other raise's lock was taken first and its card already asks this. Its card
+      // is the one the owner keeps, so this one closes itself once it is written.
+      let lostToId: string | null = null;
+      // Was another raise of this agent's already waiting for its turn? Asked before this transaction begins, so a wait that
+      // took the lock first is now writing or has written its card: this raise then loses the race and closes its own card,
+      // leaving the owner the one that got there first. false when the view is unavailable (PGlite's tests), where raises run
+      // one after another and the first one stored reads as the repeat.
+      let raced = false;
+      if (input.agentId) raced = await lockWaiterExists(db, input.agentId).catch(() => false);
       const raised = await db.transaction(async (tx) => {
+        if (!input.plan && input.agentId) {
+          await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`decision-raise:${input.agentId}`}))`);
+          const same = await tx
+            .select({ id: decisions.id, question: decisions.question, companyId: decisions.companyId, options: decisions.options, recommendedOption: decisions.recommendedOption })
+            .from(decisions)
+            .where(and(eq(decisions.companyId, input.companyId), eq(decisions.status, "open"), eq(decisions.raisedByAgentId, input.agentId), eq(decisions.kind, "question"), sql`${decisions.context}->>'type' = 'question'`, sql`${decisions.context}->>'plan' is null`, input.blocksTicketId ? sql`${decisions.context}->>'ticketId' = ${input.blocksTicketId}` : sql`${decisions.context}->>'ticketId' is null`));
+          const sameChoices = (o: (typeof same)[number]) => o.recommendedOption === input.recommended && [...((o.options as string[] | null) ?? [])].sort().join("\u0000") === [...input.options].sort().join("\u0000");
+          const repeats = same.filter((o) => similarQuestion(o.question, input.question) && sameChoices(o)).sort((a, b) => a.id.localeCompare(b.id));
+          if (repeats.length && (!replaced || !repeats.some((o) => o.id === replaced!.id))) {
+            if (raced) lostToId = repeats[0]!.id;
+            else repeatedId = repeats[0]!.id;
+          }
+        }
         const [row] = await tx
           .insert(decisions)
           .values({
@@ -2204,7 +2273,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             recommendedOption: input.recommended,
             raisedByAgentId: input.agentId,
             ...(route.tier === "ceo" ? { tier: "ceo" as const } : {}),
-            context: { type: "question", ...(input.ownerOnly ? { ownerOnly: input.ownerOnly, ...(input.ownerOnlyWhy?.trim() ? { ownerOnlyWhy: input.ownerOnlyWhy.trim().slice(0, 200) } : {}) } : {}), ...(route.tier === "ceo" ? { ladder: { rung: "ceo", since: now().toISOString(), minutes: CEO_QUESTION_HANDOVER_MINUTES, ticketId: input.blocksTicketId ?? null, about: input.agentId ? [input.agentId] : [], hops: [{ to: "ceo", at: now().toISOString(), why: route.why }] } } : {}), ...(input.blocksTicketId ? { ticketId: input.blocksTicketId } : {}), ...(input.blocksTicketId && input.holdsMerge ? { holdsMerge: true as const } : {}), ...(input.criterionIndexes?.length ? { criterionIndexes: input.criterionIndexes } : {}), ...(input.criterionIndexes?.length && input.optionVerdicts ? { optionVerdicts: input.optionVerdicts } : {}), ...(input.triedFirst ? { triedFirst: input.triedFirst } : {}), ...(input.steps?.length ? { steps: input.steps, ...(input.stepSources?.length ? { stepSources: input.stepSources } : {}) } : {}), ...(input.stillNeeded ? { stillNeeded: input.stillNeeded } : {}), ...(input.opening ? { opening: input.opening } : {}), ...(input.ownerMustDo ? { ownerMustDo: true as const } : {}), ...(input.approveSummary ? { approveSummary: input.approveSummary } : {}), ...(input.lint ? { lint: input.lint } : {}), ...(input.plan ? { plan: true } : {}), ...(input.goLive ? { goLive: true as const, ...(input.releasesCommit ? { releasesCommit: input.releasesCommit } : {}) } : {}),
+            context: { type: "question", ...(input.ownerOnly ? { ownerOnly: input.ownerOnly, ...(input.ownerOnlyWhy?.trim() ? { ownerOnlyWhy: input.ownerOnlyWhy.trim().slice(0, 200) } : {}) } : {}), ...(route.tier === "ceo" ? { ladder: { rung: "ceo", since: now().toISOString(), minutes: CEO_QUESTION_HANDOVER_MINUTES, ticketId: input.blocksTicketId ?? null, about: input.agentId ? [input.agentId] : [], hops: [{ to: "ceo", at: now().toISOString(), why: route.why }] } } : {}), ...(input.blocksTicketId ? { ticketId: input.blocksTicketId } : {}), ...(input.blocksTicketId && input.holdsMerge ? { holdsMerge: true as const } : {}), ...(input.criterionIndexes?.length ? { criterionIndexes: input.criterionIndexes } : {}), ...(input.criterionIndexes?.length && input.optionVerdicts ? { optionVerdicts: input.optionVerdicts } : {}), ...(input.triedFirst ? { triedFirst: input.triedFirst } : {}), ...(input.steps?.length ? { steps: input.steps, ...(input.stepSources?.length ? { stepSources: input.stepSources } : {}) } : {}), ...(input.stillNeeded ? { stillNeeded: input.stillNeeded } : {}), ...(input.opening ? { opening: input.opening } : {}), ...(input.ownerMustDo ? { ownerMustDo: true as const } : {}), ...(input.approveSummary ? { approveSummary: input.approveSummary } : {}), ...(input.lint ? { lint: input.lint } : {}), ...(input.plan ? { plan: true } : {}), ...(input.goLive ? { goLive: true as const, ...(input.releasesCommit ? { releasesCommit: input.releasesCommit } : {}) } : {}), ...(input.attachOptions?.some((o) => input.options.includes(o)) ? { attachOptions: input.attachOptions.filter((o) => input.options.includes(o)) } : {}), ...(input.noteOptions?.some((o) => input.options.includes(o)) ? { noteOptions: input.noteOptions.filter((o) => input.options.includes(o)) } : {}),
               // Ordering against other owner cards (BOS-551): "do after" / "do before" links, checked in the queue.
               ...(doAfter?.length ? { doAfter } : {}), ...(doBefore?.length ? { doBefore } : {}),
               // A restart would reset what this card measures, so a server update card lists it to do first (BOS-551).
@@ -2232,24 +2301,24 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             await addTicketDependency(tx as unknown as Db, { companyId: input.companyId, blockedTicketId: other, blockerDecisionId: row!.id, actor: { type: "agent", agentId: input.agentId }, hold: true, now });
           }
         }
-        return row!;
+        // The older card a repeat closes (BOS-1193); a racer has none here: its own card is the one that goes.
+        return { row: row!, olderCardId: repeatedId, lostToId };
       });
       // BOS-1161: a new plan card closes the older open plan cards for the ticket.
-      if (input.plan && input.blocksTicketId) await supersedePlanCards(db, { companyId: input.companyId, ticketId: input.blocksTicketId, newCardId: raised.id, now: now(), release: (id) => releaseIfFree(id, false), ...(await supersedeExtras(input.companyId, input.blocksTicketId, raised.id, input.agentId)) }).catch((err) => log(`closing older plan cards for ${input.blocksTicketId} failed: ${(err as Error).message}`));
+      if (input.plan && input.blocksTicketId) await supersedePlanCards(db, { companyId: input.companyId, ticketId: input.blocksTicketId, newCardId: raised.row.id, now: now(), release: (id) => releaseIfFree(id, false), ...(await supersedeExtras(input.companyId, input.blocksTicketId, raised.row.id, input.agentId)) }).catch((err) => log(`closing older plan cards for ${input.blocksTicketId} failed: ${(err as Error).message}`));
       // BOS-1193: the older card closes as superseded. Explicitly (replaces), or when the same agent asks the same thing
       // again on the same ticket (similarQuestion). Two different questions from one agent both stay open.
+      // BOS-2739: the repeat is found by comparing the ask without the record line, on either side, and the check runs
+      // from the lock taken before this card's row is written, so two raises at once can't both find no older card.
       if (!input.plan) {
         const closeDeps = { markRead: (id: string, when: Date) => markDecisionNotificationRead(db, id, when), release: (id: string) => releaseIfFree(id, false), now, notify: feed };
-        const note = `superseded by ${raised.id}`;
-        if (replaced) await closeCardBySystem(db, replaced, note, closeDeps).catch((err) => log(`closing the replaced card ${replaced!.id} failed: ${(err as Error).message}`));
-        else if (input.agentId) {
-          const same = await db
-            .select({ id: decisions.id, question: decisions.question, companyId: decisions.companyId, options: decisions.options, recommendedOption: decisions.recommendedOption })
-            .from(decisions)
-            .where(and(eq(decisions.companyId, input.companyId), eq(decisions.status, "open"), ne(decisions.id, raised.id), eq(decisions.raisedByAgentId, input.agentId), eq(decisions.kind, "question"), sql`${decisions.context}->>'type' = 'question'`, sql`${decisions.context}->>'plan' is null`, input.blocksTicketId ? sql`${decisions.context}->>'ticketId' = ${input.blocksTicketId}` : sql`${decisions.context}->>'ticketId' is null`));
-          // A card that offers other choices, or recommends another, is a different ask (BOS-195): it stays.
-          const sameChoices = (o: (typeof same)[number]) => o.recommendedOption === input.recommended && [...((o.options as string[] | null) ?? [])].sort().join("\u0000") === [...input.options].sort().join("\u0000");
-          for (const o of same) if (similarQuestion(o.question, input.question) && sameChoices(o)) await closeCardBySystem(db, o, note, closeDeps).catch((err) => log(`closing the repeated card ${o.id} failed: ${(err as Error).message}`));
+        if (replaced) await closeCardBySystem(db, replaced, `superseded by ${raised.row.id}`, closeDeps).catch((err) => log(`closing the replaced card ${replaced!.id} failed: ${(err as Error).message}`));
+        // A racer that lost the advisory lock closes its own card: the winner's card is the one the owner keeps, so two
+        // raises at once leave one open card. Any other repeat is a later raise, and the older card closes (BOS-1193).
+        if (raised.lostToId) await closeCardBySystem(db, raised.row, `superseded by ${raised.lostToId}`, closeDeps).catch((err) => log(`closing the repeated card ${raised.row.id} failed: ${(err as Error).message}`));
+        else if (raised.olderCardId) {
+          const [older] = await db.select({ id: decisions.id, companyId: decisions.companyId, question: decisions.question }).from(decisions).where(and(eq(decisions.id, raised.olderCardId), eq(decisions.status, "open")));
+          if (older) await closeCardBySystem(db, older, `superseded by ${raised.row.id}`, closeDeps).catch((err) => log(`closing the repeated card ${older.id} failed: ${(err as Error).message}`));
         }
       }
       await record(db, { companyId: input.companyId, agentId: input.agentId, ticketId: input.blocksTicketId, kind: "decision_raised", summary: `${route.tier === "ceo" ? "Asked the CEO first" : "Asked the owner"}: ${input.question}`, at: now() });
@@ -2257,9 +2326,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       clearTallyCache();
       // BOS-1318: a team question waits with the CEO. If the CEO's wake is dropped it goes straight to the owner (wakeLadderCeo).
       if (route.tier === "ceo" && ceoRow) {
-        const ladder = (raised.context as { ladder: Ladder }).ladder;
-        await wakeLadderCeo(input.companyId, raised, { ladder }, ceoRow.id, [
-          `A team question is waiting for you (decision ${raised.id}):\n${untrusted("agent's question", input.question.slice(0, 1000))}`,
+        const ladder = (raised.row.context as { ladder: Ladder }).ladder;
+        await wakeLadderCeo(input.companyId, raised.row, { ladder }, ceoRow.id, [
+          `A team question is waiting for you (decision ${raised.row.id}):\n${untrusted("agent's question", input.question.slice(0, 1000))}`,
           "An agent asked it, and it needs none of the owner's hands, money, secrets or sign-off, so it came to you before the owner. Settle it yourself: answer with the decisions tool (action answer, one of its options) and a note saying why. The agent is woken with your answer and the owner can read the note.",
           `If it really is the owner's call (product direction, a secret, money, a host step or a sign-off), escalate it at once (decisions tool, action escalate, with triedFirst). If you don't answer within ${CEO_QUESTION_HANDOVER_MINUTES} minutes it goes to the owner, marked as tried by you first.`,
           `If the asker wanted the owner to act (GitHub, the host, a secret, a payment) and left out steps, escalate it with steps rather than waiting. ${OWNER_HANDS_HINT}`,
@@ -2268,10 +2337,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // Links that weren't stored come back so the tool's reply can say which, and why (BOS-625).
       let withCeo = false;
       if (route.tier === "ceo") {
-        const [now1] = await db.select({ tier: decisions.tier }).from(decisions).where(eq(decisions.id, raised.id));
+        const [now1] = await db.select({ tier: decisions.tier }).from(decisions).where(eq(decisions.id, raised.row.id));
         withCeo = now1?.tier === "ceo";
       }
-      return { ...raised, droppedLinks, withCeo };
+      return { ...raised.row, droppedLinks, withCeo };
     },
 
     /** Re-sends permission verdicts that couldn't be delivered, once the runner is back. */
@@ -3063,7 +3132,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
      * blocked onto it and closes the original without an answer; "handled" settles it (never an owner-only kind).
      * Returns null when the owner answered first.
      */
-    async advise(input: { id: string; companyId: string; agentId: string | null; outcome: "reissue"; runId?: string; question: string; options: string[]; recommended: string; triedFirst: string; steps?: string[]; stepSources?: Array<StepSource | null>; /** BOS-1660: the opening of a card with steps. */ opening?: CardOpening; lint?: CardLint; /** What each new option means for the criteria the card settles (BOS-1155); needed when the card is linked to criteria. */ optionVerdicts?: Record<string, string>; /** The owner must act now (BOS-1110): stored as the card's urgent mark, so it also reaches their phone. */ urgentWhy?: string } | { id: string; companyId: string; agentId: string | null; outcome: "handled"; runId?: string; summary: string; answer?: string } | { id: string; companyId: string; agentId: string | null; outcome: "advice"; runId?: string; what?: string; needed?: string; recommendation?: "allow" | "deny"; why: string }) {
+    async advise(input: { id: string; companyId: string; agentId: string | null; outcome: "reissue"; runId?: string; question: string; options: string[]; recommended: string; triedFirst: string; steps?: string[]; stepSources?: Array<StepSource | null>; /** BOS-1660: the opening of a card with steps. */ opening?: CardOpening; lint?: CardLint; /** What each new option means for the criteria the card settles (BOS-1155); needed when the card is linked to criteria. */ optionVerdicts?: Record<string, string>; /** The owner must act now (BOS-1110): stored as the card's urgent mark, so it also reaches their phone. */ urgentWhy?: string; /** DR-078 (BOS-2798): new options that need an attachment or a note; each must be one of the options. */ attachOptions?: string[]; noteOptions?: string[] } | { id: string; companyId: string; agentId: string | null; outcome: "handled"; runId?: string; summary: string; answer?: string } | { id: string; companyId: string; agentId: string | null; outcome: "advice"; runId?: string; what?: string; needed?: string; recommendation?: "allow" | "deny"; why: string }) {
       const via = input.runId ? ` (CEO run ${input.runId})` : "";
       const [d] = await db.select().from(decisions).where(and(eq(decisions.id, input.id), eq(decisions.companyId, input.companyId)));
       if (!d) throw new AnswerError("No decision with that id.");
@@ -3133,6 +3202,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           return { outcome: "reissue" as const, id: d.id, inPlace: true };
         }
         if (!input.options.includes(input.recommended)) throw new AnswerError("The recommended answer must be one of the options.");
+        // DR-078 (BOS-2798): the reworded options carry their hand-over needs as a raise does, flagged or refused.
+        const needFlags = { attachOptions: input.attachOptions?.filter((o) => input.options.includes(o)), noteOptions: input.noteOptions?.filter((o) => input.options.includes(o)) };
+        for (const [field, named] of [["needsAttachment", input.attachOptions], ["needsNote", input.noteOptions]] as const) {
+          const stray = named?.find((o) => !input.options.includes(o));
+          if (stray) throw new AnswerError(`${field} names "${stray}", which is not one of the options: give each option's exact text.`);
+        }
+        const handOver = handOverRefusal(input.options, needFlags);
+        if (handOver) throw new AnswerError(handOver);
         // A card linked to criteria keeps the link, and its reworded options must say what they mean (BOS-1155).
         const linked = (d.context as { criterionIndexes?: number[] }).criterionIndexes;
         if (linked?.length) {
@@ -3158,7 +3235,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             raisedByAgentId: d.raisedByAgentId,
             // The card says the CEO wrote it and points back at the original (advice.replaces).
             // A card that held its ticket's merge still does once reworded (BOS-1078): the hold moves with the link below.
-            context: { type: "question", ...(linked?.length ? { criterionIndexes: linked, optionVerdicts: input.optionVerdicts as OptionVerdicts } : {}), triedFirst: input.triedFirst.trim(), ...urgentMark, ...(input.steps?.length ? { steps: input.steps, ...(input.stepSources?.length ? { stepSources: input.stepSources } : {}), ...(input.opening ? { opening: input.opening } : {}) } : {}), ...(input.lint ? { lint: input.lint } : {}), ...((d.context as { holdsMerge?: boolean } | null)?.holdsMerge ? { holdsMerge: true as const, ...((d.context as { ticketId?: string }).ticketId ? { ticketId: (d.context as { ticketId?: string }).ticketId } : {}) } : {}), advice: { state: "replacement", replaces: d.id, at } satisfies Advice },
+            context: { type: "question", ...(linked?.length ? { criterionIndexes: linked, optionVerdicts: input.optionVerdicts as OptionVerdicts } : {}), triedFirst: input.triedFirst.trim(), ...urgentMark, ...(needFlags.attachOptions?.length ? { attachOptions: needFlags.attachOptions } : {}), ...(needFlags.noteOptions?.length ? { noteOptions: needFlags.noteOptions } : {}),...(input.steps?.length ? { steps: input.steps, ...(input.stepSources?.length ? { stepSources: input.stepSources } : {}), ...(input.opening ? { opening: input.opening } : {}) } : {}), ...(input.lint ? { lint: input.lint } : {}), ...((d.context as { holdsMerge?: boolean } | null)?.holdsMerge ? { holdsMerge: true as const, ...((d.context as { ticketId?: string }).ticketId ? { ticketId: (d.context as { ticketId?: string }).ticketId } : {}) } : {}), advice: { state: "replacement", replaces: d.id, at } satisfies Advice },
           });
           await tx.update(ticketDependencies).set({ blockerDecisionId: newId }).where(eq(ticketDependencies.blockerDecisionId, d.id));
           return true;
@@ -3421,6 +3498,16 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const handOff = (d.context as DecisionContext).type === "stale_blocker" && answer === LET_CEO_DECIDE; // also on cards raised before the option existed
       if (handOff && extra.settledBy) throw new AnswerError("Only the owner can hand this to the CEO; answer Chase, Reassign or Drop dependency.");
       if (options.length > 0 && !ownWords && !handOff && !options.includes(answer)) throw new AnswerError(`Answer must be one of: ${options.map(shortLabel).join(", ")}`);
+      // BOS-2742, BOS-2798 (DR-078): an option that promises a hand-over is taken only with it. A screenshot: a link to an image
+      // of this company in the answer or its note. A note: any text in it (an attachment travels in the note, so it counts).
+      // Checked here, not only on the card, so no screen or tool can close it without.
+      const need = ownWords ? null : optionNeeds(answer, d.context as OptionNeedFlags);
+      if (need === "attachment") {
+        const ids = attachmentIds(`${answer}\n${extra.note ?? ""}`);
+        const known = ids.length ? await db.select({ id: ticketImages.id }).from(ticketImages).where(and(inArray(ticketImages.id, ids), eq(ticketImages.companyId, d.companyId))) : [];
+        if (!known.length) throw new AnswerError(`${ATTACH_FIRST}: "${shortLabel(answer)}" says a screenshot comes with it. Paste or attach it on the card, then press it again.`);
+      }
+      if (need === "note" && !extra.note?.trim()) throw new AnswerError(`${NOTE_FIRST}: "${shortLabel(answer)}" says the answer is in the note. Paste or write it in the note box on the card, then press it again.`);
       await validate(d, answer, extra);
       if (handOff) return handToCeo(d);
       const ctx = d.context as DecisionContext;
@@ -3475,7 +3562,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
       // The owner's own note is kept on the card too (BOS-951), so a card read by id after it drops off the queue
       // shows it beside the answer. `settled` covers the CEO's note; this is the owner's, kept whole in the card.
-      const ownerNote = !extra.settledBy && extra.note?.trim() ? extra.note.trim().slice(0, 4000) : null;
+      const ownerNote = !extra.settledBy && extra.note?.trim() ? extra.note.trim().slice(0, 20_000) : null;
       // BOS-2555: a card whose purpose was to get information from the owner. Only their own answer counts (a CEO settling it
       // is answering for them), and only a plain question card, so nothing else is turned into one. BOS-2593 (DR-076 B): or
       // their answer carries their own content (words, a note, a picture) on an agent's question card, steps cards included.
@@ -3671,7 +3758,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
               await wake({
                 agentId: ceo.id,
                 reason: "decision",
-                note: `The owner tried to apply an approved change by hand and a step failed: ${note} The "Waiting for you" card is still on their queue: "${d.question}". Work out what went wrong, fix what you can, and either tell the owner on the ticket or raise a decision with the next step.`,
+                note: `The owner tried to apply an approved change by hand and a step failed: ${note}${attachedLine("", extra.note)} The "Waiting for you" card is still on their queue: "${d.question}". Work out what went wrong, fix what you can, and either tell the owner on the ticket or raise a decision with the next step.`,
               });
             }
           }
@@ -3873,7 +3960,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         // the result where they are. The owner already has the line and flag (posted below); the raiser is who reports back.
         // An answer in the owner's own words can carry pictures or files (BOS-759): say so plainly, so
         // the agent opens them with open_attachment instead of reading the links as part of the answer.
-        const pictures = ownWords && ATTACHMENT_LINK.test(answer) ? " It includes picture(s) or file(s) they attached; open each with open_attachment." : "";
+        // BOS-2742: a button answer carries its screenshot in the note, so both are read, and the ids are listed so the agent
+        // can open them straight away.
+        const pictures = attachedLine(answer, extra.note);
         // A plan approved (BOS-1411, warning 1): the approved plan's files are compared with other open work, and a
         // match is said here, where waiting still saves the build. Read-only; nothing is linked.
         const plan = (ctx as { plan?: boolean; planText?: string | null; ticketId?: string | null });

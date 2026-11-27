@@ -19,7 +19,7 @@ A one-minute tour (63 seconds), recorded from the real app with made-up data: th
 
 ## Install
 
-You need a Linux host with Docker (a plain Linux box, a Proxmox VM, or TrueNAS SCALE), and a Claude subscription or an Anthropic API key, or any OpenAI compatible API key (tested so far with OpenRouter, Ollama and Synthetic). You can install from ready-made Docker images, published as pre-releases on the [releases page](https://github.com/Leonfinn/Boss_Man/releases), or build the containers from the source on your server.
+You need a Linux host with Docker (a plain Linux box, a Proxmox VM, or TrueNAS SCALE), and a Claude subscription or an Anthropic API key, or any OpenAI compatible API key (tested so far with OpenRouter, Ollama and Synthetic). You can install from ready-made Docker images, published as pre-releases on the [releases page](https://github.com/Leonfinn/Boss_Man/releases), or build the containers from the source on your server. A new image comes out once a week, on Tuesdays; building from source gets each change as soon as it is added. [What's new](CHANGELOG.md) says which image has each change.
 
 > **On Proxmox, use a VM, not an LXC container.** In most LXC containers the network guard cannot load, so agents' runners could reach your home network. See [docs/32-proxmox.md](docs/32-proxmox.md).
 
@@ -46,7 +46,7 @@ Work is tied to objectives. An objective is a goal with key results you can meas
 
 One company can hire another through an engagement. An engagement is a formal request that sets out the scope, what to deliver, how to check it and a budget limit.
 
-The decision queue holds everything that needs you, including blockers that have gone stale. Items that hold up the most work, or are due soonest, come first.
+The decision queue holds everything that needs you, including blockers that have gone stale. Items that hold up the most work, or are due soonest, come first. When a card's answer promises a screenshot ("Done, screenshot attached"), paste the picture into the box under the answers (or use Attach file), then press the answer; the card won't take that answer without one, and the agent gets the picture straight away.
 
 Each agent is paid for by a funding source, such as an API key or a subscription plan. Boss Man tracks spend against each source, including a subscription's usage limits.
 
@@ -127,6 +127,11 @@ Without `DATABASE_URL` the server keeps its data in an embedded Postgres (PGlite
 | [docs/07-feature-requests.md](docs/07-feature-requests.md) | Planning record: feedback notes, features, scoring and the public feedback portal |
 | [docs/08-v1.2-plan.md](docs/08-v1.2-plan.md) | Planning record: the runner launcher, the setup wizard, merge checks, pull requests, the Agents page and more |
 | [docs/13-team-plan.md](docs/13-team-plan.md) | Planning record: the CEO proposing a team for a project |
+
+## Credits
+
+- [Paperclip](https://github.com/paperclipai/paperclip) by [@paperclipai](https://github.com/paperclipai) for inspiring the idea of a company of AI agents that works through tickets.
+- [Hermes Agent](https://github.com/NousResearch/hermes-agent) by [@NousResearch](https://github.com/NousResearch) for inspiring agents that learn from their own work, which shaped Boss Man's workflow retros.
 
 ## Licence
 

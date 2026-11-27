@@ -1,7 +1,7 @@
 // The close gate for after-merge criteria that name a host fact (BOS-1586). A ticket closed on its assignee's "pass"
 // while the This host panel still showed a failing check (BOS-986). The host's own newest report, taken after the
 // work went live, decides instead: neither a "pass" nor an owner card answer overrides it.
-import { allowsCardInstead, criterionText, evalFactClause, factClauses, isAfterMerge, normQuote, pageClauses, readVerdicts, type Criterion } from "@boss-man/shared";
+import { allowsCardInstead, criterionText, evalFactClause, factClauses, isAfterMerge, normQuote, pageClauses, readVerdicts, zeroErrorsWithoutReadDate, type Criterion } from "@boss-man/shared";
 import type { HostFactsRecord } from "./host-facts.js";
 
 const at = (iso: string): string => `${iso.slice(0, 16).replace("T", " ")} UTC`;
@@ -95,6 +95,7 @@ export function outsideServiceEvidenceRefusal(
   const own = ownHosts.map((h) => h.toLowerCase());
   const lines: string[] = [];
   const receipts: string[] = [];
+  const noDate: string[] = [];
   for (const [i, c] of criteria.entries()) {
     const text = criterionText(c);
     // BOS-2598 (G2): any criterion that names an outside service, before or after merge.
@@ -109,6 +110,11 @@ export function outsideServiceEvidenceRefusal(
       receipts.push(`"${text}"`);
       continue;
     }
+    // BOS-2740: "0 errors" only counts a file the service has read; with no read date it can mean never read.
+    if (zeroErrorsWithoutReadDate(mine)) {
+      noDate.push(`"${text}"`);
+      continue;
+    }
     const lower = mine.toLowerCase();
     const hasLink = [...mine.matchAll(/https?:\/\/([^\s/"”)]+)\S*/gi)].some((m) => m[0].length >= 11 && !own.includes(m[1]!.toLowerCase().replace(/:\d+$/, "")));
     const hasQuote = /["“][^"”]{6,}["”]/.test(mine);
@@ -117,6 +123,7 @@ export function outsideServiceEvidenceRefusal(
   }
   const out: string[] = [];
   if (receipts.length) out.push(`${receipts.join(", ")}: ${RECEIPT_REFUSAL}`);
+  if (noDate.length) out.push(`${noDate.join(", ")}: ${ZERO_ERRORS_REFUSAL}`);
   if (lines.length)
     out.push(
       `A pass on a check about an outside service needs evidence on its own line: ${lines.join(", ")}. Add a link to what you looked at (not a link to our own site), a screenshot (attach_image, put its id on that line) or the reading quoted in double quotes, e.g. "Sitemap read, 12 pages discovered". If the service doesn't show it yet, report the criterion as fail: the ticket still closes and Boss Man opens the follow-up for it.`,
@@ -127,6 +134,32 @@ export function outsideServiceEvidenceRefusal(
 /** Words of a service's receipt: it took the request, nothing more (BOS-2598, BOS-2073). */
 const RECEIPT = /\b(pending|submitted|accepted|queued|processing|202|204)\b/i;
 export const RECEIPT_REFUSAL = `That's a receipt, not the outcome. Move to Blocked with a dated re-check (schedule_check), or report fail. Use set_ticket_state blocked with blocked_until at the service's normal turnaround (a sitemap read: 48 hours) and watching_for one line saying what the service must show, then schedule_check at that time; on the re-check, quote what the service now shows. A ticket with no merge can wait in Blocked on blocked_until alone.`;
+
+export const ZERO_ERRORS_REFUSAL = `"0 errors" or "no errors" with no read date is not a reading: the count only covers a file the service has read, so it is also what an unread file shows. Quote the date the service read it (for the Search Console sitemap: lastDownloaded, with isPending false and submitted above 0), or move to Blocked with a dated re-check. The readings per service are in the wiki page "Outside-service readings" (packages/shared/src/outside-service-readings.ts).`;
+
+export const OWNER_TEXT_RECEIPT_REFUSAL = `Not sent. This text names an outside service and reports its receipt as the result ("pending", "submitted", "accepted", 204, or "0 errors" with no read date). A receipt only shows the service took the request. Say what the owner's screen shows, from the readings table (wiki page "Outside-service readings", packages/shared/src/outside-service-readings.ts): the reading with its date (e.g. "Search Console shows Couldn't fetch" or "Last read 26 Nov, 7 discovered"). If nothing has been read yet, say "not read yet, re-check on <date>".`;
+
+/**
+ * BOS-2741 (R2): the G3 receipt check on text the owner reads (ticket replies, state notes, CEO chat), not only on done
+ * moves. Looks at each sentence that names an outside service and the one after it, using the same receipt words and
+ * the same "0 errors" rule as the done gate. `allowReceipt` is for a Blocked note, where "submitted, pending, re-check
+ * on 28 Nov" is the right way to say it is waiting; "0 errors" with no date is still refused there. Returns the hold
+ * text, or null.
+ */
+export function ownerTextReceiptRefusal(text: string, opts: { allowReceipt?: boolean } = {}): string | null {
+  const parts = text.split(/(?<=[.!?])\s+|[\n;]+/).map((s) => s.trim()).filter(Boolean);
+  for (const [i, part] of parts.entries()) {
+    const prev = parts[i - 1] ?? "";
+    // A receipt word counts only in the same sentence as the service's name, and not in CI, check, merge or review talk.
+    if (!opts.allowReceipt && OWNER_TEXT_SERVICE.test(part) && RECEIPT.test(part) && !ENGINEERING_TALK.test(part)) return OWNER_TEXT_RECEIPT_REFUSAL;
+    if ((OWNER_TEXT_SERVICE.test(part) || OWNER_TEXT_SERVICE.test(prev)) && zeroErrorsWithoutReadDate(`${prev} ${part}`)) return OWNER_TEXT_RECEIPT_REFUSAL;
+  }
+  return null;
+}
+
+/** BOS-2741: the services whose outcome the owner reads off their screen. Not the code host, CI or chat: "Pushed to GitHub, check queued" is routine. */
+const OWNER_TEXT_SERVICE = /\b(google|bing|search console|webmaster tools?|indexnow|sitemap|stripe|paypal|cloudflare|sendgrid|mailgun|twilio)\b/i;
+const ENGINEERING_TALK = /\b(ci|checks?|merge[sd]?|review|build|branch|commit)\b/i;
 
 /** The part of the note about criterion `n`: the segment (split on ; and newlines) that starts with its number, else the one that best repeats its words. */
 export function ownLine(note: string, n: number, text: string): string | null {

@@ -198,6 +198,8 @@ export type ChecksPlan = {
   agents: number | null;
   /** BOS-1498: one plain line for the owner: what a runner made now is given and why. */
   why: string;
+  /** BOS-2802: the most memory a runner can be given here (the machine's limit or the .env size); null when nothing limits it. The server turns it into "this machine can run N agents". */
+  ceilingBytes: number | null;
 };
 
 const gb = (b: number) => `${Math.round((b / GIB) * 10) / 10} GB`;
@@ -216,7 +218,7 @@ const n = (k: number, one: string, many: string) => `${k} ${k === 1 ? one : many
 export function planChecks(cfg: LauncherConfig): ChecksPlan {
   if (cfg.requestedSlots === undefined) {
     const why = `${gb(cfg.memoryBytes)}: ${cfg.envMemoryCap !== undefined ? "set by BOSSMAN_RUNNER_MEMORY in the host's .env" : "the starting size, until Boss Man sends your settings"}.`;
-    return { requested: null, slots: cfg.checkSlots ?? 1, memoryBytes: cfg.memoryBytes, reason: null, agents: null, why };
+    return { requested: null, slots: cfg.checkSlots ?? 1, memoryBytes: cfg.memoryBytes, reason: null, agents: null, why, ceilingBytes: null };
   }
   const want = cfg.requestedSlots;
   const agents = cfg.requestedAgents;
@@ -254,7 +256,7 @@ export function planChecks(cfg: LauncherConfig): ChecksPlan {
     else if (cfg.envMemoryCap !== undefined && slots === fits && (envWins || cfg.envMemoryCap <= hostCeiling)) reason = `The host's .env caps runner memory at ${gb(cfg.envMemoryCap)} (BOSSMAN_RUNNER_MEMORY), which fits ${slots}.`;
     else reason = `Not enough free memory for ${want}: this host has ${cfg.hostMemoryBytes ? gb(cfg.hostMemoryBytes) : "too little"}, which fits ${slots}.`;
   }
-  return { requested: want, slots, memoryBytes, reason, agents: agents ?? null, why };
+  return { requested: want, slots, memoryBytes, reason, agents: agents ?? null, why, ceilingBytes: sized && Number.isFinite(ceiling) ? ceiling : null };
 }
 
 /** The Docker create request for a company's runner. Snapshot-tested: change it on purpose only. */

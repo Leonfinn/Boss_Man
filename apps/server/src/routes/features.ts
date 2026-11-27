@@ -145,6 +145,8 @@ export function featureRoutes(
     const { id } = IdParam.parse(req.params);
     const b = z.object({ projectId: Uuid, title: Text(200).optional(), risk: z.enum(RISK_TIERS).optional(), assigneeAgentId: Uuid.optional(), state: z.enum(SYSTEM_STATES).optional(), noCode: z.boolean().optional() }).parse(req.body);
     const { feature: f, body } = await feedback.brief(id);
+    // BOS-2682: a released feature is baselined: a new ticket on it would keep it open for good. File the work as a new feature.
+    if (f.status === "released") throw new FeedbackError(409, `The feature "${f.title}" is released, so it is baselined. To deliver more, make a new feature and give it a ticket (Features → New feature), or reopen this one only if it never really shipped.`);
     const [p] = await db.select({ companyId: projects.companyId }).from(projects).where(eq(projects.id, b.projectId));
     if (!p || p.companyId !== f.companyId) return reply.code(422).send({ error: "rejected", message: "Pick a project of the feature's company." });
     const t = await work.createTicket(b.projectId, { title: b.title ?? f.title, body, featureId: id, risk: b.risk, assigneeAgentId: b.assigneeAgentId, state: b.state, noCode: b.noCode });

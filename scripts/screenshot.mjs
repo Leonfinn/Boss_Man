@@ -30,6 +30,8 @@
 //          --click SELECTOR (repeatable: after --wait, each is waited for until visible, within --timeout, then
 //          clicked, in the order given; for a state behind a button, tab or fold, BOS-2547)
 //          --wait-after SELECTOR (waited for after the clicks, before the shot)
+//          --key NAME (repeatable: a Playwright key, e.g. Tab or Control+k, pressed after the clicks and before
+//          --wait-after; for a state a keyboard brings up, BOS-2690)
 // Exit 0 with the output path on the last line; non-zero with one error line otherwise.
 // Playwright is a global tool on the runner, not a project dependency; BOSSMAN_CHROMIUM overrides the browser.
 import { execFileSync } from "node:child_process";
@@ -45,7 +47,7 @@ import { addPngText, SCREENSHOT_MARKER_KEY, SCREENSHOT_MARKER_SEEDED } from "./p
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 export function parseArgs(argv) {
-  const o = { route: "#board/p1", width: 1280, height: 900, ratio: 1, touch: false, fullPage: false, timeout: 20000, dist: join(repoRoot, "apps/web/dist"), clicks: [] };
+  const o = { route: "#board/p1", width: 1280, height: 900, ratio: 1, touch: false, fullPage: false, timeout: 20000, dist: join(repoRoot, "apps/web/dist"), clicks: [], keys: [] };
   const num = (k, v) => {
     const n = Number(v);
     if (!Number.isFinite(n) || n <= 0) fail(`${k} needs a positive number, got "${v}"`);
@@ -65,6 +67,7 @@ export function parseArgs(argv) {
     else if (a === "--timeout") o.timeout = num(a, val());
     else if (a === "--wait") o.wait = val();
     else if (a === "--click") o.clicks.push(val());
+    else if (a === "--key") o.keys.push(val());
     else if (a === "--wait-after") o.waitAfter = val();
     else if (a === "--out") o.out = val();
     else if (a === "--dist") o.dist = resolve(val());
@@ -187,8 +190,8 @@ function findChromium() {
   return undefined; // Playwright's own download, if any
 }
 
-// The steps between load and shot: --wait, then each --click in order, then --wait-after. Exported so
-// screenshot.test.mjs can drive it with a fake page (GitHub's script-test job has no browser).
+// The steps between load and shot: --wait, then each --click in order, then each --key, then --wait-after.
+// Exported so screenshot.test.mjs can drive it with a fake page (GitHub's script-test job has no browser).
 export async function afterLoad(page, o, target) {
   const visible = async (sel, what) => {
     try {
@@ -208,6 +211,13 @@ export async function afterLoad(page, o, target) {
     } catch (e) {
       // Playwright's message runs to many lines (call log); keep the one-line contract.
       fail(`--click "${sel}" could not be clicked at ${target}: ${String(e.message).split("\n")[0]}`);
+    }
+  }
+  for (const key of o.keys ?? []) {
+    try {
+      await page.keyboard.press(key);
+    } catch (e) {
+      fail(`--key "${key}" could not be pressed at ${target}: ${String(e.message).split("\n")[0]}`);
     }
   }
   if (o.waitAfter) await visible(o.waitAfter, "--wait-after ");

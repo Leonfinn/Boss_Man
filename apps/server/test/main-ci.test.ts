@@ -180,6 +180,50 @@ describe("the main-CI watcher", () => {
     expect(made[0]!.body).toContain("Publish images");
   });
 
+  describe("BOS-2795: a failed website republish tells the Release Manager", () => {
+    const withRm = async (c: Awaited<ReturnType<typeof setup>>) => {
+      const [rm] = await c.db.insert(agents).values({ companyId: c.company.id, name: "Brian - Release Manager", role: "worker", agentKind: "claude", template: "release-manager" }).returning();
+      return rm!;
+    };
+    const installRun = (c: Awaited<ReturnType<typeof setup>>, id: number, jobName: string, conclusion = "failure", name = "Install test") => {
+      c.gh.runs.unshift(run(id, conclusion === "success" ? "success" : "failure", sha("e"), { event: "workflow_run", name }));
+      c.gh.jobs[id] = [job(jobName, [["Republish the site with this result", conclusion]])];
+    };
+
+    it("wakes the Release Manager once per failed republish run, not again on the next pass", async () => {
+      ctx = await setup();
+      const c = ctx;
+      const rm = await withRm(c);
+      installRun(c, 61, "site");
+      await c.service.run();
+      expect(c.woken.filter((w) => w.agentId === rm.id)).toHaveLength(1);
+      const made = await c.failingTickets();
+      expect(c.woken.find((w) => w.agentId === rm.id)!.ticketId).toBe(made[0]!.id);
+      expect((await c.notesOn(made[0]!.id)).some((t) => t.includes("Told the Release Manager"))).toBe(true);
+      await c.service.run();
+      expect(c.woken.filter((w) => w.agentId === rm.id)).toHaveLength(1);
+    });
+
+    it("stays quiet for a failed install job, a passing republish, another workflow's site job, and a company with no Release Manager", async () => {
+      ctx = await setup();
+      const c = ctx;
+      const rm = await withRm(c);
+      installRun(c, 62, "install");
+      installRun(c, 63, "site", "success");
+      installRun(c, 64, "site", "failure", "Some other workflow");
+      await c.service.run();
+      expect(c.woken.filter((w) => w.agentId === rm.id)).toHaveLength(0);
+      ctx = await (async () => {
+        await c.app.close();
+        await c.close();
+        return setup();
+      })();
+      installRun(ctx, 65, "site");
+      await ctx.service.run();
+      expect(await ctx.failingTickets()).toHaveLength(1);
+    });
+  });
+
   it("BOS-1641's case: says where main was and the last green commit, and 'no suspect' when no commit since touched the failing test", async () => {
     ctx = await setup();
     const c = ctx;

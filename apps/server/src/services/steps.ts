@@ -62,7 +62,7 @@ export function step(sentence: string, ...rest: Array<string | Command>): string
 }
 
 /** One thing the owner-step lint found (BOS-417, DR-008 Q1). `step` counts from 1. */
-export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R7" | "R8" | "R9" | "R10" | "R11" | "R12" | "R13" | "R14" | "R15" | "R16" | "R17" | "R18" | "R18b" | "R19" | "R20" | "R21" | "R31" | "warn"; problem: string };
+export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R7" | "R8" | "R9" | "R10" | "R11" | "R12" | "R13" | "R14" | "R15" | "R16" | "R17" | "R18" | "R18b" | "R19" | "R20" | "R21" | "R31" | "R32" | "warn"; problem: string };
 
 /**
  * The words that mean a step relies on an add-on (R9, DR-023). A fixed table, so what triggers the rule
@@ -641,6 +641,31 @@ function outsideSiteFindings(step: number, prose: string, facts: LintFacts, refu
   return false;
 }
 
+// R32 (BOS-2730, the standing rule "Owner steps outside our code"): a step on an outside site, vendor image or host
+// tool says whether its claim was confirmed on the real thing: "confirmed on <host kind>, <date>" or "not yet confirmed".
+const NOT_YET_CONFIRMED = /\bnot yet confirmed\b/i;
+const CONFIRMED_ON = /(?<!\bnot (?:yet )?)\bconfirmed on\s+([^,\n]{2,80}?)\s*,\s*([^\n]{4,40})/i;
+/** A date in a form that reads one way: 2026-11-26, 26 Nov 2026, November 26, 2026. (26/11/2026 is not: day-first or month-first.) */
+const DATE_FORMS = /\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]{3,9}\.?,?\s+\d{4}\b|\b[A-Za-z]{3,9}\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}\b/;
+/** A registry-qualified image (ghcr.io/org/app:tag) in a step's words: a vendor image, not a URL, so `outsideSiteKeys` misses it. */
+const VENDOR_IMAGE = /\b(?:ghcr\.io|docker\.io|quay\.io|gcr\.io|public\.ecr\.aws|registry\.gitlab\.com)\/[\w./-]+/i;
+/** Whether the step's words carry a readable "confirmed on <host kind>, <date>", and the date is not in the future. */
+function hasConfirmedOn(prose: string, now: Date): boolean {
+  const m = CONFIRMED_ON.exec(prose);
+  if (!m) return false;
+  const d = DATE_FORMS.exec(m[2]!)?.[0];
+  if (!d) return false;
+  const t = Date.parse(`${d.replace(/(\d)(?:st|nd|rd|th)\b/i, "$1").replace(/\.(?=,|\s)/, "")} UTC`);
+  return !Number.isNaN(t) && t <= now.getTime() + 86_400_000;
+}
+function confirmedMarkFindings(step: number, prose: string, facts: LintFacts, refuse: LintFinding[]) {
+  const what = outsideSiteKeys(prose, facts.serverHost)[0] ?? VENDOR_IMAGE.exec(prose)?.[0];
+  if (!what) return;
+  if (NOT_YET_CONFIRMED.test(prose) || hasConfirmedOn(prose, facts.now ?? new Date())) return;
+  const bad = /(?<!\bnot (?:yet )?)\bconfirmed on\b/i.test(prose) ?` (the "confirmed on" you wrote has no readable date: write it as "confirmed on <host kind>, <YYYY-MM-DD>")` : "";
+  refuse.push({ step, rule: "R32", problem: `names ${what}, which Boss Man can't see, but doesn't say whether its steps were tried there${bad}. Add "confirmed on <host kind>, <date>" if you ran it on that kind of host or site, or "not yet confirmed" if you only read about it` });
+}
+
 /** Names a piece of shell sets: `X=…` (also inline, `X=1 cmd`, and after export/local), `read X Y`, `for X in`. */
 function setsIn(code: string, into: Set<string>) {
   for (const m of code.matchAll(/(?:^|[\s;&|(`])([A-Za-z_]\w*)=/g)) into.add(m[1]!);
@@ -994,6 +1019,7 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[],
     if (given.addons) addonFindings(step, text, given.addons, given.setsUp, refuse, warn);
     vagueHostFindings(step, prose, blocks, refuse);
     if (outsideSiteFindings(step, prose, given, refuse, seenSites) && !notSeenStep) notSeenStep = step;
+    confirmedMarkFindings(step, prose, given, refuse);
     const secret = secretScreenshotFinding(step, prose, i > 0 ? pieces(steps[i - 1]!).prose : undefined, given.serverHost);
     if (secret) refuse.push(secret);
     if (!anyOutside && outsideSite(prose, given.serverHost)) anyOutside = true;

@@ -87,7 +87,7 @@ describe("a move off the plan (BOS-1509)", () => {
     const reply = await c.move(worker, t.id, "blocked", { blocked_until: new Date(Date.now() + 2 * HOUR).toISOString(), blocked_reason: "waiting for data", summary: "Parked for the data." });
     expect(reply).toContain("is now blocked");
     expect(reply).toContain("Engineer splits it in two");
-    expect(reply).toContain("The CEO has been told");
+    expect(reply).toMatch(/The CEO was alerted: raised at \d\d:\d\d UTC/);
     expect((await c.row(t.id)).systemState).toBe("blocked");
     const [w, ...rest] = await c.ceoWakes(t.id);
     expect(rest).toHaveLength(0);
@@ -104,7 +104,7 @@ describe("a move off the plan (BOS-1509)", () => {
     const worker = await c.mcp(c.worker.id);
     const a = await c.ticket();
     await c.plan(a.id, { systemState: "in_progress" });
-    expect(await c.move(worker, a.id, "ready")).toContain("The CEO has been told");
+    expect(await c.move(worker, a.id, "ready")).toMatch(/The CEO was alerted: raised at \d\d:\d\d UTC/);
     const b = await c.ticket();
     await c.plan(b.id, { systemState: "in_progress", ceoPlanDeadline: new Date(Date.now() - HOUR) });
     expect(await c.move(worker, b.id, "ready")).not.toContain("CEO plan");

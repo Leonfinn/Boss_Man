@@ -88,6 +88,8 @@ export async function markLive(this: ReviewSelf, ctx: ReviewCtx, ticketId: strin
   await db.update(tickets).set({ liveMarkedAt: at, liveEvidence: evidence, liveAt: at }).where(eq(tickets.id, t.id));
   await record(db, { companyId, ticketId: t.id, kind: "go_live_marked", summary: `${input.by} marked the merge ${t.mergeCommit.slice(0, 12)} live. Evidence: ${evidence}` });
   await db.insert(ticketMessages).values({ companyId, ticketId: t.id, author: "system", text: `${input.by} marked this ticket's merge live. Evidence: ${evidence}` });
+  // BOS-2686: a ticket going live is one of the events the feature's release rule answers to.
+  await ctx.deps.onLive?.(t.id).catch(() => undefined);
   const woken = t.goLiveWait ? await releaseGoLive({ ...t, liveMarkedAt: at }, evidence) : false;
   return { woken, wasWaiting: !!t.goLiveWait };
 }

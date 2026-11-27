@@ -104,6 +104,32 @@ describe("flattenHostRecord: check lists", () => {
     expect("check.container_status.unhealthyNames" in none).toBe(false);
   });
 
+  it("leaves an empty staging-unhealthy name list out, keeps a real one (BOS-2712)", () => {
+    const none = flattenHostRecord({ ...base(), checks: { container_status: { stagingUnhealthy: 0, stagingUnhealthyNames: "" } } });
+    expect("check.container_status.stagingUnhealthyNames" in none).toBe(false);
+    const some = flattenHostRecord({ ...base(), checks: { container_status: { stagingUnhealthy: 1, stagingUnhealthyNames: "staging-runner" } } });
+    expect(some["check.container_status.stagingUnhealthyNames"]).toBe("staging-runner");
+  });
+
+  it("leaves an empty staging-stopped name list out, keeps a real one (BOS-2781)", () => {
+    const none = flattenHostRecord({ ...base(), checks: { container_status: { stagingStopped: 0, stagingStoppedNames: "" } } });
+    expect("check.container_status.stagingStoppedNames" in none).toBe(false);
+    const some = flattenHostRecord({ ...base(), checks: { container_status: { stagingStopped: 1, stagingStoppedNames: "staging-runner" } } });
+    expect(some["check.container_status.stagingStoppedNames"]).toBe("staging-runner");
+    expect(some["check.container_status.stagingStopped"]).toBe("1");
+  });
+
+  it("carries the last health-probe reason, and leaves an empty one out (BOS-2680)", () => {
+    const some = flattenHostRecord({ ...base(), checks: { container_status: { unhealthyReason: "runner (exit 1, 3 failed in a row)" } } });
+    expect(some["check.container_status.unhealthyReason"]).toBe("runner (exit 1, 3 failed in a row)");
+    const none = flattenHostRecord({ ...base(), checks: { container_status: { unhealthyReason: "" } } });
+    expect("check.container_status.unhealthyReason" in none).toBe(false);
+    const where = flattenHostRecord({ ...base(), checks: { container_status: { unhealthyWhere: "runner-x (stack staging)" } } });
+    expect(where["check.container_status.unhealthyWhere"]).toBe("runner-x (stack staging)");
+    const noWhere = flattenHostRecord({ ...base(), checks: { container_status: { unhealthyWhere: "" } } });
+    expect("check.container_status.unhealthyWhere" in noWhere).toBe(false);
+  });
+
   it("reports an empty stopped list as 0 and adds no names key", () => {
     const flat = flattenHostRecord({ ...base(), checks: { container_status: { stopped: [] } } });
     expect(flat["check.container_status.stopped"]).toBe("0");

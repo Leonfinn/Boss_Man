@@ -18,7 +18,7 @@ import { z } from "zod";
 import { goLiveWaitWords, type GoLiveWait, FEATURE_STATUSES, HORIZONS, IMPORTANCE, planFirstByDefault, portalVerdict, RISK_TIERS, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, stateNoteLine, untrusted, isTaskSize, SIZE_SCALE, type TaskSize } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
-import { agents, companies, costEvents, decisions as decisionsTable, engagements as engagementsTable, features, keyResults, objectives, projects, runs as runsTable, runTokens, ticketDependencies, ticketImages, tickets, wakes, workflowColumns } from "./db/schema.js";
+import { agents, companies, costEvents, decisions as decisionsTable, engagements as engagementsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, ticketDependencies, ticketImages, tickets, wakes, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
 import { wipQueuedNote } from "./services/agent-wip.js";
 import { goLiveLine, goLiveWaitOf, liveClaimWarning } from "./services/go-live-wait.js";
@@ -50,7 +50,8 @@ import { NOTHING_CHANGED, ReviewError, type reviewService } from "./services/rev
 import type { notificationsService } from "./services/notifications.js";
 import type { chaptersService } from "./services/chapters.js";
 import { staleVersionMessage, startRefusal, WorkError, type workService } from "./services/work.js";
-import type { planningService } from "./services/planning.js";
+import { effectiveSize, notInPointsLeft, type planningService } from "./services/planning.js";
+import { findMilestone, milestoneOfTicket, milestoneOut, sizeOut } from "./mcp-ticket-plan.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
 import { acceptanceCriteriaSchema, afterMergeLint, criteriaForCard, criterionOverlap, criteriaText, criterionText, failedAfterMerge, isAfterMerge, missingVerdicts, optionVerdictsRefusal, pageClauseRefusal, readCriteria, unreportedAfterMerge, type Criterion } from "@boss-man/shared";
 import { TicketChatError, type ticketChatService } from "./services/ticket-chat.js";
@@ -67,6 +68,7 @@ import type { alertLadder } from "./services/alert-ladder.js";
 import type { retroService } from "./services/retro.js";
 import { sizingGuideText } from "./services/sizing.js";
 import { getHold, WRAP_UP } from "./services/maintenance.js";
+import { ownerTextReceiptRefusal } from "./services/host-fact-gate.js";
 import { ownerFactAnswered, ownerFactHeldLive, recordHeadLine, type GitTokenProbe, ownerSetupFacts, usesOwnerSetupToken } from "./services/owner-record.js";
 import { cleanSummary, SUMMARY_MAX } from "./services/phone-approve.js";
 import { getStandingRules, STANDING_RULES_MAX, StandingRulesError } from "./services/standing-rules.js";
@@ -78,6 +80,7 @@ import { registerAgentAdminTools } from "./mcp-agent-admin.js";
 import { buildPaServer } from "./mcp-pa.js";
 import { registerRetro, registerWatchdog } from "./mcp-watchdog.js";
 import { traceCalls } from "./mcp-trace.js";
+import { guardSecrets } from "./mcp-secret-guard.js";
 import { registerBoard, registerListMyWork, registerNotes, registerRequestNote, registerRoadmap } from "./mcp-board.js";
 import { registerDecisionTools } from "./mcp-decisions.js";
 import { registerMergeLineExport } from "./mcp-merge-line.js";
@@ -245,7 +248,8 @@ function restrictTo(server: McpServer, only: ReadonlySet<string>) {
 }
 
 function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, only?: ReadonlySet<string>, retroAgent = false, withServerStatus = true) {
-  const server = new McpServer({ name: "bossman", version: "0.1.0" });
+  // BOS-2731: an agent's text for the wiki, tickets, replies and cards is refused if it holds a secret. Wrapped first so every registrar below is covered.
+  const server = guardSecrets(new McpServer({ name: "bossman", version: "0.1.0" }));
   if (only) restrictTo(server, only);
   if (only === SCRUM_MASTER_TOOLS) {
     registerBoard(server, db, scope);
@@ -373,6 +377,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       if (urgentHold) return fail(urgentHold);
       const factHold = await ownerFactHeldLive(db, scope.companyId, gitTokenProbe, [body]); // BOS-1596, R34
       if (factHold) return fail(factHold);
+      const receiptHold = ownerTextReceiptRefusal(body); // BOS-2741 (R2)
+      if (receiptHold) return fail(receiptHold);
       // Any agent's owner-ask is held, not posted, until a card covers it (BOS-901 for the CEO, BOS-1576 for everyone):
       // a hint after posting reaches only the writer, so the ask never got to the owner. notAnAsk lets a status reply through.
       // R53 (BOS-2084): a reply that names another ticket's open owner card is held for every agent, notAnAsk or not.
@@ -472,6 +478,9 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         criterion: criterionArg,
         // What choosing each option means for that criterion (BOS-1155): pass, fail or none. Required with criterion.
         optionVerdicts: z.record(z.string().max(200), z.enum(["pass", "fail", "none"])).optional(),
+        // BOS-2742: options the owner can only press with a screenshot attached on the card.
+        needsAttachment: z.array(z.string().min(1).max(200)).max(6).optional().describe("Options (their exact text) the owner may only press with a screenshot or file attached, e.g. [\"Done, screenshot of the result attached\"]. The card then shows a paste/attach area, refuses the option with nothing attached, and your wake lists the image ids to open with open_attachment. An option whose words promise one (\"screenshot attached\", \"I'll attach\") must be flagged here or the card is refused; flag any other option that asks for a file or picture too."),
+        needsNote: z.array(z.string().min(1).max(200)).max(6).optional().describe("Options (their exact text) the owner may only press with text in the card's note, e.g. [\"Sent\"] when you ask them to paste a command's output. The card then shows the note box open, refuses the option with an empty note, and your wake carries the note in full. An option whose words promise one (\"in my note\", \"pasted\", \"output below\", \"link below\", \"I've entered\") must be flagged here or the card is refused."),
         // BOS-1161: the condition that makes this card moot, so Boss Man closes it by itself and records why. Each key is an
         // alternative (any one closes it); only conditions Boss Man can check are accepted. Without it the card is only flagged "may be out of date".
         clearsWhen: z.object({
@@ -482,7 +491,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         }).strict().optional(),
       },
     },
-    async ({ replaces: givenReplaces, ownerOnly, ownerOnlyWhy, question, options, recommended, blocksTicketId, alsoBlocks, holdsMerge, triedFirst, ownerMustDo, steps, stillNeeded, goLive, rollback, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, why, minutes, criterion, optionVerdicts, clearsWhen }) => {
+    async ({ replaces: givenReplaces, ownerOnly, ownerOnlyWhy, question, options, recommended, blocksTicketId, alsoBlocks, holdsMerge, triedFirst, ownerMustDo, steps, stillNeeded, goLive, rollback, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, why, minutes, criterion, optionVerdicts, needsAttachment, needsNote, clearsWhen }) => {
       // R38: a go-live card states its undo with its source, and (below) waits for its ticket's preview proof.
       if (goLive) {
         const bad = rollbackRefusal(rollback);
@@ -515,6 +524,10 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         clearWhen = made.clearWhen;
       }
       if (!options.includes(recommended)) return fail("The recommended answer must be one of the options.");
+      for (const [field, named] of [["needsAttachment", needsAttachment], ["needsNote", needsNote]] as const) {
+        const notAnOption = named?.filter((o) => !options.includes(o)) ?? [];
+        if (notAnOption.length) return fail(`${field} names ${notAnOption.map((o) => `"${o}"`).join(", ")}, which ${notAnOption.length === 1 ? "is not one of the options" : "are not among the options"}: give each option's exact text.`);
+      }
       // BOS-1596: owner-facing text the record contradicts (an installed check worker when none ever connected) is held with the live value.
       const factHold = await ownerFactHeldLive(db, scope.companyId, gitTokenProbe, [question, ...options, ...(steps ?? [])]);
       if (factHold) return fail(factHold);
@@ -540,6 +553,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         const filledAs = new Map(options.map((o, i) => [o, ask.options![i]!]));
         recommended = filledAs.get(recommended) ?? recommended;
         if (optionVerdicts) optionVerdicts = Object.fromEntries(Object.entries(optionVerdicts).map(([k, v]) => [filledAs.get(k) ?? k, v]));
+        if (needsAttachment) needsAttachment = needsAttachment.map((o) => filledAs.get(o) ?? o);
+        if (needsNote) needsNote = needsNote.map((o) => filledAs.get(o) ?? o);
         options = ask.options;
       }
       question = ask.question ?? question;
@@ -608,7 +623,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       }
       let d: { id: string; droppedLinks?: DroppedOrderLink[]; withCeo?: boolean };
       try {
-        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question: [recordLine, question, notLiveLine].filter(Boolean).join("\n\n"), recordSays: !!recordAnswer, options, recommended, blocksTicketId, ...(alsoIds.length ? { alsoBlocksTicketIds: alsoIds } : {}), holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, ...(steps?.length && stepSources ? { stepSources } : {}), ...(steps?.length && ask.opening ? { opening: ask.opening } : {}), stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(goLive ? { goLive: true, releasesCommit: releasedCommitOf(question, ...(steps ?? [])) } : {}), ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
+        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question: [recordLine, question, notLiveLine].filter(Boolean).join("\n\n"), recordSays: !!recordAnswer, options, recommended, blocksTicketId, ...(alsoIds.length ? { alsoBlocksTicketIds: alsoIds } : {}), holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, ...(steps?.length && stepSources ? { stepSources } : {}), ...(steps?.length && ask.opening ? { opening: ask.opening } : {}), stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, ...(needsAttachment?.length ? { attachOptions: needsAttachment } : {}), ...(needsNote?.length ? { noteOptions: needsNote } : {}), doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(goLive ? { goLive: true, releasesCommit: releasedCommitOf(question, ...(steps ?? [])) } : {}), ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
       } catch (err) {
         if (err instanceof WorkError || err instanceof AnswerError) return fail(err.message);
         throw err;
@@ -1123,6 +1138,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           // triage, so a note must not talk one into publishing it. Only the owner can tick it on in the app (BOS-991).
           // The guard also runs when this call rewrites the public text of a feature that is already on the portal
           // (BOS-1420), judged on the feature as it would be left, since visitors see that text too.
+          let tickRefused = false;
           if (portalVisibleIn === true || input.publicSummary !== undefined || input.publicTitle !== undefined) {
             const target = await feedback.feature(input.featureId, scope.companyId);
             const facts = await feedback.portalFacts(scope.companyId, target.areaId, target.driverScores as Record<string, number | null>);
@@ -1144,7 +1160,16 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
                 keepOffPortal: input.keepOffPortal ?? target.keepOffPortal,
                 hasPublicSummary: !!publicSummary?.trim(),
               });
-              if (verdict.reason === "security") return fail("This feature reads as security work, so it stays off the feedback portal. Only the owner can put it there, in the Features page.");
+              if (verdict.reason === "security") {
+                const refusal = "This feature reads as security work, so it stays off the feedback portal. Only the owner can put it there, in the Features page.";
+                // Text visitors would see at once (the feature is already on the portal and this call rewrites its public
+                // text) is refused whole, saving nothing. A refused tick alone drops only the tick (BOS-2850).
+                const publicTextShownNow = target.portalVisible && !target.keepOffPortal && (input.publicSummary !== undefined || input.publicTitle !== undefined);
+                if (publicTextShownNow || portalVisibleIn !== true) return fail(refusal);
+                delete (changes as { portalVisible?: boolean }).portalVisible;
+                tickRefused = true;
+                if (!Object.keys(changes).length) return fail(refusal);
+              }
             }
           }
           const f = await feedback.updateFeature(input.featureId, changes, scope.companyId);
@@ -1156,10 +1181,11 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
             input.status !== undefined ? `status ${input.status}` : null,
             input.publicSummary !== undefined ? (input.publicSummary ? "wrote its public summary" : "cleared its public summary") : null,
             input.publicTitle !== undefined ? (input.publicTitle ? "wrote its public title" : "cleared its public title") : null,
-            portalVisibleIn !== undefined ? (portalVisibleIn ? "put it on the feedback portal" : "took it off the feedback portal") : null,
+            portalVisibleIn !== undefined && !tickRefused ? (portalVisibleIn ? "put it on the feedback portal" : "took it off the feedback portal") : null,
             input.keepOffPortal === true ? `kept it off the portal (sensitive${input.keepOffReason ? `: ${input.keepOffReason}` : ""})` : null,
           ].filter(Boolean);
           await record(db, { companyId: scope.companyId, agentId: scope.agentId, kind: "feature_updated", summary: `${me.name} placed "${f.title}" on the roadmap: ${parts.join(", ")}. ${input.reason}` });
+          if (tickRefused) return text(`Updated "${f.title}": ${parts.join(", ")}. The portal tick was refused and portalVisible is unchanged: this feature reads as security work, so it stays off the feedback portal. Only the owner can put it there, in the Features page.`);
           return text(`Updated "${f.title}": ${parts.join(", ")}.`);
         }
         if (input.action === "size") {
@@ -1260,7 +1286,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       "server_status",
       {
         description:
-          "A read-only view of the server, for when you or the owner need to know what is actually running. Say Boss Man is up only when the stack field says healthy: one server answering is not enough. stack is healthy, degraded or down, and stackWhy gives the reasons (for example a failed or partial last deploy, which stays degraded until a later deploy result replaces it). Also shown: both blue/green colours (colours), when the database last started (database.startedAt), the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, recent server errors with secrets redacted, server freezes over 1 s with memory, GC time and requests in flight (stalls), and the Synthetic plan's quota (syntheticUsage: which measure it is, used of the limit (the plan's weekly credits, which regenerate 2% at a time, or else the old request window), when it renews, how old the reading is, recent readings this period and which of your company's agents are paid from it, with the number of other companies' agents on the same plan but not their names). Also runLimits: the all-companies and per-company run limits in force, with how many work runs each has going (counts only); limit is the number in force and saved the owner's saved number; when allCompanies or background is lower than saved, because says why (a server update's hold), since since when and until the latest it lifts, and mergeChecks.paused says new merge checks wait for the same hold, so never ask the owner whether they meant a lower number; a waiting wake held 'at a concurrency limit: all companies' waits for the first, 'this company' for the second, and 'this agent is busy' for the agent's own run. Also mergeFailures: failed merge attempts in the last hour, with a count per reason (check_failed, landing_refused, main_moved, conflict, lock_timeout, restart, gate_fault). Also mergeTrain: per project, the merge train's seats, who is seated (seatDetails: each seat's phase, e.g. waiting for GitHub CI since 14:05 UTC, when that wait began as ciSince, and the GitHub jobs still running as ciRunning) and who waits, tickets held to land on main alone (who they clashed with, the files, and whether they hold the line), and since when a seat has stood empty or nothing has landed (empty on a server that isn't in charge), and mergeTrainOn: whether the owner's merge train switch is on. Also landingTurns (empty while the merge train runs, because the train uses no landing turn: read mergeTrain seatDetails then): per project, the ticket holding the landing turn (since, capMin, capEndsAt, and phase: what its merge is doing now, e.g. waiting for GitHub CI since 14:05 UTC; a turn past its cap is released when you read this), the line waiting for it in order, and merges whose check passed and whose push waits for it (pushWaiting); each waiter's label is the same line its ticket and the Merges tab show, e.g. 'waiting for BOS-12 to land, then re-checks'. Also addons: ntfy, Tailscale and Penpot, each with state (not_set_up, stopped, needs_login, running or unknown), since and source. Never tell the owner an add-on carries over, is back up or works unless its state is running; unknown means Boss Man can't see it, so say so. For ntfy, running means only that ntfy accepted the last push, not that the phone got it: say a push reached the phone only when ntfy.phone.confirmedAt (the owner's tap on Got it on a test notification) is later than the push, or the owner says so. ntfy.phoneType is the owner's phone (android, iphone, both or unknown): when unknown, ask the owner rather than guessing a phone. It changes nothing and shows no other company's tickets, runs or errors.",
+          "A read-only view of the server, for when you or the owner need to know what is actually running. Say Boss Man is up only when the stack field says healthy: one server answering is not enough. stack is healthy, degraded or down, and stackWhy gives the reasons (for example a failed or partial last deploy, which stays degraded until a later deploy result replaces it). Also shown: both blue/green colours (colours), when the database last started (database.startedAt), the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, recent server errors with secrets redacted, server freezes over 1 s with memory, GC time and requests in flight (stalls), and the Synthetic plan's quota (syntheticUsage: which measure it is, used of the limit (the plan's weekly credits, which regenerate 2% at a time, or else the old request window), when it renews, how old the reading is, recent readings this period and which of your company's agents are paid from it, with the number of other companies' agents on the same plan but not their names). Also claudeQuota: for each Claude subscription, its newest stored quota reports (observedAt, and per window the utilization, resetsAt, status and bossManWritten, true for a row Boss Man wrote itself on a weekly-limit stop), so you can see which limits each real report carried. Also runLimits: the all-companies and per-company run limits in force, with how many work runs each has going (counts only); limit is the number in force and saved the owner's saved number; when allCompanies or background is lower than saved, because says why (a server update's hold), since since when and until the latest it lifts, and mergeChecks.paused says new merge checks wait for the same hold, so never ask the owner whether they meant a lower number; a waiting wake held 'at a concurrency limit: all companies' waits for the first, 'this company' for the second, and 'this agent is busy' for the agent's own run. Also mergeFailures: failed merge attempts in the last hour, with a count per reason (check_failed, landing_refused, main_moved, conflict, lock_timeout, restart, gate_fault). Also mergeTrain: per project, the merge train's seats, who is seated (seatDetails: each seat's phase, e.g. waiting for GitHub CI since 14:05 UTC, when that wait began as ciSince, and the GitHub jobs still running as ciRunning) and who waits, tickets held to land on main alone (who they clashed with, the files, and whether they hold the line), and since when a seat has stood empty or nothing has landed (empty on a server that isn't in charge), and mergeTrainOn: whether the owner's merge train switch is on. Also landingTurns (empty while the merge train runs, because the train uses no landing turn: read mergeTrain seatDetails then): per project, the ticket holding the landing turn (since, capMin, capEndsAt, and phase: what its merge is doing now, e.g. waiting for GitHub CI since 14:05 UTC; a turn past its cap is released when you read this), the line waiting for it in order, and merges whose check passed and whose push waits for it (pushWaiting); each waiter's label is the same line its ticket and the Merges tab show, e.g. 'waiting for BOS-12 to land, then re-checks'. Also addons: ntfy, Tailscale and Penpot, each with state (not_set_up, stopped, needs_login, running or unknown), since and source. Never tell the owner an add-on carries over, is back up or works unless its state is running; unknown means Boss Man can't see it, so say so. Also holdRecords: the last 5 update holds (startedAt, kind, endedAt, endTitle, and wrapUpLines: when a wrap-up was asked, what it was tied to, the banner's exact words and how it lifted), so quote what the banner said from there rather than working it out. For ntfy, running means only that ntfy accepted the last push, not that the phone got it: say a push reached the phone only when ntfy.phone.confirmedAt (the owner's tap on Got it on a test notification) is later than the push, or the owner says so. ntfy.phoneType is the owner's phone (android, iphone, both or unknown): when unknown, ask the owner rather than guessing a phone. It changes nothing and shows no other company's tickets, runs or errors.",
         inputSchema: {},
       },
       async () => text(JSON.stringify(await serverStatus.status(scope.companyId))),
@@ -1326,10 +1352,10 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
     "tickets",
     {
       description:
-        "Look up your company's tickets. Each has a reference like HOL-12, which you can use anywhere this tool takes a ticketId. find (optional q to search titles and descriptions, or a reference, optional state, optional assignee: an agent's name, exact, any case, optional since: an ISO time, only tickets created at or after it or finished (merged, or done) at or after it, each row's \"since\" says created and/or finished, optional noFeature: true, only tickets with no feature) lists matches, 40 a page, newest activity first, with their ids and references, createdAt and feature (id and title, or null); a line after the list gives the total and, when more exist, \"continue with tickets find offset=N\" (pass offset for the next page); read (ticketId) gives one ticket: description (long ones are cut; pass offset to continue), state, assignee, its branch, what it produced (wiki pages, repo files, links) and its recent conversation; file (ticketId, path, optional offset) reads a file from that ticket's work in the repo, such as a document it wrote, even if it was never merged; long files come in parts of 40000 characters; check_log (ticketId, optional jobId, optional offset) without a jobId lists the ticket's failed checks (job id, kind, time, first failing line); with a jobId it reads that job's whole redacted log, kept 14 days.",
-      inputSchema: { action: z.enum(["find", "read", "file", "check_log"]), q: z.string().max(200).optional(), state: z.enum(STATES).optional(), ticketId: z.string().max(40).optional(), path: z.string().max(500).optional(), offset: z.number().int().min(0).optional(), jobId: z.string().uuid().optional(), assignee: z.string().max(100).optional(), since: z.string().max(40).optional(), noFeature: z.boolean().optional() },
+        "Look up your company's tickets. Each has a reference like HOL-12, which you can use anywhere this tool takes a ticketId. find (optional q to search titles and descriptions, or a reference, optional state, optional assignee: an agent's name, exact, any case, optional since: an ISO time, only tickets created at or after it or finished (merged, or done) at or after it, each row's \"since\" says created and/or finished, optional noFeature: true, only tickets with no feature, optional milestone: a milestone's id or exact title, only its tickets, its own or through their feature, open and merged-not-done unless you give a state, each with merged and countsTowardPointsLeft (and notCountedBecause), plus a line with the milestone's points left) lists matches, 40 a page, newest activity first, with their ids and references, createdAt, size (points, or \"no size\"), milestone (id and title, or null; a ticket's own, else its feature's) and feature (id and title, or null); a line after the list gives the total and, when more exist, \"continue with tickets find offset=N\" (pass offset for the next page); read (ticketId) gives one ticket: description (long ones are cut; pass offset to continue), state, assignee, its branch, what it produced (wiki pages, repo files, links) and its recent conversation; file (ticketId, path, optional offset) reads a file from that ticket's work in the repo, such as a document it wrote, even if it was never merged; long files come in parts of 40000 characters; check_log (ticketId, optional jobId, optional offset) without a jobId lists the ticket's failed checks (job id, kind, time, first failing line); with a jobId it reads that job's whole redacted log, kept 14 days.",
+      inputSchema: { action: z.enum(["find", "read", "file", "check_log"]), q: z.string().max(200).optional(), state: z.enum(STATES).optional(), ticketId: z.string().max(40).optional(), path: z.string().max(500).optional(), offset: z.number().int().min(0).optional(), jobId: z.string().uuid().optional(), assignee: z.string().max(100).optional(), since: z.string().max(40).optional(), noFeature: z.boolean().optional(), milestone: z.string().max(200).optional() },
     },
-    async ({ action, q, state, ticketId: given, path, offset, jobId, assignee, since, noFeature }) => {
+    async ({ action, q, state, ticketId: given, path, offset, jobId, assignee, since, noFeature, milestone }) => {
       const asRef = given ? REF.exec(given) : null;
       const ref = await refsOf(db, scope.companyId);
       const idStartsWith = (p: string) => sql`${tickets.id}::text like ${`${p.toLowerCase()}%`}`;
@@ -1379,32 +1405,56 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
         }
         const finishedAtSql = sql`coalesce(${tickets.mergedAt}, ${tickets.lastActivityAt})`;
         const finishedSince = sinceAt ? sql`(${tickets.systemState} = 'done' and ${finishedAtSql} >= ${sinceAt.toISOString()}::timestamptz)` : undefined;
-        const where = and(eq(tickets.companyId, scope.companyId), state ? eq(tickets.systemState, state) : undefined, sinceAt ? or(sql`${tickets.createdAt} >= ${sinceAt.toISOString()}::timestamptz`, finishedSince) : undefined, noFeature ? isNull(tickets.featureId) : undefined, who ? sql`lower(${agents.name}) = ${who.toLowerCase()}` : undefined, byRef ? eq(tickets.number, Number(byRef[1])) : undefined, like ? or(ilike(tickets.title, like), ilike(tickets.body, like), byPrefix ? idStartsWith(byPrefix) : undefined) : undefined);
+        // BOS-2720: milestone lists a milestone's tickets (its own or through their feature, as the Roadmap counts them),
+        // open and merged-not-done unless a state is given, cancelled left out, each saying whether it counts toward points left.
+        let ms: { id: string; title: string } | null = null;
+        if (milestone?.trim()) {
+          const found = await findMilestone(db, scope.companyId, milestone);
+          if ("error" in found) return fail(found.error);
+          ms = found;
+        }
+        const inMilestone = ms ? and(sql`${milestoneOfTicket} = ${ms.id}`, sql`${tickets.outcome} is distinct from 'cancelled'`) : undefined;
+        const where = and(eq(tickets.companyId, scope.companyId), inMilestone, ms && !state ? ne(tickets.systemState, "done") : undefined, state ? eq(tickets.systemState, state) : undefined, sinceAt ? or(sql`${tickets.createdAt} >= ${sinceAt.toISOString()}::timestamptz`, finishedSince) : undefined, noFeature ? isNull(tickets.featureId) : undefined, who ? sql`lower(${agents.name}) = ${who.toLowerCase()}` : undefined, byRef ? eq(tickets.number, Number(byRef[1])) : undefined, like ? or(ilike(tickets.title, like), ilike(tickets.body, like), byPrefix ? idStartsWith(byPrefix) : undefined) : undefined);
         if (who) {
           const named = await db.select({ name: agents.name }).from(agents).where(and(eq(agents.companyId, scope.companyId), sql`lower(${agents.name}) = ${who.toLowerCase()}`));
           if (!named.length) return fail(`No agent called "${who}" in your company. Give the name exactly as the board shows it (any case).`);
         }
         const start = offset ?? 0;
         const rows = await db
-          .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, version: tickets.version, outcome: tickets.outcome, assignee: agents.name, createdAt: tickets.createdAt, finishedAt: sql<Date | null>`case when ${tickets.systemState} = 'done' then ${finishedAtSql} end`, featureId: tickets.featureId, featureTitle: features.title, recurring: tickets.recurring, urgent: tickets.urgent, lastActivityAt: tickets.lastActivityAt, stateNote: tickets.stateNote, stateNoteAt: tickets.stateNoteAt, stateNoteStaleAt: tickets.stateNoteStaleAt, stateNoteStaleReason: tickets.stateNoteStaleReason })
+          .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, version: tickets.version, outcome: tickets.outcome, assignee: agents.name, createdAt: tickets.createdAt, finishedAt: sql<Date | null>`case when ${tickets.systemState} = 'done' then ${finishedAtSql} end`, featureId: tickets.featureId, featureTitle: features.title, recurring: tickets.recurring, urgent: tickets.urgent, lastActivityAt: tickets.lastActivityAt, stateNote: tickets.stateNote, stateNoteAt: tickets.stateNoteAt, stateNoteStaleAt: tickets.stateNoteStaleAt, stateNoteStaleReason: tickets.stateNoteStaleReason, size: tickets.size, milestoneId: milestoneOfTicket, milestoneTitle: milestones.title, mergeCommit: tickets.mergeCommit, goLiveWait: tickets.goLiveWait })
           .from(tickets)
           .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
           .leftJoin(features, eq(features.id, tickets.featureId))
+          .leftJoin(milestones, sql`${milestones.id} = ${milestoneOfTicket}`)
           .where(where)
           .orderBy(desc(tickets.lastActivityAt))
           .limit(40)
           .offset(start);
         const json = JSON.stringify(
-          rows.map(({ featureId, featureTitle, finishedAt, recurring, urgent, ...r }) => {
+          rows.map(({ featureId, featureTitle, finishedAt, recurring, urgent, size, milestoneId, milestoneTitle, mergeCommit, goLiveWait, ...r }) => {
             const out = withNote(ref(r));
             const fin = finishedAt ? new Date(finishedAt) : null;
             const madeSince = sinceAt ? [...(r.createdAt >= sinceAt ? ["created"] : []), ...(fin && fin >= sinceAt ? ["finished"] : [])] : undefined;
-            return { ...out, feature: featureId ? { id: featureId, title: featureTitle } : null, ...(recurring ? { recurring: true } : {}), ...(urgent ? { urgent: true } : {}), ...(madeSince ? { since: madeSince } : {}) };
+            const notCounted = ms ? notInPointsLeft({ size, state: r.state, mergeCommit, goLiveWait }) : null;
+            const plan = ms ? { ...(mergeCommit && r.state !== "done" ? { merged: true } : {}), countsTowardPointsLeft: notCounted === null, ...(notCounted ? { notCountedBecause: notCounted } : {}) } : {};
+            return { ...out, size: sizeOut(size), milestone: milestoneOut(milestoneId, milestoneTitle), feature: featureId ? { id: featureId, title: featureTitle } : null, ...plan, ...(recurring ? { recurring: true } : {}), ...(urgent ? { urgent: true } : {}), ...(madeSince ? { since: madeSince } : {}) };
           }),
         );
-        const [{ n: total } = { n: 0 }] = await db.select({ n: sql<number>`count(*)::int` }).from(tickets).leftJoin(agents, eq(agents.id, tickets.assigneeAgentId)).where(where);
+        const [{ n: total } = { n: 0 }] = await db.select({ n: sql<number>`count(*)::int` }).from(tickets).leftJoin(agents, eq(agents.id, tickets.assigneeAgentId)).leftJoin(features, eq(features.id, tickets.featureId)).where(where);
         const end = start + rows.length;
-        return text(`${json}\n\nShowing ${rows.length ? `${start + 1} to ${end}` : "none"} of ${total} matching tickets (newest activity first).${end < total ? ` More exist: continue with tickets find offset=${end} (same q, state, assignee, since and noFeature).` : ""}`);
+        // The milestone's whole open set, whatever the other filters or page, so the line matches the Roadmap's points left.
+        let msLine = "";
+        if (ms) {
+          const open = await db
+            .select({ size: tickets.size, state: tickets.systemState, mergeCommit: tickets.mergeCommit, goLiveWait: tickets.goLiveWait })
+            .from(tickets)
+            .leftJoin(features, eq(features.id, tickets.featureId))
+            .where(and(eq(tickets.companyId, scope.companyId), inMilestone, ne(tickets.systemState, "done")));
+          const counted = open.filter((t) => notInPointsLeft(t) === null);
+          const unsized = open.filter((t) => notInPointsLeft(t) === "no size").length;
+          msLine = `\nMilestone "${ms.title}" (id ${ms.id}): ${counted.reduce((n, t) => n + effectiveSize(t.size), 0)} points left in ${counted.length} sized open tickets${unsized ? `; ${unsized} open ${unsized === 1 ? "ticket has" : "tickets have"} no size and ${unsized === 1 ? "adds" : "add"} nothing` : ""}.${state ? "" : " Done tickets are left out; pass state=done to list them."}`;
+        }
+        return text(`${json}\n\nShowing ${rows.length ? `${start + 1} to ${end}` : "none"} of ${total} matching tickets (newest activity first).${end < total ? ` More exist: continue with tickets find offset=${end} (same q, state, assignee, since, noFeature and milestone).` : ""}${msLine}`);
       }
       if (!ticketId) return fail("Give the ticketId to read.");
       const [row] = await db
@@ -1414,6 +1464,15 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
         .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
         .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
       if (!row) return fail("No ticket with that ID in your company.");
+      // BOS-2720: its milestone as the Roadmap counts it (its own, else its feature's).
+      const [msRow] = await db
+        .select({ id: milestones.id, title: milestones.title })
+        .from(tickets)
+        .leftJoin(features, eq(features.id, tickets.featureId))
+        .innerJoin(milestones, sql`${milestones.id} = ${milestoneOfTicket}`)
+        .where(eq(tickets.id, ticketId));
+      const size = sizeOut(row.t.size);
+      const sizeMilestone = `Size: ${size === "no size" ? "no size" : `${size} ${size === 1 ? "point" : "points"}`}. Milestone: ${msRow ? `"${msRow.title}" (id ${msRow.id})` : "none"}.`;
       const made = await wiki.artifacts(ticketId);
       const talk = await conversationLines(db, ticketId);
       const pics = await db.select({ id: ticketImages.id, name: ticketImages.name, caption: ticketImages.caption }).from(ticketImages).where(and(eq(ticketImages.ticketId, ticketId), eq(ticketImages.companyId, scope.companyId), sql`${ticketImages.type} like 'image/%'`)).orderBy(asc(ticketImages.createdAt));
@@ -1432,7 +1491,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
       // followed rather than cut; the whole text is paged by offset, and a long line is split and continued.
       const head = [
         `# ${t.title}`,
-        `Ticket ${ref(t).ref ?? ""} (id ${t.id}) in project "${row.project}". State: ${t.systemState}${t.outcome ? ` (${t.outcome})` : ""}. Version: ${t.version}. Assigned to: ${row.assignee ?? (t.assignedToOwner ? "the owner" : "nobody")}. Risk: ${t.risk ?? "medium"}.${t.recurring ? " Recurring: yes." : ""}${t.urgent ? " Urgent: yes." : ""}`,
+        `Ticket ${ref(t).ref ?? ""} (id ${t.id}) in project "${row.project}". State: ${t.systemState}${t.outcome ? ` (${t.outcome})` : ""}. Version: ${t.version}. Assigned to: ${row.assignee ?? (t.assignedToOwner ? "the owner" : "nobody")}. Risk: ${t.risk ?? "medium"}. ${sizeMilestone}${t.recurring ? " Recurring: yes." : ""}${t.urgent ? " Urgent: yes." : ""}`,
         ...(note ? [note] : []),
         ...(signoff ? [signoff] : []),
         ...(signoffLog ? [signoffLog] : []),
@@ -1626,7 +1685,7 @@ const CHAT_WORKER_RUN_TOOLS: ReadonlySet<string> = new Set(["ticket_reply", "sch
 function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, withRunTools: boolean, workerTools = false) {
   const { work, planning, feedback, notes, wiki, skills, skillProposals, review, agents: team, images, ticketChat } = services;
   // Wrapped before any tool registers, or the registrars below keep the plain one (BOS-758).
-  const server = traceCalls(new McpServer({ name: "bossman", version: "0.1.0" }), db, scope.runId, scope.companyId);
+  const server = traceCalls(guardSecrets(new McpServer({ name: "bossman", version: "0.1.0" })), db, scope.runId, scope.companyId);
   // BOS-1300: an ordinary agent's chat also gets the ticket tools its runs have for its own tickets: reply, and book or clear a check.
   // Each of those already limits itself to the caller's company and (checks, moves) to the caller's own tickets.
   if (workerTools) {
@@ -1735,7 +1794,7 @@ function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHoo
   server.registerTool(
     "create_feature",
     {
-      description: "Add a feature to the company's feature requests (it starts as an idea, and goes on the feedback portal by default unless it reads as security work). Give a title and a description: the problem, who it's for, what done looks like, what's out of scope and the risk. Pass objectiveId or milestoneId from board when it serves one. If it should be held off the portal for a reason other than security, pass keepOffPortal true and a short keepOffReason: the owner is asked whether to keep it off or publish it. Pass the returned id as featureId to create_ticket to deliver it.",
+      description: "Add a feature to the company's feature requests (it starts as an idea, and goes on the feedback portal by default unless it reads as security work). Give a title and a description: the problem, who it's for, what done looks like, what's out of scope and the risk. Pass objectiveId or milestoneId from board when it serves one. If it should be held off the portal for a reason other than security, pass keepOffPortal true and a short keepOffReason: the owner is asked whether to keep it off or publish it. Pass the returned id as featureId to create_ticket to deliver it. A released feature is baselined: an enhancement to it is a new feature (this tool), not another ticket on the old one; only a bug fix that restores what it promised joins it, with update_ticket exceptionReason.",
       inputSchema: { title: z.string().min(1).max(200), description: z.string().max(10_000).optional(), objectiveId: z.string().uuid().optional(), milestoneId: z.string().uuid().optional(), keepOffPortal: z.boolean().optional(), keepOffReason: z.string().trim().max(500).optional() },
     },
     async (input) => {

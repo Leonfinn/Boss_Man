@@ -85,7 +85,7 @@ INFRA='^(docker-compose[^/]*\.ya?ml$|deploy/|scripts/(deploy|rebuild-live|update
 NOT_INFRA='^deploy/(penpot|ntfy|ntfy-bluegreen)\.yml$'
 # Same rule as needs_runner in scripts/deploy.sh (scripts/host-deployer.test.sh keeps them equal) and RUNNER_CODE_PATHS in
 # packages/shared/src/go-live.ts: what the runner, launcher and netguard images COPY in, read from their Dockerfiles (BOS-1648).
-RUNNER_PATHS='^(apps/runner/Dockerfile$|apps/runner/package\.json$|apps/runner/src/|apps/runner/claude-pack/|apps/launcher/Dockerfile$|apps/launcher/package\.json$|apps/launcher/tsconfig\.json$|apps/launcher/tsconfig\.build\.json$|apps/launcher/src/|apps/netguard/Dockerfile$|apps/netguard/netguard\.sh$|packages/shared/package\.json$|packages/shared/src/|scripts/check-slot\.sh$|scripts/scan-added-lines\.mjs$|scripts/scan-allow\.txt$|package\.json$|pnpm-workspace\.yaml$|pnpm-lock\.yaml$|tsconfig\.base\.json$|NOTICE$)'
+RUNNER_PATHS='^(apps/runner/Dockerfile$|apps/runner/package\.json$|apps/runner/src/|apps/runner/claude-pack/|apps/launcher/Dockerfile$|apps/launcher/package\.json$|apps/launcher/tsconfig\.json$|apps/launcher/tsconfig\.build\.json$|apps/launcher/src/|apps/netguard/Dockerfile$|apps/netguard/netguard\.sh$|packages/shared/package\.json$|packages/shared/src/|packages/shared/src/secret-rules\.mjs$|scripts/check-slot\.sh$|scripts/scan-added-lines\.mjs$|scripts/scan-allow\.txt$|package\.json$|pnpm-workspace\.yaml$|pnpm-lock\.yaml$|tsconfig\.base\.json$|NOTICE$)'
 
 # Git as root must not run hooks from a checkout that agents' commits land in; deploy.sh inherits this.
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null GIT_TERMINAL_PROMPT=0
@@ -853,7 +853,8 @@ host_extra_facts() {
   # which. A running container that is failing its health check counts as unhealthy too.
   # Only fields `docker ps` really has are asked for here (`ExitCode` is not one of them, so it comes from inspect).
   local checks="" csep="" total=0 notrun=0 unhealthy=0 maxrestart=0 line r
-  local stopping="" ssep2="" seen_ids="" unh_names="" unh_sep=""
+  local stg_unhealthy=0 stg_names="" stg_sep="" stg_stopped=0 stg_stopped_names="" stg_stopped_sep=""
+  local stopping="" ssep2="" seen_ids="" unh_names="" unh_sep="" unh_why="" why_sep="" unh_where="" where_sep=""
   # BOS-2481: a container that is still inside its health-check start period (a runner just swapped onto a new image)
   # is settling, not unhealthy. Docker's own "(health: starting)" already covers the normal case; this also covers a
   # failing probe reported inside the window. Reads StartedAt and the configured StartPeriod (nanoseconds); anything
@@ -867,14 +868,61 @@ host_extra_facts() {
     now_s="$(date +%s)"
     ((now_s - start_s < period / 1000000000))
   }
+  # BOS-2680: why Docker marked a container unhealthy, from its last health probe: the exit code, the failing streak
+  # and the first line of the probe's output, with anything that looks like a path replaced, so the panel can say
+  # why and not only which. Empty when inspect is denied or the container has no health log.
+  probe_reason() { # cid
+    local out last code streak text
+    out="$(dk inspect -f '{{.State.Health.FailingStreak}}{{range .State.Health.Log}}{{"\n"}}{{.ExitCode}} {{json .Output}}{{end}}' "$1" 2>/dev/null || true)"
+    last="$(printf '%s\n' "$out" | tail -n 1)"
+    streak="$(printf '%s\n' "$out" | head -n 1)"
+    [[ $last =~ ^(-?[0-9]+)\ (.*)$ ]] || return 0
+    code="${BASH_REMATCH[1]}"; text="${BASH_REMATCH[2]}"
+    text="${text#\"}"; text="${text%\"}"
+    text="${text%%\\n*}"                                  # first line only (JSON-escaped newline)
+    text="$(printf '%s' "$text" | sed -E 's#(^|[[:space:]])[^[:space:]]*/[^[:space:]]*#\1<path>#g; s#\\"#"#g' | tr -d '\000-\037' | cut -c1-200)"
+    [[ $streak =~ ^[0-9]+$ ]] || streak=""
+    printf 'exit %s%s%s' "$code" "${streak:+, $streak failed in a row}" "${text:+: $text}"
+  }
+  # BOS-2680: an unhealthy container is reported by its own container name, never by its compose service label: an
+  # image built by Compose hands that label on to every container made from it (the launcher's staging runners
+  # showed up as the service they were built from). Where it lives is the compose project and the boss-man.stack and
+  # boss-man.company labels, each only when set. `-` stands in for an empty label in the listing (a tab-separated
+  # empty field would be swallowed by `read`).
+  note_unhealthy() { # cid name project stack company
+    local where="" probe
+    [[ $3 && $3 != - ]] && where+="project $3"
+    [[ $4 && $4 != - ]] && where+="${where:+, }stack $4"
+    [[ $5 && $5 != - ]] && where+="${where:+, }company $5"
+    # BOS-2712: a container of the staging stack (label boss-man.stack=staging) is a separate lane with its own smoke
+    # checks. Its runner waits for a staging server that is often stopped or reset, so it is listed apart and never
+    # counted as a fault of this host. Production runners and the host's own stack carry no such label.
+    if [[ $4 == staging ]]; then
+      stg_unhealthy=$((stg_unhealthy + 1))
+      stg_names+="$stg_sep$2"; stg_sep="; "
+      return 0
+    fi
+    unhealthy=$((unhealthy + 1))
+    unh_names+="$unh_sep$2"; unh_sep="; "
+    unh_where+="$where_sep$2${where:+ ($where)}"; where_sep="; "
+    [[ $6 == restarting ]] && return 0
+    probe="$(probe_reason "$1")"
+    [[ -n $probe ]] && { unh_why+="$why_sep$2 ($probe)"; why_sep="; "; }
+    return 0
+  }
   if have_docker; then
-    local cid cname cstate_str cstatus csince csvc
+    local cid cname cstate_str cstatus csince csvc cproj cstack ccompany
     local -A exit_code=()
     # Read the stack once. `docker ps` has no exit-code field (`ExitCode` is not one of the names it accepts, and
     # asking for it makes real Docker fail), so `docker inspect` is asked afterwards for the containers that aren't
     # up. The listing is kept in a temp file so the loop can read it and the ids can be inspected before it starts.
     local listing="$STATE/containers.tsv"
-    dk ps -a --filter label=com.docker.compose.project --format '{{.ID}}\t{{.Names}}\t{{.State}}\t{{.Status}}\t{{.RunningFor}}\t{{.Label "com.docker.compose.project"}}\t{{.Label "com.docker.compose.service"}}' >"$listing" 2>/dev/null || : >"$listing"
+    # BOS-2680: the launcher's runners (label boss-man.launcher=1) are listed too: production runners are built without
+    # Compose, so the compose-project filter alone never saw them. A container in both lists is counted once (by name).
+    local fmt='{{.ID}}\t{{.Names}}\t{{.State}}\t{{.Status}}\t{{.RunningFor}}\t{{or (.Label "com.docker.compose.project") "-"}}\t{{or (.Label "com.docker.compose.service") "-"}}\t{{or (.Label "boss-man.stack") "-"}}\t{{or (.Label "boss-man.company") "-"}}'
+    : >"$listing"
+    dk ps -a --filter label=com.docker.compose.project --format "$fmt" >>"$listing" 2>/dev/null || true
+    dk ps -a --filter label=boss-man.launcher=1 --format "$fmt" >>"$listing" 2>/dev/null || true
     local ids_nonrunning=""
     while IFS=$'\t' read -r cid _ cstate_str _; do
       [[ -n $cid && $cstate_str != running ]] && ids_nonrunning+=" $cid"
@@ -889,12 +937,13 @@ host_extra_facts() {
     # Is the live colour's server container running? (BOS-1584: the standby filter below needs it.)
     local live_up=false
     if [[ -n $colour ]]; then
-      while IFS=$'\t' read -r _ _ cstate_str _ _ _ csvc; do
+      while IFS=$'\t' read -r _ _ cstate_str _ _ _ csvc _; do
         [[ $csvc == "server-$colour" && $cstate_str == running ]] && live_up=true
       done <"$listing"
     fi
-    while IFS=$'\t' read -r cid cname cstate_str cstatus csince _ csvc; do
+    while IFS=$'\t' read -r cid cname cstate_str cstatus csince cproj csvc cstack ccompany; do
       [[ -n $cstate_str ]] || continue
+      [[ $csvc == - ]] && csvc=""
       # One entry per container name: a stack run twice on one host (BOS-986's duplicate compose-file entry on
       # Docker01) holds two containers with the same name. Replicas have their own index (bm-worker-1 and
       # bm-worker-2), so a stopped replica beside a running one is still counted and named.
@@ -906,14 +955,12 @@ host_extra_facts() {
       if [[ $cstate_str == running ]]; then
         # A container that is up but failing its health check ("Up 2 minutes (unhealthy)") is a problem too.
         if [[ $cstatus == *unhealthy* ]] && ! in_start_period "$cid"; then
-          unhealthy=$((unhealthy + 1))
-          unh_names+="$unh_sep${csvc:-$cname}"; unh_sep="; "
+          note_unhealthy "$cid" "$cname" "$cproj" "$cstack" "$ccompany" running
         fi
         continue
       fi
       if [[ $cstate_str == restarting ]]; then
-        unhealthy=$((unhealthy + 1))
-        unh_names+="$unh_sep${csvc:-$cname}"; unh_sep="; "
+        note_unhealthy "$cid" "$cname" "$cproj" "$cstack" "$ccompany" restarting
       fi
       local cexit="${exit_code[$cid]:-}"
       # Meant to stop: a one-shot whose job is done. That means a migrate/netguard helper, or any service Compose
@@ -934,6 +981,15 @@ host_extra_facts() {
       # quit within the grace time. So when the live colour is known and its container is up, the other colour is meant
       # to be stopped whatever its exit code. A crashed live colour is never hidden: it is the one that is not up.
       if [[ -n $colour && $csvc =~ ^server-(blue|green)$ && $csvc != "server-$colour" && $live_up == true ]]; then continue; fi
+      # BOS-2781: a stopped container of the staging stack (the same label rule as BOS-2712) is listed apart, never counted
+      # as not running on this host. A restarting one is already in the staging unhealthy list above, so it isn't named twice.
+      if [[ $cstack == staging ]]; then
+        if [[ $cstate_str != restarting ]]; then
+          stg_stopped=$((stg_stopped + 1))
+          stg_stopped_names+="$stg_stopped_sep$cname"; stg_stopped_sep="; "
+        fi
+        continue
+      fi
       notrun=$((notrun + 1))
       # `exit` is a string, never bare: if instead of a number inspect returns nothing (the container was removed
       # between ps and inspect, or inspect was denied), a bare value would leave `"exit": ,` and break the whole
@@ -942,7 +998,7 @@ host_extra_facts() {
       stopping+="$ssep2{\"name\": $(jstr "$cname"), \"status\": $(jstr "$cstate_str"), \"exit\": $(jstr "$cexit_s"), \"since\": $(jstr "$csince")}"; ssep2=", "
     done <"$listing"
     rm -f "$listing" 2>/dev/null || true
-    checks+="$csep\"container_status\": {\"total\": $total, \"notRunning\": $notrun, \"unhealthy\": $unhealthy, \"unhealthyNames\": $(jstr "$unh_names"), \"stopped\": [$stopping]}"; csep=", "
+    checks+="$csep\"container_status\": {\"total\": $total, \"notRunning\": $notrun, \"unhealthy\": $unhealthy, \"unhealthyNames\": $(jstr "${unh_names:0:450}"), \"unhealthyWhere\": $(jstr "${unh_where:0:450}"), \"unhealthyReason\": $(jstr "${unh_why:0:450}"), \"stagingUnhealthy\": $stg_unhealthy, \"stagingUnhealthyNames\": $(jstr "${stg_names:0:450}"), \"stagingStopped\": $stg_stopped, \"stagingStoppedNames\": $(jstr "${stg_stopped_names:0:450}"), \"stopped\": [$stopping]}"; csep=", "
     maxrestart=0
     while read -r r; do [[ $r =~ ^[0-9]+$ ]] && ((r > maxrestart)) && maxrestart=$r; done < <(dk ps -aq --filter label=com.docker.compose.project | xargs -r docker inspect -f '{{.RestartCount}}' 2>/dev/null || true)
     checks+="$csep\"restart_counts\": {\"max\": $maxrestart}"; csep=", "

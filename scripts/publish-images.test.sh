@@ -25,7 +25,15 @@ case "$3" in
     case "$fmt" in
       --raw) printf '{"manifests":[{"digest":"%s","platform":{"os":"linux","architecture":"amd64"}},{"digest":"%s","platform":{"os":"linux","architecture":"arm64"}},{"digest":"sha256:cc","platform":{"os":"unknown","architecture":"unknown"}}]}\n' "$FAKE_DA" "$FAKE_DB" ;;
       --format) case "$6" in
-        '{{json .Manifest}}') printf '{"digest":"%s"}\n' "$d" ;;
+        # A tag not written is "not found". FAKE_LAG=n: the first n reads of a written tag fail too, as a just-pushed
+        # ghcr.io tag can (BOS-2768).
+        '{{json .Manifest}}')
+          case "$ref" in *@*) ;; *)
+            [ -f "$FAKE_STATE/$(key "$ref")" ] || { echo "ERROR: $ref: not found" >&2; exit 1; }
+            n=$(cat "$FAKE_STATE/reads_$(key "$ref")" 2>/dev/null || echo 0); echo $((n + 1)) >"$FAKE_STATE/reads_$(key "$ref")"
+            [ "$n" -ge "${FAKE_LAG:-0}" ] || { echo "ERROR: $ref: not found" >&2; exit 1; } ;;
+          esac
+          printf '{"digest":"%s"}\n' "$d" ;;
         '{{json .SBOM}}') if [ -n "${FAKE_SBOM:-}" ]; then echo "$FAKE_SBOM"; else echo '{"linux/amd64":{"x":1},"linux/arm64":{"x":1}}'; fi ;;
         '{{json .Provenance}}') echo '{"linux/amd64":{"x":1},"linux/arm64":{"x":1}}' ;;
         # The image config per platform; its revision label comes from a rev_ file beside the reference (none: no label).
@@ -77,6 +85,16 @@ run IMAGE_PREFIXES="ghcr.io/me docker.io/me2" DOCKERHUB_PUBLISH=true DOCKERHUB_U
 if run FAKE_BAD_COPY=docker.io IMAGE_PREFIXES="ghcr.io/me docker.io/me2" DOCKERHUB_PUBLISH=true DOCKERHUB_USERNAME=u DOCKERHUB_TOKEN=t $P copy boss-man-server sha-0123456789ab "$D1" 2>"$S/err"; then fail "different digests must fail"; fi
 grep -q "digest" "$S/err" || fail "the mismatch must be explained"
 if run IMAGE_PREFIXES="ghcr.io/me" $P copy boss-man-server sha-0123456789ab "$D2" 2>/dev/null; then fail "a digest that is not the pushed one must fail"; fi
+
+# Digest (BOS-2768): a just-written tag that reads as "not found" twice is read on the third try; one that never
+# appears fails after the set number of tries, naming the reference.
+T=ghcr.io/me/boss-man-netguard:sha-4f49563cd3e9
+echo "$D1" >"$S/state/$(echo "$T" | tr '/:@' '___')"
+out=$(run FAKE_LAG=2 PUBLISH_READ_STEP=0 $P digest "$T" 2>"$S/err") || fail "a tag readable on the third try must pass: $(cat "$S/err")"
+[ "$out" = "$D1" ] || fail "digest after retries, got: $out"
+[ "$(grep -c 'cannot be read yet' "$S/err")" = 2 ] || fail "each retry must be logged: $(cat "$S/err")"
+if run PUBLISH_READ_TRIES=3 PUBLISH_READ_STEP=0 $P digest ghcr.io/me/boss-man-netguard:sha-000000000000 2>"$S/err"; then fail "a tag that never appears must fail"; fi
+grep -q 'sha-000000000000 still cannot be read after 3 tries' "$S/err" || fail "the failure must name the tag: $(cat "$S/err")"
 
 # Verify: signature, SBOM and provenance in every registry.
 V="IMAGE_PREFIXES=ghcr.io/me docker.io/me2"

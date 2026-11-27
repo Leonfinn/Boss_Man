@@ -225,7 +225,7 @@ export function releaseWatchService(db: Db, deps: ReleaseWatchDeps) {
         const body = `${found.summary ? `${found.summary}\n\n` : ""}Open Settings → Server and runner → Updates to see it. Release notes: ${found.url}`;
         const phone = s.ntfy && (await deps.hasNtfy().catch(() => false));
         // The note is marked as told only once it was saved, so a failure here is tried again at the next check.
-        await deps.notify({ companyId: null, agentId: null, level: "note", title: `Boss Man ${found.version} is available`, body, link: "#/settings/server", ...(phone ? { phoneOptIn: "You asked for new releases on your phone" } : { noPush: true }) });
+        await deps.notify({ companyId: null, agentId: null, level: "note", title: `Boss Man ${found.version} is available`, body, link: "#/settings/updates", ...(phone ? { phoneOptIn: "You asked for new releases on your phone" } : { noPush: true }) });
         s = { ...s, notified: found.version };
       }
       await save(s);

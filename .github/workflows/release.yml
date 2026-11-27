@@ -112,6 +112,13 @@ jobs:
           set -euo pipefail
           out="$(scripts/release-pick.sh pick)"
           echo "$out"
+          # BOS-2666: green commits but no recorded docs check is a refusal, not a quiet skip: the run fails, so Boss Man's
+          # main-CI watcher tells the CEO. Nothing has been tagged or released at this point.
+          refuse="$(printf '%s\n' "$out" | sed -n 's/^refuse=//p' | head -n 1)"
+          if [ -n "$refuse" ]; then
+            echo "::error title=Release refused::$(printf '%s' "$refuse" | tr '\n' ' ' | cut -c1-400)"
+            exit 1
+          fi
           skip="$(printf '%s\n' "$out" | sed -n 's/^skip=//p')"
           if [ -z "$skip" ]; then
             sha="$(printf '%s\n' "$out" | sed -n 's/^sha=//p')"
@@ -167,6 +174,26 @@ jobs:
             echo "tag=$(scripts/publish-images.sh tag "$SHA")"
           } >> "$GITHUB_OUTPUT"
           { echo "RELEASE_SHA=$SHA"; echo "RELEASE_TAG=$(scripts/publish-images.sh tag "$SHA")"; } >> "$GITHUB_ENV"
+      - name: Docs gate (BOS-2666; stage wording, What's new, a recorded docs check; before any tag or release, both ways of starting)
+        if: ${{ env.RELEASE_SKIP == '' }}
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ env.RELEASE_SHA }}
+        run: |
+          set -euo pipefail
+          # A pressed run has not looked up the previous release yet (a scheduled one did, in "Pick the commit").
+          if [ "$GITHUB_EVENT_NAME" != schedule ]; then
+            RELEASE_PREV_SHA="$(scripts/release-docs-gate.sh prev)"; export RELEASE_PREV_SHA
+            echo "RELEASE_PREV_SHA=$RELEASE_PREV_SHA" >> "$GITHUB_ENV"
+          fi
+          if ! out="$(scripts/release-docs-gate.sh check "$VERSION" "$SHA" 2>&1)"; then
+            echo "$out"
+            # The last line is the one-line reason; the lines above it are file:line. Annotations are readable without the log.
+            echo "::error title=Release blocked by the docs gate::$(printf '%s\n' "$out" | tail -n 1 | cut -c1-400)"
+            exit 1
+          fi
+          echo "$out"
       - name: The version is new, and the commit being released has its images
         if: ${{ env.RELEASE_SKIP == '' }}
         env:
@@ -221,9 +248,12 @@ jobs:
           TAG: ${{ env.RELEASE_TAG }}
         run: |
           set -euo pipefail
+          # The moving tag is the stage word (beta, rc, ...) from the one helper that knows it; a stable release moves "latest".
+          stage="$(scripts/release-docs-gate.sh stage-of "$VERSION")"
+          moving="$stage"; [ "$stage" != stable ] || moving=latest
           for p in $(scripts/publish-images.sh prefixes); do
             while read -r name digest; do
-              docker buildx imagetools create -t "$p/$name:$VERSION" -t "$p/$name:beta" "$p/$name@$digest"
+              docker buildx imagetools create -t "$p/$name:$VERSION" -t "$p/$name:$moving" "$p/$name@$digest"
             done < "$RUNNER_TEMP/verified-digests"
           done
       - name: Write release.json from what the registries now hold, and sign it
@@ -273,13 +303,12 @@ jobs:
           SHA: ${{ env.RELEASE_SHA }}
         run: |
           set -euo pipefail
-          # A pressed run keeps its fixed one-sentence body. A scheduled run's body is that week's CHANGELOG lines
-          # (scripts/release-notes.sh), the same lines the website's "What's new" page shows.
-          if [ "$GITHUB_EVENT_NAME" = schedule ]; then
-            scripts/release-notes.sh "${RELEASE_PREV_SHA:-}" "$SHA" > "$RUNNER_TEMP/notes.md"
-          else
-            printf '%s\n' "Beta release. The images are listed, by digest and architecture, in release.json, which is signed (release.json.sigstore.json)." > "$RUNNER_TEMP/notes.md"
-          fi
+          # The body is the CHANGELOG lines added since the last release (scripts/release-notes.sh), the same lines the
+          # website's "What's new" page shows, for a pressed run as well since BOS-2666 (the docs gate above refused an
+          # empty list).
+          RELEASE_VERSION="$VERSION" scripts/release-notes.sh "${RELEASE_PREV_SHA:-}" "$SHA" > "$RUNNER_TEMP/notes.md"
+          flags=(--prerelease)
+          [ "$(scripts/release-docs-gate.sh stage-of "$VERSION")" != stable ] || flags=()
           assets=(release.json release.json.sigstore.json)
           if [ -f images.env ]; then assets+=(images.env images.env.sigstore.json docker-compose.images.yml docker-compose.images.yml.sigstore.json); fi
           # BOS-2601: this step failed in 1 s on release #3 and the job log is not readable by agents. Name any missing
@@ -287,7 +316,7 @@ jobs:
           for f in "${assets[@]}"; do
             [ -s "$f" ] || { echo "::error title=Release file missing::$f is missing or empty, nothing was published. Files here: $(ls | tr '\n' ' ')"; exit 1; }
           done
-          if ! out="$(gh release create "v$VERSION" "${assets[@]}" --prerelease --target "$SHA" \
+          if ! out="$(gh release create "v$VERSION" "${assets[@]}" "${flags[@]}" --target "$SHA" \
             --title "Boss Man $VERSION" --notes-file "$RUNNER_TEMP/notes.md" 2>&1)"; then
             echo "$out"
             echo "::error title=gh release create failed::$(echo "$out" | tr '\n' ' ' | cut -c1-400)"

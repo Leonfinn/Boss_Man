@@ -67,7 +67,7 @@ describe("release watch", () => {
     expect(t.urls).toEqual(["https://api.github.com/repos/example-org/boss-man/releases?per_page=30"]);
     expect(v).toMatchObject({ active: true, channel: "beta", couldntCheck: false, available: { version: "0.1.0-beta.3" } });
     expect(t.sent).toHaveLength(1);
-    expect(t.sent[0]).toMatchObject({ level: "note", title: "Boss Man 0.1.0-beta.3 is available", noPush: true });
+    expect(t.sent[0]).toMatchObject({ level: "note", title: "Boss Man 0.1.0-beta.3 is available", noPush: true, link: "#/settings/updates" });
     expect(t.sent[0]!.body).toContain("Faster updates");
     expect(t.sent[0]!.body).toContain("https://github.com/example-org/boss-man/releases/tag/v0.1.0-beta.3");
     // The same version is not announced again, but a newer one is.

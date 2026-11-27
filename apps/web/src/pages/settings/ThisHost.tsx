@@ -2,7 +2,7 @@ import { Fragment, useState } from "react";
 import { api } from "../../api";
 import { usePoll } from "../../hooks";
 import { when } from "../Runs";
-import { isFailingCheck, NORMALLY_EMPTY_FACTS, OWNER_FACT_LABELS, STOPPED_CONTAINERS_KEY, problemText, stoppedContainerNames, type HostFactsView } from "../../host-facts-display";
+import { isFailingCheck, NORMALLY_EMPTY_FACTS, OWNER_FACT_LABELS, STOPPED_CONTAINERS_KEY, problemText, stagingFaultLine, stoppedContainerNames, warningAdvice, type HostFactsView } from "../../host-facts-display";
 import { Section, useAction } from "./shared";
 
 type Health = { role: "leader" | "standby" | "single"; version: string; commit: string; colour: "blue" | "green" | null; startedAt: string };
@@ -61,6 +61,18 @@ function problemLine(p: { missing: string[]; failing: string[]; addonsDown: stri
   return bits.length ? bits.join(" · ") : null;
 }
 
+/** BOS-2674: the three plain lines under a warning: does it matter, what Boss Man is doing, does the owner need to act. */
+export function AdviceLines({ k, d }: { k: string; d: HostFactsView }) {
+  const a = warningAdvice(k, d.impact, d.handling?.[k]);
+  return (
+    <ul data-testid="warning-advice" style={{ margin: "2px 0 6px", paddingLeft: 18, listStyle: "none" }}>
+      <li><strong>Does it matter?</strong> {a.matters}</li>
+      <li><strong>What Boss Man is doing:</strong> {a.doing}</li>
+      <li><strong>Do you need to do anything?</strong> {a.needs}</li>
+    </ul>
+  );
+}
+
 /** The "Deployer script" line of Settings → This host (BOS-990). */
 export function deployerScriptLine(s: { state: string; since?: string }): string {
   if (s.state === "current") return "current";
@@ -83,6 +95,7 @@ export function ThisHost() {
   // code-host read failed comes with the probe result. Both are plain text the host wrote, shown as text only.
   const stopped = stoppedContainerNames(d.facts[STOPPED_CONTAINERS_KEY]?.value ?? "");
   const probeWhy = d.facts["repo.probeWhy"]?.value?.trim() ?? "";
+  const stagingLine = stagingFaultLine(d); // BOS-2781: a quiet info line, never a warning
   const problemTexts = [...problems.missing, ...problems.failing].map((k) => ({ key: k, text: problemText(k, d, stopped, probeWhy) }));
   const toggle = () => {
     const next = !open;
@@ -110,6 +123,11 @@ export function ThisHost() {
           <strong>Deployer script:</strong> {deployerScriptLine(d.deployerScript)}
         </p>
       )}
+      {stagingLine && (
+        <p className="muted" data-testid="staging-faults" style={{ fontSize: 14 }}>
+          {stagingLine}
+        </p>
+      )}
       {keys.length > 0 && (
         <div className="host-facts">
           <button type="button" className="host-facts-toggle" aria-expanded={open} aria-controls="host-facts-body" onClick={toggle}>
@@ -129,11 +147,15 @@ export function ThisHost() {
                 <p style={{ marginTop: 0, marginBottom: 4 }}>Worth a look. Raw keys are in the list below.</p>
                 <ul style={{ margin: 0, paddingLeft: 18 }}>
                   {problemTexts.map((p) => (
-                    <li key={p.key}>{p.text}</li>
+                    <li key={p.key}>
+                      {p.text}
+                      <AdviceLines k={p.key} d={d} />
+                    </li>
                   ))}
                   {problems.addonsDown.map((a) => (
                     <li key={`addon.${a}`}>
-                      The {ADDON_NAME[a] ?? a} add-on isn't running, so whatever uses it can't be reached. Turn it back on for this host and it starts again; its own log says why it stopped.
+                      The {ADDON_NAME[a] ?? a} add-on isn't running, so whatever uses it can't be reached. Turn it back on for this host and it starts again.
+                      <AdviceLines k={`addon.${a}`} d={d} />
                     </li>
                   ))}
                 </ul>

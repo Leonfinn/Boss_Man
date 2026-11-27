@@ -419,14 +419,14 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
     return Math.max(FORECAST_WINDOW_MS, left);
   }
 
-  async function latestQuota(source: typeof fundingSources.$inferSelect) {
+  async function latestQuota(source: typeof fundingSources.$inferSelect, now: Date) {
     // The newest sample per window, limited to the windows the latest report included (BOS-1916).
     const rows = await db
       .selectDistinctOn([quotaSamples.window])
       .from(quotaSamples)
       .where(eq(quotaSamples.fundingSourceId, source.id))
       .orderBy(quotaSamples.window, desc(quotaSamples.observedAt));
-    return source.provider === "synthetic" || !rows.length ? rows : currentReportSamples(rows);
+    return source.provider === "synthetic" || !rows.length ? rows : currentReportSamples(rows, now);
   }
 
   /**
@@ -437,7 +437,7 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
    */
   async function quotaForecasts(source: typeof fundingSources.$inferSelect, now: Date) {
     const fundingSourceId = source.id;
-    const quota = source.kind === "subscription" ? await latestQuota(source) : [];
+    const quota = source.kind === "subscription" ? await latestQuota(source, now) : [];
     const since = new Date(now.getTime() - lookbackFor(quota, now));
     const recent = quota.length ? await db.select().from(quotaSamples).where(and(eq(quotaSamples.fundingSourceId, fundingSourceId), gte(quotaSamples.observedAt, since))) : [];
     return { quota, forecasts: Object.fromEntries(quota.map((q) => [q.window, forecastQuota(recent.filter((r) => r.window === q.window), now)])) };
@@ -724,6 +724,37 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
         } catch {
           // A quota failure only leaves the reading stale; it never blocks anything.
         }
+      }
+      return out;
+    },
+
+    /**
+     * A read-only readout of each Claude subscription's stored quota reports for server_status (BOS-2676): the
+     * newest `batches` reports (rows sharing one observedAt), each with its windows, so an agent can see whether
+     * a limit such as Fable is still reported, and whether reports alternate between window sets. A row Boss Man
+     * wrote itself on a weekly-limit stop (seven_day, 100%, rejected, resetting exactly an hour after it was
+     * observed) is flagged bossManWritten; every other row came from a real Claude report.
+     */
+    async claudeQuotaReports(batches = 12) {
+      const sources = await db.select().from(fundingSources).where(and(eq(fundingSources.kind, "subscription"), eq(fundingSources.provider, "anthropic"))).orderBy(fundingSources.name);
+      const out = [];
+      for (const source of sources) {
+        const rows = await db.select().from(quotaSamples).where(eq(quotaSamples.fundingSourceId, source.id)).orderBy(desc(quotaSamples.observedAt)).limit(batches * 6);
+        const byTime = new Map<number, typeof rows>();
+        for (const r of rows) byTime.set(r.observedAt.getTime(), [...(byTime.get(r.observedAt.getTime()) ?? []), r]);
+        const reports = [...byTime.entries()].slice(0, batches).map(([at, list]) => ({
+          observedAt: new Date(at).toISOString(),
+          windows: list
+            .map((r) => ({
+              window: r.window,
+              utilization: r.utilization,
+              resetsAt: r.resetsAt?.toISOString() ?? null,
+              status: r.status,
+              bossManWritten: r.window === "seven_day" && r.utilization === 1 && r.status === "rejected" && r.resetsAt != null && r.resetsAt.getTime() - at === 3_600_000,
+            }))
+            .sort((a, b) => a.window.localeCompare(b.window)),
+        }));
+        out.push({ fundingSourceId: source.id, name: source.name, reports });
       }
       return out;
     },

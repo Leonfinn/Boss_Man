@@ -53,8 +53,9 @@ export async function exportCompany(db: Db, companyId: string, opts: ExportOptio
     if (pic) files[`${dir}/avatar.${pic.type.split("/")[1]?.replace("svg+xml", "svg") ?? "img"}`] = new Uint8Array(pic.bytes);
   }
 
-  // Skills: every file as stored, and who has each.
-  const library = await db.select().from(skills).where(eq(skills.companyId, companyId)).orderBy(asc(skills.name));
+  // Skills: every file as stored, and who has each. Built-ins are left out: Boss Man seeds them in the
+  // new company on its own (BOS-2631), so carrying them would make a duplicate of the same text.
+  const library = (await db.select().from(skills).where(eq(skills.companyId, companyId)).orderBy(asc(skills.name))).filter((s) => s.source !== "builtin");
   const holders = library.length ? await db.select().from(agentSkills).where(inArray(agentSkills.skillId, library.map((s) => s.id))) : [];
   for (const s of library) for (const f of s.files) files[`skills/${s.name}/${f.path}`] = new Uint8Array(Buffer.from(f.content, "base64"));
   files["skills.json"] = json(

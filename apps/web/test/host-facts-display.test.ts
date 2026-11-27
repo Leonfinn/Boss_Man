@@ -1,5 +1,6 @@
+import { actionClaim } from "@boss-man/shared";
 import { describe, expect, it } from "vitest";
-import { NORMALLY_EMPTY_FACTS, STOPPED_CONTAINERS_KEY, UNHEALTHY_CONTAINERS_KEY, failingCheckText, problemText, stoppedContainerNames, type HostFactsView } from "../src/host-facts-display";
+import { NORMALLY_EMPTY_FACTS, STOPPED_CONTAINERS_KEY, UNHEALTHY_CONTAINERS_KEY, failingCheckText, problemText, stagingFaultLine, stoppedContainerNames, warningAdvice, type HostFactsView } from "../src/host-facts-display";
 
 // BOS-986: the "This host" panel says in plain words what is missing and what failed, rather than the raw
 // dotted key ("check.container_status.notRunning" told the owner nothing). These tests pin the wording the
@@ -76,7 +77,7 @@ describe("failingCheckText: what a failing check says (BOS-986)", () => {
     const d = view({ "check.container_status.notRunning": "2", "check.container_status.total": "18" });
     const t = failingCheckText("check.container_status.notRunning", d, ["bm-worker-1 (exited, exit 137, 2 hours ago)", "bm-cache-1 (restarting, exit 255, 5 minutes ago)"], "");
     expect(t.what).toBe("the containers bm-worker-1 (exited, exit 137, 2 hours ago); bm-cache-1 (restarting, exit 255, 5 minutes ago) are not running (of 18 in the Boss Man stack)");
-    expect(t.fix).toContain("pressing Build and update runners");
+    expect(t.fix).toContain("Pressing Build and update runners");
     expect(t.fix).toContain("starts the stack again");
     expect(t.fix).not.toContain("check.container_status");
   });
@@ -151,7 +152,76 @@ describe("failingCheckText: what a failing check says (BOS-986)", () => {
   it("falls back to the raw value and a generic line for a check it does not know", () => {
     const t = failingCheckText("check.something.new", view({ "check.something.new": "weird" }), [], "");
     expect(t.what).toBe('The check "check.something.new" reports "weird"');
-    expect(t.fix).toBe("this is a check the host runs about itself; its log on the host says more.");
+    expect(t.fix).toBe("this is a check the host runs about itself.");
+  });
+
+  it("never sends the owner to a host log (BOS-2674)", () => {
+    for (const key of ["check.container_status.notRunning", "check.container_status.unhealthy", "repo.probe", "check.restart_counts.max", "check.state_file_sizes.stale", "check.something.new"]) {
+      const t = problemText(key, view({ [key]: "1" }), [], "");
+      expect(t, key).not.toMatch(/\blog\b|access to the host/i);
+    }
+  });
+
+  it("says a warning does not matter while every runner is connected, from the live counts (BOS-2674)", () => {
+    const a = warningAdvice("check.container_status.unhealthy", { runnersTotal: 1, runnersConnected: 1, runsGoing: 3 }, undefined);
+    expect(a.matters).toContain("No runner is affected");
+    expect(a.matters).toContain("3 runs are going");
+    expect(a.doing).toContain("the CEO is told");
+    expect(a.needs).toMatch(/^No\./);
+  });
+
+  it("words the impact per kind of warning and does not over-promise (BOS-2674)", () => {
+    const impact = { runnersTotal: 1, runnersConnected: 1, runsGoing: 0 };
+    expect(warningAdvice("repo.probe", impact, undefined).matters).toContain("code host");
+    expect(warningAdvice("addon.example", impact, undefined).matters).toContain("add-on provides");
+    expect(warningAdvice("repo.probe", impact, undefined).matters).not.toContain("Not right now");
+  });
+
+  it("links the open ticket by its number, or says there is none yet (BOS-2674)", () => {
+    const base = { state: "ceo_told" as const, reports: 3, since: "2026-11-26T11:00:00Z" };
+    const withTicket = warningAdvice("check.container_status.unhealthy", undefined, { ...base, ticket: { ref: "BOS-9", title: "Fix the unhealthy container" } });
+    expect(withTicket.doing).toContain("Ticket BOS-9: Fix the unhealthy container.");
+    expect(warningAdvice("check.container_status.unhealthy", undefined, base).doing).toContain("no ticket for it");
+  });
+
+  it("says it may matter when a runner is not connected, and says the CEO was alerted (BOS-2674)", () => {
+    const a = warningAdvice("check.container_status.unhealthy", { runnersTotal: 2, runnersConnected: 1, runsGoing: 0 }, { state: "ceo_told", reports: 3, since: "2026-11-26T11:00:00Z" });
+    expect(a.matters).toContain("1 of 2 runners are not connected");
+    expect(a.doing).toContain("The CEO was alerted");
+  });
+
+  // BOS-2737: an open alert with no started run says "raised at HH:MM, nobody has picked it up yet" (main said "The CEO
+  // has been alerted (at 15:30 UTC)"); every line is actionClaim's for the same facts.
+  it("an open alert with no run: raised at HH:MM, nobody has picked it up yet, and actionClaim's words exactly", () => {
+    const base = { reports: 3, since: "2026-11-26T11:00:00Z", alertedAt: "2026-11-26T15:30:12Z" };
+    const k = "check.container_status.unhealthy";
+    const alerted = warningAdvice(k, undefined, { ...base, state: "ceo_told" }).doing;
+    expect(alerted).toBe(`${actionClaim({ who: "The CEO", raisedAt: base.alertedAt }).text} There is no ticket for it yet. If nobody answers within 30 minutes you are told.`);
+    expect(alerted).toContain("raised at 15:30 UTC, nobody has picked it up yet");
+    const answered = warningAdvice(k, undefined, { ...base, state: "ceo_answered", answer: "Restarted the proxy; it is healthy again." }).doing;
+    expect(answered).toBe(`${actionClaim({ who: "The CEO", raisedAt: base.alertedAt, answered: { note: "Restarted the proxy; it is healthy again." } }).text} There is no ticket for it yet.`);
+    const ticketed = warningAdvice(k, undefined, { ...base, state: "ceo_told", ticket: { ref: "BOS-9", title: "Fix it" } }).doing;
+    expect(ticketed).toBe(`Ticket BOS-9: Fix it. ${actionClaim({ who: "The CEO", raisedAt: base.alertedAt, ticket: { ref: "BOS-9", agent: null } }).text}`);
+  });
+
+  it("names the assignee, and says work started only once their run has (BOS-2737)", () => {
+    const base = { state: "ceo_told" as const, reports: 3, since: "2026-11-26T11:00:00Z", alertedAt: "2026-11-26T15:30:12Z" };
+    const k = "check.container_status.unhealthy";
+    expect(warningAdvice(k, undefined, { ...base, ticket: { ref: "BOS-9", title: "Fix it", agent: "Dougal" } }).doing).toBe("Ticket BOS-9: Fix it. BOS-9 is assigned to Dougal; no run has started on it yet.");
+    expect(warningAdvice(k, undefined, { ...base, ticket: { ref: "BOS-9", title: "Fix it", agent: "Dougal", startedAt: "2026-11-26T15:41:00Z" } }).doing).toBe("Ticket BOS-9: Fix it. Dougal started work on it on BOS-9 at 15:41 UTC.");
+  });
+
+  it("words the staging line, and says nothing when staging is fine (BOS-2781)", () => {
+    const f = (o: Record<string, string>) => stagingFaultLine(view(o));
+    expect(f({})).toBeNull();
+    expect(f({ "check.container_status.stagingUnhealthy": "0" })).toBeNull();
+    expect(f({ "check.container_status.stagingUnhealthyNames": "runner-a" })).toBe("Staging: 1 container unhealthy (runner-a). This doesn't affect your live Boss Man.");
+    expect(f({ "check.container_status.stagingStoppedNames": "a; b" })).toBe("Staging: 2 containers stopped (a, b). This doesn't affect your live Boss Man.");
+  });
+
+  it("asks the owner only for a fact only they can give (BOS-2674)", () => {
+    const a = warningAdvice("network.publicAddress", undefined, undefined);
+    expect(a.needs).toMatch(/^Yes/);
   });
 
   it("never leaks a raw dotted key for any check it knows", () => {

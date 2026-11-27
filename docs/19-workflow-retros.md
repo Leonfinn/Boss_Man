@@ -129,6 +129,19 @@ Not built at all:
 
 Each task gets a relative size, **1, 2, 3, 5 or 8**, set by whoever creates it (usually the CEO). That's how the owner's human teams work. Each size is calibrated against measured hours and cost per role, not against velocity: agents have no fixed sprint capacity, the owner pays per token, and the limit is the number of run slots.
 
+### Points and ticket sizes
+
+A ticket's size is counted in **points**. Each ticket is sized 1, 2, 3, 5 or 8 points by how much work it is (1 is a small fix, 8 is the largest we allow in one ticket). A milestone's or project's points are the sizes of its tickets added up. A ticket with no size isn't counted yet; the CEO sizes it when planning.
+
+Where you see them:
+
+- **Roadmap.** Each milestone says how much is done and how many points are left, and "N tickets have no size yet" when some aren't counted. A milestone's pace is the points of its tickets finished in the last 4 weeks, per week. "How the status is worked out", under the milestones, explains points first.
+- **Ticket page.** The **Size** field shows the ticket's points; its help (?) says what a point is. You can change it there.
+- **Board.** A sized ticket's card has a **Size N** tag; hover it for the same explanation.
+- **Features and Settings → Projects.** Points done and left for each feature and project, with the number not sized yet.
+
+The rest of this part is how sizing works inside Boss Man.
+
 - **The field.** `tickets.size`, which may only be 1, 2, 3, 5 or 8.
   - An agent's `create_ticket` must give a size.
   - `update_ticket` lets the CEO and managers change it.

@@ -12,7 +12,7 @@ import { agents, companies, runners as runnersTable, settings } from "../db/sche
 import { DEFAULT_AGENT_WIP_LIMIT, readWipLimits } from "../services/agent-wip.js";
 import { checkQueue, DEFAULT_CHECK_SLOTS, MACHINE_TAKES, MAX_CHECK_SLOTS } from "../services/check-queue.js";
 import { DEFAULT_BACKGROUND_LANE_AGE_MINUTES, MAX_BACKGROUND_LANE_AGE_MINUTES } from "../services/check-gate.js";
-import { agentsAtOnce, CHECK_MEMORY_CEILING_BYTES, limitReason, memoryLine, readRunnerAgents } from "../services/check-limit.js";
+import { agentsAtOnce, CHECK_MEMORY_CEILING_BYTES, checksRunHere, limitReason, memoryLine, readRunnerAgents } from "../services/check-limit.js";
 import type { checkDispatcher } from "../services/check-dispatcher.js";
 import type { mainCiService } from "../services/main-ci.js";
 import { MEMORY_MB_MAX, MEMORY_MB_MIN, THREADS_MAX, type CheckWorkersService } from "../services/check-workers.js";
@@ -132,7 +132,7 @@ export function settingsLimitsRoutes(
           // A lower limit always carries a reason (BOS-1152), also while the launcher has not yet been sent the setting.
           reason: limitReason(slots, lc),
           // BOS-1498: what a runner is given and why, in one line.
-          memoryLine: memoryLine(lc),
+          memoryLine: memoryLine(lc, undefined, await checksRunHere(db, (await checkWorkers?.list()) ?? [])),
           // Every runner is sized on its own from the whole host's memory, so with more than one the panel warns (BOS-993).
           runnerCount: lc.runners.length,
           pending: lc.runners.filter((r) => r.slots !== lc.slots || r.memoryBytes !== lc.memoryBytes).length,

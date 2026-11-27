@@ -9,6 +9,10 @@
 #     prev_sha=<sha>      the commit the newest beta was released from (empty when there is none), for the notes
 #   or, when nothing may be released this week, a single line
 #     skip=<one-line reason>
+#   or, when green commits exist but none has a recorded docs check (BOS-2666; the run fails so the CEO hears of it)
+#     refuse=<one-line reason>
+# A commit also needs a recorded docs check: release-docs-gate.sh covered (every commit since the "Docs checked up to"
+# sha touches docs only). So the newest covered commit is released, not simply the newest green one.
 #
 # A commit qualifies when ALL hold: the CI workflow (ci.yml) passed on it as a push; every image in PUBLISH_IMAGES is in the
 # first registry under its sha tag for linux/amd64 and linux/arm64; and `publish-images.sh verify` accepts every image
@@ -25,6 +29,7 @@ PUBLISH="${PUBLISH_IMAGES_SH:-$HERE/publish-images.sh}"
 REPO="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY}"
 DEPTH="${RELEASE_PICK_DEPTH:-30}"
 CI_WORKFLOW="${RELEASE_CI_WORKFLOW:-ci.yml}"
+GATE="${RELEASE_DOCS_GATE_SH:-$HERE/release-docs-gate.sh}"
 
 say() { echo "release-pick: $*" >&2; }
 die() { echo "release-pick: $*" >&2; exit 1; }
@@ -74,15 +79,28 @@ cmd_pick() {
   fi
   version="$core-beta.$((n + 1))"
 
+  local uncovered="" why
   while read -r sha; do
     [ -n "$sha" ] || continue
     ci_passed "$sha" || { say "${sha:0:12}: main CI has not passed on it"; continue; }
+    # BOS-2666: only a commit whose docs were checked (every commit since the recorded check touches docs only).
+    # Cheaper than the image checks, so it comes first. The newest green commit that fails it is remembered.
+    if ! why="$("$GATE" covered "$sha" 2>&1)"; then
+      say "${sha:0:12}: $why"
+      [ -n "$uncovered" ] || uncovered="$sha"
+      continue
+    fi
     images_ready "$sha" || continue
     chosen="$sha"
     break
   done < <(git rev-list --first-parent -n "$DEPTH" origin/main)
 
   if [ -z "$chosen" ]; then
+    # Green commits exist but none has a docs check: that is a refusal (the run fails, the CEO hears of it), not a quiet skip.
+    if [ -n "$uncovered" ] && ! { [ -n "$prev" ] && { [ "$uncovered" = "$prev" ] || git merge-base --is-ancestor "$uncovered" "$prev" 2>/dev/null; }; }; then
+      echo "refuse=Weekly release refused: no commit since ${tag:-the start} has a recorded docs check (the Release Manager's \"Docs checked up to\" line in CHANGELOG.md is missing or older than a code change). Newest green commit: ${uncovered:0:12}."
+      return 0
+    fi
     echo "skip=Weekly release skipped: none of the newest $DEPTH commits on main is green with every image published and signed."
     return 0
   fi

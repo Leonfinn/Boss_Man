@@ -11,6 +11,7 @@ import { signedInOwner } from "./helpers/owner-session.js";
 import { sharedDatabase } from "./helpers/shared-server.js";
 import { activity, agentChanges, agentSkills, agents, companies, decisions, retros, skillProposals, skills, ticketReviews, tickets, wakes, wikiPages, workflowChanges } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
+import { expectEveryWriterGuarded } from "./secret-guard-walk.js";
 import { LESSON_ADD, LESSON_DROP } from "../src/services/project-brief.js";
 import { SKILL_ADD, SKILL_REJECT } from "../src/services/decisions.js";
 
@@ -218,8 +219,10 @@ describe("the retro agent's tools", () => {
     const pm = await open(c);
     const mine = (await pm.listTools()).tools.map((t) => t.name);
     expect(mine).toEqual(expect.arrayContaining(["workflow_scorecard", "save_retro", "propose_workflow_change"]));
+    expectEveryWriterGuarded(mine);
     const other = (await (await c.mcp(c.eng.id)).listTools()).tools.map((t) => t.name);
     expect(other).not.toContain("workflow_scorecard");
+    expectEveryWriterGuarded(other); // the ordinary run server's whole tool list
     expect(isError(await tool(await c.mcp(c.eng.id), "save_retro"))).toBe(true);
     // The owner moves the job to the engineer: the Product Manager loses the tools straight away.
     await c.req("PUT", `/api/companies/${c.company.id}/retro-settings`, { agentId: c.eng.id });
@@ -587,7 +590,7 @@ describe("proposing a change", () => {
     const [card] = await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `skill:${proposal!.id}`));
     expect((await answer(c, card!.id, SKILL_REJECT)).statusCode).toBe(200);
     expect(await c.db.select().from(skills).where(eq(skills.name, "null-checks"))).toHaveLength(0);
-    expect(await c.db.select().from(agentSkills)).toHaveLength(0);
+    expect(await c.db.select().from(agentSkills).innerJoin(skills, eq(agentSkills.skillId, skills.id)).where(ne(skills.source, "builtin"))).toHaveLength(0);
     expect((await c.db.select().from(skillProposals).where(eq(skillProposals.id, proposal!.id)))[0]!.status).toBe("rejected");
     // The change never reached anyone, so it no longer reads as applied (and part 4 will not ask Keep/Revert).
     expect((await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch.id)))[0]).toMatchObject({ status: "skipped", checkDueAt: null });
@@ -954,14 +957,14 @@ describe("checking a change's result (part 4)", () => {
     expect(await c.retro.checkSweep()).toBe(1);
     const d = await decisionRow(c, (await changeRow(c, ch!.id)).checkDecisionId!);
     expect(d.question).toContain("cancels the pending skill nomination");
-    expect(await c.db.select().from(skills)).toHaveLength(0);
+    expect(await c.db.select().from(skills).where(ne(skills.source, "builtin"))).toHaveLength(0);
     expect((await answer(c, d.id, "Revert")).statusCode).toBe(200);
     expect((await decisionRow(c, d.id)).status).toBe("answered");
     expect((await changeRow(c, ch!.id)).status).toBe("reverted");
     const [proposal] = await c.db.select().from(skillProposals).where(eq(skillProposals.name, "null-checks"));
     expect(proposal!.status).toBe("rejected");
-    expect(await c.db.select().from(skills)).toHaveLength(0);
-    expect(await c.db.select().from(agentSkills)).toHaveLength(0);
+    expect(await c.db.select().from(skills).where(ne(skills.source, "builtin"))).toHaveLength(0);
+    expect(await c.db.select().from(agentSkills).innerJoin(skills, eq(agentSkills.skillId, skills.id)).where(ne(skills.source, "builtin"))).toHaveLength(0);
   });
 
   it("closes a playbook change as skipped, with no card, when its nomination ends without installing", async () => {
@@ -981,7 +984,7 @@ describe("checking a change's result (part 4)", () => {
     expect(await c.retro.checkSweep()).toBe(0);
     expect((await changeRow(c, ch!.id)).status).toBe("skipped");
     expect(await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `workflow-check:${ch!.id}`))).toHaveLength(0);
-    expect(await c.db.select().from(agentSkills)).toHaveLength(0);
+    expect(await c.db.select().from(agentSkills).innerJoin(skills, eq(agentSkills.skillId, skills.id)).where(ne(skills.source, "builtin"))).toHaveLength(0);
   });
 
   it("goes to the owner when the CEO ran the retro", async () => {

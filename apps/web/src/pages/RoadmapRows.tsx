@@ -4,10 +4,26 @@
 // inside a row's own date strip.
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { BurnupPoint, MilestoneStatus, RoadmapCompany, RoadmapMilestone } from "../api";
+import { ownerTerm } from "@boss-man/shared";
 import { api } from "../api";
+import { POINTS_EXPLAINED } from "@boss-man/shared";
 import { dayOf, short } from "../short-date";
 
 const DAY = 86_400_000;
+
+/** BOS-2709: the Boss Man words this screen uses, each with its meaning from the shared owner terms list, so none stands unexplained. */
+export function OwnerWords({ ids }: { ids: readonly string[] }) {
+  const terms = ids.map((id) => ownerTerm(id)).filter((t): t is NonNullable<typeof t> => !!t);
+  return (
+    <dl className="rm-words muted" data-testid="owner-words">
+      {terms.map((t) => (
+        <div key={t.id}>
+          <dt>{t.term}</dt> <dd>{t.meaning}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
 
 export const STATUS: Record<MilestoneStatus, { label: string; tone: string; icon: string; colour: string }> = {
   done: { label: "Done", tone: "green", icon: "✓", colour: "var(--green-ink)" },
@@ -56,6 +72,11 @@ export function summaryLine(ms: RoadmapMilestone[]): string {
   return done ? `${lead} · ${done} done` : lead;
 }
 
+/** BOS-2708: what "no size" means and who fixes it, so the owner isn't left guessing. */
+export function unsizedNote(n: number): string {
+  return n === 1 ? "1 ticket has no size yet, so it isn't counted (the CEO sizes it)" : `${n} tickets have no size yet, so they aren't counted (the CEO sizes them)`;
+}
+
 /** The two meta lines of a row, and whether the second is a warning. */
 export function metaLines(m: RoadmapMilestone, now: string): { line1: string; line2: string; warn: boolean } {
   const f = m.forecast;
@@ -63,7 +84,7 @@ export function metaLines(m: RoadmapMilestone, now: string): { line1: string; li
   // Rounded down: 99.6% shows 99%, never 100% while work is left.
   const pct = total > 0 ? Math.floor((f.pointsDone * 100) / total) : m.total > 0 ? Math.floor((m.done * 100) / m.total) : 0;
   const due = m.targetDate ? `Due ${weekday(m.targetDate)} ${short(m.targetDate)}` : null;
-  const addOns = [m.blocked ? plural(m.blocked, "ticket blocked", "tickets blocked") : null, f.unsized ? (f.unsized === 1 ? "1 ticket has no size" : `${f.unsized} tickets have no size`) : null].filter(Boolean);
+  const addOns = [m.blocked ? plural(m.blocked, "ticket blocked", "tickets blocked") : null, f.unsized ? unsizedNote(f.unsized) : null].filter(Boolean);
   const tail = addOns.length ? ` · ${addOns.join(" · ")}` : "";
   if (m.status === "no_work") return { line1: `${due ?? "No date"} · no tickets yet`, line2: "Add tickets or features to it to get a forecast.", warn: false };
   const line1 = [due, `${pct}% done`, `${f.pointsLeft} points left`].filter(Boolean).join(" · ");
@@ -335,15 +356,17 @@ export function MilestoneRows({ ms, range, now, selected, onSelect, detail, onCh
           </p>
         </>
       )}
+      <OwnerWords ids={["points", "no-size", "pace"]} />
       <details className="rm-rules">
         <summary>How the status is worked out</summary>
         <ul>
+          <li><b>Points:</b> {POINTS_EXPLAINED}</li>
           <li><b>✓ Done:</b> Every ticket in it is finished.</li>
           <li><b>✓ Live, being checked:</b> Everything is built and live; some final checks haven't reported yet. It turns Done when the last one passes.</li>
           <li><b>● On track:</b> At its pace it finishes by its date. A merged, live ticket counts as built.</li>
           <li><b>▲ At risk:</b> At its pace the unbuilt work finishes after its date; or nothing was finished in the last 4 weeks and its date is within 4 weeks; or an unbuilt ticket waits on your card or looks stuck. A blocked ticket alone does not make it at risk.</li>
           <li><b>■ Late:</b> Its date has passed and work is not yet built and live. The date means built and live.</li>
-          <li><b>Its pace:</b> Points of this milestone finished in the last 4 weeks, per week. Tickets of its features count too.</li>
+          <li><b>Its pace:</b> {ownerTerm("pace")!.meaning} Tickets of its features count too.</li>
         </ul>
       </details>
       {done.length > 0 && (

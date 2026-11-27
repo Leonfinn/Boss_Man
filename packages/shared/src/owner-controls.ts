@@ -20,7 +20,11 @@ export const OWNER_CONTROLS = {
   "Any screen": [
     "Dashboard", "Decisions", "Notifications", "Chat", "Projects", "Roadmap", "Plan", "Wiki", "Features", "Feedback",
     "Agents", "Skills", "Runs", "Merge queue", "Scrum Master log", "Workflow report", "Engagements", "Settings",
-    "Switch company", "Create", "Creating", "New company", "Close menu", "Menu …", "Log out",
+    // BOS-2669: the chip beside a page's title (26 pages), its toast's Undo, the gone-page screen's button, the menu section.
+    "Add to shortcuts", "In shortcuts", "Undo", "Remove this shortcut",
+    // BOS-2669 ticket 3: the menu's Edit button and the full toast's link (the dialog's row buttons are named by page).
+    "Edit", "Edit shortcuts",
+    "Switch company", "Create", "Creating", "New company", "Close menu", "Menu …", "Log out", "Keyboard shortcuts",
     "Save", "Saving", "Saved", "Attach file", "Attaching", "Remove", "Try again", "OK", "Cancel",
     // The error line a page shows when its first load fails (Features, Chat).
     "Retry",
@@ -41,13 +45,17 @@ export const OWNER_CONTROLS = {
     // The search box (Ctrl+K) and its sidebar button (BOS-2192).
     // "Clear" empties the recent searches listed when the box is empty (BOS-2433).
     "Search", "Close", "Clear",
+    // The "?" list's single-letter-key links (BOS-2689, BOS-2671 part 3d), on any screen it opens from.
+    "Turn them on", "Turn off single-letter keys",
+    // The one-time keyboard tip (BOS-2690, part 3e), on any screen it shows on.
+    "Show shortcuts", "Got it",
   ],
   "Log in": ["Create owner account", "Log in"],
   Setup: [
     "Create the company", "Add the project", "Check the token against …", "Add the task to …", "Continue", "Dismiss", "Saving",
     "Back", "Next", "Skip for now", "Finish", "I know what I'm doing, let me get on with it",
     // The Claude and runner steps (BOS-1495), then the credentials, funding and project panels Setup shares with Settings and Projects.
-    "Save the token", "Start the runner",
+    "Save the code", "Start the runner",
     "Save", "Check with Claude", "Check", "Remove", "Edit", "Delete", "Add funding source", "Cancel", "Re-detect",
   ],
   Decisions: [
@@ -234,7 +242,6 @@ export const OWNER_CONTROLS = {
   // The Scrum Master's watchdog: its limits, its record-only rehearsal and its safety cap.
   Watchdog: ["Switch off", "Switch back on", "Switch on", "Run the test", "Download CSV"],
   "Import and export": ["Check name", "Import as a new company", "Open …"],
-  // The owner's password and other logins (BOS-2159).
   Account: ["Change password", "Sign out other devices"],
   // Spend, the hold and the Claude accounts' order, and adding or editing a funding source.
   Funding: ["Save", "Add funding source", "Add limit", "Edit", "Delete", "Cancel", "Download CSV"],
@@ -269,13 +276,13 @@ export const OWNER_FIELDS = {
   Setup: [
     "Company name", "What it's for", "Project name", "The CEO", "Title", "Description", "Give it to",
     // The credentials, funding and project panels Setup shares with Secrets, Access and funding, and Projects.
-    "Claude setup token", "Add", "Value", "Name", "Variable name",
+    "Claude sign-in code", "Add", "Value", "Name", "Variable name",
     "Editing …", "New funding source", "Kind", "Provider", "Monthly grant (USD)", "Cycle starts on",
     "Reviews for this project", "Cost cap per task (USD)", "Monthly spend cap (USD)", "Git repo", "Default branch",
     "When work is approved", "Before merging, Boss Man will", "For high-risk work, also",
   ],
   Decisions: [
-    "Harness", "Provider", "Model", "Paid from", "What went wrong (if a step failed)", "Note for",
+    "Harness", "Provider", "Model", "Paid from", "What went wrong (if a step failed)", "Note for", "Paste your output here for",
     "Why (shown on the Changes table, required)", "Wiki page that explains it (optional)",
     "Your answer, in your own words. It goes to …", "What's unclear (optional, one line)",
     "Every agent in this company",
@@ -423,7 +430,7 @@ export const OWNER_FIELDS = {
     // The "Try a command" box can include the rule being typed (BOS-2188).
     "Try it with the rule I'm typing under \"Add a rule\" first (nothing is saved)",
   ],
-  Account: ["Current password", "New password", "New password again"],
+  Account: ["Current password", "New password", "New password again", "Use single-letter keys"],
   "Import and export": [
     "Include the wiki", "Tickets", "Package", "Company name", "Funding for every agent",
     // The import preview's opt-in for a tool server that reaches the stack or the private network (BOS-335 follow-up).
@@ -481,6 +488,6 @@ export const OWNER_SECTIONS = {
   "This server": ["Server", "This host", "Facts only you can give", "Network guard", "Allowed automatically", "Extra lines from your .env"],
   "Devices and privacy": ["Your devices", "Private details to block"],
   "Import and export": ["Import a company"],
-  Account: ["Change password", "Sign out other devices"],
+  Account: ["Change password", "Keyboard shortcuts", "Sign out other devices"],
   Budget: ["Spending limit", "Pay-as-you-go spend", "On your subscriptions", "Tokens", "Costliest tasks"],
 } as const satisfies Record<string, readonly string[]>;

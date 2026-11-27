@@ -216,6 +216,7 @@ reads: (none)
 ## #/settings/<company>/account
 sections: 
   - Change password
+  - Keyboard shortcuts
   - Sign out other devices
 reads: (none)
 
@@ -427,6 +428,10 @@ reads:
   - /api/funding-sources
   - /api/secrets
   - /api/setup-progress
+
+## #/shortcut-gone
+sections: (none)
+reads: (none)
 
 ## #/skills
 sections: 

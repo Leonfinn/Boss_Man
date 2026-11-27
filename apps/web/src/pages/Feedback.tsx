@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { AddToShortcuts } from "../pinned-pages";
 import { NoCompany } from "../components/NoCompany";
 import { Loader } from "../components/Loader";
 import { LoadError } from "../components/LoadError";
@@ -655,6 +656,7 @@ export function Feedback({ companies, companyId, noteId, go }: { companies: Comp
       <header className="page-head">
         <div>
           <h1>Feedback</h1>
+          <AddToShortcuts page="feedback" />
           <p className="sub">What people tell each company. Link the passages that ask for something to features, and how much it matters to them.</p>
         </div>
       </header>

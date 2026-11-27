@@ -11,10 +11,13 @@ import { agents, checkWorkers, companies, decisions, runnerEvents, runs, setting
 import { CANCEL_RUNNER_UPDATE, CANCEL_UPDATE, DEADLINE_WAIT_MINUTES, STOP_AND_UPDATE, STOP_CHECKS_UPDATE_NOW, STOP_THESE_CARRY_ON, SWAP_WHEN_DONE, WAIT_TEN_MORE } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 import { expectRestart } from "./runner-restarts.js";
-import { untrusted } from "@boss-man/shared";
+import { untrusted, wrapUpEndWords, wrapUpWords, type WrapEnd, type WrapTieView } from "@boss-man/shared";
+import { autoWrapDue, autoWrapStuck, EMPTY_CHAIN, forUpdateOf, stepTie, tieView, type AutoWrap, type UpdateChain, type WrapTie } from "./update-chain.js";
 import { chatRunsByCompany, runnerBusy, runnerChecks, runsByCompany, updateWaitCountsRun, workerChecks, type RunnerCheck } from "./runner-busy.js";
 import { updateHoldHistory } from "./update-hold-history.js";
-import { drainEndsAt, STANDALONE_WRAPUP_MS, SWAP_WHEN_DONE_CAP_MINUTES, WAIT_RULES } from "./update-waits.js";
+import { runnerImageCommit } from "./runner-image.js";
+import { wakeUpdateWatchers, type WatchNotify } from "./watch-triggers.js";
+import { AUTO_WRAPUP_QUEUED_GRACE_MIN, AUTO_WRAPUP_TELL_LEAD_MIN, drainEndsAt, STANDALONE_WRAPUP_MS, SWAP_WHEN_DONE_CAP_MINUTES, WAIT_RULES } from "./update-waits.js";
 
 export const MAINTENANCE_KEY = "maintenance";
 
@@ -39,6 +42,15 @@ export const WRAP_UP_ASKED = "The owner asked every agent to wrap up before an u
  * message too, so an agent that reads only the last message still knows an update is behind it.
  */
 export const WRAP_UP_DURING_UPDATE = `${WRAP_UP_ASKED} A runner update is already waiting: it goes ahead by itself as soon as the running agents have finished.`;
+/**
+ * BOS-2786: Boss Man's own wrap-up for a runner update queued behind a server update's trial, said to each running agent
+ * AUTO_WRAPUP_TELL_LEAD_MIN before the trial ends. The same clean stop as the owner's ask, so it reads the same.
+ */
+export const WRAP_UP_AUTO = "Boss Man is wrapping up every agent for a runner update that starts when the server update's trial ends. Finish the step you are on, commit your work on the ticket branch, write the ticket's state note with the next step, reply to anything pending, then end your turn now. Don't start anything new: no new checks either. If a command you were running was moved to the background, don't wait for a long check: say in the state note that it needs running again. You'll be woken again once it is done.";
+/** BOS-2786: the press (its queuedAt, "" when it has none) the owner cancelled Boss Man's wrap-up for; it is not started again for it. */
+export const AUTO_WRAP_OFF_KEY = "maintenance:auto_wrap_off";
+/** BOS-2786: how often a drain pass with no hold on reads the update chain for a runner update queued behind a trial. */
+export const AUTO_WRAP_EVERY_MS = 30_000;
 /** What a drain is for. "update": swap each runner not on the current image. "settings": recreate every runner once,
  * whatever its image, so new launcher settings (memory, check slots, CPU) reach it without cutting runs off (BOS-594).
  * "wrapup": the owner asked every agent to stop cleanly (BOS-929); nothing is swapped, so there is no runner to wait
@@ -112,14 +124,25 @@ export type Hold = {
    */
   wrapSince?: string;
   /**
-   * BOS-2058 (rule e): which update the owner's wrap-up belongs to, set when it is pressed. "runner": it joined the runner
-   * update's hold (which lifts it). "server": a server update was waiting for a quiet machine; the wrap-up lifts by
-   * itself when that wait is over. "none": no update was waiting; it lifts by itself after STANDALONE_WRAPUP_MS.
+   * BOS-2672 (RCA-011): the update chain the owner's wrap-up is tied to: the server update at whatever stage it was, and
+   * the runner update queued after it. Steps that start while the wrap-up is on join it (update-chain.ts stepTie); the
+   * wrap-up ends when the last one is in, or at once when one fails, is cancelled or gives up. Kept when the runner
+   * drain takes the wrap-up over, so the screen still names the chain.
+   */
+  tie?: WrapTie;
+  /**
+   * BOS-2786: Boss Man started this wrap-up itself, for a runner update queued behind a trial (autoWrapDue): the press, the
+   * trial's end, and when running agents are asked to finish. Kept when the drain takes it over.
+   */
+  auto?: AutoWrap;
+  /** BOS-2786: the owner pressed "Ask agents to wrap up" too, during Boss Man's own wrap-up (agents were told then). */
+  ownerPressedAt?: string;
+  /**
+   * BOS-2058 (rule e), derived from `tie` since BOS-2672 (forUpdateOf): "runner", "server", or "none" (tied to nothing:
+   * it lifts by itself after STANDALONE_WRAPUP_MS). update-waits.ts and the chat screen read it.
    * Absent on a hold saved before this: read as "none" from `since`.
    */
   forUpdate?: "server" | "runner" | "none";
-  /** BOS-2610: when a standalone wrap-up was tied to the runner update's build (update-runner.sh asked for its "building" hold while the wrap-up was on). */
-  tiedSince?: string;
   /** The still-running-list timeout for the owner's wrap-up ask (BOS-929/988): only a flag, never an automatic stop. */
   wrapNotRespondingAfter?: number;
   /** runId -> when the owner's wrap-up message went to it (BOS-988), so a drain pass never tells a run twice. */
@@ -228,6 +251,12 @@ export const OVERDUE_GRACE_MS = 5 * 60_000;
 /** A clock time for a card: 24-hour UTC, so it reads the same on any host. */
 const fmtTime = (d: Date) => `${d.toISOString().slice(11, 16)} UTC`;
 
+/** BOS-2811: what a wrap-up is tied to, in plain words, for the hold's record. */
+export function wrapTieWords(tie: WrapTie | undefined): string {
+  const parts = [tie?.server ? `the server update (${tie.server.stage})` : "", tie?.runner ? `the runner update (${tie.runner.stage})` : ""].filter(Boolean);
+  return `Wrap-up tied to: ${parts.length ? parts.join(" and ") : "nothing (no update was waiting)"}`;
+}
+
 /**
  * Whether the hold keeps new runs and checks from starting right now. While a drain is under way (before its
  * deadline), and after the deadline until the owner answers or the hard cap passes (HOLD_CAP_MINUTES): work that
@@ -284,8 +313,11 @@ export type MaintenanceDeps = {
   landingMergeIds?: () => Promise<string[]>;
   /** BOS-2479: when the last counted push stops holding the swap at the latest (null when none), for the banner's go-ahead time. */
   landingEndsAt?: () => Promise<string | null>;
-  /** BOS-2058: a server update is waiting for a quiet machine right now (a wrap-up pressed then belongs to it, and lifts with it). */
-  serverUpdateWaiting?: () => Promise<boolean>;
+  /**
+   * BOS-2672: the update chain now (server deploy wait, queued or running runner update, the host's last report), which
+   * the owner's wrap-up is tied to. `tied`: the server request the wrap-up already follows. Absent: nothing is under way.
+   */
+  updateChain?: (tied: string | null) => Promise<UpdateChain>;
   /** Resolves when no scheduling pass is mid-flight, so a count of runs taken after it cannot be outdated by a launch. */
   settled: () => Promise<unknown>;
   /** BOS-1954: how long to wait for `settled` (default SETTLE_WAIT_MS); a test makes it short. */
@@ -305,6 +337,8 @@ export type MaintenanceDeps = {
   wakeCeo?: (companyId: string, note: string) => Promise<unknown>;
   /** The hold has lifted: wake the agents who ended their runs for it, as WRAP_UP promised (BOS-574). */
   afterHold?: (since: Date) => Promise<unknown>;
+  /** BOS-2755: wakes one agent on a ticket; a runner update's end wakes the tickets watching for one. */
+  wake?: WatchNotify;
   /** The deployer folder; update-runner.sh drops inbox/drain.json there to ask for a drain. */
   dir?: string;
   drainMinutes?: number;
@@ -342,6 +376,24 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     await db.insert(settings).values({ key: MAINTENANCE_KEY, value: h }).onConflictDoUpdate({ target: settings.key, set: { value: h } });
     await history.upsert(h);
   };
+
+  /**
+   * BOS-2811: records what a wrap-up is tied to and the exact banner wrapUpWords gives now, once per text, so a later
+   * "the banner named the update" check reads it from the hold's record. Never throws; no error text goes in.
+   */
+  async function noteWrap(h: Hold) {
+    const since = h.wrapSince;
+    if (!since) return;
+    try {
+      const view = h.kind === "wrapup" ? tieView(h.tie, since, { liftsAt: new Date(Date.parse(since) + STANDALONE_WRAPUP_MS).toISOString() }) : tieView(h.tie, since, { swapping: true });
+      const runs = (await liveWorkRuns(db, since, h.wrapTold)).length;
+      const words = wrapUpWords(view, runs, (iso) => fmtTime(new Date(iso)));
+      await history.event(h.since, wrapTieWords(h.tie));
+      await history.event(h.since, `Wrap-up banner said: ${words.banner}`);
+    } catch (err) {
+      deps.log?.(`wrap-up record failed: ${(err as Error).message}`);
+    }
+  }
 
   /**
    * Live runs per company. `workOnly` leaves out the owner's chat and the CEO's reply lane (BOS-349):
@@ -479,21 +531,41 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     return ` Check workers are not swapped by this update and take no checks until they match (${names}). On each worker host: in its compose.yaml, replace the 40-character commit on the two lines marked "CHANGE THIS (commit)" with the new runner commit, and run docker compose up -d next to it (it rebuilds the worker by itself). The steps are in docs/34-check-workers.md; the Checks panel shows which workers are out of date.`;
   }
 
-  async function end(title: string, level: NotifyInput["level"], bodyIn: string) {
+  /** `update`: set when a runner update (an image swap) ended, to how it ended; its watchers are woken (BOS-2755). */
+  async function end(title: string, level: NotifyInput["level"], bodyIn: string, update?: "deployed" | "partial" | "failed", wrapLift?: string) {
     let body = bodyIn;
     const h = await getHold(db);
+    // BOS-2811: the lift line goes on the record before it is closed (a closed record takes no events). Fixed words only.
+    if (h && (h.kind === "wrapup" || h.wrapSince)) {
+      const how = update === "deployed" ? "update live" : update ? "update failed" : "cancelled by the owner";
+      await history.event(h.since, wrapLift ?? (h.kind === "wrapup" ? `Wrap-up lifted (${how}): ${title}. ${bodyIn}` : `Wrap-up lifted (${how}): it ended with the runner update. Work has restarted.`));
+    }
     // BOS-2056: a wrap-up that joined this update's hold ends with it, and the owner is told so once, here.
-    if (h && h.kind !== "wrapup" && h.wrapSince) body = `${body} The wrap-up you asked for ended with it: work has restarted.`;
+    // BOS-2672: one taken over from a wrap-up tied to a server update names both steps.
+    if (h && h.kind !== "wrapup" && h.wrapSince) body = `${body} The wrap-up ${h.auto && !h.ownerPressedAt ? "Boss Man started" : "you asked for"}${h.tie?.server ? " (for the server update and this runner update)" : ""} ended with it: work has restarted.`;
     const last: LastUpdate = { at: now().toISOString(), startedAt: h?.since ?? null, ok: level !== "page", title, body, ...(h?.swapped ? { swapped: h.swapped } : {}) };
     await db.insert(settings).values({ key: MAINTENANCE_LAST_KEY, value: last }).onConflictDoUpdate({ target: settings.key, set: { value: last } });
     if (h) await history.close(h.since, { ok: last.ok, title, body, swapped: h.swapped, failed: h.failed });
     await db.delete(settings).where(eq(settings.key, MAINTENANCE_KEY));
     await withdrawQuestion();
     await deps.notify({ companyId: null, level, title, body, link: "#/settings/updates" });
+    // BOS-2755: after the hold is gone, so the watchers' wakes are not held by it. The commit is the home runner's image.
+    if (update && deps.wake) {
+      const [home] = await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1);
+      const commit = home ? ((await runnerImageCommit(db, home.id).catch(() => null)) ?? "") : "";
+      await wakeUpdateWatchers(db, deps.wake, { what: "runner", commit, result: update, started: h ? new Date(h.since) : null, ended: now(), ...(h?.wrapSince ? { wrapUpAt: new Date(h.wrapSince) } : {}) }, deps.log);
+    }
     // The agents that wrapped up for the update are woken again, as they were told they would be (BOS-574).
     if (h && deps.afterHold) await deps.afterHold(new Date(h.since)).catch((err) => deps.log?.(`waking agents after the update failed: ${(err as Error).message}`));
     // Held wakes were only waiting; one pass starts them.
     await deps.tick();
+  }
+
+  /** BOS-2672: a wrap-up ends by itself, with the one notice wrap-up-words.ts gives for how it ended. */
+  async function endWrap(e: WrapEnd) {
+    const w = wrapUpEndWords(e, fmtTime(now()));
+    const why = { in: "update live", failed: "update failed", cancelled: "update cancelled", "gave-up": "update gave up", standalone: "nothing was waiting for it" }[e.how];
+    await end(w.title, "note", w.body, undefined, e.how === "cancelled" ? `Wrap-up lifted (${why}): ${w.title}.` : `Wrap-up lifted (${why}): ${w.title}. ${w.body}`);
   }
 
   /** The one question at a deadline. The key names the deadline, so "Keep waiting" earns a new one at the next. */
@@ -588,15 +660,59 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     return swapInProgressUntil(h, now(), reconnectMs, notSwapping);
   }
 
+  /**
+   * BOS-2672: the update chain now, or null when it can't be read this pass (a tied step must never look "ended" because
+   * a read failed). With no source wired, nothing is under way.
+   */
+  async function chainNow(tied: string | null): Promise<UpdateChain | null> {
+    if (!deps.updateChain) return EMPTY_CHAIN;
+    try {
+      return await deps.updateChain(tied);
+    } catch (err) {
+      deps.log?.(`wrap-up: reading the update chain failed: ${(err as Error).message}`);
+      return null;
+    }
+  }
+
+  // lost on restart, harmless because it only spaces out autoWrap's chain reads (a restart reads at once).
+  let autoCheckedAt = 0;
+  /**
+   * BOS-2786: starts Boss Man's own wrap-up when a runner update is queued behind a trial (update-chain.ts autoWrapDue),
+   * unless the owner cancelled it for that press. Only called with no hold on, so an owner's wrap-up, a build or a drain
+   * already under way is never replaced. A chain that can't be read starts nothing.
+   */
+  async function autoWrap(): Promise<void> {
+    // The chain read touches the host's files; with no hold on, once every AUTO_WRAP_EVERY_MS is plenty for a 15-minute trial.
+    const t = now().getTime();
+    if (t - autoCheckedAt < AUTO_WRAP_EVERY_MS) return;
+    autoCheckedAt = t;
+    const chain = await chainNow(null);
+    if (!chain?.runner) return;
+    const [off] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, AUTO_WRAP_OFF_KEY));
+    const due = autoWrapDue(chain, now(), { offFor: typeof off?.value === "string" ? off.value : null, leadMin: AUTO_WRAPUP_TELL_LEAD_MIN });
+    if (!due) return;
+    deps.log?.(`wrap-up: Boss Man starts its own wrap-up for the runner update queued behind the trial ending ${due.startsAt}; agents are asked to finish at ${due.tellAt}`);
+    await self.start({ kind: "wrapup", auto: due });
+  }
+
   const self = {
     /** BOS-2408: the past holds, newest first. */
     history: (limit?: number) => history.list(limit),
 
     /** Turns the hold on. Idempotent: a second call returns the hold that is already on. // leader-only */
-    async start(opts: { reason?: string; minutes?: number; kind?: HoldKind } = {}): Promise<Hold> {
+    async start(opts: { reason?: string; minutes?: number; kind?: HoldKind; auto?: AutoWrap } = {}): Promise<Hold> {
       const kind = opts.kind ?? "update";
       const have = await getHold(db);
       if (have) {
+        // BOS-2786: the owner presses "Ask agents to wrap up" during Boss Man's own wrap-up: it becomes theirs and every
+        // running agent is told now (not at Boss Man's later time). Same hold, same tie, same end: nothing to fight.
+        if (kind === "wrapup" && have.kind === "wrapup" && have.auto && !opts.auto && !have.ownerPressedAt) {
+          const t = now().toISOString();
+          const up: Hold = { ...have, ownerPressedAt: t, auto: { ...have.auto, tellAt: Date.parse(have.auto.tellAt) < Date.parse(t) ? have.auto.tellAt : t } };
+          await save(up);
+          const told = await tell(WRAP_UP_ASKED, up, "wrapTold");
+          return { ...up, wrapTold: told };
+        }
         // BOS-1955: the image is built and the real drain asks: it takes over the early hold and KEEPS its start, so the
         // hard cap and the "waited too long" clock count from when new work was first held. Its own wait starts now.
         if ((kind === "update" || kind === "settings") && have.kind === "building") {
@@ -623,6 +739,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
           const up: Hold = { ...have, wrapSince: asked, wrapNotRespondingAfter: WRAPUP_NOT_RESPONDING_MINUTES, forUpdate: "runner" };
           await save(up);
           const told = await tell(WRAP_UP_DURING_UPDATE, up, "wrapTold");
+          await noteWrap({ ...up, wrapTold: told });
           return { ...up, wrapTold: told };
         }
         // A setting change asked for during an image update: recreate every runner from now on, including any
@@ -636,10 +753,13 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         // carries the same "nothing new starts" and lifts by itself when the runners are swapped. Its own
         // start message goes out below, so an agent that missed the wrap-up is told again by the update.
         if ((kind === "update" || kind === "settings") && have.kind === "wrapup") {
-          const up: Hold = { ...have, kind, reason: kind === "settings" ? SETTINGS_REASON : "runner update", since: now().toISOString() };
+          // BOS-2672: the wrap-up's ask, its tie and who it told are kept, so the screen still names the update it was
+          // pressed for while the runners swap, and the swap's end says the wrap-up ended with it (they used to be dropped).
+          const up: Hold = { ...have, kind, reason: kind === "settings" ? SETTINGS_REASON : "runner update", since: now().toISOString(), wrapSince: have.wrapSince ?? have.since, wrapNotRespondingAfter: have.wrapNotRespondingAfter ?? WRAPUP_NOT_RESPONDING_MINUTES, forUpdate: "runner" };
           // The wrap-up's own record ends here (its start time is the key); the update opens a new one below.
           await history.close(have.since, { ok: true, title: "Taken over by a runner update (the wrap-up carries on as part of it)", body: "" });
           await save(up);
+          await noteWrap(up);
           await tellOnce(kind === "settings" ? WRAP_UP_SETTINGS : WRAP_UP, up);
           return up;
         }
@@ -656,19 +776,27 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         await deps.notify({ companyId: null, level: "note", title: "Runner update building: new work held", body: `The new runner image is being built and checked. New runs and checks wait from now, so the swap does not have to wait for work that starts during the build. Runs already going carry on. If the build fails the hold lifts by itself; it also lifts after ${minutes} minutes at the latest. You can cancel it in Settings > Server and runner > Updates.`, link: "#/settings/updates" });
         return b;
       }
-      // BOS-2058: a wrap-up pressed while a server update waits for a quiet machine belongs to that update (it used to be a
-      // standalone hold that ended only when someone pressed Cancel: the 20 Nov 10:40 "wrapped up for no reason" entry).
-      const forServer = kind === "wrapup" && (await deps.serverUpdateWaiting?.().catch(() => false));
-      const h: Hold = { reason: opts.reason ?? (kind === "settings" ? SETTINGS_REASON : kind === "wrapup" ? (forServer ? "asking agents to wrap up for the waiting server update" : "asking agents to wrap up") : "runner update"), kind, since: t.toISOString(), deadline: new Date(t.getTime() + minutes * 60_000).toISOString(), minutes, ...(kind === "wrapup" ? { forUpdate: forServer ? ("server" as const) : ("none" as const) } : {}) };
+      // BOS-2672 (RCA-011): a wrap-up is tied to every step of the update under way when it is pressed: the server update
+      // at any stage (approved, going in, on trial, handing over) and a runner update queued or under way. BOS-2058 tied it
+      // only to a server update waiting for a quiet machine, so on 26 Nov a press while the update was going in read "none".
+      const tie = kind === "wrapup" ? stepTie({}, (await chainNow(null)) ?? EMPTY_CHAIN, t, { buildMaxMin: BUILD_HOLD_MAX_MINUTES }).tie : undefined;
+      const forUpdate = forUpdateOf(tie);
+      // BOS-2786: Boss Man's own wrap-up (step's autoWrap) is only ever for a runner update; the owner's keeps its words.
+      const auto = kind === "wrapup" ? opts.auto : undefined;
+      const h: Hold = { reason: opts.reason ?? (kind === "settings" ? SETTINGS_REASON : kind === "wrapup" ? (auto ? "Boss Man is wrapping up for the runner update" : forUpdate !== "none" ? `asking agents to wrap up for the ${forUpdate} update` : "asking agents to wrap up") : "runner update"), kind, since: t.toISOString(), deadline: new Date(t.getTime() + minutes * 60_000).toISOString(), minutes, ...(kind === "wrapup" ? { forUpdate, tie, wrapSince: t.toISOString(), ...(auto ? { auto } : {}) } : {}) };
       await save(h);
-      const said = kind === "settings" ? WRAP_UP_SETTINGS : kind === "wrapup" ? WRAP_UP_ASKED : WRAP_UP;
-      const told = kind === "wrapup" ? await tell(said, h, "wrapTold") : await tell(said, h, "startTold");
+      const said = kind === "settings" ? WRAP_UP_SETTINGS : kind === "wrapup" ? (auto ? WRAP_UP_AUTO : WRAP_UP_ASKED) : WRAP_UP;
+      // Boss Man's own wrap-up asks agents to finish only from its tellAt (the wrapup pass in step tells them then).
+      const later = !!auto && Date.parse(auto.tellAt) > t.getTime();
+      const told = later ? {} : kind === "wrapup" ? await tell(said, h, "wrapTold") : await tell(said, h, "startTold");
+      if (kind === "wrapup") await noteWrap({ ...h, wrapTold: told });
       await deps.notify({
         companyId: null,
         level: "note",
-        title: kind === "settings" ? "Setting change pending: waiting for runs to finish" : kind === "wrapup" ? "Agents asked to wrap up" : "Update pending: waiting for runs to finish",
-        body:
-          kind === "wrapup"
+        title: kind === "settings" ? "Setting change pending: waiting for runs to finish" : auto ? "Boss Man is wrapping up for the runner update" : kind === "wrapup" ? "Agents asked to wrap up" : "Update pending: waiting for runs to finish",
+        body: auto
+          ? `The runner update you queued starts when the server update's trial ends (${fmtTime(new Date(auto.startsAt))}). New runs and checks are held from now; urgent work and live fixes still start. Running agents ${later ? `are asked to finish their step and stop cleanly at ${fmtTime(new Date(auto.tellAt))}` : "were asked to finish their step and stop cleanly"}. It lifts by itself when the runners are updated, or if the update is switched back or cancelled. Nothing for you to press.`
+          : kind === "wrapup"
             ? `Every running agent was asked to finish its step and stop cleanly. Nothing new starts in any company until you cancel the wrap-up or the update it was for finishes. Runs still going after ${minutes} minutes are only flagged, never stopped for you.`
             : `Nothing new starts in any company. Each runner is ${kind === "settings" ? "recreated with the new settings" : "swapped"} as its company goes idle. If runs are still going after ${minutes} minutes, you will be asked.`,
         link: "#/settings/updates",
@@ -698,7 +826,9 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       const runsTotal = busyNow.runsTotal;
       // BOS-1600: the checks on a runner that a swap waits on (not those on a check worker), so the banner can name them.
       // A "stop the checks and update now" answer (force) means nothing is waited for any more.
-      const checksList = h.kind === "wrapup" || h.kind === "building" || h.force || h.ignoreChecks ? [] : await runnerChecks(db, now());
+      // BOS-2786: a wrap-up tied to a runner update names the runner's checks too: the swap after it waits for them.
+      const wrapForRunner = h.kind === "wrapup" && !!h.tie?.runner;
+      const checksList = (h.kind === "wrapup" && !wrapForRunner) || h.kind === "building" || h.force || h.ignoreChecks ? [] : await runnerChecks(db, now());
       // BOS-1951: merges being pushed to main hold the swap too (BOS-1645), so the banner names them.
       // Not for a wrap-up hold: it swaps nothing. The same count the drain waits on, so text and swap never disagree.
       const mergeIds = h.kind === "wrapup" || h.kind === "building" || !deps.landingMergeIds ? [] : await deps.landingMergeIds().catch(() => [] as string[]);
@@ -730,13 +860,20 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       // the same list here; each run's own "asked N min ago" comes from when it was told.
       if (h.kind !== "wrapup" && !h.wrapSince) return base;
       const wrapSince = h.wrapSince ?? h.since;
-      const list = await liveWorkRuns(db, wrapSince, h.wrapTold);
+      // BOS-2786: under Boss Man's own wrap-up a run not told yet is asked at tellAt, so its line says when, not "asked 0 min ago".
+      const askLater = h.auto && Date.parse(h.auto.tellAt) > now().getTime() ? h.auto.tellAt : null;
+      const list = (await liveWorkRuns(db, wrapSince, h.wrapTold)).map((r) => (askLater && !h.wrapTold?.[r.runId] ? { ...r, sinceWrapUpMinutes: 0, askAt: askLater } : r));
       return {
         ...base,
         wrapAsked: true,
         // BOS-2056: which update the wrap-up is for, and since when, so the banner and status box can name it.
         wrapSince,
         wrapForUpdate: h.kind === "wrapup" ? (h.forUpdate ?? "none") : "runner",
+        // BOS-2672: the chain it is tied to, which the banner and the status box both word with wrapUpWords.
+        // BOS-2786: Boss Man's own wrap-up says so, with when agents are asked to finish, until the owner presses too.
+        wrapTie: (h.kind === "wrapup"
+          ? tieView(h.tie, wrapSince, { liftsAt: new Date(Date.parse(wrapSince) + STANDALONE_WRAPUP_MS).toISOString(), auto: h.auto && !h.ownerPressedAt ? h.auto : null })
+          : tieView(h.tie, wrapSince, { swapping: true })) satisfies WrapTieView,
         ...(h.kind === "wrapup" ? { minutes: h.minutes } : {}),
         notRespondingAfter: h.wrapNotRespondingAfter ?? WRAPUP_NOT_RESPONDING_MINUTES,
         runsList: list,
@@ -762,7 +899,18 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     async cancel() {
       const h = await getHold(db);
       if (!h) return false;
-      if (h.kind === "wrapup") await end("Wrap-up cancelled", "note", "New runs start again. Agents that were still going finish on their own; any that ended cleanly are woken on their tickets.");
+      // BOS-2786: the owner cancelled a wrap-up while a runner update is queued: Boss Man does not start its own wrap-up
+      // again for that press. BOS-2808: whoever started the hold. The press is read as autoWrap reads it, so the marker
+      // matches what autoWrapDue compares (an owner hold's tie may carry a stand-in queuedAt); Boss Man's own hold names
+      // its press when the chain can't be read.
+      let off: string | null = null;
+      if (h.kind === "wrapup") {
+        const r = (await chainNow(null))?.runner;
+        off = r?.stage === "queued" ? (r.queuedAt ?? "") : h.auto ? (h.auto.queuedAt ?? "") : null;
+        if (off !== null) await db.insert(settings).values({ key: AUTO_WRAP_OFF_KEY, value: off }).onConflictDoUpdate({ target: settings.key, set: { value: off } });
+      }
+      if (h.kind === "wrapup" && off !== null) await end("Wrap-up cancelled", "note", "New runs start again. Boss Man won't wrap up again for this runner update: it now waits for the work going to finish, as before. Agents that ended cleanly are woken on their tickets.");
+      else if (h.kind === "wrapup") await end("Wrap-up cancelled", "note", "New runs start again. Agents that were still going finish on their own; any that ended cleanly are woken on their tickets.");
       else if (h.kind === "building") await end("Runner update build hold cancelled", "note", "New runs start again. If the image build is still going, the swap will wait for work again once it is built.");
       else await end("Runner update cancelled", "note", "New runs start again. Runners not swapped yet still run the old image; start the update again when you like.");
       return true;
@@ -780,6 +928,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       if (!h.wrapSince) return false;
       const { wrapSince: _s, wrapNotRespondingAfter: _n, wrapTold: _t, ...rest } = h;
       await save(rest);
+      await history.event(h.since, "Wrap-up lifted (cancelled by the owner): the update keeps waiting. New runs start again once it is in.");
       return true;
     },
 
@@ -877,15 +1026,9 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         const cur = await getHold(db);
         if (cur?.kind === "building" && asked !== "update" && asked !== "settings") await end("Runner update build stopped", "note", "The new runner image was not built, so nothing is swapped. New runs have started again.");
         // BOS-2610: a wrap-up tied to this build ends with it: the update failed, so nothing is waiting any more.
-        else if (cur?.kind === "wrapup" && cur.forUpdate === "runner" && asked !== "update" && asked !== "settings") await end("Wrap-up lifted: the runner update failed", "note", `The runner update failed at ${now().toISOString().slice(11, 16)} UTC. Work has restarted.`);
+        else if (cur?.kind === "wrapup" && cur.tie?.runner?.buildingSince && asked !== "update" && asked !== "settings") await endWrap({ how: "failed", step: "runner" });
       }
       let h = await getHold(db);
-      // BOS-2610: update-runner.sh asks for its "building" hold while a standalone wrap-up is on: the wrap-up now belongs to
-      // that update. It lifts when the build fails (the cancel file above), when the real drain takes it over, or after the build's own cap.
-      if (asked === "building" && h?.kind === "wrapup" && h.forUpdate !== "runner" && h.forUpdate !== "server") {
-        await save({ ...h, forUpdate: "runner", tiedSince: now().toISOString() });
-        h = await getHold(db);
-      }
       // A real update or setting change takes over a wrap-up hold here too, not only from the button (BOS-929): its
       // trigger file must end the wrap-up and swap, or new work stays held until the owner cancels by hand.
       // BOS-1955: it takes over a building hold the same way, but keeps that hold's start.
@@ -899,6 +1042,9 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       if (!h) {
         // BOS-2408: no live hold, so a record still open is one that lost its end (a restart): close it, don't leave it open.
         await history.closeOrphans();
+        // BOS-2786: a runner update queued behind a trial gets Boss Man's own wrap-up, so the host is quiet when the trial
+        // ends without the owner pressing anything. The same wrap-up as the owner's button: same hold, tie and ends.
+        await autoWrap();
         return;
       }
       // BOS-1955: the early hold ends by itself when the build never reached a drain (the script was killed, a host reboot).
@@ -910,16 +1056,29 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       // A wrap-up hold (BOS-929) swaps nothing and asks nothing: it only keeps new runs from starting until the
       // owner cancels it, or a real update takes it over in start() above. The scheduler's hold already does that.
       if (h.kind === "wrapup") {
-        // BOS-2058 (rule e): a wrap-up belongs to an update and lifts by itself. For a server update it lifts when that wait
-        // is over (sent, cancelled or given up); with no update behind it, after an hour. It never waits for a press.
+        // BOS-2672 (RCA-011): the wrap-up follows the update chain it is tied to (update-chain.ts stepTie): a step that
+        // starts now joins it (update-runner.sh's "building" request is the runner build starting), and it ends when the
+        // last step is in, or at once when one fails, is cancelled or gives up. Tied to nothing, it lifts after an hour.
+        // It never waits for a press. A chain that can't be read this pass changes nothing.
         const t = now();
-        if (h.forUpdate === "server" && !(await deps.serverUpdateWaiting?.().catch(() => true))) {
-          await end("Wrap-up lifted", "note", "The server update it was asked for is no longer waiting for the machine, so new runs start again. Agents that were still going finish on their own; any that ended cleanly are woken on their tickets.");
-        } else if (h.forUpdate === "runner" && h.tiedSince && t.getTime() - Date.parse(h.tiedSince) > BUILD_HOLD_MAX_MINUTES * 60_000) {
-          await end("Wrap-up lifted: the runner update did not start", "note", `The runner update it was tied to did not start within ${BUILD_HOLD_MAX_MINUTES} minutes, so work has restarted.`);
-        } else if (h.forUpdate !== "server" && t.getTime() - Date.parse(h.wrapSince ?? h.since) > STANDALONE_WRAPUP_MS) {
-          await end("Wrap-up lifted after 60 minutes", "note", "No update was waiting for it, so new runs start again after 60 minutes. Agents that were still going finish on their own; any that ended cleanly are woken on their tickets.");
+        const chain = await chainNow(h.tie?.server?.decisionId ?? null);
+        if (chain) {
+          const r = stepTie(h.tie ?? {}, chain, t, { building: asked === "building", buildMaxMin: BUILD_HOLD_MAX_MINUTES });
+          if (r.end) return endWrap(r.end);
+          const next: Hold = { ...h, tie: r.tie, forUpdate: forUpdateOf(r.tie) };
+          if (JSON.stringify(next) !== JSON.stringify(h)) {
+            await save(next);
+            await noteWrap(next);
+          }
+          h = next;
         }
+        if (h.auto) {
+          // BOS-2786: Boss Man's own wrap-up gives up when its runner update is still only queued well after the trial.
+          if (autoWrapStuck(h.tie, h.auto, t, AUTO_WRAPUP_QUEUED_GRACE_MIN)) return endWrap({ how: "gave-up", step: "runner", didNot: `start within ${AUTO_WRAPUP_QUEUED_GRACE_MIN} minutes of the trial's end` });
+          // From its tellAt, every running agent not told yet is asked to finish (once each; runs that passed the hold never).
+          if (t.getTime() >= Date.parse(h.auto.tellAt)) await tell(h.ownerPressedAt ? WRAP_UP_ASKED : WRAP_UP_AUTO, h, "wrapTold");
+        }
+        if (forUpdateOf(h.tie) === "none" && t.getTime() - Date.parse(h.wrapSince ?? h.since) > STANDALONE_WRAPUP_MS) await endWrap({ how: "standalone" });
         return;
       }
 
@@ -945,7 +1104,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         const downSince = h.launcherDownSince ?? t.toISOString();
         if (t.getTime() - Date.parse(downSince) >= WAIT_RULES["runner-launcher"].endMin * 60_000) {
           const minutes = Math.round((t.getTime() - Date.parse(downSince)) / 60_000);
-          await end("Runner update gave up: the launcher does not answer", "page", `The runner launcher has not answered for ${minutes} minutes, so the update stopped waiting and new runs start again on the runners as they are. Once the launcher is back, start the update again from Settings > Server and runner > Updates.`);
+          await end("Runner update gave up: the launcher does not answer", "page", `The runner launcher has not answered for ${minutes} minutes, so the update stopped waiting and new runs start again on the runners as they are. Once the launcher is back, start the update again from Settings > Server and runner > Updates.`, h.kind === "settings" ? undefined : "failed");
           if (deps.wakeCeo) {
             for (const co of await db.select({ id: companies.id }).from(companies).where(eq(companies.paused, false))) {
               await deps.wakeCeo(co.id, `The runner update gave up: the runner launcher did not answer for ${minutes} minutes, so the hold lifted and new runs start again on the old runner image. Nothing was stopped. The owner was told; the update needs starting again once the launcher answers.`).catch((e) => deps.log?.(`drain: waking the CEO failed: ${(e as Error).message}`));
@@ -958,7 +1117,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       }
       if (h.launcherDownSince) h = { ...h, launcherDownSince: undefined };
       if (fleet.some((r) => r.current === undefined)) {
-        await end("Runner update stopped", "page", "The launcher is older than the server and cannot say which runners are on the new image. Update the launcher (scripts/deploy.sh --runner), then start the update again.");
+        await end("Runner update stopped", "page", "The launcher is older than the server and cannot say which runners are on the new image. Update the launcher (scripts/deploy.sh --runner), then start the update again.", h.kind === "settings" ? undefined : "failed");
         return;
       }
       const t = now();
@@ -1150,9 +1309,9 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       const bad = [...Object.entries(failed).map(([s, m]) => `${s}: ${m}`), ...slow.map((s) => `${s}: has not reconnected`)];
       // The hold lifts either way: keeping every company stopped for one runner would cost more than it protects.
       const settingsDone = h.kind === "settings";
-      if (bad.length) await end(settingsDone ? "Runner restart for a setting change finished with problems" : "Runner update finished with problems", "page", `${bad.join("; ")}. New runs have started again. Check Settings > Runner for those companies.`);
+      if (bad.length) await end(settingsDone ? "Runner restart for a setting change finished with problems" : "Runner update finished with problems", "page", `${bad.join("; ")}. New runs have started again. Check Settings > Runner for those companies.`, settingsDone ? undefined : "partial");
       else if (settingsDone) await end("Runners restarted with the new settings", "note", `${after.length ? `All ${after.length} runner${after.length === 1 ? " was" : "s were"}` : "No runners were"} recreated after their runs finished. New runs have started again.`);
-      else await end("Runners updated", "note", `${after.length ? `All ${after.length} runner${after.length === 1 ? " is" : "s are"}` : "No runners were"} on the new image. New runs have started again.${await workerUpdateSteps()}`);
+      else await end("Runners updated", "note", `${after.length ? `All ${after.length} runner${after.length === 1 ? " is" : "s are"}` : "No runners were"} on the new image. New runs have started again.${await workerUpdateSteps()}`, "deployed");
     },
   };
   return self;

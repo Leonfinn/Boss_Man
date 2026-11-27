@@ -175,6 +175,9 @@ function chainsIn(text: string): Array<{ parts: string[]; end: number }> {
   return out;
 }
 
+/** A review kind as the Reviews page names it, normalised: "security", "security review(er)", "reviews for security". Group 1 is set by "reviews for". */
+const REVIEW_KIND = /^(reviews for )?(?:security|infra|infrastructure|adversarial|code)(?: review(?:er)?)?$/;
+
 /** Follow one path from its first part; the place it reaches, null after a refusal, or undefined if it starts nowhere known. */
 function walk(parts: string[], problems: string[]): Place | null | undefined {
   const start = PLACES.get(norm(parts[0]!));
@@ -183,6 +186,14 @@ function walk(parts: string[], problems: string[]): Place | null | undefined {
   for (const raw of parts.slice(1)) {
     const n = norm(raw);
     if (!n) break;
+    // The Reviews page names its reviewers by kind (Security review, Infrastructure review, Adversarial review, code
+    // reviewed by). "Security" is also an Outgoing email field, so without this a path to the Security reviewer was
+    // refused as sitting on Server and runner (BOS-2716). "Reviews for Security" is the same page.
+    const kind = REVIEW_KIND.exec(n);
+    if (kind && (at.screen === "Reviews" || (at.route === "Settings" && kind[1]))) {
+      if (at.route === "Settings") at = tab(at, "Reviews");
+      break;
+    }
     // A tab may be named by its first words ("Settings → Reviews" is Reviews and CEO), as cards shorten them.
     const child = at.tabs.find((t) => norm(t) === n) ?? at.tabs.find((t) => norm(t).startsWith(`${n} `));
     if (child) { at = tab(at, child); continue; }

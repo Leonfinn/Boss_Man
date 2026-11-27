@@ -4,9 +4,13 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { figureText } from "@boss-man/shared";
 import type { Company, Decision } from "../api";
 import { useMediaQuery } from "../hooks";
-import { Activity, BookOpen, ChevronDown, ChevronRight, ChevronsLeft, ChevronsRight, FolderGit2, Bell, GitMerge, Gavel, Handshake, LayoutDashboard, ListChecks, LogOut, Map, Menu as MenuIcon, MessageCircle, MessageSquare, Puzzle, Settings, ShieldCheck, Sparkles, Star, Users, Workflow as WorkflowIcon, type LucideIcon } from "lucide-react";
+import { usePinned } from "../pinned-pages";
+import { SHORTCUT_ICONS } from "../shortcut-icons";
+import { CircleHelp, Pencil, TriangleAlert } from "lucide-react";
+import { Activity, BookOpen, ChevronDown, ChevronRight, ChevronsLeft, ChevronsRight, FolderGit2, Bell, GitMerge, Gavel, Handshake, Keyboard, LayoutDashboard, ListChecks, LogOut, Map, Menu as MenuIcon, MessageCircle, MessageSquare, Puzzle, Settings, ShieldCheck, Sparkles, Star, Users, Workflow as WorkflowIcon, type LucideIcon } from "lucide-react";
 import { art } from "../brand";
 import { SearchButton } from "./SearchPalette";
+import { SHOW_SHORTCUTS_EVENT, linkTitle } from "../shortcut-list";
 
 /**
  * R43: a per-company server figure (feedback.toProcess) for the chosen company, the one its own page shows. The
@@ -164,6 +168,8 @@ function CompanySwitcher({ companies, current, waiting, onPick, onCreate }: { co
  */
 export function Sidebar(props: {
   active: string;
+  /** The address parts on screen (e.g. ["settings", "c1", "updates"]), to mark the shortcut that is open. */
+  route?: string[];
   activeAgent?: string;
   activeProject?: string;
   companies: Company[];
@@ -269,10 +275,14 @@ export function Sidebar(props: {
   // badge reads exactly as the page, banner and dashboard write the same figure.
   const badge = (n: Item) =>
     n.id === "decisions" && badgeCount > 0 ? { value: badgeCount, label: `${figureText("decisions.needYou", badgeCount)}${props.decisionsTally && props.decisionsTally.waiting > 0 ? `, ${figureText("decisions.withTeam", props.decisionsTally.waiting)}` : ""}` } : n.id === "feedback" && props.feedback > 0 ? { value: props.feedback, label: figureText("feedback.toProcess", props.feedback) } : n.id === "merge-queue" && props.mergeStuck > 0 ? { value: props.mergeStuck, label: figureText("mergeQueue.lineStuck", props.mergeStuck), warn: true } : n.id === "merge-queue" && props.mergeWaiting > 0 ? { value: props.mergeWaiting, label: figureText("mergeQueue.inLine", props.mergeWaiting) } : n.id === "notifications" && props.unread > 0 ? { value: props.unread, label: figureText("notifications.unread", props.unread) } : null;
+  // BOS-2669: the owner's pinned pages. None pinned (or no provider, as in a bare menu): no section at all.
+  const pinned = usePinned();
+  const shortcutRows = pinned?.entries ?? [];
+  const hash = `#/${(props.route ?? []).join("/")}`;
   const itemLink = (n: Item) => {
     const b = badge(n);
     return (
-      <a className="nav" href={`#/${n.id}`} onClick={closeIfNarrow} title={n.label} aria-current={isCurrent(n.id) ? "page" : undefined}>
+      <a className="nav" href={`#/${n.id}`} onClick={closeIfNarrow} title={linkTitle(n.id, n.label)} aria-current={isCurrent(n.id) ? "page" : undefined}>
         <n.icon size={18} strokeWidth={1.75} aria-hidden="true" />
         <span className="nav-label">{n.label}</span>
         {b && <span className={`count${b.warn ? " warn" : ""}`} aria-label={b.label}>{b.value}</span>}
@@ -301,6 +311,36 @@ export function Sidebar(props: {
       </div>
       <div id="nav-groups" className={`nav-groups${menu ? " open" : ""}`}>
         <div className="nav-scroll">
+        {shortcutRows.length > 0 && (
+          <section className="side-shortcuts" aria-label="Shortcuts">
+            <div className="side-shortcuts-head">
+              <p className="side-shortcuts-title">Shortcuts</p>
+              {pinned && (
+                <button type="button" className="side-shortcuts-edit" data-edit-shortcuts aria-label="Edit shortcuts" onClick={() => pinned.openEditor()}>
+                  <Pencil size={13} strokeWidth={1.75} aria-hidden="true" />
+                  <span>Edit</span>
+                </button>
+              )}
+            </div>
+            <ul>
+              {shortcutRows.map((e) => {
+                const Icon = e.gone ? TriangleAlert : (SHORTCUT_ICONS[e.icon] ?? CircleHelp);
+                const here = e.gone ? hash === `#/shortcut-gone/${e.id}` : hash === e.address;
+                return (
+                  <li key={e.id}>
+                    <a className={`nav${pinned?.justAdded === e.id ? " just-added" : ""}${e.gone ? " gone" : ""}`} href={e.gone ? `#/shortcut-gone/${e.id}` : e.address} onClick={closeIfNarrow} title={e.gone ? `${e.name}: page no longer exists` : `Opens ${e.path}`} aria-current={here ? "page" : undefined}>
+                      <Icon size={18} strokeWidth={1.75} aria-hidden="true" />
+                      <span className="nav-label">
+                        {e.name}
+                        {e.gone && <small className="nav-here">Page no longer exists</small>}
+                      </span>
+                    </a>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        )}
         {BLOCKS.map((block, bi) => (
           <section key={bi} aria-label={["Overview", "Work", "Company"][bi]}>
             <ul>
@@ -379,6 +419,10 @@ export function Sidebar(props: {
         {/* Pinned below the list, so Settings and Log out are in view without scrolling. On a phone they sit inside the folded menu, so the header stays one row. */}
         <div className="side-pinned foot">
           {itemLink(SETTINGS)}
+          {/* BOS-2688: opens the "?" list for people who never press "?". Hidden on a phone (styles.css). */}
+          <button type="button" className="shortcuts-button" onClick={() => window.dispatchEvent(new Event(SHOW_SHORTCUTS_EVENT))} title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">
+            <Keyboard size={18} strokeWidth={1.75} aria-hidden="true" />
+          </button>
           <button type="button" className="logout" onClick={props.onLogout} title="Log out" aria-label="Log out">
             <LogOut size={18} strokeWidth={1.75} aria-hidden="true" className="logout-icon" />
             <span className="label-full">Log out</span>
