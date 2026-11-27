@@ -1218,6 +1218,29 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     if (await standbyStopped()) return null;
     return { due, endsAt: due.after };
   }
+  /**
+   * BOS-2701: the version the server runs while available.json is gone (the host removes it after every deploy and
+   * rewrites it on its next tick). Only while the deployer is alive: its last server deploy that went in, else the
+   * poller's record of it, else the live-server record. Null when the deployer never reported or is late, so the press
+   * is refused with noOfferReason's words, which say what to check.
+   */
+  async function gapLiveCommit(a: Available | null, s: DeployStatus | null): Promise<string | null> {
+    if ((await deployerSeen(a, s)).late) return null;
+    if (s?.target === "server" && s.result === "deployed" && isSha(s.to_commit)) return s.to_commit;
+    if (s?.result === "running") return null;
+    const last = await getSetting<LastServer>(LAST_SERVER);
+    if (last?.result === "deployed" && isSha(last.to)) return last.to;
+    const companyId = await homeCompany();
+    const recorded = companyId ? (await liveServerRecord(db, companyId)).live : null;
+    return recorded && isSha(recorded) ? recorded : null;
+  }
+  /** BOS-2701: the trial of a server deploy the poller hasn't read yet (finished() sets the same end), from its own status. */
+  function gapTrial(s: DeployStatus | null): { endsAt: string } | null {
+    if (s?.target !== "server" || s.result !== "deployed") return null;
+    const ends = Date.parse(s.ended) + trialMs(null, s);
+    return Number.isFinite(ends) && ends > Date.now() ? { endsAt: new Date(ends).toISOString() } : null;
+  }
+
   /** What the owner's Build and update runners press says during the trial: the very time it can work (BOS-953). */
   const trialMessage = (endsAt: string, seconds: number) => {
     const mins = Math.max(1, Math.ceil((Date.parse(endsAt) - Date.now()) / 60_000));
@@ -1301,6 +1324,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     // the live version: a refused or failed one (or none at all) says nothing about it, and the host's `deployed`
     // commit decides, so the card can't be dropped for a running state the status file never wrote.
     const live = last?.result === "deployed" ? last.to : a?.deployed;
+    // BOS-2701: nothing says what runs (no deploy record, and available.json is gone until the host's next tick): wait
+    // for that report rather than drop the press as "no longer on that version".
+    if (!live && !due.retry) return;
     // BOS-2616: a failed runner update's retry is not judged by the last server deploy's record. A hand-apply
     // (rebuild-live.sh, deploy.sh) never writes the host deployer's status, so that record still named an older server
     // deploy (or a failed one), and the retry was dropped a minute after the failure, long before the hold was
@@ -1917,11 +1943,17 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     async updateRunners() {
       if (!dir) return { error: "Self-deploy is not set up on this install." } as const;
       const a = await available();
-      if (!a?.deployed) return { error: await noOfferReason(a, await status()) } as const;
+      const st = await status();
+      // BOS-2701: the host removes available.json on purpose after every deploy and rewrites it on its next tick, so for
+      // about a minute after each server update there is no offer to read. That is the very moment the trial banner says
+      // "press", so the press is queued on the version the server runs (the deploy's own record), never refused. Only a
+      // deployer that never reported or is late is refused, and the panel disables the button then (runnerPressBlocked).
+      const gap = !a?.deployed;
+      const live = a?.deployed || (await gapLiveCommit(a, st));
+      if (!live) return { error: await noOfferReason(a, st) } as const;
       // BOS-953: during the trial say plainly when it can work, and remember the press so the offer is raised by
       // itself when the trial ends. Never a silent refusal, and never a press that is quietly lost.
       // A runner update that is already waiting for the host or running is the very thing being asked for.
-      const st = await status();
       if ((await pendingRunnerRequest()) || (st?.result === "running" && st.target === "runner")) return { error: "A runner update is already under way. Boss Man swaps each runner onto the new image by itself as its company goes idle; you don't need to press again." } as const;
       // BOS-1086: a press that can't run yet (the trial, a server update running or waiting for the host, the host's
       // wait) is QUEUED, never refused: it starts by itself the moment nothing blocks it (releaseRunnerDue), is cancelled
@@ -1930,28 +1962,34 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       // BOS-1467: refused, not queued, while a merged fix to the runner update itself isn't live: the press would run the old script and fail.
       const { refusal: fix, note: unconfirmed } = await runnerUpdateFixCheck();
       if (fix) return { error: fix } as const;
-      const trial = await trialState(a);
+      // In the gap the poller may not have read the deploy's status yet, so its trial is worked out from that status here.
+      const trial = (await trialState(a)) ?? (gap ? gapTrial(st) : null);
       const notNow = await runnerBlocker(a);
-      if (trial || notNow) {
+      // In the gap a card can't be raised (it reads the offer), so the press is always queued; releaseRunnerDue sends it.
+      if (trial || notNow || gap) {
         const old = await getSetting<RunnerDue>(RUNNER_DUE);
         const pressed = old?.pressed ?? new Date().toISOString();
-        await putSetting(RUNNER_DUE, { commit: old?.commit ?? a.deployed, fromCommit: old?.fromCommit ?? a.deployed, after: trial ? trial.endsAt : old?.after ?? pressed, offer: true, needs: old?.needs ?? a.deployed, pressed, priorOffer: old?.pressed ? old.priorOffer ?? false : old?.offer ?? false } satisfies RunnerDue);
+        await putSetting(RUNNER_DUE, { commit: old?.commit ?? live, fromCommit: old?.fromCommit ?? live, after: trial ? trial.endsAt : old?.after ?? pressed, offer: true, needs: old?.needs ?? live, pressed, priorOffer: old?.pressed ? old.priorOffer ?? false : old?.offer ?? false } satisfies RunnerDue);
         await putSetting(QUEUE_CANCELLED, null);
-        const message = trial ? `Runners will update at ${clock(trial.endsAt)}, when this server update's ${trialWords(soakSeconds(a))} trial ends. You don't need to press again.` : `${notNow![0]!.toUpperCase()}${notNow!.slice(1)} The runner update is queued and starts by itself as soon as that is over.`;
+        const message = trial
+          ? `Runners will update at ${clock(trial.endsAt)}, when this server update's ${trialWords(soakSeconds(a, st))} trial ends. You don't need to press again.`
+          : notNow
+            ? `${notNow[0]!.toUpperCase()}${notNow.slice(1)} The runner update is queued and starts by itself as soon as that is over.`
+            : "The runner update is queued. It starts by itself within a minute or two, once the host deployer has reported after the server update. You don't need to press again.";
         // BOS-2672: `note` alone too, so the Settings press can show it without repeating the time the status box already gives.
         return { queued: true, startsAt: trial?.endsAt ?? null, message: unconfirmed ? `${message} ${unconfirmed}` : message, note: unconfirmed ?? null } as const;
       }
-      const open = (await openFor("runner")).find((d) => (d.context as SelfDeployContext).commit === a.deployed);
+      const open = (await openFor("runner")).find((d) => (d.context as SelfDeployContext).commit === live);
       if (open) {
         // BOS-1010: the card for the live version is already there; still make sure it is the only open runner card.
-        await withdrawOtherRunnerCards(open.id, a.deployed);
+        await withdrawOtherRunnerCards(open.id, live);
         return { decisionId: open.id, ...(unconfirmed ? { note: unconfirmed } : {}) } as const;
       }
       // The plain key when no card for this commit is open (DR-042 point 5). Only if an answered card still holds it
       // (the owner said "Not now" before) does the button fall back to a keyed copy, so the ask is not silently dropped.
       // BOS-1010 rule 4: pressing it when it can't run (a race with a server update that started in between) raises the
       // card anyway, and it says why and when it can run; and every raise here withdraws any earlier runner card.
-      const r = (await raiseRunner(a.deployed, a.deployed, a, { requested: true, askAnyway: true })) ?? (await raiseRunner(a.deployed, a.deployed, a, { requested: true, askAnyway: true, again: true }));
+      const r = (await raiseRunner(live, live, a, { requested: true, askAnyway: true })) ?? (await raiseRunner(live, live, a, { requested: true, askAnyway: true, again: true }));
       if (!r || "blocked" in r) return { error: "Create a company first: decisions belong to one." } as const;
       return { decisionId: r.row.id, ...(unconfirmed ? { note: unconfirmed } : {}) } as const;
     },

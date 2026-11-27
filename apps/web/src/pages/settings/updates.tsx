@@ -454,6 +454,19 @@ export function updateStatus(view: SelfDeployView | null, maint: MaintenanceView
   };
 }
 
+/**
+ * BOS-2701: why "Build and update runners" can't take a press now, or null when it can. The server queues a press at
+ * every stage of an update, including the minute after a deploy when the host's offer is gone; it refuses only when the
+ * deployer never reported or is late. Then the button is disabled with this one line, and nothing on the panel says "press".
+ */
+export function runnerPressBlocked(v: SelfDeployView): string | null {
+  const d = v.deployer;
+  if (v.available || (d?.reportedAt && !d.late)) return null;
+  return d?.reportedAt
+    ? `Build and update runners is ready again once the host deployer reports; it last reported ${when(d.reportedAt)}.`
+    : "Build and update runners is ready once the host deployer has reported for the first time.";
+}
+
 /** The line under the sentence when the host has no offer to show (BOS-753): "not reported" only when it really is overdue. */
 export function deployerLine(v: SelfDeployView): string {
   const d = v.deployer;

@@ -2979,6 +2979,82 @@ describe("runner updates queue instead of being refused (BOS-1086)", () => {
   });
 });
 
+// BOS-2701 (26 Nov 13:19): the host removes available.json after every deploy and rewrites it on its next tick. The
+// trial banner says "press Build and update runners" in that very minute, and the press was refused with "reading main
+// again... try again in a minute". Every stage now queues the press; only a deployer that never reported or is late refuses.
+describe("Build and update runners just after a server update is queued, not refused (BOS-2701)", () => {
+  afterEach(() => vi.useRealTimers());
+  const inbox = (c: Awaited<ReturnType<typeof setup>>) => path.join(c.dir, "inbox", "request.json");
+  const hostTicks = (c: Awaited<ReturnType<typeof setup>>, at: string) => writeFile(path.join(c.dir, "outbox", "host.json"), JSON.stringify({ version: 1, name: "nas01", writtenAt: at, ownership: [] }));
+  const offerGone = (c: Awaited<ReturnType<typeof setup>>) => rm(path.join(c.dir, "outbox", "available.json"));
+  const deployedB = { id: randomUUID(), target: "server", result: "deployed", from_commit: A, to_commit: B, started: "2026-11-26T13:14:00Z", ended: "2026-11-26T13:18:00Z" };
+
+  it("a press within 2 minutes of the deploy, offer file gone and the poller not yet run, is queued for the trial's end and starts by itself", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-26T13:19:00Z"));
+    const c = (ctx = await setup());
+    await hostTicks(c, "2026-11-26T13:18:30Z");
+    await c.status(deployedB);
+    await offerGone(c).catch(() => undefined);
+    const press = await c.req("POST", "/api/self-deploy/update-runners");
+    expect(press.statusCode).toBe(200);
+    expect(press.json()).toMatchObject({ queued: true, startsAt: "2026-11-26T13:33:00.000Z" });
+    expect(press.json().message).toContain("Runners will update at");
+    expect(JSON.stringify(press.json())).not.toContain("Try again");
+    // The poller then reads the deploy (finished() keeps the press) and the host rewrites its offer: still queued.
+    vi.setSystemTime(new Date("2026-11-26T13:20:00Z"));
+    await c.available({ deployed: B, tip: B, commits: [], checkedAt: "2026-11-26T13:20:00Z" });
+    await hostTicks(c, "2026-11-26T13:20:00Z");
+    await c.selfDeploy.sync();
+    await expect(readFile(inbox(c), "utf8")).rejects.toThrow();
+    // After the trial the runner update goes to the host for B, with no card and no second press.
+    vi.setSystemTime(new Date("2026-11-26T13:33:30Z"));
+    await hostTicks(c, "2026-11-26T13:33:30Z");
+    await c.selfDeploy.sync();
+    expect(JSON.parse(await readFile(inbox(c), "utf8"))).toMatchObject({ target: "runner", commit: B });
+    expect((await c.open()).filter((d) => (d.context as { target: string }).target === "runner")).toHaveLength(0);
+  });
+
+  it("a press during the trial, after the poller read the deploy and the offer is still gone, is queued for the trial's end", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-26T13:18:30Z"));
+    const c = (ctx = await setup());
+    await hostTicks(c, "2026-11-26T13:18:30Z");
+    await c.status(deployedB);
+    await c.selfDeploy.sync();
+    vi.setSystemTime(new Date("2026-11-26T13:25:00Z"));
+    const press = await c.selfDeploy.updateRunners();
+    expect(press).toMatchObject({ queued: true, startsAt: "2026-11-26T13:33:00.000Z" });
+    expect(press).not.toHaveProperty("error");
+  });
+
+  it("a press after the trial with the offer still gone is queued and sent on the next pass", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-26T13:18:30Z"));
+    const c = (ctx = await setup());
+    await hostTicks(c, "2026-11-26T13:18:30Z");
+    await c.status(deployedB);
+    await c.selfDeploy.sync();
+    vi.setSystemTime(new Date("2026-11-26T13:40:00Z"));
+    await hostTicks(c, "2026-11-26T13:39:30Z");
+    const press = await c.selfDeploy.updateRunners();
+    expect(press).toMatchObject({ queued: true, startsAt: null, message: expect.stringContaining("starts by itself within a minute or two") });
+    vi.setSystemTime(new Date("2026-11-26T13:40:30Z"));
+    await hostTicks(c, "2026-11-26T13:40:30Z");
+    await c.selfDeploy.sync();
+    expect(JSON.parse(await readFile(inbox(c), "utf8"))).toMatchObject({ target: "runner", commit: B });
+  });
+
+  it("is still refused, with what to check, when the deployer is late", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-26T14:00:00Z"));
+    const c = (ctx = await setup());
+    await hostTicks(c, "2026-11-26T13:18:30Z");
+    await c.status(deployedB);
+    expect(await c.selfDeploy.updateRunners()).toMatchObject({ error: expect.stringContaining("Check that its cron job is running.") });
+  });
+});
+
 describe("a queued runner update, its cancel and the deploys behind it (BOS-1086)", () => {
   afterEach(() => vi.useRealTimers());
   const inbox = (c: Awaited<ReturnType<typeof setup>>) => path.join(c.dir, "inbox", "request.json");
