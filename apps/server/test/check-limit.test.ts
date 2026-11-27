@@ -36,6 +36,9 @@ describe("BOS-2802: memoryLine leads with how many agents the machine can run", 
   it("without checks: agents only, no mention of a check, and what to lower", () => {
     expect(memoryLine(small, "a", false)).toBe("This machine can run 4 agents at once. Agents at once is set to 6: lower it to 4.");
     expect(memoryLine({ ...small, agents: 3 }, "a", false)).toBe("This machine can run 4 agents at once.");
+    // The owner's 6.7 GB machine: 4.7 GB for the runner, so 2 agents and no checks counted.
+    const owners = lc({ agents: 6, ceilingBytes: 4.7 * GB, memoryBytes: 4.7 * GB, why, runners: [] });
+    expect(memoryLine(owners, undefined, false)).toBe("This machine can run 2 agents at once. Agents at once is set to 6: lower it to 2.");
   });
   it("says nothing to lower when the settings fit, and when no check fits at all", () => {
     const big = lc({ agents: 6, ceilingBytes: 30 * GB, why, runners: [{ slug: "a", slots: 3, memoryBytes: 22 * GB }] });
