@@ -2061,4 +2061,6 @@ details.pushes[open] > summary { margin-bottom: 8px; }
 .connect-meta { font-size: 13px; color: var(--muted); }
 .connect-detail { padding: 12px 14px 14px; }
 .connect-detail li code { font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; }
-@media (max-width: 640px) { .connect-pick { min-height: 60px; } .connect-detail { padding: 12px; } }
+/* The line's two parts on a phone are its own tap targets, as every other button is on touch (BOS-2811's bar). */
+.banner .linkish { align-self: center; }
+@media (max-width: 640px) { .connect-pick { min-height: 60px; } .connect-detail { padding: 12px; } .banner { flex-wrap: wrap; } .banner .linkish { min-height: 44px; padding: 4px 6px; } }
