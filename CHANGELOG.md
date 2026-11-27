@@ -62,6 +62,14 @@ Release step: adding to this file is part of every release (Release Manager, on 
    an older stage word in the docs, or has no new "What's new" entry, and it stops with a one-line reason.
    The weekly run is Tuesday 10:00 UTC: record the check before then, or that week's release is refused.
 
+8. Label the week's entries before the weekly release (BOS-2841). The Release workflow refuses a commit whose new entries are not
+   labelled with the version it is releasing, so that the page never says "not in an image yet" about an image that has them. On
+   the Monday docs check, with the next weekly version (the newest release's number plus one), run
+   scripts/changelog-label.sh label 0.1.0-beta.N on main's CHANGELOG.md, commit it with the docs check, and let CI publish that
+   commit's images. Running it twice does nothing the second time. The workflow cannot do it itself: a push with its own token
+   starts no CI, so the labelled commit would have no images. A run refused for this reason says which lines to label; label them,
+   wait for the new commit's images, and run the release again.
+
 Check before committing: pnpm --filter @boss-man/site build (it stops on a heading that is not a date, or one out of order).
 Remember to put an empty line after any line you add outside this comment, so the comment's own closing marker still closes it.
 -->
