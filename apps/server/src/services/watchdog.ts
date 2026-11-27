@@ -6,6 +6,7 @@
 import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, ne, notInArray, or, sql } from "drizzle-orm";
 import { GO_LIVE_WAIT_MAX_MS, currentReportSamples, watchEndsAt, splitOwnerSteps, ageWords, formatDate, readWatchdogSettings, sinceHours, ticketRef, untrusted, WATCHDOG_ACTION_LABEL, WATCHDOG_NON_CAPPED_KINDS, WATCHDOG_NUDGE_KINDS, WATCHDOG_RULE_LABEL, WatchdogSettings, windowHasReset, type WatchdogActionKind, type WatchdogRule } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
+import { reviewReadLine, ticketHasRepo } from "./no-repo-wording.js";
 import type { AlertInput } from "./alert-ladder.js";
 import { PREFLIGHT_KIND, PREFLIGHT_STARTED_KIND } from "./ci-preflight.js";
 /** A GitHub CI pre-flight "started" row with no result after this long is treated as lost, not as a wait. */
@@ -1380,12 +1381,13 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       await capOrFail(companyId, s);
       const base = { companyId, kind: "chase_review" as const, ticketId: t.id, flagId: f.id, actorAgentId: sm.id, actorRunId: runId, targetAgentId: pending[0]!.reviewerAgentId, reason };
       const wakeIds: string[] = [];
+      const read = reviewReadLine(await ticketHasRepo(db, t.id));
       for (const r of pending) {
         const w = await deps.notify(r.reviewerAgentId!, {
           reason: REVIEW_REASON,
           priority: 3,
           causedByRunId: runId,
-          note: `- ${t.id} "${title(t.title)}": the Scrum Master is chasing your ${r.kind} review (round ${r.round}).\n  ${untrusted(`agent ${sm.name}`, reason)}\n  Read the changes with the review tool (action diff), then give your verdict with action submit.`,
+          note: `- ${t.id} "${title(t.title)}": the Scrum Master is chasing your ${r.kind} review (round ${r.round}).\n  ${untrusted(`agent ${sm.name}`, reason)}\n  ${read}.`,
         });
         if (w.status !== "dropped") wakeIds.push(w.id);
       }
