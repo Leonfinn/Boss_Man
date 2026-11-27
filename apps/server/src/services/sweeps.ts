@@ -8,6 +8,7 @@
 import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, max, ne, notInArray, or, sql } from "drizzle-orm";
 import { ageWords, goLiveWaitWords, isInfiniteModel, MERGE_MISSED_AFTER_MS, parkedOnPurpose, ticketRef } from "@boss-man/shared";
 import { systemMoveTicket } from "./ticket-transition.js";
+import { reviewReadLine, ticketHasRepo } from "./no-repo-wording.js";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
 import { activity, agents, checkJobs, companies, decisions, engagementMessages, engagements, keyResults, milestones, notifications, objectives, reviewRequests, runnerEvents, runners, runs, settings, ticketDependencies, ticketMessages, tickets, wakes } from "../db/schema.js";
@@ -674,7 +675,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
           agentId,
           reason: REVIEW_REASON,
           priority: 3,
-          note: `- ${ticket.id} "${ticket.title}": still waiting for your ${r.kind} review (round ${r.round}), requested ${ago(t.getTime() - r.createdAt.getTime())} ago.${standIn ? `\n  You hold the ${r.kind} review as a stand-in, not as its usual reviewer: ${standIn}.` : ""}\n  Read the changes with the review tool (action diff), then give your verdict with action submit.`,
+          note: `- ${ticket.id} "${ticket.title}": still waiting for your ${r.kind} review (round ${r.round}), requested ${ago(t.getTime() - r.createdAt.getTime())} ago.${standIn ? `\n  You hold the ${r.kind} review as a stand-in, not as its usual reviewer: ${standIn}.` : ""}\n  ${reviewReadLine(await ticketHasRepo(db, ticket.id))}.`,
         });
         done.add(agentId);
         result.woken++;
