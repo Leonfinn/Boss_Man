@@ -41,13 +41,20 @@ export function reasonForWake(reason: string | null): string {
 // those are treated as not woken, so the first pass after the update wakes the CEO once instead of going quiet for good.
 // BOS-2650: `sentAt` (a misnomer kept for the row's shape) is the id of the wake that resolved: sender, milestone and time
 // in one. A wake the scheduler saved while the CEO could not start (quiet hours, a quota hold, too many ticketless wakes
-// that hour) resolves as "queued" the moment it is written, which proves the request was saved, not that the CEO was told.
-// So the next pass reads that wake's row and, while it is still "queued" and older than WAKE_GRACE_MS, treats the row as
+// that hour) resolves as "queued" or "deferred" (BOS-2843) the moment it is written, which proves the request was saved, not
+// that the CEO was told. So the next pass reads that wake's row and, while it is still waiting and older than WAKE_GRACE_MS, treats the row as
 // not woken and sends again. Without it a saved-but-never-started wake would go quiet for good.
 type Kept = { status: string | null; managed: boolean; woke?: boolean; sentAt?: string };
 
 /** How long a saved wake may stay "queued" before this pass assumes it never started and sends again (BOS-2650). */
 export const WAKE_GRACE_MS = 30 * 60_000;
+
+/**
+ * BOS-2843: the wake statuses that mean "saved, not started yet". BOS-2650 named quiet hours and quota holds as the cases
+ * to retry but read only "queued"; the scheduler saves a held wake as "deferred" (scheduler.wake's hold, and tick()'s
+ * quota, budget and limit holds move a queued one there), so a held wake counted as told and the milestone went quiet.
+ */
+export const WAKE_WAITING: readonly string[] = ["queued", "deferred"];
 
 export function milestoneRiskService(db: Db, deps: { planning: ReturnType<typeof planningService>; wake: (input: { agentId: string; reason: string; note: string; priority?: number }) => Promise<unknown>; now?: () => Date; log?: (message: string) => void; /** BOS-2650: a wake's current status (and when it was saved) by its row id; null when it can't be read. BOS-2653: `createdAt` is the real send time the grace is measured from, because `sentAt` holds the wake's id, not a time. */ wakeStatus?: (wakeId: string) => Promise<{ status: string; createdAt?: Date | string | null } | null> }) {
   const now = deps.now ?? (() => new Date());
@@ -101,12 +108,13 @@ export function milestoneRiskService(db: Db, deps: { planning: ReturnType<typeof
           } else if (deps.wakeStatus) {
             try {
               const row = await deps.wakeStatus(prev.sentAt);
-              if (row?.status === "queued") {
+              if (row && WAKE_WAITING.includes(row.status)) {
                 const made = row.createdAt ? new Date(row.createdAt) : null;
                 owedFrom = made && !Number.isNaN(made.getTime()) ? made : now();
-              } else if (!row) {
+              } else if (!row || row.status === "dropped") {
                 // BOS-2653: the wake row is gone (never saved, purged, or written by the broken version that recorded
-                // "woken" on a save). Nothing proves the CEO was told, so treat it as not woken and send again now.
+                // "woken" on a save). BOS-2843: or the scheduler dropped it after it was saved. Nothing proves the CEO
+                // was told, so treat it as not woken and send again now.
                 owedFrom = new Date(0);
               }
             } catch (err) {

@@ -140,8 +140,10 @@ describe("go-live resolves for every merge the live commit contains (BOS-1640)",
     await writeFile(path.join(c.dir, "outbox", "available.json"), JSON.stringify({ checkedAt: new Date().toISOString(), deployed: LOST, tip: LOST, commits: [], paths: [], infraPaths: [], runnerChanged: false }));
     // Boss Man can't place the running commit: that is "can't tell", not "not live" (BOS-1644), so the guard does not
     // refuse with the BOS-1467 "waiting to go live" message. (The update may still queue behind the server's trial.)
-    const before = await c.req("POST", "/api/self-deploy/update-runners");
-    expect(before.json().message ?? "").not.toContain("to go live: it fixes the runner update itself.");
+    // The service step of the press: since BOS-2859 the route also approves the card it raises, which would make the
+    // second press below "already under way" instead of showing the guard's answer.
+    const before = (await c.selfDeploy.updateRunners()) as { error?: string; message?: string };
+    expect(before.error ?? before.message ?? "").not.toContain("to go live: it fixes the runner update itself.");
 
     await hostReports(c, { from: PREV, to: LOST });
     const after = await c.req("POST", "/api/self-deploy/update-runners");

@@ -215,6 +215,20 @@ export function drainDetail(d: DrainFacts, otherWaits: boolean): string {
 }
 
 /**
+ * BOS-2861: which waits that count running checks are on now, read from the same rows as activeWaits: the runner drain
+ * (not the owner's "stop and update now", which waits for no check, and not a wrap-up or a build, which swap nothing) and
+ * the server update's quiet wait. The Merge queue marks each running check from these (runner-busy.ts updateCheckMarks).
+ */
+export async function checkCountingWaits(db: Db): Promise<{ runner: boolean; server: boolean }> {
+  const rows = await db.select().from(settings);
+  const deploy = rows.find((r) => r.key === DEPLOY_WAIT_KEY)?.value as DeployWaitRow | undefined;
+  const hold = rows.find((r) => r.key === "maintenance")?.value as HoldRow | undefined;
+  const runner = !!hold?.since && hold.kind !== "wrapup" && hold.kind !== "building" && runnerHoldWait(hold) === "runner-drain";
+  const server = !!deploy?.approvedAt && deploy.phase !== "sent" && deploy.phase !== "window" && deploy.phase !== "handover";
+  return { runner, server };
+}
+
+/**
  * Every wait that is on now, from the rows that exist today (`deploy_wait`, `maintenance`) plus the live landing ids
  * the runner swap waits on. No table of its own: a restart keeps every `since`.
  */
