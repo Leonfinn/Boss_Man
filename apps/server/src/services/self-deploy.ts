@@ -2245,7 +2245,19 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
 
     /** When the current server update's standby window (its trial) ends, if one is running. */
     async trialUntil(): Promise<string | null> {
-      return (await trialState(await available()))?.endsAt ?? null;
+      const a = await available();
+      const trial = await trialState(a);
+      if (trial) return trial.endsAt;
+      // BOS-2789 (27 Nov 09:59): the runner-due row that trialState reads is written by sync's finished(), and a new
+      // leader's background loops have no first pass at start, so after a blue/green takeover the deploy wait's first
+      // pass (15 s) reads the host's "deployed" before the first sync (30 s) has. The row was missing, or still the last
+      // update's, so the wait saw no window and lifted its hold at the start of the trial. The host's own status gives
+      // the end finished() is about to write (same sum); a standby that has already stopped still ends the trial early.
+      const s = await realStatus();
+      if (s?.target !== "server" || s.result !== "deployed") return null;
+      const ends = Date.parse(s.ended) + trialMs(a, s);
+      if (!Number.isFinite(ends) || ends <= Date.now() || (await standbyStopped())) return null;
+      return new Date(ends).toISOString();
     },
 
     /** Whether a runner update card is open (the drain hands over to it after a server update). */
