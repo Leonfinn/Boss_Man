@@ -43,8 +43,8 @@ The image install has not yet been run from start to finish on a real machine fo
 
 - a 64-bit machine (x86-64 or arm64) with at least 4 GB of memory, and Docker Engine with Docker Compose v2 (check with `docker compose version`). For agents to run, size it as in [What machine do I need](#what-machine-do-i-need).
 - internet access to the image registry, and to Anthropic if you use Claude Code
-- a GitHub or Gitea account, for the repositories your agents work in
-- an AI account: a Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic. A Claude Pro or Max plan is the easiest start, because the CEO is a Claude Code agent unless you change it.
+- only if your agents will work on code: a GitHub or Gitea account, for the repositories they work in. A team that works on documents and research does not need one.
+- an AI account: a Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic. A Claude Pro or Max plan is the easiest start, because the CEO is a Claude Code agent unless you change it. You pay for this account. Boss Man itself is free.
 - a computer with a web browser
 
 ### Which platforms work
@@ -185,8 +185,8 @@ The second option: build every image on your own machine from the code. Use it i
 
 - a 64-bit Linux machine with Docker Engine and Docker Compose v2 (check with `docker compose version`)
 - `git`, `openssl` and `curl` on that machine
-- a GitHub or Gitea account, for the repositories your agents work in
-- an AI account: a Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic. A Claude Pro or Max plan is the easiest start, because the CEO is a Claude Code agent unless you change it.
+- only if your agents will work on code: a GitHub or Gitea account, for the repositories they work in. A team that works on documents and research does not need one.
+- an AI account: a Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic. A Claude Pro or Max plan is the easiest start, because the CEO is a Claude Code agent unless you change it. You pay for this account. Boss Man itself is free.
 - a computer with a web browser on the same network
 
 Boss Man needs Linux because two safety features use the Linux kernel: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. Settings shows whether each one is working on your machine: the network guard under **Settings → Server and runner → This server**, and the agent fence under **Settings → Permissions → Agent fence**.

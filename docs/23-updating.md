@@ -32,7 +32,7 @@ You need:
 
 Every way of updating the server takes a database backup first. Database changes apply by themselves during the update. Each one is written so the previous code still runs against the new schema, which is why a code rollback works. The rules are in [docs/10-migrations.md](10-migrations.md).
 
-- With the host deployer: approve the "Deploy <commit>?" card on Decisions. Settings → Server and runner → Updates shows the same offer under **Review and deploy**, or **Check for updates now** when there is none yet. Setting it up is in [docs/30-in-app-updates.md](30-in-app-updates.md).
+- With the host deployer: approve the "Deploy <commit>?" card on Decisions. Settings → Server and runner → Updates shows the same offer under **Review and deploy**, or **Check for updates now** when there is none yet. Setting it up is in [docs/30-in-app-updates.md](30-in-app-updates.md). To reach that page in one click, open it and press **Add to shortcuts** beside its title: it then shows in the Shortcuts section at the top of the menu.
 - Single server, by hand: run `scripts/deploy.sh` from the checkout. It backs up, pulls, rebuilds, restarts, waits for the server to report healthy, and offers to update the runners if their code changed. Success is the line `The server is healthy.` Useful options:
   - `--dry-run` shows the steps without running anything.
   - `--force` rebuilds even when there is nothing new.

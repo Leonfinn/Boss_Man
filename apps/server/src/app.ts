@@ -28,7 +28,7 @@ import { runnersService } from "./services/runners.js";
 import { connectionSummary } from "./services/runner-connections.js";
 import { allowsPrivate, type HostLookup, LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { watchCiTokenGrant } from "./services/ci-identity-card.js";
-import { AnswerError, clearOwnerTodo, decisionsService, setDecisionSettledListener, setOwnerTodoFacts } from "./services/decisions.js";
+import { AnswerError, UPDATE_RUNNERS, clearOwnerTodo, decisionsService, setDecisionSettledListener, setOwnerTodoFacts } from "./services/decisions.js";
 import { githubWatchService, WATCH_TOKEN_ENV } from "./services/github-watch.js";
 import { markOwnerOpened, recentClosedNotices } from "./services/closed-notice.js";
 import { getHold, holdBlocksStarts, maintenanceService } from "./services/maintenance.js";
@@ -2814,7 +2814,7 @@ export async function buildApp(opts: AppOptions) {
     });
 
     // Scheduling and kill switches, the runner update hold, self-deploy, restart and deploy targets (R30, R14, R15).
-    serverAdminRoutes(owner, { db, scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun: (runId) => runsSvc.cancel(runId), activeWaits: () => currentUpdateWaits(), releaseWatch });
+    serverAdminRoutes(owner, { db, scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun: (runId) => runsSvc.cancel(runId), activeWaits: () => currentUpdateWaits(), releaseWatch, approveRunnerCard: async (id, req) => decisionsSvc.answer(id, UPDATE_RUNNERS, { by: await ownerName(req), via: "approved by owner via Updates panel" }) });
 
     // The decision queue (R20), ranked, with what each row holds up.
     owner.get("/api/decisions", async () => decisionsSvc.queue());
