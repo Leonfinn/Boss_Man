@@ -10,6 +10,7 @@
 #   publish-images.sh copy <name> <tag> <digest>
 #                                              copy the finished multi-arch image from the first prefix to the others
 #                                              by digest, and fail if any copy has a different digest
+#   publish-images.sh digest <reference>       the digest a reference points to, waiting about a minute for a new tag
 #   publish-images.sh verify <name> <digest>   in EVERY registry: the signature, the SBOM and the provenance exist
 #   publish-images.sh release-json <version> <commit> <tag>
 #                                              print release.json: each image's digest, and its digest per architecture
@@ -85,8 +86,22 @@ cmd_tag() {
 load_prefixes() { local out; out="$(cmd_prefixes)"; mapfile -t prefixes <<<"$out"; }
 load_images() { local out; out="$(cmd_images)"; mapfile -t names <<<"$out"; }
 
-# The digest a reference points to (the manifest list for a multi-arch image).
-digest_of() { docker buildx imagetools inspect "$1" --format '{{json .Manifest}}' | jq -r .digest; }
+# The digest a reference points to (the manifest list for a multi-arch image). A tag written a moment ago can read
+# as "not found" for a few seconds (BOS-2768: ghcr.io, right after `imagetools create`; the same commit's next run
+# passed), so a failed read is tried again, PUBLISH_READ_TRIES times PUBLISH_READ_STEP seconds apart (about a
+# minute). A reference that never appears still fails, naming it.
+digest_of() {
+  local out try=1 tries="${PUBLISH_READ_TRIES:-12}" step="${PUBLISH_READ_STEP:-5}"
+  until out="$(docker buildx imagetools inspect "$1" --format '{{json .Manifest}}')"; do
+    [ "$try" -lt "$tries" ] || die "$1 still cannot be read after $tries tries"
+    echo "publish-images: $1 cannot be read yet (try $try of $tries), trying again in ${step}s" >&2
+    sleep "$step"
+    try=$((try + 1))
+  done
+  jq -r .digest <<<"$out"
+}
+
+cmd_digest() { digest_of "${1:?image reference}"; }
 
 cmd_copy() {
   local name="${1:?image name}" tag="${2:?tag}" digest="${3:?digest}" first p got
@@ -212,6 +227,7 @@ case "${1:-}" in
   dockerfile) shift; cmd_dockerfile "$@" ;;
   tag) shift; cmd_tag "$@" ;;
   copy) shift; cmd_copy "$@" ;;
+  digest) shift; cmd_digest "$@" ;;
   verify) shift; cmd_verify "$@" ;;
   release-json) shift; cmd_release_json "$@" ;;
   resolve-commit) shift; cmd_resolve_commit "$@" ;;
