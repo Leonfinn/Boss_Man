@@ -33,7 +33,7 @@ If you picked code, the project also needs its repository. Paste its address int
 
 ## The runner
 
-The runner is your agents' workspace: a separate, locked-down space where they work. Wait for it to say **Connected**. This can take up to a minute. If it says **Not connected**, choose **Start the runner**.
+The runner is your agents' workspace: a separate, locked-down space where they work. Wait for it to say **Connected**. This can take up to a minute. If it says **Not connected**, choose **Start the runner**. To find out more, see [Your agents' workspace (the runner)](/guides/the-runner).
 
 ## Claude
 
@@ -52,11 +52,11 @@ The wizard shows this step only if you picked **Code in a git repository**. A gi
 - On GitHub, make a fine-grained personal access token for only the repositories this company works on, with Contents, Pull requests, Workflows and Actions set to read and write. The wizard's **How do I get a token?** lists every step.
 - On Gitea, open **Settings > Applications > Generate New Token** and give it repository Read and Write.
 
-Paste it, save, and choose **Check the token against** your project. You should see "The token can read and push to the repo."
+Paste it, save, and choose **Check the token against** your project. You should see "The token can read and push to the repo." Step-by-step help and what to do when it expires are in [Git token](/guides/checks-and-check-workers#git-token).
 
 ## Checks before merging (code companies only)
 
-The wizard shows this step only if you picked **Code in a git repository**. A check is an automatic test Boss Man runs on finished code before it joins the project. Under **Before merging, Boss Man will**, choose the command Boss Man runs before it merges approved work. Boss Man suggests one from your repository. Choose **Re-detect** if the list looks generic.
+The wizard shows this step only if you picked **Code in a git repository**. A check is an automatic test Boss Man runs on finished code before it joins the project. Under **Before merging, Boss Man will**, choose the command Boss Man runs before it merges approved work. Boss Man suggests one from your repository. Choose **Re-detect** if the list looks generic. To find out whether you need a check at all, see [Checks and check workers](/guides/checks-and-check-workers).
 
 ## What pays for the CEO
 
