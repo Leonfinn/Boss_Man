@@ -678,6 +678,9 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         if (followUps?.length) {
           const carryBad = criterionCarryRefusal(withCriteria.criteria, withCriteria.current, followUps);
           if (carryBad) return fail(carryBad);
+          // BOS-2864: the follow-up would carry the criterion as its own, so it is refused the same way (reword it on this ticket first).
+          const blindCarry = runnerBlindRefusal(followUps.flatMap((f) => criteriaToCarry(withCriteria.criteria, withCriteria.current, f.criterion !== undefined ? [f.criterion] : undefined) ?? []));
+          if (blindCarry) return fail(`A follow-up would carry a criterion nobody can observe from the runner. Reword it on this ticket (update_ticket acceptanceCriteria), then hand it on.\n${blindCarry}`);
         }
       }
       if (!withCriteria) return fail("No ticket with that ID in your company.");

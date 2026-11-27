@@ -77,6 +77,14 @@ describe("runner-blind after-merge criteria (BOS-2864)", () => {
     expect(textOf(bad)).toContain("Three ways out");
   });
 
+  it("followUps refuse to carry one", async () => {
+    const c = await ceo();
+    const t = await ctx.ticket({ systemState: "in_progress", acceptanceCriteria: [BLIND] });
+    const out = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "1 not reported: handed on.", followUps: [{ title: "Check the container", assignee: "CEO", why: "Needs a look." }] } });
+    expect(isError(out)).toBe(true);
+    expect(textOf(out)).toContain("Three ways out");
+  });
+
   it("approve is refused on a ticket made after the rule, not on an older one; changes_requested always goes", async () => {
     const c = await ceo();
     const fresh = await ctx.ticket({ acceptanceCriteria: [BLIND], createdAt: new Date("2030-01-01T00:00:00Z") });
