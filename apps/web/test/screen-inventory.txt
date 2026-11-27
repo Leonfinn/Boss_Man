@@ -322,6 +322,7 @@ reads:
   - /api/companies/:id/runner
   - /api/companies/:id/runner/:id
   - /api/self-deploy/runner-addons
+  - /api/setup-progress
 
 ## #/settings/<company>/secrets
 sections: 
