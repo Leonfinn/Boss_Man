@@ -29,7 +29,7 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 
 ## C
 
-- **Card**: One thing on the Decisions page that waits for your answer, such as a plan, a permission request, a sign-off or a question. Each card offers its own buttons. ([Guide 4](/guides/board-and-decisions#answering-a-card))
+- **Card**: One thing on the Decisions page that waits for your answer, such as a plan, a permission request, a sign-off or a question. Each card offers its own buttons. A button that promises a screenshot works only once one is attached on the card. ([Guide 4](/guides/board-and-decisions#answering-a-card))
 - **CEO**: The agent every company has. It plans the work, writes and assigns tickets, reviews simpler work and settles many permission requests before you see them. ([Guide 1](/guides/how-boss-man-works#companies-and-agents))
 - **CEO-first rule**: Commands that no rule or built-in check settles, and deletes in /tmp or in the agent's own folder (apart from plain deletes of its own entries in /tmp, which run at once), go to the CEO first. If the CEO does not settle one within five minutes, or the request is from the CEO itself, it comes to you. ([Guide 6](/guides/permissions#who-is-asked))
 - **Check worker**: A small container on another Docker host that runs checks when the check line is long. It runs no agents. Add one under **Settings > Server and runner > Limits and checks**. ([Guide 9](/guides/add-ons#check-workers-more-machines-for-checks))
@@ -63,6 +63,10 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 
 - **In progress**: The board column for tickets an agent is working on. ([Guide 4](/guides/board-and-decisions#the-board-s-columns))
 - **In-progress limit**: How many tickets one agent, or the whole company, may have in progress at once, set under **Settings > Server and runner > Limits and checks**. A ticket over the limit waits in Ready and starts by itself when a place frees up. Agents also call it the WIP limit. ([Guide 4](/guides/board-and-decisions#in-progress-limits))
+
+## K
+
+- **Keyboard shortcuts**: Keys that move around Boss Man without the mouse. Press **?** to list them. Switch off the single-letter keys under **Settings > Account**. ([Guide 4](/guides/board-and-decisions#keyboard-shortcuts))
 
 ## L
 
