@@ -104,6 +104,19 @@ describe("a ready hold wakes its holder once (BOS-2870 criterion 2)", () => {
     expect(woke[0]!.ticketId).toBe(id);
   });
 
+  it("the live failure: a stranded Blocked ticket with no assignee broke every pass, and the holder is still woken", async () => {
+    // The owner's live reads (27 Nov): every server-blue log line was "sweep failed" from releaseStrandedBlocked
+    // looking up agents.id = "" for an unassigned Blocked ticket (BOS-2871), and both holds kept woken_at null.
+    ctx = await setup();
+    const { id, waited } = await ctx.heldOn(ctx.ceo.id, "CEO");
+    await ctx.ticket("Parked, nobody on it", { systemState: "blocked", assigneeAgentId: null, stateChangedAt: new Date(ctx.clock().getTime() - 60 * MIN) });
+    await ctx.merge(waited);
+    await ctx.sweeps.run().catch(() => undefined);
+    const woke = await ctx.holdWakes(ctx.ceo.id);
+    expect(woke).toHaveLength(1);
+    expect(woke[0]!.ticketId).toBe(id);
+  });
+
   it("a wake the scheduler dropped is tried again on the next pass, not counted as sent", async () => {
     ctx = await setup();
     const { waited } = await ctx.heldOn(ctx.reviewer.id, "Reviewer");
