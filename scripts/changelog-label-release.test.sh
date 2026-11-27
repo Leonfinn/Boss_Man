@@ -125,7 +125,8 @@ EOF
 scur="$(commit split-cur)"
 (cd "$G" && "$L" label-release 0.1.0-beta.4 "$sprev" "$scur" > "$S/split")
 grep -q 'labelled 1 section' "$S/split" || fail "expected one label on the split day: $(cat "$S/split")"
-grep -q '^## 2 December 2026$' "$G/CHANGELOG.md" && grep -q '^\*\*In image 0.1.0-beta.4\*\*$' "$G/CHANGELOG.md" || fail "the split day got no beta.4 label"
+grep -q '^## 2 December 2026$' "$G/CHANGELOG.md" || fail "the split day heading is gone"
+grep -q '^\*\*In image 0.1.0-beta.4\*\*$' "$G/CHANGELOG.md" || fail "the split day got no beta.4 label"
 [ "$(grep -c '^\*\*In image 0.1.0-beta.4\*\*$' "$G/CHANGELOG.md")" = 1 ] || fail "expected exactly one beta.4 label"
 [ "$(grep -c '^\*\*In image 0.1.0-beta.3\*\*$' "$G/CHANGELOG.md")" = 2 ] || fail "the older label was touched"
 echo "split file:"; sed -n '1,30p' "$G/CHANGELOG.md"
