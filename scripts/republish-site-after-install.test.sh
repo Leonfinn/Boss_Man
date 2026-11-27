@@ -29,6 +29,9 @@ run INSTALL_RESULT_FILE="$t/pass.json" VERSION=0.1.0-beta.4 && fail "a result fo
 run INSTALL_RESULT_FILE="$t/pass.json" CF_PAGES_PROJECT= || fail "not configured: should exit 0"
 [ ! -s "$t/log" ] || fail "not configured: nothing may be published"
 grep -q "not set up here" "$t/out" || fail "not configured: should say why"
+run INSTALL_RESULT_FILE="$t/pass.json" CF_PAGES_PROJECT= GITHUB_REPOSITORY=o/r || fail "not configured with a repo: should exit 0"
+grep -q "gh release edit v0.1.0-beta.3" "$t/log" || fail "not configured: the release notes must say the site was not republished"
+grep -q "Website NOT republished" "$t/log" || fail "not configured: the notes line must say NOT republished"
 
 run INSTALL_RESULT_FILE="$t/pass.json" PUBLISH_FAIL=1 GITHUB_REPOSITORY=o/r RUN_URL=https://example.com/run/1 && fail "a failed publish must fail the job"
 grep -q "gh release edit v0.1.0-beta.3" "$t/log" || fail "a failed publish must mark the release"

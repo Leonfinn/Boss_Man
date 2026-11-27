@@ -206,8 +206,11 @@ jobs:
   # guide's "Last tested" line is never stale and nobody has to run scripts/publish-site.sh by hand. It runs after a failed
   # result too (the guide then says the test failed). The publish settings are in the "site" environment (Settings >
   # Environments > site): variables SITE_URL and CF_PAGES_PROJECT, secrets CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID
-  # (docs/18-website.md). Not set up (a fork with no website): a warning, nothing published. A failed publish fails this job
-  # and marks the release; the old page stays live.
+  # (docs/18-website.md). Only main may use the environment (Deployment branches and tags: main only), and the secrets are
+  # environment secrets, not repository ones, so no other branch's workflow can read the token. Not set up (a fork with no
+  # website): a warning and a "Website NOT republished" line in the release notes, nothing published. A failed publish fails
+  # this job and adds "Website republish FAILED" to the release notes; the old page stays live. The Release Manager reads
+  # those lines on its "Release log: record" wake (CHANGELOG.md step 6); a workflow cannot message Boss Man itself.
   site:
     needs: record
     if: ${{ always() && (needs.record.result == 'success' || needs.record.result == 'failure') && (needs.record.outputs.result == 'pass' || needs.record.outputs.result == 'fail') }}
@@ -224,8 +227,6 @@ jobs:
       VERSION: ${{ needs.record.outputs.version }}
       SITE_URL: ${{ vars.SITE_URL }}
       CF_PAGES_PROJECT: ${{ vars.CF_PAGES_PROJECT }}
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -242,6 +243,9 @@ jobs:
       - run: pnpm install --frozen-lockfile --filter @boss-man/site...
       - name: Republish the site with this result
         env:
+          # The Cloudflare secrets are on this step only, so checkout, setup and pnpm install never see them.
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           INSTALL_RESULT_FILE: ${{ runner.temp }}/joined/install-result.json
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: scripts/republish-site-after-install.sh

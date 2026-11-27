@@ -35,8 +35,18 @@ missing=""
 for name in SITE_URL CF_PAGES_PROJECT CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
   [ -n "${!name:-}" ] || missing="$missing $name"
 done
+# Puts one "Website ..." line at the end of the release notes (replacing an earlier one), so the Release Manager, who reads
+# the release on its "Release log: record" wake, sees a failed or skipped republish there and not only in a job log.
+mark_release() {
+  [ -n "${GITHUB_REPOSITORY:-}" ] || return 0
+  local body
+  body="$("$gh_cmd" release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json body --jq .body 2> /dev/null | grep -v '^Website republish FAILED\|^Website NOT republished' || true)"
+  "$gh_cmd" release edit "v$VERSION" --repo "$GITHUB_REPOSITORY" --notes "$body"$'\n\n'"$1" || echo "republish-site: could not mark the release"
+}
+
 if [ -n "$missing" ]; then
   echo "::warning::Site not republished after the install test of v$VERSION: not set up here (missing:$missing). Add them as described in docs/18-website.md (Where the publish settings come from)."
+  mark_release "Website NOT republished after the install test: the \"site\" environment is not set up (missing:$missing). The install guide still shows the previous result. Set it up (docs/18-website.md) or publish by hand."
   exit 0
 fi
 
@@ -48,9 +58,5 @@ if "$publish"; then
 fi
 
 echo "::error::Republishing the site after the install test of v$VERSION failed; the old page is still live."
-line="Website republish FAILED after the install test (${RUN_URL:-no run link}). The install guide may still show the previous result."
-if [ -n "${GITHUB_REPOSITORY:-}" ]; then
-  body="$("$gh_cmd" release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json body --jq .body 2> /dev/null | grep -v '^Website republish FAILED' || true)"
-  "$gh_cmd" release edit "v$VERSION" --repo "$GITHUB_REPOSITORY" --notes "$body"$'\n\n'"$line" || echo "republish-site: could not mark the release"
-fi
+mark_release "Website republish FAILED after the install test (${RUN_URL:-no run link}). The install guide may still show the previous result."
 exit 1
