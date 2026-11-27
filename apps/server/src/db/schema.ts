@@ -1858,6 +1858,12 @@ export const features = pgTable(
     createdAt: createdAt(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     releasedAt: timestamp("released_at", { withTimezone: true }),
+    /**
+     * BOS-2686: when the feature first went live. The first ticket that delivers it is live once it is done and live,
+     * or once this is set. Tickets on the feature from before this are delivery work; one created after it is a
+     * follow-up, which shows on the feature but neither holds it nor reopens it.
+     */
+    liveBaselineAt: timestamp("live_baseline_at", { withTimezone: true }),
     /** When to ask whether the released feature moved its goal. Set once, on the first release, and never again. */
     goalCheckDueAt: timestamp("goal_check_due_at", { withTimezone: true }),
     /** Set when that question has been put to the owner. */
