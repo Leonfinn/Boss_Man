@@ -50,7 +50,7 @@ const items = [
 ];
 
 describe.skipIf(!browser)("setup before-you-go and checklist, in a browser", () => {
-  for (const [name, width] of [["desktop", 1280], ["phone", 380]] as const) {
+  for (const [name, width] of [["desktop-1440", 1440], ["wide-1667", 1667], ["phone", 390]] as const) {
     it(`fits at ${name} width, rows one under another, wizard button shown`, async () => {
       const page = await browser!.newPage({ viewport: { width, height: 900 } });
       const list = items.map((i) => `<li class="${i.done ? "done" : ""}"><span aria-hidden="true">${i.done ? "✓" : "○"}</span> ${i.label}</li>`).join("");
