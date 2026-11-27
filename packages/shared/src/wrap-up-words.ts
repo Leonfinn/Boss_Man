@@ -15,6 +15,10 @@ export type WrapTieView = {
   runner?: { queuedAt: string | null; stage: WrapRunnerStage; startsAt?: string | null; why?: string | null } | null;
   /** Only for a wrap-up tied to nothing: when it lifts by itself. */
   liftsAt?: string | null;
+  /** BOS-2786: "boss-man" when Boss Man started it for a runner update queued behind a trial (absent: the owner asked). */
+  by?: "owner" | "boss-man";
+  /** BOS-2786: with by "boss-man": when running agents are (or were) asked to finish. */
+  tellAt?: string | null;
 };
 
 export type WrapWords = {
@@ -30,18 +34,31 @@ export type WrapWords = {
 export const STANDALONE_WRAPUP_MINUTES = 60;
 
 const runsWord = (n: number) => `${n} ${n === 1 ? "run" : "runs"}`;
+const checksWord = (n: number) => `${n} ${n === 1 ? "check" : "checks"}`;
 
 /**
- * The words for a wrap-up that is on, in every state (RCA-011 table rows A–I). `runs` is how many agents are still
- * finishing; `at` formats an instant as a clock time. "No update was waiting" appears only when nothing is tied.
+ * The words for a wrap-up that is on, in every state (RCA-011 table rows A–I, and BOS-2786's row J). `runs` is how many
+ * agents are still finishing; `checks` how many checks on the runner the runner update still waits for; `at` formats an
+ * instant as a clock time; `now` (ms) says whether Boss Man's ask to agents is still to come. "No update was waiting"
+ * appears only when nothing is tied.
  */
-export function wrapUpWords(v: WrapTieView, runs: number, at: (iso: string) => string): WrapWords {
+export function wrapUpWords(v: WrapTieView, runs: number, at: (iso: string) => string, checks = 0, now: number = Date.now()): WrapWords {
   const s = v.server ?? null;
   const r = v.runner ?? null;
   const server = s ? `the server update${s.approvedAt ? ` you approved at ${at(s.approvedAt)}` : ""}` : "";
-  const finishing = runs > 0 ? `${runs} ${runs === 1 ? "agent is" : "agents are"} still finishing the step ${runs === 1 ? "it is" : "they are"} on.` : "Every agent has finished.";
-  const waitingRuns = runs > 0 ? ` Waiting for ${runsWord(runs)} to finish.` : "";
+  const left = [...(runs > 0 ? [runsWord(runs)] : []), ...(checks > 0 ? [checksWord(checks)] : [])].join(" and ");
+  const finishing = runs > 0 ? `${runs} ${runs === 1 ? "agent is" : "agents are"} still finishing the step ${runs === 1 ? "it is" : "they are"} on.${checks > 0 ? ` ${checksWord(checks)} still running.` : ""}` : checks > 0 ? `Every agent has finished; ${checksWord(checks)} still running.` : "Every agent has finished.";
+  const waitingRuns = left ? ` Waiting for ${left} to finish.` : "";
   const out = (lead: string, lift: string): WrapWords => ({ banner: `${lead} ${lift}${waitingRuns}`, say: `${lead} ${finishing}`, more: lift });
+
+  // J (BOS-2786): Boss Man started it for a runner update queued behind a trial, and nobody has to press anything.
+  if (v.by === "boss-man" && r && r.stage === "queued") {
+    const startsAt = r.startsAt ?? s?.trialEndsAt ?? null;
+    const when = startsAt ? ` for ${at(startsAt)}` : "";
+    const trial = s ? ", when the server update's trial ends" : "";
+    const tell = v.tellAt ? (Date.parse(v.tellAt) > now ? ` and asks agents to finish at ${at(v.tellAt)}` : ` and asked agents to finish at ${at(v.tellAt)}`) : "";
+    return out(`Runner update queued${when}${trial}. Boss Man is holding new work and checks since ${at(v.since)}${tell}.`, "It lifts by itself when the runners are updated, or if the update is switched back or cancelled. Nothing for you to press.");
+  }
 
   // A: tied to nothing. The only state that says no update was waiting, and it has no update line beside it.
   if (!s && !r) {

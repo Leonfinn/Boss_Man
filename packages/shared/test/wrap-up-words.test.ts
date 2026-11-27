@@ -125,3 +125,32 @@ describe("wrapUpEndWords: the notice for every way a wrap-up ends (BOS-2672)", (
     for (const e of ENDS) expect(/no update was waiting/i.test(wrapUpEndWords(e.end, "11:52").body)).toBe(e.end.how === "standalone");
   });
 });
+
+// BOS-2786 row J: Boss Man started the wrap-up itself for a runner update queued behind a trial. It says so, when it asks
+// agents to finish (before and after that time), counts the checks the swap waits for, and asks the owner to press nothing.
+describe("Boss Man's own wrap-up (BOS-2786, row J)", () => {
+  const v: WrapTieView = {
+    since: T("10:05"),
+    by: "boss-man",
+    tellAt: T("10:04"),
+    server: { approvedAt: T("09:50"), stage: "live-trial", liveAt: T("09:59"), trialEndsAt: T("10:14") },
+    runner: { queuedAt: T("10:05"), stage: "queued", startsAt: null, why: null },
+  };
+
+  it("before and after the ask, with runs and checks still finishing", () => {
+    const before = wrapUpWords({ ...v, tellAt: T("10:08") }, 2, at, 1, Date.parse(T("10:06")));
+    expect(before.banner).toBe("Runner update queued for 10:14, when the server update's trial ends. Boss Man is holding new work and checks since 10:05 and asks agents to finish at 10:08. It lifts by itself when the runners are updated, or if the update is switched back or cancelled. Nothing for you to press. Waiting for 2 runs and 1 check to finish.");
+    expect(before.say).toBe("Runner update queued for 10:14, when the server update's trial ends. Boss Man is holding new work and checks since 10:05 and asks agents to finish at 10:08. 2 agents are still finishing the step they are on. 1 check still running.");
+    const after = wrapUpWords(v, 0, at, 0, Date.parse(T("10:06")));
+    expect(after.say).toBe("Runner update queued for 10:14, when the server update's trial ends. Boss Man is holding new work and checks since 10:05 and asked agents to finish at 10:04. Every agent has finished.");
+    expect(after.banner).not.toMatch(/press Cancel|you asked/i);
+  });
+
+  it("once the runner update is building or swapping, the usual rows apply", () => {
+    expect(wrapUpWords({ ...v, runner: { ...v.runner!, stage: "building" } }, 0, at).say).toMatch(/^Wrapping up for the runner update/);
+  });
+
+  it("the owner's own wrap-up keeps its words when checks are counted", () => {
+    expect(wrapUpWords({ since }, 0, at, 2).say).toBe("No update was waiting when you asked at 11:29. Every agent has finished; 2 checks still running.");
+  });
+});

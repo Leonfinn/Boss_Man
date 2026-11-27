@@ -31,7 +31,7 @@ import { watchCiTokenGrant } from "./services/ci-identity-card.js";
 import { AnswerError, clearOwnerTodo, decisionsService, setDecisionSettledListener, setOwnerTodoFacts } from "./services/decisions.js";
 import { githubWatchService, WATCH_TOKEN_ENV } from "./services/github-watch.js";
 import { markOwnerOpened, recentClosedNotices } from "./services/closed-notice.js";
-import { getHold, holdBlocksStarts, maintenanceService, runnerCardHold } from "./services/maintenance.js";
+import { getHold, holdBlocksStarts, maintenanceService } from "./services/maintenance.js";
 import { runnerBusy, runnerChecks, serverWaitChecks, updateWaitCountsRun, workerChecks } from "./services/runner-busy.js";
 import { activeWaits, runnerHoldWait } from "./services/update-waits.js";
 import { runnerWatchService } from "./services/runner-watch.js";
@@ -423,9 +423,13 @@ export async function buildApp(opts: AppOptions) {
   const checks = checkDispatcher(db, {
     // BOS-1471: while a runner drain is under way (image update or setting change) no new check goes to a runner about to be swapped.
     // BOS-2108: which wait it is, so the dispatcher stops only what that wait's WAIT_RULES row blocks (a worker keeps its quick checks).
+    // BOS-2786: a wrap-up (the owner's or Boss Man's own) is its own row, which blocks every runner check as its message to
+    // agents says ("no new checks either"); it used to be read through runnerCardHold, which leaves a wrap-up out, so merge
+    // and quick checks kept starting during one.
     drainPending: async () => {
-      const h = runnerCardHold(await getHold(db));
-      return h && holdBlocksStarts(h, opts.now?.() ?? new Date()) ? runnerHoldWait(h) : null;
+      const h = await getHold(db);
+      if (!h || !holdBlocksStarts(h, opts.now?.() ?? new Date())) return null;
+      return h.kind === "wrapup" ? "wrapup" : runnerHoldWait(h);
     },
     scanList: () => privateDetails.forRunner(),
     scanListWarning,
@@ -1312,6 +1316,8 @@ export async function buildApp(opts: AppOptions) {
       const h = await getHold(db);
       return !!h && h.kind !== "wrapup";
     },
+    // BOS-2786: a wrap-up holds new checks too (drainPending above), so a waiting merge names it, not "a slot".
+    wrapUpOn: async () => (await getHold(db))?.kind === "wrapup",
     launcherOn: () => launch.enabled,
     // BOS-2359: the landing turns and the usual GitHub wait, for the holder's line and the estimates.
     landingTurns: (companyId) => review.landingTurnStatus(companyId),
