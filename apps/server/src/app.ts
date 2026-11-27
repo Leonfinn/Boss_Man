@@ -93,6 +93,7 @@ import { chaptersService } from "./services/chapters.js";
 import { FeedbackError, feedbackService } from "./services/feedback.js";
 import { portalRoutes, sendLogo, type PortalLimits } from "./portal.js";
 import { TicketImageError, ticketImagesService } from "./services/ticket-images.js";
+import { NOTE_KEEP_MAX, NOTE_PASTE_MAX, shrinkNote } from "./services/long-note.js";
 import { ChatError, chatService } from "./services/chat.js";
 import { chatTraceService } from "./services/chat-trace.js";
 import type { TraceUpdate } from "./services/chat-trace.js";
@@ -2863,15 +2864,16 @@ export async function buildApp(opts: AppOptions) {
       return { ok: await markOwnerOpened(db, id) };
     });
 
-    owner.post("/api/decisions/:id/answer", async (req, reply) => {
+    owner.post("/api/decisions/:id/answer", { bodyLimit: 15 * 1024 * 1024 }, async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const { answer, assigneeAgentId, note, reasonLink, custom, picks, modelConfig, alwaysScope, alwaysTtl } = z
+      const { answer, assigneeAgentId, note: givenNote, reasonLink, custom, picks, modelConfig, alwaysScope, alwaysTtl } = z
         .object({
           answer: z.string().trim().min(1).max(OWNER_MESSAGE_MAX),
           assigneeAgentId: Uuid.optional(),
           // BOS-2798: a note can carry pasted command output, which the raiser's wake gets whole; 2000 refused most logs.
           // What reads it for a short field (a lesson, a change reason) caps or checks it there.
-          note: z.string().trim().max(20_000).optional(),
+          // BOS-2874: one over NOTE_KEEP_MAX is never refused; the whole text is attached and the note keeps its start and end.
+          note: z.string().trim().max(NOTE_PASTE_MAX).optional(),
           reasonLink: z.string().trim().max(400).optional(),
           custom: z.boolean().optional(),
           alwaysScope: z.enum(["agent", "company"]).optional(),
@@ -2882,6 +2884,13 @@ export async function buildApp(opts: AppOptions) {
             .optional(),
         })
         .parse(req.body);
+      let note = givenNote;
+      if (note && note.length > NOTE_KEEP_MAX) {
+        const [card] = await db.select({ companyId: decisions.companyId }).from(decisions).where(eq(decisions.id, id));
+        if (!card) return reply.code(404).send({ error: "not_open" });
+        const file = await images.upload(card.companyId, { name: "owner-note.txt", base64: Buffer.from(note, "utf8").toString("base64") });
+        note = shrinkNote(note, file.markdown) ?? note;
+      }
       try {
         const result = await decisionsSvc.answer(id, answer, { assigneeAgentId, note, reasonLink, custom, picks, modelConfig, alwaysScope, alwaysTtl, by: await ownerName(req) });
         return result ?? reply.code(404).send({ error: "not_open" });
