@@ -88,7 +88,7 @@ const plan: Decision = {
   reasons: [],
   ageReason: "",
   dueDate: null,
-  context: { type: "team_plan", projectId: null, covered: "the CEO runs the work.", costLine: "On your Claude Max 20x plan: no extra cost", hires },
+  context: { type: "team_plan", covered: "the CEO runs the work.", costLine: "On your Claude Max 20x plan: no extra cost", hires },
 };
 
 /** What the owner sees in the card, measured from the rendered page. */
@@ -114,7 +114,7 @@ const read = (name: string) => {
     // A row with a long name and a long reason still wraps rather than widening: the card is as wide as its box.
     cardInside: inside(bodyBox),
     oneRowEach: rows.every((r) => (r.querySelectorAll("strong").length === 1)),
-    foldClosed: !!details && !details.open,
+    foldClosed: !!details && !(details as HTMLDetailsElement).open,
     foldMarked: summary?.textContent?.trim() === "Technical details",
     // A closed fold is just its summary line: it keeps the model setup out of the way until opened.
     foldHeight: details?.getBoundingClientRect().height ?? 0,
