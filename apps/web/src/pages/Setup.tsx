@@ -18,7 +18,7 @@ export type ChecklistItem = { id: string; label: string; done: boolean };
 
 const STEPS = [
   { id: "company", title: "Your company", why: "Name it and say what it's for. The CEO plans the work from this." },
-  { id: "project", title: "What will your team work on?", why: "Pick what kind of work this is. Documents and research need nothing else; code adds a git repo, a git token and checks before merging." },
+  { id: "project", title: "What will your team work on?", why: "Pick the kind of work your team does and name its first project. You can change this later in Settings." },
   { id: "runner", title: "The runner", why: "The runner is the container the company's agents work in. It connects out to this server, so it needs no open ports. The full panel is in Settings." },
   { id: "credential", title: "Claude", why: "Agents need something to run on. Paste the setup token from your Claude Pro or Max subscription: it also pays for the CEO. Or use an API key instead." },
   { id: "git", title: "A git token", why: "So agents can clone, push, and open pull requests on the project's repo." },
