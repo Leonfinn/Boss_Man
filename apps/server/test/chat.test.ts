@@ -818,6 +818,24 @@ describe("owner chat", () => {
     expect(saved.text).not.toContain("No changes made in this reply.");
   });
 
+  it("saves one what-changed line when the reply already copied one from the chat history (BOS-2852)", async () => {
+    const c = await setup();
+    await c.db.delete(wakes);
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Tell me when you're done." });
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Start => x.type === "run.start")!;
+    const client = await c.mcp(start.runId);
+    await client.callTool({ name: "notify_owner", arguments: { level: "note", title: "Probe note" } });
+    await client.close();
+    // The model copies the line it saw under an earlier reply; Boss Man's own line must be the only one.
+    const copied = "I told the owner.\n\nDone in this reply: replied on a ticket.";
+    await c.emit({ type: "run.update", runId: start.runId, update: { kind: "agent_message", text: copied } });
+    await c.settle();
+    const saved = (await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items.at(-1) as { text: string };
+    expect(saved.text).toBe("I told the owner.\n\nDone in this reply: sent the owner a note.");
+    expect(saved.text.match(/Done in this reply:/g)).toHaveLength(1);
+  });
+
   it("counts neither a read nor a failed call as a change, and names an updated or moved ticket by its ref (BOS-806, QA BOS-821)", async () => {
     const c = await setup();
     await c.db.delete(wakes);

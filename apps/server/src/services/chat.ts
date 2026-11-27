@@ -20,6 +20,13 @@ import { swapUntilForScreen } from "./maintenance.js";
 export function stripYouSaidLines(text: string): string {
   return text.replace(/(?:\n+|^)You said "[^\n]*?, \d{4}-\d{2}-\d{2}, about [^\n]*/g, "").trimEnd();
 }
+/**
+ * Drops a "Done in this reply: …" or "No changes made in this reply." line the model wrote itself (BOS-2852): the chat history it
+ * reads holds the lines Boss Man saved under earlier replies, and a reply that copies one would get a second, real one under it.
+ */
+export function stripChangeLines(text: string): string {
+  return text.replace(/(?:\n+|^)(?:Done in this reply: [^\n]*|No changes made in this reply\.)(?=\n|$)/g, "").trimEnd();
+}
 import { runCapabilities } from "./run-capabilities.js";
 import type { ChatTraceService } from "./chat-trace.js";
 import { reportBackSection, settleReports } from "./chat-report-back.js";
@@ -335,7 +342,8 @@ export function chatService(
     },
 
     /** The answering run's final message becomes the agent's reply. */
-    async onAgentMessage(runId: string, text: string) {
+    async onAgentMessage(runId: string, rawText: string) {
+      const text = stripChangeLines(rawText);
       // Registered at once, so the run-end check waits for the whole save, however many lookups build the notes first.
       const work = (async () => {
       const [r] = await db.select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose, duty: agents.duty }).from(runs).innerJoin(agents, eq(agents.id, runs.agentId)).where(eq(runs.id, runId));
