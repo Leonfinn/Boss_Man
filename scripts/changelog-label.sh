@@ -23,7 +23,7 @@ set -euo pipefail
 
 FILE="${RELEASE_NOTES_FILE:-CHANGELOG.md}"
 VERSION_RE='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
-NOT_YET='^\*\*Not in an image yet:\*\* '
+NOT_YET='^[*][*]Not in an image yet:[*][*] ' # bracket form: awk -v would warn on a backslash escape
 
 die() { echo "changelog-label: $*" >&2; exit 1; }
 need_version() { [[ "${1:-}" =~ $VERSION_RE ]] || die "version '${1:-}' is not like 0.1.0 or 0.1.0-beta.1"; }
