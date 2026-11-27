@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { scanText, compare } from "./check-test-lines.mjs";
 
 const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "check-test-lines.mjs");
-const rules = (src) => scanText(src).map((h) => `${h.rule}@${h.line}`);
+const rules = (src, opts) => scanText(src, opts).map((h) => `${h.rule}@${h.line}`);
 
 test("flags the four shapes", () => {
   assert.deepEqual(rules("await new Promise((r) => setTimeout(r, 300));"), ["bare-sleep@1"]);
@@ -64,6 +64,26 @@ test("a comment never switches a rule off; only the marker does", () => {
   assert.deepEqual(rules("// test-lines-ok: x\nawait new Promise((r) =>\n  setTimeout(r, 50));"), []);
 });
 
+test("hidden-stderr: the five shapes, inside a string, and shell files (BOS-2794)", () => {
+  for (const s of ["2>/dev/null", "2> /dev/null", "&>/dev/null", ">/dev/null 2>&1", "2>&-"]) {
+    assert.deepEqual(rules('execSync("npx x ' + s + '");'), ["hidden-stderr@1"], s);
+    assert.deepEqual(rules('r = x ' + s, { shell: true }), ["hidden-stderr@1"], s);
+  }
+  assert.deepEqual(rules('execSync("a 2>/dev/null && b 2>/dev/null");'), ["hidden-stderr@1"]);
+  // a comment is not counted, in either language
+  assert.deepEqual(rules("// run with 2>/dev/null\nexpect(ok()).toBe(true);"), []);
+  assert.deepEqual(rules("# hide it: 2>/dev/null\necho hi", { shell: true }), []);
+  assert.deepEqual(rules("echo hi # 2>/dev/null", { shell: true }), []);
+  assert.deepEqual(rules('echo "# not a comment" 2>/dev/null', { shell: true }), ["hidden-stderr@1"]);
+  // the escape works on the same line or the line above, in either comment style
+  assert.deepEqual(rules("await run(); // test-lines-ok: the failure is asserted after\nawait run(null, 2>/dev/null);"), []);
+  assert.deepEqual(rules("// test-lines-ok: expected to fail\nexecSync('x 2>/dev/null');"), []);
+  assert.deepEqual(rules("# test-lines-ok: expected to fail\nx 2>/dev/null", { shell: true }), []);
+  // a redirect without a hidden stderr is fine
+  assert.deepEqual(rules("execSync('echo hi >/dev/null');"), []);
+  assert.deepEqual(rules("execSync('cmd 2>&1');"), []);
+});
+
 test("compare: more than the baseline fails, fewer only reports", () => {
   const hit = { line: 1, text: "x" };
   const found = { "bare-sleep": { "a.test.ts": [hit, hit], "b.test.ts": [hit] } };
@@ -94,6 +114,12 @@ test("end to end: a new hit in a tracked test file fails with file, line and the
     const fewer = run();
     assert.equal(fewer.status, 0);
     assert.match(fewer.stdout, /--update/);
+    // a *.test.sh file is scanned too (BOS-2794)
+    writeFileSync(path.join(dir, "scripts", "b.test.sh"), "echo hi 2>/dev/null\n");
+    git("add", ".");
+    const shellHit = run();
+    assert.equal(shellHit.status, 1);
+    assert.match(shellHit.stderr, /scripts\/b\.test\.sh:1: echo hi 2>\/dev\/null/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
