@@ -1993,8 +1993,17 @@ details.pushes[open] > summary { margin-bottom: 8px; }
 .shortcuts-off { margin: 0; padding: 8px 16px; font-size: 14px; border-bottom: 1px solid var(--line); }
 .shortcuts-section.first { border-top: 0; }
 /* BOS-2690: the one-time keyboard tip, bottom left. Never focused (it's read out as a status), never on a
-   phone (the component doesn't draw it at 640 px or under), and above the page like the search box's backdrop. */
-.shortcuts-tip { position: fixed; z-index: 90; left: 16px; bottom: 16px; max-width: min(360px, calc(100vw - 32px)); display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; background: var(--card); color: var(--ink); border: 1px solid var(--line-strong); border-radius: 12px; box-shadow: 0 10px 30px rgb(0 0 0 / 0.35); }
+   phone (the component doesn't draw it at 640 px or under), and above the page like the search box's backdrop.
+   BOS-2769: clear of the menu's pinned bottom row (Settings, keyboard, Log out), which sits in the sidebar's
+   last 60 px: the 44 px row of buttons (.side-pinned) plus the sidebar's bottom padding (24 px, or 10 px on a
+   short window). Keep this in step with those two if the footer changes. From just above the phone bar the tip
+   starts beside the menu's column, so on a short window it never covers that row; with the menu folded to its
+   64 px strip it only has to clear that strip. */
+.shortcuts-tip { position: fixed; z-index: 90; left: 16px; bottom: calc(60px + 16px); max-width: min(360px, calc(100vw - 32px)); display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; background: var(--card); color: var(--ink); border: 1px solid var(--line-strong); border-radius: 12px; box-shadow: 0 10px 30px rgb(0 0 0 / 0.35); }
+@media (min-width: 641px) {
+  .shortcuts-tip { left: calc(var(--side-width) + 16px); }
+  .app.side-collapsed .shortcuts-tip { left: calc(64px + 16px); }
+}
 .shortcuts-tip-text { margin: 0; font-size: 14px; }
 .shortcuts-tip-actions { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 .shortcuts-tip-actions .btn { min-height: 40px; }
