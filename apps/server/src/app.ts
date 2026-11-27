@@ -1177,6 +1177,7 @@ export async function buildApp(opts: AppOptions) {
       return r;
     },
     composeCmd: () => hostFacts.value("compose.cmd"),
+    imageInstall: () => process.env.BOSSMAN_IMAGE_INSTALL === "1",
     log: (m) => app.log.warn(m),
   });
   // BOS-2674: a host warning seen in 2 reports in a row tells the CEO; the panel reads what is being done about each one.

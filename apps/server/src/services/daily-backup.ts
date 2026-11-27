@@ -62,11 +62,18 @@ export type DailyBackupDeps = {
   raise: (input: Record<string, unknown>) => Promise<{ id: string } | null | undefined | unknown>;
   /** The host's filled compose prefix (`cd <checkout> && docker compose -f …`, DR-052), or null when the host hasn't reported one. */
   composeCmd?: () => Promise<string | null>;
+  /** True on an install from ready-made images (BOSSMAN_IMAGE_INSTALL=1, set by docker-compose.images.yml): the steps then name its files. */
+  imageInstall?: () => boolean;
   log?: (m: string) => void;
 };
 
 /** The owner's steps for a stopped backup service, built from host facts. `--no-deps` so the database is not recreated. */
-export function backupSteps(cmd: string | null): string {
+export function backupSteps(cmd: string | null, imageInstall = false): string {
+  if (imageInstall) {
+    // BOS-2817: an install from ready-made images has no checkout and no host deployer; its files are the two downloaded ones.
+    const c = "docker compose --env-file images.env -f docker-compose.images.yml";
+    return `What to do: on the machine that runs Boss Man, go to the folder with docker-compose.images.yml and images.env, and run these one at a time:\n1. ${c} up -d backup\n2. ${c} ps backup\n3. ${c} logs --tail 30 backup\nIf there is no backup service in that list, download the newest docker-compose.images.yml from the release page first. If the disk is full, free some space; the backups restart by themselves (a pass runs every 15 minutes).`;
+  }
   if (!cmd) {
     return "What to do: Boss Man doesn't have this server's compose command yet (the host deployer hasn't reported it; see Settings → Server and runner → This server). On the machine that runs Boss Man, go to the folder that holds docker-compose.yml (the checkout), and run docker compose with the same -f files your server uses: up -d --no-deps backup. Then check it with ps backup, and read why it stopped with logs --tail 30 backup. Do not leave out --no-deps: without it the database is started again from the base file alone. If the disk is full, free some space; the backups restart by themselves (a pass runs every 15 minutes).";
   }
@@ -93,7 +100,7 @@ export function dailyBackupService(db: Db, deps: DailyBackupDeps) {
       const why = s.failed ? `The last attempt failed: ${s.failed.message}.` : "The backup service may not be running.";
       const question = [
         `Boss Man's daily database backup is overdue. ${age} ${why}`,
-        backupSteps(await deps.composeCmd?.().catch(() => null) ?? null),
+        backupSteps(await deps.composeCmd?.().catch(() => null) ?? null, deps.imageInstall?.() ?? false),
         "This card closes by itself once a new backup has been saved. You get one card, not one every day.",
       ].join("\n\n");
       const card = await deps.raise({
