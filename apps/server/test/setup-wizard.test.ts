@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
 import { eq } from "drizzle-orm";
 import { openPglite } from "../src/db/client.js";
-import { tickets } from "../src/db/schema.js";
+import { agents, runners as runnersTable, tickets } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -113,7 +113,7 @@ describe("the setup wizard (R56)", () => {
     // Runner first: register it and have its socket open, then the account arrives last.
     const reg = (await c.req("POST", `/api/companies/${company.id}/runner`)).json() as { runnerId: string };
     const [row] = await c.db.select().from(runnersTable).where(eq(runnersTable.id, reg.runnerId));
-    await c.runners.touch(row!);
+    await c.runners.touch(row!, null);
     c.runners.connect(reg.runnerId, () => true);
     expect((await read()).items.map((i) => i.id)).toEqual(["claude", "funding"]);
     const { secret } = (await c.req("POST", "/api/secrets", { name: "Claude", kind: "claude_oauth_token", value: "sk-ant-oat01-example-token-value" })).json();
@@ -122,7 +122,10 @@ describe("the setup wizard (R56)", () => {
     await c.req("PATCH", `/api/agents/${ceo.id}`, { fundingSourceId: source.id });
     const done = await read();
     expect(done.items).toEqual([]);
-    expect(done.noFunding).toEqual([]);
+    // Every agent but the paused Wiki Maintainer (it has no funding until the owner starts it) is paid for.
+    const [unpaid] = await c.db.select({ name: agents.name }).from(agents).where(eq(agents.id, done.noFunding[0]!));
+    expect(done.noFunding).toHaveLength(1);
+    expect(unpaid!.name).toBe("Wiki Maintainer");
   });
 
   it("says when the token can't push", async () => {

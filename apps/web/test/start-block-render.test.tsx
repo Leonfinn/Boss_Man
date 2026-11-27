@@ -61,6 +61,7 @@ const read = () => {
 };
 
 const devices = [
+  { name: "desktop-1440", viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   { name: "safari-1550", viewport: { width: 1550, height: 900 }, deviceScaleFactor: 2 },
   { name: "brave-foldable-1667x724", viewport: { width: 1667, height: 724 }, deviceScaleFactor: 3, hasTouch: true },
   { name: "phone-390", viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, hasTouch: true, isMobile: true },
