@@ -356,6 +356,62 @@ export function eventWatchPhrase(text: string): string | null {
   return null;
 }
 
+/**
+ * BOS-2864: wordings of something no agent can read from the runner (it has no Docker daemon, no host logs, no
+ * owner-only panel). An after-merge criterion that matches can never be reported, so it would sit in "Merged, watching"
+ * for ever (8 of 49 on 27 Nov). Kept beside the event list: this is the other kind of criterion that can't finish.
+ */
+const RUNNER_BLIND: readonly RegExp[] = [
+  // docker ps / docker logs / docker compose ps|logs / docker inspect|stats|exec
+  /\bdocker(?:[\s-]+compose)?\s+(?:ps|logs|inspect|stats|exec|images)\b/i,
+  // container logs, "in the container", "inside the container"
+  /\bcontainer(?:'s)?\s+logs?\b/i,
+  /\b(?:in|inside|from)\s+(?:the|a|that|each)\s+(?:[a-z-]+\s+){0,2}container\b/i,
+  // the host's own logs: host logs, journal, journalctl, syslog
+  /\b(?:host(?:'s)?|server(?:'s)?\s+host)\s+(?:own\s+)?(?:logs?|journal)\b/i,
+  /\bjournalctl\b|\bsystemd\s+journal\b|\bsyslog\b/i,
+  // "on the host" with a log or file read
+  /\bon\s+the\s+(?:owner'?s\s+)?host\b[^.;]{0,80}?\b(?:logs?|log\s+file|file|journal|reads?|cat)\b/i,
+  /\b(?:logs?|log\s+file|file|journal)\b[^.;]{0,60}?\bon\s+the\s+(?:owner'?s\s+)?host\b/i,
+  // the owner's screen or panel, a host tool's own UI
+  /\b(?:the\s+)?owner'?s\s+(?:own\s+)?(?:screen|panel|dashboard|display)\b/i,
+  /\b(?:truenas|proxmox|portainer|unraid|synology)(?:'s)?\s+(?:ui|gui|web\s*ui|dashboard|panel|console|app\s+page)\b/i,
+];
+
+/** BOS-2864: the wording that makes a criterion unobservable from the runner, or null (see RUNNER_BLIND). */
+export function runnerBlindPhrase(text: string): string | null {
+  for (const re of RUNNER_BLIND) {
+    const m = re.exec(text);
+    if (m) return m[0].trim();
+  }
+  return null;
+}
+
+/** BOS-2864: tickets created before this moment are never refused at approve for an old runner-blind criterion. */
+export const RUNNER_BLIND_FROM = "2026-11-28T00:00:00Z";
+
+/** BOS-2864: the three ways out, in one sentence the refusals share. */
+export const RUNNER_BLIND_WAYS = `Rewrite it as a test that runs before merge (CI can use a fake Docker), or add a fact clause "(fact: ...)" or a page clause "(page: https://example.com/path shows \\"words\\")" so Boss Man reads the result, or word it so an owner card stands in ("... or names one, with a card raised for it").`;
+
+/**
+ * BOS-2864: the refusal for an after-merge criterion that matches RUNNER_BLIND and says how it will be seen no other
+ * way (no fact clause, no page clause, no card standing in), or null. A criterion checked before merge is not refused.
+ */
+export function runnerBlindRefusal(criteria: ReadonlyArray<Criterion>): string | null {
+  const lines: string[] = [];
+  for (const c of criteria) {
+    if (!isAfterMerge(c)) continue;
+    const text = criterionText(c);
+    const phrase = runnerBlindPhrase(text);
+    if (!phrase || factClauses(text).length || pageClauses(text).length || allowsCardInstead(text)) continue;
+    lines.push(`"${text}" asks for something no agent can read from the runner ("${phrase}").`);
+  }
+  return lines.length ? `${lines.join("\n")}\nThe runner has no Docker, no host logs and no owner-only panel, so this could never be reported and the ticket would sit in "Merged, watching" for ever. Three ways out: ${RUNNER_BLIND_WAYS}` : null;
+}
+
+/** BOS-2864: the line the reviewer's context carries. */
+export const RUNNER_BLIND_REVIEW_LINE = "Refuse a criterion the agent has no way to observe from the runner (docker ps, container or host logs, an owner-only panel) unless it has a fact clause, a page clause or an owner card standing in (BOS-2864).";
+
 /** BOS-2643 + BOS-2797: the phrase that opens an after-merge criterion as its own check ticket (a long watch or a future event), or null. */
 export const watchPhrase = (text: string): string | null => longWatchPhrase(text) ?? eventWatchPhrase(text);
 

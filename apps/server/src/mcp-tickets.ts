@@ -4,7 +4,7 @@
 import { and, asc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { EVENT_WATCH_DAYS, eventWatchEndsAt, eventWatchPhrase, longWatchPhrase, carriedCriteria as criteriaToCarry, addsUsabilityCriterion, holdEarlyAfterMergePasses, WATCH_DAILY_CHECKS, WATCH_TRIGGERS, WATCH_DEFAULT_DAYS, WATCH_MAX_DAYS, REAL_USE_ASK, USABILITY_ADDED_NOTE, withUsabilityCriterion, goLiveWaitWords, type GoLiveWait, acceptanceCriteriaSchema, criterionText, pageClauseRefusal, pageClauses, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, criteriaText, failedAfterMerge, isAfterMerge, isTaskSize, readCriteria, missingVerdicts, planFirstByDefault, RISK_TIERS, SIZE_SCALE, ticketRef } from "@boss-man/shared";
+import { EVENT_WATCH_DAYS, eventWatchEndsAt, eventWatchPhrase, longWatchPhrase, carriedCriteria as criteriaToCarry, addsUsabilityCriterion, holdEarlyAfterMergePasses, WATCH_DAILY_CHECKS, WATCH_TRIGGERS, WATCH_DEFAULT_DAYS, WATCH_MAX_DAYS, REAL_USE_ASK, USABILITY_ADDED_NOTE, withUsabilityCriterion, goLiveWaitWords, type GoLiveWait, acceptanceCriteriaSchema, criterionText, pageClauseRefusal, pageClauses, runnerBlindRefusal, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, criteriaText, failedAfterMerge, isAfterMerge, isTaskSize, readCriteria, missingVerdicts, planFirstByDefault, RISK_TIERS, SIZE_SCALE, ticketRef } from "@boss-man/shared";
 import type { Db } from "./db/client.js";
 import { agents, companies, decisions as decisionsTable, engagements as engagementsTable, features, projects, reviewRequests, runs as runsTable, ticketDependencies, ticketImages, tickets, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
@@ -226,7 +226,7 @@ export function registerTicketAdmin(server: McpServer, db: Db, { work, engagemen
       const waitsOn = [...new Set(typeof waitsOnGiven === "string" ? [waitsOnGiven] : (waitsOnGiven ?? []))];
       const badFix = fixesLive ? fixesLiveProblem(fixesLive) : null;
       if (badFix) return fail(badFix);
-      const badPage = pageClauseRefusal(acceptanceCriteria ?? []);
+      const badPage = pageClauseRefusal(acceptanceCriteria ?? []) ?? runnerBlindRefusal(readCriteria(acceptanceCriteria ?? []));
       if (badPage) return fail(badPage);
       const setup = await checkSetupWrite(db, hostFacts, scope, ownerSetup, lintOverride);
       if (setup.error !== null) return fail(setup.error);
@@ -450,7 +450,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "reorganised", summary: `${me.name} ${reportInChat ? "marked it to be reported back in chat" : "cleared its report back in chat"}: ${reason}` });
         return text(reportInChat ? "Marked: when this ticket closes or hands out follow-ups, your chat is woken to report it to the owner." : "Cleared: this ticket is no longer reported back in chat.");
       }
-      const badPage = acceptanceCriteria ? pageClauseRefusal(acceptanceCriteria) : null;
+      const badPage = acceptanceCriteria ? pageClauseRefusal(acceptanceCriteria) ?? runnerBlindRefusal(readCriteria(acceptanceCriteria)) : null;
       if (badPage) return fail(badPage);
       const manager = await isManager();
       const otherChange = project !== undefined || featureId !== undefined || parentTicketId !== undefined || title !== undefined || body !== undefined || assignee !== undefined || noCode !== undefined || ownerSetup !== undefined || urgent !== undefined || recurring !== undefined || fixesLive !== undefined || size !== undefined || acceptanceCriteria !== undefined || ceoPlan !== undefined || ceoPlanDeadline !== undefined || fixesMergeCheck !== undefined;

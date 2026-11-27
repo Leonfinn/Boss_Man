@@ -53,7 +53,7 @@ import { staleVersionMessage, startRefusal, WorkError, type workService } from "
 import { effectiveSize, notInPointsLeft, type planningService } from "./services/planning.js";
 import { findMilestone, milestoneOfTicket, milestoneOut, sizeOut } from "./mcp-ticket-plan.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
-import { acceptanceCriteriaSchema, afterMergeLint, criteriaForCard, criterionOverlap, criteriaText, criterionText, failedAfterMerge, isAfterMerge, missingVerdicts, optionVerdictsRefusal, pageClauseRefusal, readCriteria, unreportedAfterMerge, type Criterion } from "@boss-man/shared";
+import { acceptanceCriteriaSchema, afterMergeLint, criteriaForCard, criterionOverlap, criteriaText, criterionText, failedAfterMerge, isAfterMerge, missingVerdicts, optionVerdictsRefusal, pageClauseRefusal, readCriteria, runnerBlindRefusal, unreportedAfterMerge, type Criterion } from "@boss-man/shared";
 import { TicketChatError, type ticketChatService } from "./services/ticket-chat.js";
 import { findSection, HISTORY_PAGE_MAX, missingPageNote, splitSections, WikiError, type wikiService } from "./services/wiki.js";
 import { conversationLines } from "./services/ticket-chat.js";
@@ -1755,7 +1755,7 @@ function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHoo
         assigneeAgentId = a.id;
       }
       for (const id of input.waitsOn ?? []) if (!(await ownTicket(id))) return fail(`No ticket ${id} in this company.`);
-      const badPage = pageClauseRefusal(input.acceptanceCriteria ?? []);
+      const badPage = pageClauseRefusal(input.acceptanceCriteria ?? []) ?? runnerBlindRefusal(readCriteria(input.acceptanceCriteria ?? []));
       if (badPage) return fail(badPage);
       try {
         const t = await work.createTicket(p.id, { title: input.title, body: input.body ?? null, risk: input.risk, size: input.size as TaskSize | undefined, planFirst: input.planFirst, milestoneId: input.milestoneId, assigneeAgentId, featureId: input.featureId, acceptanceCriteria: input.acceptanceCriteria, noCode: input.noCode });
