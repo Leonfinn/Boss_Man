@@ -64,17 +64,17 @@ export const PINNABLE_PAGES: readonly PinnablePage[] = [
   { id: "runs", name: "Runs", path: "Activity → Runs", page: "runs", icon: "activity" },
   { id: "scrum-master", name: "Scrum Master log", path: "Activity → Scrum Master log", page: "scrum-master", icon: "shield-check" },
   { id: "workflow", name: "Workflow report", path: "Activity → Workflow report", page: "workflow", icon: "workflow" },
-  // Settings → Money and access.
-  { id: "funding", name: "Funding", path: "Settings → Money and access → Funding", page: "settings", settingsPage: "funding", icon: "wallet" },
-  { id: "secrets", name: "Secrets", path: "Settings → Money and access → Secrets", page: "settings", settingsPage: "secrets", icon: "key" },
-  { id: "account", name: "Account", path: "Settings → Money and access → Account", page: "settings", settingsPage: "account", icon: "id-card" },
-  { id: "notification-settings", name: "Notification settings", path: "Settings → Money and access → Notifications", page: "settings", settingsPage: "notifications", icon: "bell" },
-  { id: "tools", name: "Tools and deploys", path: "Settings → Money and access → Tools and deploys", page: "settings", settingsPage: "tools", icon: "plug" },
-  // Settings → How the team works.
-  { id: "reviews", name: "Reviews", path: "Settings → How the team works → Reviews", page: "settings", settingsPage: "reviews", icon: "check-check" },
-  { id: "team", name: "Team and CEO", path: "Settings → How the team works → Team and CEO", page: "settings", settingsPage: "team", icon: "user-cog" },
-  { id: "watchdog", name: "Watchdog", path: "Settings → How the team works → Watchdog", page: "settings", settingsPage: "watchdog", icon: "dog" },
-  { id: "permissions", name: "Permissions", path: "Settings → How the team works → Permissions", page: "settings", settingsPage: "permissions", icon: "shield" },
+  // The Money and access group; the path names the page you click after Settings.
+  { id: "funding", name: "Funding", path: "Settings → Funding", page: "settings", settingsPage: "funding", icon: "wallet" },
+  { id: "secrets", name: "Secrets", path: "Settings → Secrets", page: "settings", settingsPage: "secrets", icon: "key" },
+  { id: "account", name: "Account", path: "Settings → Account", page: "settings", settingsPage: "account", icon: "id-card" },
+  { id: "notification-settings", name: "Notification settings", path: "Settings → Notifications", page: "settings", settingsPage: "notifications", icon: "bell" },
+  { id: "tools", name: "Tools and deploys", path: "Settings → Tools and deploys", page: "settings", settingsPage: "tools", icon: "plug" },
+  // The How the team works group; the path names the page you click after Settings.
+  { id: "reviews", name: "Reviews", path: "Settings → Reviews", page: "settings", settingsPage: "reviews", icon: "check-check" },
+  { id: "team", name: "Team and CEO", path: "Settings → Team and CEO", page: "settings", settingsPage: "team", icon: "user-cog" },
+  { id: "watchdog", name: "Watchdog", path: "Settings → Watchdog", page: "settings", settingsPage: "watchdog", icon: "dog" },
+  { id: "permissions", name: "Permissions", path: "Settings → Permissions", page: "settings", settingsPage: "permissions", icon: "shield" },
   // Settings → Server and runner.
   { id: "updates", name: "Updates", path: "Settings → Server and runner → Updates", page: "settings", settingsPage: "updates", icon: "download" },
   { id: "limits", name: "Limits and checks", path: "Settings → Server and runner → Limits and checks", page: "settings", settingsPage: "limits", icon: "gauge" },
@@ -82,7 +82,7 @@ export const PINNABLE_PAGES: readonly PinnablePage[] = [
   { id: "email", name: "Email", path: "Settings → Server and runner → Email", page: "settings", settingsPage: "email", icon: "mail" },
   { id: "server", name: "This server", path: "Settings → Server and runner → This server", page: "settings", settingsPage: "server", icon: "server" },
   { id: "devices", name: "Devices and privacy", path: "Settings → Server and runner → Devices and privacy", page: "settings", settingsPage: "devices", icon: "smartphone" },
-  { id: "transfer", name: "Import and export", path: "Settings → Server and runner → Import and export", page: "settings", settingsPage: "transfer", icon: "arrow-left-right" },
+  { id: "transfer", name: "Import and export", path: "Settings → Import and export", page: "settings", settingsPage: "transfer", icon: "arrow-left-right" },
 ] as const;
 
 /** Where a page id that left the list went, or that it is gone for good. */
