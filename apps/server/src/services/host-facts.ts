@@ -164,7 +164,7 @@ export function flattenHostRecord(r: HostRecord): Record<string, string> {
       }
       // BOS-2481: no unhealthy containers means no names, and an empty fact reads as "missing" on the panel.
       // BOS-2680: the same for the last health-probe reason.
-      if (check === "container_status" && (k === "unhealthyNames" || k === "unhealthyWhere" || k === "unhealthyReason" || k === "stagingUnhealthyNames") && !String(v).trim()) continue;
+      if (check === "container_status" && (k === "unhealthyNames" || k === "unhealthyWhere" || k === "unhealthyReason" || k === "stagingUnhealthyNames" || k === "stagingStoppedNames") && !String(v).trim()) continue;
       o[`check.${check}.${k}`] = String(v);
     }
   for (const k of Object.keys(o)) if (!/^[A-Za-z0-9_.]{1,80}$/.test(k) || o[k]!.length > 500) delete o[k];

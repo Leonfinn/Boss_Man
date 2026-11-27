@@ -61,6 +61,32 @@ describe("Deployer script line in Settings → This host", () => {
     expect(line.textContent).toContain(text);
   });
 
+  // BOS-2781: staging faults get one quiet line, are absent when none, and never count as a failing check.
+  it("shows a quiet staging line, not a warning, when staging containers are unhealthy or stopped", async () => {
+    const at = "2026-11-10T09:00:00Z";
+    const v = view({ state: "current" });
+    v.facts = {
+      ...v.facts,
+      "check.container_status.stagingUnhealthy": { value: "1", source: "host", at },
+      "check.container_status.stagingUnhealthyNames": { value: "staging-runner", source: "host", at },
+      "check.container_status.stagingStopped": { value: "1", source: "host", at },
+      "check.container_status.stagingStoppedNames": { value: "staging-db", source: "host", at },
+    } as typeof v.facts;
+    vi.stubGlobal("fetch", vi.fn(async () => json(v)));
+    render(<ThisHost />);
+    const line = await screen.findByTestId("staging-faults");
+    expect(line.textContent).toBe("Staging: 1 container unhealthy (staging-runner); 1 container stopped (staging-db). This doesn't affect your live Boss Man.");
+    expect(line.className).not.toMatch(/amber|warn|red/);
+    expect(screen.queryByTestId("host-facts-problems")).toBeNull();
+  });
+
+  it("shows no staging line when there are no staging faults", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json(view({ state: "current" }))));
+    render(<ThisHost />);
+    await screen.findByTestId("deployer-script");
+    expect(screen.queryByTestId("staging-faults")).toBeNull();
+  });
+
   it("shows no line when the host has not reported", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => json(view({ state: "none" }))));
     render(<ThisHost />);
