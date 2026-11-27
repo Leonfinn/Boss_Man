@@ -3,7 +3,7 @@
 import { and, eq, inArray } from "drizzle-orm";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { ageWords, isAfterMerge, OWNER_STEPS_OK, REAL_USE_ASK, REAL_USE_LABEL, recurringDutyHits, recurringDutyInDiff, REVIEW_KINDS, touchesInstallSurface, untrusted, usabilityGated, type Criterion } from "@boss-man/shared";
+import { ageWords, isAfterMerge, readCriteria, RUNNER_BLIND_FROM, RUNNER_BLIND_REVIEW_LINE, runnerBlindRefusal, OWNER_STEPS_OK, REAL_USE_ASK, REAL_USE_LABEL, recurringDutyHits, recurringDutyInDiff, REVIEW_KINDS, touchesInstallSurface, untrusted, usabilityGated, type Criterion } from "@boss-man/shared";
 import type { Db } from "./db/client.js";
 import { agents, decisions as decisionsTable, tickets, tickets as ticketsTable } from "./db/schema.js";
 import { record } from "./services/activity.js";
@@ -453,9 +453,14 @@ export function registerDecisionTools(
             : "";
           const gate = usabilityGateBlock(rt, d.files.map((f) => f.path), d.diff);
           const moved = movedMidRead ? "The branch moved since your first page; start again from offset 0 so you read one head throughout.\n\n" : "";
-          return text(`${moved}${checklist}${setup}${live}${gate}${EDGE_CASE_REVIEW_LINE}\n\nBase ${d.baseCommit.slice(0, 12)}, ${d.commits.length} commit(s).\nFiles:\n${files || "(none)"}\n\n${patch}${d.truncated ? "\n[diff truncated by the runner]" : ""}`);
+          return text(`${moved}${checklist}${setup}${live}${gate}${EDGE_CASE_REVIEW_LINE}\n${RUNNER_BLIND_REVIEW_LINE}\n\nBase ${d.baseCommit.slice(0, 12)}, ${d.commits.length} commit(s).\nFiles:\n${files || "(none)"}\n\n${patch}${d.truncated ? "\n[diff truncated by the runner]" : ""}`);
         }
         if (!input.verdict) return fail("Give the verdict.");
+        // BOS-2864: a ticket made after the rule can't be approved holding a criterion no agent can observe from the runner.
+        if (input.verdict !== "changes_requested" && rt.createdAt.getTime() >= Date.parse(RUNNER_BLIND_FROM)) {
+          const blind = runnerBlindRefusal(readCriteria(rt.acceptanceCriteria));
+          if (blind) return fail(blind);
+        }
         // A verdict on a ticket is touching it, like any other hook (BOS-268).
         await noteRunTicket(input.ticketId);
         // A reviewer may add the "fixes live" marker (BOS-639). It is set before the verdict, because an approval can merge at once.

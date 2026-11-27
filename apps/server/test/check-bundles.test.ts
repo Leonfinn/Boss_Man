@@ -19,6 +19,7 @@ import { BUNDLE_FEATURE, checkWorkersService } from "../src/services/check-worke
 import { checkBundleStore } from "../src/services/check-bundles.js";
 import { checkBundleRoutes } from "../src/routes/check-bundles.js";
 import type { WaitKind } from "../src/services/update-waits.js";
+import { updateCheckMarks } from "../src/services/runner-busy.js";
 
 const shared = openPglite();
 afterAll(async () => (await shared).close());
@@ -191,6 +192,29 @@ describe("check bundle dispatch (BOS-1436)", () => {
     expect((await s.job(merge.id)).state).toBe("running");
     expect((await s.job(full.id)).state).toBe("running");
     expect(ran(s.toRunner.map((command) => ({ command }))).length).toBe(1);
+  });
+
+  // BOS-2861: nothing the dispatcher starts during a runner drain is a check the drain then waits for. Every check that
+  // starts is one the Merge queue marks "doesn't hold up the runner update"; with no worker, nothing starts at all.
+  it("BOS-2861: a check started during a runner drain never holds it: with a worker only its quick checks start, with none nothing does", async () => {
+    for (const withWorker of [true, false]) {
+      const s = await setup();
+      s.runnerTakes(true);
+      if (withWorker) await s.worker(3);
+      await s.req(s.co, { kind: "merge" });
+      await s.req(s.co, { scope: "full" });
+      await s.req();
+      await s.req();
+      s.setDrain("runner-drain");
+      await s.pump();
+      const running = await s.db.select().from(checkJobs).where(eq(checkJobs.state, "running"));
+      expect(running.map((j) => j.scope)).toEqual(withWorker ? ["quick", "quick"] : []);
+      expect(running.every((j) => j.workerId !== null)).toBe(true);
+      const marks = await updateCheckMarks(s.db, s.co.id, { runner: true, server: false });
+      expect(marks).toHaveLength(running.length);
+      expect(marks.some((m) => m.holdsUpdate)).toBe(false);
+      expect(ran(s.toRunner.map((command) => ({ command })))).toEqual([]);
+    }
   });
 
   it("packs the job's commit for the worker, then sends it the job with the bundle details; the upload is open only while it packs", async () => {

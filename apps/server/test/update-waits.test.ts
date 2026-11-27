@@ -6,8 +6,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openPglite } from "../src/db/client.js";
 import type { Db } from "../src/db/client.js";
 import { checkJobs, checkWorkers, companies, projects, runs, settings, tickets } from "../src/db/schema.js";
-import { runnerBusy, runsByCompany, serverWaitChecks, workerChecks } from "../src/services/runner-busy.js";
-import { activeWaits, blocksClass, describeWait, drainDetail, drainEndsAt, LANDING_END_MS, landingsThatCount, namedChecksText, ruleProblems, runnerHoldWait, serverQuietCounts, WAIT_RULES, type WaitKind, type WaitRule } from "../src/services/update-waits.js";
+import { runnerBusy, runsByCompany, serverWaitChecks, updateCheckMarks, workerChecks } from "../src/services/runner-busy.js";
+import { activeWaits, blocksClass, checkCountingWaits, describeWait, drainDetail, drainEndsAt, LANDING_END_MS, landingsThatCount, namedChecksText, ruleProblems, runnerHoldWait, serverQuietCounts, WAIT_RULES, type WaitKind, type WaitRule } from "../src/services/update-waits.js";
 import { duringUpdate, PASSES_UPDATE_HOLD, WAKE_CLASS } from "../src/services/wake-classes.js";
 
 // BOS-2479 (replacing BOS-2058's exception list): a landing counts only while its push call is going, for at most
@@ -91,7 +91,7 @@ describe("what a waiting server update counts (serverWaitChecks)", () => {
     const [w] = await db.insert(checkWorkers).values({ name: "worker-1", tokenHash: randomUUID() }).returning();
     const job = (state: string, o: { kind?: string; scope?: string; worker?: boolean } = {}) =>
       db.insert(checkJobs).values({ companyId: c!.id, projectId: p!.id, ticketId: t!.id, kind: o.kind ?? "merge", scope: o.scope ?? "full", commit: "abc", tree: randomUUID(), state, workerId: o.worker ? w!.id : null, startedAt: new Date() });
-    return { job };
+    return { job, companyId: c!.id };
   }
 
   // 20 Nov 10:05 to 10:50: the update counted every running check, but its hold let the worker start a quick check each time
@@ -110,6 +110,27 @@ describe("what a waiting server update counts (serverWaitChecks)", () => {
     await job("queued", { kind: "merge", scope: "full" });
     await job("passed", { kind: "merge", scope: "full" });
     expect(await serverWaitChecks(db)).toBe(3);
+  });
+
+  // BOS-2861: the Merge queue's marks under a server update are serverWaitChecks' own rows: a worker's merge or full check
+  // holds it, a worker's quick check does not. Under both waits a check either one counts holds the update.
+  it("updateCheckMarks: a server update waits for what serverWaitChecks counts, and lets a worker's quick check run", async () => {
+    const { job, companyId } = await seed();
+    await job("running", { kind: "merge", scope: "quick", worker: true });
+    await job("running", { kind: "pre_review", scope: "quick", worker: true });
+    await job("running", { kind: "pre_review", scope: "quick", worker: false });
+    await job("queued", { kind: "merge", scope: "full" });
+    const server = await updateCheckMarks(db, companyId, { runner: false, server: true });
+    expect(server.map((m) => [m.kind, m.holdsUpdate]).sort()).toEqual([["merge", true], ["pre_review", false], ["pre_review", true]]);
+    expect(server.filter((m) => m.holdsUpdate)).toHaveLength(await serverWaitChecks(db));
+    // A runner drain alone lets the worker's merge check run (it started before the drain; the drain blocks new ones).
+    const runner = await updateCheckMarks(db, companyId, { runner: true, server: false });
+    expect(runner.map((m) => [m.kind, m.holdsUpdate]).sort()).toEqual([["merge", false], ["pre_review", false], ["pre_review", true]]);
+    const both = await updateCheckMarks(db, companyId, { runner: true, server: true });
+    expect(both.filter((m) => m.holdsUpdate)).toHaveLength(2);
+    expect(await updateCheckMarks(db, companyId, { runner: false, server: false })).toEqual([]);
+    // Another company's running checks are never in this company's marks.
+    expect(await updateCheckMarks(db, randomUUID(), { runner: true, server: true })).toEqual([]);
   });
 
   // BOS-2479: the runner drain's "not waited for" list is exactly the running checks on a worker.
@@ -168,6 +189,22 @@ describe("activeWaits: one list for every screen", () => {
     ]);
     // Without a landing, an empty drain says the swap is next; with the owner's force, no counts (it waits for none).
     expect((await activeWaits(db, { drain: { runs: 0, runnerChecks: [], workerChecks: [] } }))[0]!.waitingOn).toContain("nothing left; the swap happens on the next pass");
+  });
+
+  it("checkCountingWaits: the plain runner drain and the server's quiet wait count checks; force, wrap-up, build and later server phases don't (BOS-2861)", async () => {
+    expect(await checkCountingWaits(db)).toEqual({ runner: false, server: false });
+    const set = async (key: string, value: unknown) => db.insert(settings).values({ key, value }).onConflictDoUpdate({ target: settings.key, set: { value } });
+    await set("maintenance", { kind: "update", since: "2026-11-27T15:00:00.000Z" });
+    await set("deploy_wait", { phase: "waiting", approvedAt: "2026-11-27T15:00:00.000Z" });
+    expect(await checkCountingWaits(db)).toEqual({ runner: true, server: true });
+    for (const hold of [{ kind: "update", since: "x", force: true }, { kind: "update", since: "x", ignoreChecks: true }, { kind: "wrapup", since: "x" }, { kind: "building", since: "x" }]) {
+      await set("maintenance", hold);
+      expect((await checkCountingWaits(db)).runner).toBe(false);
+    }
+    for (const phase of ["sent", "window", "handover"]) {
+      await set("deploy_wait", { phase, approvedAt: "2026-11-27T15:00:00.000Z" });
+      expect((await checkCountingWaits(db)).server).toBe(false);
+    }
   });
 
   it("lists nothing when no update waits", async () => {

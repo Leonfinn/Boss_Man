@@ -33,20 +33,33 @@ const splitLabel = (cfg: Config): [string, string] => {
 
 export type ColourParams = { colour: Colour; image: string; version: string; digest: string; role: "standby" | "auto" };
 
+/**
+ * BOS-2713: the one-button install. The server reaches the updater over the updater's own private network and reads its key from
+ * the key folder, read-only. Returns the server's mount of that folder (the install's own volume for it) or null when the install
+ * does not define one, in which case the colour gets no link and says so on the Updates panel.
+ */
+function updaterLink(cfg: SwapReady): { mount: { Type: "volume"; Source: string; Target: string; ReadOnly: true }; env: string[] } | null {
+  const dir = cfg.keyFile.replace(/\/[^/]*$/, "");
+  const m = cfg.swap.selfMounts.find((x) => x.target === dir);
+  if (!m) return null;
+  return { mount: { Type: "volume", Source: m.source, Target: m.target, ReadOnly: true }, env: [`BOSSMAN_UPDATER_URL=http://${cfg.swap.selfName}:${cfg.port}`, `BOSSMAN_UPDATER_KEY_FILE=${cfg.keyFile}`] };
+}
+
 /** The create body for one server colour. The per-move override list (design section 5) is exactly: image, name/hostname, colour + role env, labels; aliases are set by `colourNetworks`. */
 export function colourSpec(cfg: SwapReady, p: ColourParams) {
   const [lk, lv] = splitLabel(cfg);
   const name = colourName(p.colour);
+  const link = updaterLink(cfg);
   return {
     Image: p.image,
     Hostname: name,
     // BOS-2663: the server learns it is an image install, which repository its releases come from and which release it is, so it can
     // look for a newer one by itself. A source install is not started by the updater, so it never gets these three.
-    Env: [...cfg.swap.serverEnv, `BOSSMAN_COLOUR=${p.colour}`, `BOSSMAN_ROLE=${p.role}`, "BOSSMAN_IMAGE_INSTALL=1", `BOSSMAN_RELEASE_REPO=${cfg.repo}`, `BOSSMAN_VERSION=${p.version}`],
+    Env: [...cfg.swap.serverEnv, `BOSSMAN_COLOUR=${p.colour}`, `BOSSMAN_ROLE=${p.role}`, "BOSSMAN_IMAGE_INSTALL=1", `BOSSMAN_RELEASE_REPO=${cfg.repo}`, `BOSSMAN_VERSION=${p.version}`, ...(link?.env ?? [])],
     Labels: { [lk]: lv, [LABEL_MANAGED]: "1", [LABEL_COLOUR]: p.colour, [LABEL_RELEASE]: p.version, [LABEL_DIGEST]: p.digest },
     StopTimeout: cfg.swap.stopGraceSeconds,
     HostConfig: {
-      Mounts: cfg.swap.serverMounts.map((m) => ({ Type: "volume", Source: m.source, Target: m.target, ReadOnly: m.readOnly })),
+      Mounts: [...cfg.swap.serverMounts.map((m) => ({ Type: "volume", Source: m.source, Target: m.target, ReadOnly: m.readOnly })), ...(link ? [link.mount] : [])],
       NetworkMode: cfg.network,
       CapDrop: ["ALL"],
       CapAdd: [],
@@ -68,6 +81,8 @@ export type NetworkJoin = { network: string; aliases: string[] };
 export function colourNetworks(cfg: SwapReady, colour: Colour, live: boolean): NetworkJoin[] {
   return [
     { network: cfg.swap.launcherNetwork, aliases: [] },
+    // BOS-2713: the updater's own network, so the server can ask it to install a release (no alias: the updater has its own name there).
+    ...(updaterLink(cfg) ? [{ network: cfg.swap.selfNetwork, aliases: [] as string[] }] : []),
     { network: cfg.swap.frontNetwork, aliases: live ? [frontAlias(colour), LIVE_ALIAS] : [frontAlias(colour)] },
   ];
 }

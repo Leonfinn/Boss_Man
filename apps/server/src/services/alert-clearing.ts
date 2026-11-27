@@ -7,7 +7,7 @@
 import { and, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import { mergeContext } from "./decision-context.js";
 import type { Db } from "../db/client.js";
-import { decisions, features, reviewRequests, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
+import { decisions, features, reviewHolds, reviewRequests, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { record } from "./activity.js";
 import { signoffClearedReason } from "./signoff.js";
 import { allMergeOrder, commitIsLive } from "./go-live-wait.js";
@@ -86,7 +86,9 @@ export type ClearWhen =
   | { kind: "landingTurnEnded"; companyId: string; ticketId: string }
   /** A failing sweep step's card (BOS-2160): the step ran without an error in the last pass. */
   | { kind: "sweepStepOk"; step: string }
-  | { kind: "hostWarningGone"; key: string };
+  | { kind: "hostWarningGone"; key: string }
+  /** BOS-2870: the card about a review hold left unreleased: the hold was released or cancelled. */
+  | { kind: "holdClosed"; holdId: string };
 
 type Card = { id: string; companyId: string; status: string; createdAt: Date; question: string; context: unknown };
 
@@ -170,6 +172,9 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
         break;
       case "mergeFailuresCalm":
         if (typeof c.companyId === "string" && typeof c.reason === "string") out.push({ kind: "mergeFailuresCalm", companyId: c.companyId, reason: c.reason });
+        break;
+      case "holdClosed":
+        if (typeof c.holdId === "string") out.push({ kind: "holdClosed", holdId: c.holdId });
         break;
       default:
         break;
@@ -348,6 +353,11 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
         return sweepStepOkReason(db, c.step);
       case "hostWarningGone":
         return hostWarningGoneReason(db, c.key);
+      case "holdClosed": {
+        const [h] = await db.select({ status: reviewHolds.status, closedBy: reviewHolds.closedBy }).from(reviewHolds).where(eq(reviewHolds.id, c.holdId));
+        if (!h) return "the hold is no longer on record";
+        return h.status === "open" ? null : `the hold was ${h.status}${h.closedBy ? ` by ${h.closedBy}` : ""}`;
+      }
       case "landingTurnEnded":
         if (!deps.landingTurnHeld) return null;
         return (await deps.landingTurnHeld(c.companyId, c.ticketId)) ? null : "that ticket no longer holds the landing turn";
