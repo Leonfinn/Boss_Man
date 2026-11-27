@@ -456,4 +456,20 @@ describe("BOS-2643: a watch of a day or more is opened as its own check ticket",
     // BOS-2682: the check is a watch of live work, not new work on the feature, so it never joins the feature.
     expect(check!.featureId).toBeNull();
   });
+
+  // BOS-2797: BOS-2663 ("after the next beta release") and BOS-974 ("one real install") sat open or bounced until split
+  // by hand. A criterion that waits on a future event is split exactly like a duration watch.
+  it("an after-merge criterion that waits on a future event opens its own check, tied back to the build", async () => {
+    const c = await setup();
+    const EVENT = { text: "After the next beta release, a real image install shows the new-release note", after: "merge" as const };
+    const made = await c.create(c.co.ceo.id, { title: "Show the new-release note", noCode: false, assignee: "Dev", acceptanceCriteria: [BEFORE, ONCE, EVENT] });
+    expect(made.isError, made.text).toBe(false);
+    expect(made.text).toContain('Criterion 3 needs a watch ("the next beta release")');
+    const [check, ...more] = await checksOf(c, made.id!);
+    expect(more).toEqual([]);
+    expect([check!.checksCriterion, check!.assigneeAgentId, check!.systemState]).toEqual([3, c.dev.id, "blocked"]);
+    expect(check!.body).toContain("waits on a future event");
+    const deps = await c.db.select().from(ticketDependencies);
+    expect(deps.filter((d) => d.blockedTicketId === check!.id).map((d) => [d.blockerTicketId, d.until])).toEqual([[made.id, "merged"]]);
+  });
 });
