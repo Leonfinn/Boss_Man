@@ -420,6 +420,14 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         for (const j of q.queued) if (beingChecked.has(j.ticketId) && j.kind === "pre_review" && !checkLines.has(j.ticketId)) checkLines.set(j.ticketId, `no. ${j.place} in line`);
         for (const j of q.held) if (beingChecked.has(j.ticketId) && !checkLines.has(j.ticketId)) checkLines.set(j.ticketId, "waiting (the line is held)");
       }
+      // BOS-2879: an In progress ticket whose own quick check is queued or running waits on the check line, not on an agent:
+      // the strip counts it under "being checked", not "in progress".
+      const ownCheck = new Set<string>();
+      const inProgressIds = new Set(rows.filter((r) => r.t.systemState === "in_progress").map((r) => r.t.id));
+      if (inProgressIds.size) {
+        const q = await checkQueue(db).status(p.companyId);
+        for (const j of [...q.running, ...q.queued]) if (inProgressIds.has(j.ticketId) && j.kind === "pre_review") ownCheck.add(j.ticketId);
+      }
       for (const id of inReview) if (!beingChecked.has(id) && !pendingAny.has(id) && !withPr.has(id) && !signoffWaiting.has(id) && !deps.some((d) => d.blockedTicketId === id && d.blockerDecisionId && signoffs.has(d.blockerDecisionId))) unreviewed.add(id);
       // Who is running on each ticket right now, so a card can show live work. A run counts for a
       // ticket when it is on it, was about it without being on it (a nudge that named it), or a
@@ -553,6 +561,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         // Why an in-progress ticket doesn't count towards a WIP limit (BOS-1172); null when it counts.
         wipExempt: t.systemState === "in_progress" ? wipExemptKind(t, deps.some((d) => d.blockedTicketId === t.id && !!d.blockerTicketId && !doneIds.has(d.blockerTicketId) && !(d.until === "merged" && !!blocker(d.blockerTicketId)?.mergeCommit)), busyOn(t)?.id ?? null) : null,
         // BOS-1908: the ticket this one's agent is running instead ("Agent busy on BOS-N"), and the one marked Next up in Ready.
+        ownCheck: ownCheck.has(t.id),
         busyOnTicketId: t.systemState === "in_progress" ? (busyOn(t)?.id ?? null) : null,
         busyOnNumber: t.systemState === "in_progress" ? (busyOn(t)?.number ?? null) : null,
         nextUp: t.systemState === "ready" && !!t.nextUpAt,

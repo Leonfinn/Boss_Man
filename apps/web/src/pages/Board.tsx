@@ -1059,9 +1059,9 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged, d
   const progressCol = cols.find((c) => c.systemState === "in_progress");
   const readyCol = cols.find((c) => c.systemState === "ready");
   const standing = {
-    inProgress: (progressCol?.tickets ?? []).filter((t) => !t.waitingOnOwner && !t.wipExempt && passes(t)).length,
+    inProgress: (progressCol?.tickets ?? []).filter((t) => !t.waitingOnOwner && !t.wipExempt && !t.recurring && !t.ownCheck && passes(t)).length,
     nextUp: (readyCol?.tickets ?? []).filter((t) => t.nextUp && passes(t)).length,
-    beingChecked: lanes.find((l) => l.checking)?.tickets.filter(passes).length ?? 0,
+    beingChecked: (lanes.find((l) => l.checking)?.tickets.filter(passes).length ?? 0) + (progressCol?.tickets ?? []).filter((t) => !t.waitingOnOwner && !t.wipExempt && !t.recurring && t.ownCheck && passes(t)).length,
     watching: lanes.find((l) => l.liveCheck)?.tickets.filter(passes).length ?? 0,
   };
   // BOS-1910: every shown card the watchdog has handed on, in lane order; the strip links to the first.

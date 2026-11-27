@@ -204,7 +204,7 @@ export function Dashboard({ company, decisions = null, tally = null, onChanged }
       <MergesStuckBanner stuck={stuck} slow={slow} paused={paused} brakeOff={merges.data && !company.paused ? brakeOffSummary(merges.data) : null} companyId={company.id} />
 
 
-      {s.inProgressCounted != null && <WorkStands counts={{ inProgress: s.inProgressCounted, nextUp: s.nextUp ?? 0, beingChecked: s.beingChecked ?? 0, watching: s.watching ?? 0 }} hrefFor="#/board" />}
+      {s.inProgressCounted != null && <WorkStands counts={{ inProgress: s.inProgressCounted, nextUp: s.nextUp ?? 0, beingChecked: s.beingChecked ?? 0, watching: s.watching ?? 0 }} hrefFor="#/board" working={s.running} />}
 
       <div className="dash-lead">
         <RightNow lines={lines} paused={company.paused} companyId={company.id} onResume={onChanged ? async () => { await setCompanyPause(company.id, false); onChanged(); } : undefined} />

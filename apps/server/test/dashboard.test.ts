@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, runners, runs, tickets, wakes } from "../src/db/schema.js";
+import { checkJobs, decisions, runners, runs, tickets, wakes } from "../src/db/schema.js";
 import { dashboardService, runResult } from "../src/services/dashboard.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -118,6 +118,16 @@ describe("dashboard (R74)", () => {
     expect(stats).toMatchObject({ inProgressCounted: 1, nextUp: 1, beingChecked: 1, watching: 1 });
     const agent = ((await c.req("GET", `/api/companies/${c.company.id}/agents`)).json() as Array<{ id: string; beingChecked: number; nextUp: number }>).find((x) => x.id === c.worker.id)!;
     expect(agent).toMatchObject({ beingChecked: 1, nextUp: 1 });
+  });
+  it("counts an in-progress ticket with its own check queued as being checked, and never counts a recurring one (BOS-2879)", async () => {
+    const c = (ctx = await setup());
+    const mk = async (title: string) => ((await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title, assigneeAgentId: c.worker.id })).json() as { id: string }).id;
+    const [work, waiting, tracker] = [await mk("Working"), await mk("Waits on check"), await mk("Tracker")];
+    for (const id of [work, waiting, tracker]) await c.db.update(tickets).set({ systemState: "in_progress" }).where(eq(tickets.id, id));
+    await c.db.update(tickets).set({ recurring: true }).where(eq(tickets.id, tracker));
+    await c.db.insert(checkJobs).values({ companyId: c.company.id, projectId: c.project.id, ticketId: waiting, kind: "pre_review", scope: "quick", commit: "abc1234", tree: "def5678", state: "queued" });
+    const stats = (await c.req("GET", `/api/companies/${c.company.id}/dashboard`)).json().stats;
+    expect(stats).toMatchObject({ inProgressCounted: 1, beingChecked: 1 });
   });
   it("shows a ticket under its state, even when its column was left behind by an older move", async () => {
     const c = (ctx = await setup());
