@@ -1025,6 +1025,12 @@ export type AnswerExtra = {
    * merge done in the same press, and a ticket with nothing to merge marked done instead of left in review.
    */
   merge?: { markDone: boolean };
+  /**
+   * BOS-2859: the owner answered from somewhere other than the card itself (the Updates panel's Build and update
+   * runners press). Said in the audit line, e.g. "approved by owner via Updates panel". Only server routes behind the
+   * owner's session set it; no agent tool passes it.
+   */
+  via?: string;
 };
 
 /** Which checkout a working-copy cleanup deletes in, and what (BOS-120). */
@@ -3905,7 +3911,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // The activity line is cut at 300 characters, and the brief shows 100, so a long question is shortened here to
       // keep the answer in it (BOS-951 criterion 3: the whats_new line shows the option chosen, not only the question).
       const asked = d.question.length > 80 ? `${d.question.slice(0, 79)}…` : d.question;
-      await record(db, { companyId: d.companyId, ticketId: freed[0]?.ticketId, kind: "decision_answered", summary: settled ? `${settled.name} settled "${asked}": ${answer}.${settled.note ? ` Reason: ${settled.note}` : ""}` : `${extra.by === "ceo" ? "The CEO settled" : "Owner answered"} "${asked}": ${answer}`, at: now() });
+      await record(db, { companyId: d.companyId, ticketId: freed[0]?.ticketId, kind: "decision_answered", summary: settled ? `${settled.name} settled "${asked}": ${answer}.${settled.note ? ` Reason: ${settled.note}` : ""}` : `${extra.by === "ceo" ? "The CEO settled" : "Owner answered"} "${asked}": ${answer}${extra.via && !settled && extra.by !== "ceo" ? ` (${extra.via})` : ""}`, at: now() });
       let unblocked: Array<typeof tickets.$inferSelect> = [];
       // Linked tickets the card never moved (BOS-919: one in review keeps its state): not released, but still
       // the ticket the answer is about, so the asker is woken on it and its assignee hears the answer too.
