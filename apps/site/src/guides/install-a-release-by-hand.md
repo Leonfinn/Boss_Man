@@ -56,7 +56,7 @@ Do not edit the digests in the new `images.env`. To check the files' signatures 
 diff images.env.old images.env
 ```
 
-Lines starting with `<` are only in your old file. Copy each one that is your own setting into the new `images.env`. Leave out `BOSSMAN_VERSION` and the `_DIGEST` lines: the new file has its own.
+Lines starting with `<` are only in your old file. Copy each one that is your own setting into the new `images.env`. Leave out `BOSSMAN_VERSION` and the `_DIGEST` lines: the new file has its own. Write each value without quotes (`BOSSMAN_BIND=0.0.0.0`, not `BOSSMAN_BIND="0.0.0.0"`): step 4 reads the file as it is, so quotes would be sent as part of the value.
 
 **Success:** `grep BOSSMAN_VERSION images.env` shows the new version, for example `BOSSMAN_VERSION=0.2.0`.
 
@@ -75,6 +75,8 @@ docker logs --tail 20 updater
 ```
 
 The old number is expected: the updater counts from the server that is running now.
+
+The commands in steps 3 to 5 use the container name `updater`, which the install file sets today. If `docker logs updater` says "No such container", run `docker ps` and use the name in the list that ends in `updater` instead.
 
 ## 4. Ask the updater to install the release
 
