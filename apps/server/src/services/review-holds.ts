@@ -30,6 +30,8 @@ export type HoldView = {
   waits: HoldWaitView[];
   /** Every wait has closed, or the date has come: the reviewer has been (or is about to be) asked to re-check. */
   ready: boolean;
+  /** BOS-2870: when Boss Man first asked the holder to release it (the wait was seen done then); null until then. */
+  readySince: string | null;
   /** One line for a badge: "waits on BOS-12 / until 19 Nov". */
   label: string;
   /** Boss Man placed it (BOS-1173): no reviewer re-checks it; it releases itself once what it waits on is merged and live. */
@@ -126,6 +128,7 @@ export async function holdView(db: Db, ticketId: string, now: Date = new Date())
     createdAt: h.createdAt.toISOString(),
     waits,
     ready: holdReady(h, waits, now),
+    readySince: h.wokenAt?.toISOString() ?? null,
     label: parts.join(" / ") || "ready to re-check",
     system,
   };
@@ -389,14 +392,98 @@ export async function wakeReadyHolds(db: Db, now: Date, wake: (input: { agentId:
     await record(db, { companyId: t.companyId, ticketId: t.id, agentId: h.reviewerAgentId, kind: "review_hold_ready", summary: `The hold on this ticket has run its course (${h.releaseAt && h.releaseAt <= now ? "the date came" : "everything it waited on has closed"}); the reviewer was asked to re-check and release.` });
     if (!h.reviewerAgentId) continue;
     const ref = ticketRef(t.prefix, t.number) ?? t.id;
-    await wake({
+    const sent = await wake({
       agentId: h.reviewerAgentId,
       reason: HOLD_WAKE_REASON,
       ticketId: t.id,
       priority: 3,
-      note: `- ${t.id} "${t.title}" (${ref}): you passed this review but held the merge ("${h.reason}"). What it waited for is done. Re-check it against current main (git diff origin/main...HEAD with the review tool's diff action), then use the review tool: action release_hold to let it merge, or action cancel_hold to withdraw your pass and have it reviewed again.`,
+      note: `- ${t.id} "${t.title}" (${ref}): you passed this review but held the merge ("${h.reason}"). What it waited for is done. Re-check it against current main (git diff origin/main...HEAD with the review tool's diff action), then use the review tool: action release_hold to let it merge, or action cancel_hold to withdraw your pass and have it reviewed again. If you don't, you are asked again in 1 hour, and after 2 hours a card goes up naming the hold.`,
     });
+    // BOS-2870: a wake the scheduler dropped reached nobody, so the stamp goes back and the next pass tries again.
+    if (wakeDropped(sent)) {
+      await db.update(reviewHolds).set({ wokenAt: null }).where(eq(reviewHolds.id, h.id));
+      continue;
+    }
     woken++;
   }
   return woken;
+}
+
+/** Whether the scheduler's answer says the wake reached nobody. */
+const wakeDropped = (r: unknown) => !!r && typeof r === "object" && (r as { outcome?: unknown }).outcome === "dropped";
+
+/** BOS-2870: a ready hold still open this long after the holder was woken wakes the holder again, once. */
+export const HOLD_REMIND_MS = 60 * 60_000;
+/** BOS-2870: and this long after, a card goes up naming it: to the CEO, or to the owner when the CEO holds it. */
+export const HOLD_ESCALATE_MS = 2 * 60 * 60_000;
+
+const hhmm = (d: Date) => `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")} UTC`;
+const hoursSince = (from: Date, now: Date) => {
+  const h = (now.getTime() - from.getTime()) / 3_600_000;
+  return h < 1 ? `${Math.max(1, Math.round(h * 60))} minutes` : `${Math.floor(h)} hour${Math.floor(h) === 1 ? "" : "s"}`;
+};
+
+export type HoldAlert = { companyId: string; kind: "review_hold_unreleased" | "review_hold_unreleased_owner"; question: string; ticketId: string; about: string[]; from: "ceo" | "owner"; why: string; dedupeKey: string; clearWhen: Array<{ kind: "holdClosed"; holdId: string }> };
+
+/**
+ * The safety net under wakeReadyHolds (BOS-2870). BOS-2713 sat held for 22 hours after what it waited on had merged:
+ * the holder had one chance (one wake), and nothing looked again. A reviewer's hold that is ready (every wait done, or
+ * its date come) and still open HOLD_REMIND_MS after that first wake wakes the holder a second time; at
+ * HOLD_ESCALATE_MS a card goes up naming it. The CEO can release any hold, so the card goes to the CEO; when the CEO
+ * is the holder (or the holder is gone) it goes to the owner, who can release it from the ticket page. Each step is
+ * claimed with a conditional update, so two passes never repeat one, and the card closes itself when the hold closes.
+ * Returns what it did. Boss Man's own holds are left out: they end themselves (releaseReadyHolds).
+ */
+export async function chaseReadyHolds(
+  db: Db,
+  now: Date,
+  deps: { wake: (input: { agentId: string; reason: string; ticketId: string; note: string; priority: number }) => Promise<unknown>; alert: (input: HoldAlert) => Promise<unknown> },
+): Promise<{ reminded: number; escalated: number }> {
+  const open = await db.select().from(reviewHolds).where(and(eq(reviewHolds.status, "open"), isNotNull(reviewHolds.wokenAt), isNull(reviewHolds.escalatedAt)));
+  const out = { reminded: 0, escalated: 0 };
+  for (const h of open) {
+    const since = h.wokenAt!;
+    const age = now.getTime() - since.getTime();
+    if (age < HOLD_REMIND_MS) continue;
+    if ((await autoReleases(db, h)).auto) continue;
+    const waits = await waitsOf(db, h.id);
+    if (!holdReady(h, waits, now)) continue;
+    const [t] = await db.select({ id: tickets.id, title: tickets.title, companyId: tickets.companyId, number: tickets.number, prefix: companies.ticketPrefix, state: tickets.systemState }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(eq(tickets.id, h.ticketId));
+    if (!t || t.state !== "review") continue;
+    const [holder] = h.reviewerAgentId ? await db.select({ id: agents.id, name: agents.name, role: agents.role, retiredAt: agents.retiredAt }).from(agents).where(eq(agents.id, h.reviewerAgentId)) : [];
+    const ref = ticketRef(t.prefix, t.number) ?? `"${t.title}"`;
+    const what = waits.length ? waits.map((w) => w.label).join(", ") : "its date";
+    const holderName = holder?.name ?? "a reviewer who is no longer on the team";
+    if (age >= HOLD_ESCALATE_MS) {
+      const claimed = await db.update(reviewHolds).set({ escalatedAt: now }).where(and(eq(reviewHolds.id, h.id), isNull(reviewHolds.escalatedAt))).returning({ id: reviewHolds.id });
+      if (!claimed.length) continue;
+      const toOwner = !holder || holder.role === "ceo" || !!holder.retiredAt;
+      const reminded = h.remindedAt ? ` and again at ${hhmm(h.remindedAt)}` : "";
+      const act = toOwner
+        ? `Open the task and press Release hold to let it merge, or Cancel hold and review again.`
+        : `Release it (review tool, action release_hold) or cancel it (action cancel_hold), or ask ${holderName} why it is still held.`;
+      const question = `${ref} "${t.title}" has been held by ${holderName} for ${hoursSince(since, now)} after what it waited on (${what}) was done. ${holderName} was asked to re-check and release it at ${hhmm(since)}${reminded}, and hasn't. Its reviews passed, so nothing else is in the way of its merge. ${act} This card closes by itself once the hold is released or cancelled.`;
+      await deps.alert({ companyId: t.companyId, kind: toOwner ? "review_hold_unreleased_owner" : "review_hold_unreleased", question, ticketId: t.id, about: holder ? [holder.id] : [], from: toOwner ? "owner" : "ceo", why: toOwner ? "the CEO holds it, so only the owner is above it" : "the CEO can release any hold", dedupeKey: `review-hold-unreleased:${h.id}`, clearWhen: [{ kind: "holdClosed", holdId: h.id }] });
+      await record(db, { companyId: t.companyId, ticketId: t.id, agentId: h.reviewerAgentId, kind: "review_hold_escalated", summary: `The hold was still not released ${hoursSince(since, now)} after its wait was done, so a card went to ${toOwner ? "the owner" : "the CEO"}.` });
+      out.escalated++;
+      continue;
+    }
+    if (h.remindedAt || !holder || holder.retiredAt) continue;
+    const claimed = await db.update(reviewHolds).set({ remindedAt: now }).where(and(eq(reviewHolds.id, h.id), isNull(reviewHolds.remindedAt))).returning({ id: reviewHolds.id });
+    if (!claimed.length) continue;
+    const sent = await deps.wake({
+      agentId: holder.id,
+      reason: HOLD_WAKE_REASON,
+      ticketId: t.id,
+      priority: 3,
+      note: `- ${t.id} "${t.title}" (${ref}): second reminder. You held this merge ("${h.reason}") and what it waited for (${what}) has been done since ${hhmm(since)}, but the hold is still open, so the ticket can't merge. Re-check it against current main (review tool, action diff), then action release_hold, or action cancel_hold to have it reviewed again. In 1 hour a card goes to ${holder.role === "ceo" ? "the owner" : "the CEO"} naming this hold.`,
+    });
+    if (wakeDropped(sent)) {
+      await db.update(reviewHolds).set({ remindedAt: null }).where(eq(reviewHolds.id, h.id));
+      continue;
+    }
+    await record(db, { companyId: t.companyId, ticketId: t.id, agentId: holder.id, kind: "review_hold_reminded", summary: `The hold is still open an hour after its wait was done; ${holder.name} was asked again to re-check and release it.` });
+    out.reminded++;
+  }
+  return out;
 }

@@ -46,7 +46,7 @@ export function WorkspaceDisk({ company, onChanged }: { company: Company; onChan
       </p>
       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
         <label htmlFor="disk-cap">
-          Most disk to use (GB) <code className="mono">workspace disk cap</code>
+          Most disk to use (GB)
         </label>
         <input id="disk-cap" type="number" min={1} max={100000} step={1} placeholder="20" value={gb} onChange={(e) => setGb(e.target.value)} style={{ width: 100 }} />
         <SaveButton

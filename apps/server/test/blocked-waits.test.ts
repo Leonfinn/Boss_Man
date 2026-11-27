@@ -121,6 +121,35 @@ describe("Blocked accepts every kind of wait (BOS-1171)", () => {
     expect(await c.block(agent, t.id, { watch_until: until })).toMatch(/goes with watching_for/);
   });
 
+  // BOS-2863: a watch on an event ends 7 days after go-live; later needs a reason, earlier is fine, a duration watch keeps 14 days.
+  it("a hand watch on an event defaults to 7 days from go-live; a later date needs a reason", async () => {
+    const c = await setup();
+    const agent = await c.mcp(c.worker.id);
+    const day = 86_400_000;
+    const liveAt = new Date(Date.now() - 1 * day);
+    const merged = { systemState: "in_progress" as const, mergeCommit: "d".repeat(40), mergedAt: liveAt, liveAt, acceptanceCriteria: [{ text: "On the next real server update the card closes", after: "merge" as const }] };
+    const t = await c.ticket();
+    await c.put(t.id, merged);
+    const reply = await c.block(agent, t.id, { watching_for: "the next real server update", watch_trigger: "server_update" });
+    expect(reply).toContain("ends 7 days after go-live");
+    expect((await c.row(t.id)).watchUntil?.getTime()).toBe(liveAt.getTime() + 7 * day);
+    const later = new Date(Date.now() + 20 * day).toISOString();
+    const t2 = await c.ticket();
+    await c.put(t2.id, merged);
+    expect(await c.block(agent, t2.id, { watching_for: "the next real server update", watch_trigger: "server_update", watch_until: later })).toMatch(/watch_until_reason/);
+    expect(await c.block(agent, t2.id, { watching_for: "the next real server update", watch_trigger: "server_update", watch_until: later, watch_until_reason: "updates only ship monthly" })).toContain("is now blocked");
+    expect((await c.row(t2.id)).watchUntil?.toISOString()).toBe(later);
+    const earlier = new Date(Date.now() + 2 * day).toISOString();
+    const t3 = await c.ticket();
+    await c.put(t3.id, merged);
+    expect(await c.block(agent, t3.id, { watching_for: "the next real server update", watch_trigger: "server_update", watch_until: earlier })).toContain("is now blocked");
+    // A duration watch keeps the 14-day default (no date stored).
+    const t4 = await c.ticket();
+    await c.put(t4.id, merged);
+    expect(await c.block(agent, t4.id, { watching_for: "a week of real use with no new stuck alerts" })).toContain("is now blocked");
+    expect((await c.row(t4.id)).watchUntil).toBeNull();
+  });
+
   // BOS-2288: a watch names the event that wakes it, or gets a daily re-read; the event wakes only the matching watchers.
   it("a watch with no trigger books a daily re-read and says so; a named trigger is stored and wakes its watchers", async () => {
     const c = await setup();

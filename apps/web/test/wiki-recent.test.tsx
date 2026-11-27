@@ -59,7 +59,7 @@ describe("wiki Recently changed", () => {
       }),
     );
     render(<Wiki companies={[company]} companyId="c1" slug="p5" go={() => {}} />);
-    await screen.findByText("Only the company brief so far.");
+    await screen.findByText("No pages yet.");
     expect(block()).toBeNull();
   });
 

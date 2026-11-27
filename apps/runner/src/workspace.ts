@@ -27,6 +27,7 @@ import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
+import { finishesStep, stepLimitMs } from "./check-clock.js";
 import { createStageTracker, CHECK_BUNDLE_MAX_HAVES, CHECK_TOOLS, ciBranchFor, DEPLOY_REF, type CheckBundleInfo, prepareFullLog, FULL_LOG_MAX, FULL_LOG_HEAD, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MergeLineConflict, type MergeLineConflictsResult, type MergeCarried, type MainLogResult, type MigrationsResult, type PushResult, type Uncommitted, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, fencedCommand, fenceProfile, repoGrant, shortTmpName, type FenceLevel } from "./fence.js";
 import type { SecretScanResult } from "@boss-man/shared";
@@ -1880,6 +1881,7 @@ export class Workspaces {
       // The queue limit is a no-progress limit (BOS-370): it restarts whenever the printed place changes.
       let queued = false;
       let slotTaken = false;
+      let slotTakenAt = started;
       let lastPlace = "";
       // BOS-1228: a queued job also keeps the start and the end of the whole log (middle cut once it is too big), for check_log.
       let logHead = "";
@@ -1905,7 +1907,12 @@ export class Workspaces {
         job?.onOutput?.(tail);
         if (!slotTaken && tail.includes(CHECK_STARTED_MARKER)) {
           slotTaken = true;
+          slotTakenAt = Date.now();
           arm(timeoutMs);
+        } else if (job && (slotTaken || !queued) && finishesStep(chunk)) {
+          // BOS-2877: a finished step restarts the clock (up to the hard cap), so a slow host is not mistaken for a stuck check.
+          const left = stepLimitMs({ now: Date.now(), slotTakenAt, limitMs: timeoutMs });
+          arm(Math.max(left, 1));
         } else if (!slotTaken && tail.includes(CHECK_QUEUED_MARKER)) {
           const place = [...chunk.matchAll(/waiting for a free check slot \(place (\d+) of/g)].pop()?.[1] ?? "";
           if (!queued || (place && place !== lastPlace)) arm(queueMaxMs);

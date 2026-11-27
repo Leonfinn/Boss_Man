@@ -16,7 +16,7 @@ Each agent is a session of Claude Code, Codex or OpenCode with a role, instructi
 
 ## The runner
 
-The runner is the container where a company's agents work. Each company has one. It connects out to the Boss Man server, so it needs no open ports. In a code project, agents work on a separate copy of the repository for each task. You can add check workers on other machines to run checks.
+The runner is the container where a company's agents work. Each company has one. It connects out to the Boss Man server, so it needs no open ports. In a code project, agents work on a separate copy of the repository for each task. You can add check workers on other machines to run checks. See [Your agents' workspace (the runner)](/guides/the-runner) for why it is kept separate and what to do if it stops.
 
 ## Projects and tasks
 
