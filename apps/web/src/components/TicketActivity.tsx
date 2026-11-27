@@ -8,6 +8,7 @@ import { api, type Agent } from "../api";
 import { NEWLINE_KEY_HINT, useCoarsePointer, usePoll } from "../hooks";
 import { useDraft } from "../drafts";
 import { linked, visibleParts } from "../pages/Chat";
+import { MessageText } from "./MessageText";
 import { countHits, findQuery, findSpots, spotIndex, splitHits, stepSpot, type FindSpot, type Segment } from "../chat-find";
 import { ImagePreviews, useImageAttach, withAttachments } from "./ImageAttach";
 import { OwnerMessageBox, tooLongToSend } from "./OwnerMessageBox";
@@ -617,13 +618,22 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
                 const mark = markIn(m!, { n: 0 });
                 // Details open when the current match is in them.
                 const inDetails = !!query && !!details && curSpot?.id === m!.id && curSpot.n >= countHits(visibleParts(summary), query);
+                // A reply with a fenced command gets the same code box as chat (BOS-2853); plain text keeps its bubble.
+                const body = (text: string) =>
+                  text.includes("```") ? (
+                    <div className="msg-text">
+                      <MessageText text={text} wikiCompanyId={companyId} ctx={refCtx} mark={mark} />
+                    </div>
+                  ) : (
+                    <p>{linked(text, companyId, refCtx, mark)}</p>
+                  );
                 return (
                   <>
-                    <p>{linked(summary, companyId, refCtx, mark)}</p>
+                    {body(summary)}
                     {details && (
                       <details open={inDetails || undefined}>
                         <summary>Details</summary>
-                        <p>{linked(details, companyId, refCtx, mark)}</p>
+                        {body(details)}
                       </details>
                     )}
                   </>
