@@ -7,7 +7,7 @@
 // Only screen facts are kept: no personal data. A profile is whatever one signed-in browser
 // reported, so it works on any install with no host-specific values.
 import { z } from "zod";
-import { SavedShortcut, SHORTCUTS_MAX } from "./shortcuts.js";
+import { SavedShortcut, SHORTCUTS_MAX } from "./shortcut-shape.js";
 
 /** The screen units a layout test needs. `vh` is the largest viewport on a phone (toolbar hidden),
  * `dvh` is the viewport as it is now, `svh` is the smallest, `lvh` is the largest; `visual` is the

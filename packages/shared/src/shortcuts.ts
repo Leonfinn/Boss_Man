@@ -6,9 +6,10 @@
 // never point outside the app, and when an update renames or moves a page the shortcut follows it.
 
 import { z } from "zod";
+import { SavedShortcut, SHORTCUTS_MAX } from "./shortcut-shape.js";
 
-/** Most shortcuts at once: 6 keeps the whole top block (Dashboard, Decisions, Notifications, Chat) in view. */
-export const SHORTCUTS_MAX = 6;
+// Most shortcuts at once; re-exported so callers of the list don't need the shape module too.
+export { SavedShortcut, SHORTCUTS_MAX };
 
 /** Most characters in a shortcut's own name. */
 export const SHORTCUT_NAME_MAX = 40;
@@ -110,16 +111,6 @@ export function isKnownShortcutPage(id: string): boolean {
 export function isGoneShortcutPage(id: string): boolean {
   return !byId.has(id) && id in SHORTCUT_PAGE_CHANGES;
 }
-
-/**
- * One saved shortcut: which page (from the shared list) and the owner's own name for it, if they gave one. The
- * name is optional; without it the menu uses the page's own name.
- */
-export const SavedShortcut = z.object({
-  id: z.string(),
-  name: z.string().optional(),
-});
-export type SavedShortcut = z.infer<typeof SavedShortcut>;
 
 /**
  * What the menu draws for one saved shortcut: the page's details from the shared list (or, for a page this build
