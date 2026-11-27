@@ -67,7 +67,7 @@ Run these in the folder with the two files.
 1. Make the keys. This runs once and is safe to run again: it never replaces a file that exists.
 
    ```
-   docker compose --env-file images.env run --rm setup
+   docker compose --env-file images.env -f docker-compose.images.yml run --rm setup
    ```
 
    It writes the master key into a Docker volume called `config` and the database password into a second one called `db-secret` (in a project named `boss-man`, they are `boss-man_config` and `boss-man_db-secret`). The database container gets only `db-secret`, so it never sees the master key. **Back up both volumes.** Without `master.key`, the secrets Boss Man stores cannot be read again, and without the database password the server cannot reach its database.
@@ -75,7 +75,7 @@ Run these in the folder with the two files.
 2. Start Boss Man. Compose starts only the database, a small proxy and the updater; the updater then downloads the server, launcher, runner and network-guard images by their digests and makes the server and the launcher itself, so the first start takes a few minutes longer than later ones:
 
    ```
-   docker compose --env-file images.env up -d
+   docker compose --env-file images.env -f docker-compose.images.yml up -d
    ```
 
 3. Open `http://<this machine>:3100` and create the owner account. By default Boss Man listens only on the machine itself (`127.0.0.1`). To reach it from another computer, add `BOSSMAN_BIND=0.0.0.0` to `images.env` and run the start command in step 2 again, and keep the port off the internet. Logging in over plain `http://` on your home network also needs `BOSSMAN_INSECURE_COOKIES=1` in `images.env`; without it, login needs HTTPS.
@@ -98,13 +98,13 @@ Until this change compose itself started the server and the launcher. An install
 2. In the old folder stop and remove the old containers, keeping volumes (never add `-v`):
 
    ```
-   docker compose --env-file images.env down
+   docker compose --env-file images.env -f docker-compose.images.yml down
    ```
 
 3. In the new folder start the new stack. The updater finds no server and no launcher, makes both from the release the new `images.env` pins (no backup or soak, nothing is serving), and the existing database, keys and company data are used as they are:
 
    ```
-   docker compose --env-file images.env up -d
+   docker compose --env-file images.env -f docker-compose.images.yml up -d
    ```
 
 Runners keep their company data (it is in volumes); the new launcher picks them up by label and starts new ones as before.
@@ -152,7 +152,7 @@ Follow sections 1 to 3 in a terminal. The launcher finds where Docker keeps its 
 - **The server cannot read `master.key`** or the database says its password file is missing: run step 1 first.
 - **A pull is refused or "denied"**: the package may be private, or you hit Docker Hub's limit (section 2). Run `docker login` for that registry.
 - **Start again from nothing** (this deletes everything, including your company data and keys): see the next section. Do not do this if you want to keep anything.
-- **Go back to the build install**: stop this one with `docker compose --env-file images.env down` (without `-v`, so the volumes stay) and follow [docs/00-first-time-install.md](00-first-time-install.md) in a different folder. The two installs do not share data.
+- **Go back to the build install**: stop this one with `docker compose --env-file images.env -f docker-compose.images.yml down` (without `-v`, so the volumes stay) and follow [docs/00-first-time-install.md](00-first-time-install.md) in a different folder. The two installs do not share data.
 
 ## Start again from nothing
 

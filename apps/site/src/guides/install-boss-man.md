@@ -100,7 +100,7 @@ The database image, `pgvector/pgvector`, always comes from Docker Hub, so that l
 Run this and every later command in the folder with the two files.
 
 ```sh Run in the folder with the files
-docker compose --env-file images.env run --rm setup
+docker compose --env-file images.env -f docker-compose.images.yml run --rm setup
 ```
 
 This writes the master key into a Docker volume called `config`, and the database password into one called `db-secret`. It is safe to run again: it never replaces a file that exists.
@@ -124,15 +124,15 @@ Keep the port off the internet. Skip this step if you only open Boss Man in a br
 ### 5. Start Boss Man
 
 ```sh Run in the folder with the files
-docker compose --env-file images.env up -d
+docker compose --env-file images.env -f docker-compose.images.yml up -d
 ```
 
 This starts Boss Man. Compose starts only the database, a small proxy and the updater; the updater then downloads the server, launcher, runner and network-guard images by their digests and makes the server and the launcher itself, so the first start takes a few minutes longer than later ones.
 
 :::worked
-`docker compose --env-file images.env ps` shows `db`, `server` and `launcher` running, and `http://<this machine>:3100` opens a Boss Man page. (Expected from the compose file; not yet seen on a real install.)
+`docker compose --env-file images.env -f docker-compose.images.yml ps` shows `db`, `server` and `launcher` running, and `http://<this machine>:3100` opens a Boss Man page. (Expected from the compose file; not yet seen on a real install.)
 
-If `ps` shows the server restarting, run `docker compose --env-file images.env logs server` to see why, and check the list under "If something goes wrong" below.
+If `ps` shows the server restarting, run `docker compose --env-file images.env -f docker-compose.images.yml logs server` to see why, and check the list under "If something goes wrong" below.
 :::
 
 ### 6. Make the owner account
@@ -213,7 +213,7 @@ You do not run `docker compose pull` or `up -d` for a release any more. Do not r
 - **`required variable BOSSMAN_REGISTRY is missing`.** You left out `--env-file images.env`.
 - **The server cannot read `master.key`, or the database says its password file is missing.** Run step 3 first.
 - **A pull is refused or "denied".** You may have hit Docker Hub's limit (step 2). Run `docker login` for that registry.
-- **The login page reloads.** `images.env` is missing `BOSSMAN_INSECURE_COOKIES=1` (step 4). Add it and run `docker compose --env-file images.env up -d`.
+- **The login page reloads.** `images.env` is missing `BOSSMAN_INSECURE_COOKIES=1` (step 4). Add it and run `docker compose --env-file images.env -f docker-compose.images.yml up -d`.
 
 Do not forward the web port on your router. For access from outside your home, use Tailscale (see [Add-ons](/guides/add-ons)).
 

@@ -76,6 +76,13 @@ for c in "${guide_cmds[@]}"; do
 done
 [ "$order_ok" = 1 ] && ok "the guide removes labelled containers, runners, guards, then down -v, then the pack volume" || bad "the guide's removal steps are missing or out of order"
 echo "$cfg" | jq -r '.services.updater.environment.UPDATER_LAUNCHER_ENV' | grep -q '^BOSSMAN_INSTALL_LABEL=com.bossman.install=' && ok "the launcher gets the install label to stamp on runners, guards and the pack volume" || bad "UPDATER_LAUNCHER_ENV lacks BOSSMAN_INSTALL_LABEL"
+# BOS-2788: docker-compose.images.yml is not a default Compose file name, so every guide step that runs compose with images.env must
+# pass -f docker-compose.images.yml, as this test does. Both guides are read; a step with --env-file images.env and no -f fails.
+for guide in docs/35-install-from-images.md apps/site/src/guides/install-boss-man.md; do
+  [ -f "$guide" ] || { bad "$guide is missing"; continue; }
+  nof="$(grep -n 'docker compose .*--env-file images\.env' "$guide" | grep -v -- '-f docker-compose\.images\.yml' || true)"
+  [ -z "$nof" ] && ok "$guide: every image-install compose command names -f docker-compose.images.yml" || bad "$guide: compose command without -f docker-compose.images.yml: $nof"
+done
 
 # BOS-2388: the real install half below only runs with a Docker daemon and INSTALL_RELEASE_JSON, so a workflow that builds its
 # test release.json by hand can drift from what the install needs and only GitHub notices. Check the contract here, with no daemon:
