@@ -16,10 +16,8 @@ import { ownerSetupFacts, ownerSetupLines, workerSetupLines } from "./owner-reco
 import { namedThingsSection, type NamedSources } from "./named-things.js";
 import { swapUntilForScreen } from "./maintenance.js";
 
-/** Drops the "You said "X" on card Y, 2026-11-01, about Z, ..." footer lines that BOS-1855 saved under older CEO replies. */
-export function stripYouSaidLines(text: string): string {
-  return text.replace(/(?:\n+|^)You said "[^\n]*?, \d{4}-\d{2}-\d{2}, about [^\n]*/g, "").trimEnd();
-}
+import { stripCodeNotes, stripYouSaidLines } from "./reply-notes.js";
+export { stripYouSaidLines };
 import { runCapabilities } from "./run-capabilities.js";
 import type { ChatTraceService } from "./chat-trace.js";
 import { reportBackSection, settleReports } from "./chat-report-back.js";
@@ -284,7 +282,10 @@ export function chatService(
           .where(and(eq(ownerChatMessages.companyId, companyId), eq(ownerChatMessages.agentId, agentId)))
           .orderBy(desc(ownerChatMessages.createdAt))
           .limit(HISTORY)
-      ).reverse();
+      )
+        .reverse()
+        // BOS-2854: the agent sees its earlier replies without the notes the code added under them, here and in the PA prompt and the named-things lookup.
+        .map((m) => (m.role === "assistant" ? { ...m, text: stripCodeNotes(m.text) } : m));
       const ceo = agent.role === "ceo";
       if (agent.duty === "assistant") return paPrompt(agent, company?.name ?? "this company", recent);
       return [
