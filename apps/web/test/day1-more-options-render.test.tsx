@@ -5,6 +5,9 @@ import { afterAll, describe, expect, it } from "vitest";
 // BOS-2828: the "More options" fold on the task page and the sideways-scroll hint over the board.
 // Loads the real styles.css in a headless browser and measures: the closed fold is one short line, the open one
 // shows its rows, and the hint stays inside the page at phone width. Skipped, not failed, where no browser is installed.
+// Known gap: it measures hand-written markup with the real stylesheet, not the Ticket and Board components, so it
+// would not notice Ticket.tsx dropping the fold. Those are covered by jsdom tests (not-found-and-empty-states,
+// wiki-recent) and by the before/after screenshots on the ticket.
 
 const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 

@@ -856,7 +856,10 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
     }
   };
   // With no page chosen, open the owner's most recently changed page; the brief is a last resort, not the front door.
-  const latest = [...pages].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0];
+  // Taken from the unfiltered list only: typing in the Search box must not swap the right pane to the best match.
+  const landingRef = useRef<string | null>(null);
+  if (!q.trim() && list.data) landingRef.current = [...pages].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0]?.slug ?? null;
+  const latest = landingRef.current ? { slug: landingRef.current } : undefined;
   const folders = [...new Set(pages.map((p) => p.folder).filter(Boolean))].sort();
   const create = async (v: Draft) => {
     const p = await api<{ slug: string }>(`/api/companies/${company!.id}/wiki`, { method: "POST", body: v });
