@@ -177,7 +177,8 @@ const OWNER_TZ = timeZoneOr(process.env.TZ);
 /** Set on the blue/green colours only (deploy/truenas-bluegreen.yml); null on a single server. */
 const colour = () => (process.env.BOSSMAN_COLOUR === "blue" || process.env.BOSSMAN_COLOUR === "green" ? process.env.BOSSMAN_COLOUR : null);
 const STARTED_AT = new Date().toISOString();
-const SERVER_VERSION = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
+// BOS-2799: an image install is told its release by the updater (BOSSMAN_VERSION); package.json stays 0.0.0 until the package is stamped.
+const SERVER_VERSION = process.env.BOSSMAN_VERSION?.trim() || (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
 
 export type AppOptions = {
   db: Db;
