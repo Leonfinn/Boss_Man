@@ -13,6 +13,7 @@ sections:
 reads: 
   - /api/companies/:id/dashboard
   - /api/companies/:id/merge-queue
+  - /api/companies/:id/start-block
   - /api/companies/:id/weekly-summary/view
 
 ## #/agents
@@ -83,6 +84,7 @@ reads:
   - /api/companies/:id/merge-queue
   - /api/companies/:id/setup-checklist
   - /api/companies/:id/skill-proposals/:id
+  - /api/companies/:id/start-block
   - /api/companies/:id/weekly-summary/view
   - /api/decisions/answered
   - /api/decisions/tally
@@ -425,6 +427,7 @@ reads:
   - /api/companies/:id/review-policy
   - /api/companies/:id/runner
   - /api/companies/:id/setup-checklist
+  - /api/companies/:id/start-block
   - /api/funding-sources
   - /api/secrets
   - /api/setup-progress
@@ -467,6 +470,7 @@ reads:
   - /api/companies/:id/merge-queue/:id/status
   - /api/companies/:id/objectives
   - /api/companies/:id/open-tickets
+  - /api/companies/:id/start-block
   - /api/companies/:id/watchdog/actions
   - /api/risk-tiers
   - /api/runs/:id/transcript
