@@ -866,12 +866,17 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     async cancel() {
       const h = await getHold(db);
       if (!h) return false;
-      // BOS-2786: the owner cancelled Boss Man's own wrap-up: it is not started again for the same queued press.
-      if (h.kind === "wrapup" && h.auto) {
-        const off = h.auto.queuedAt ?? "";
-        await db.insert(settings).values({ key: AUTO_WRAP_OFF_KEY, value: off }).onConflictDoUpdate({ target: settings.key, set: { value: off } });
+      // BOS-2786: the owner cancelled a wrap-up while a runner update is queued: Boss Man does not start its own wrap-up
+      // again for that press. BOS-2808: whoever started the hold. The press is read as autoWrap reads it, so the marker
+      // matches what autoWrapDue compares (an owner hold's tie may carry a stand-in queuedAt); Boss Man's own hold names
+      // its press when the chain can't be read.
+      let off: string | null = null;
+      if (h.kind === "wrapup") {
+        const r = (await chainNow(null))?.runner;
+        off = r?.stage === "queued" ? (r.queuedAt ?? "") : h.auto ? (h.auto.queuedAt ?? "") : null;
+        if (off !== null) await db.insert(settings).values({ key: AUTO_WRAP_OFF_KEY, value: off }).onConflictDoUpdate({ target: settings.key, set: { value: off } });
       }
-      if (h.kind === "wrapup" && h.auto) await end("Wrap-up cancelled", "note", "New runs start again. Boss Man won't wrap up again for this runner update: it now waits for the work going to finish, as before. Agents that ended cleanly are woken on their tickets.");
+      if (h.kind === "wrapup" && off !== null) await end("Wrap-up cancelled", "note", "New runs start again. Boss Man won't wrap up again for this runner update: it now waits for the work going to finish, as before. Agents that ended cleanly are woken on their tickets.");
       else if (h.kind === "wrapup") await end("Wrap-up cancelled", "note", "New runs start again. Agents that were still going finish on their own; any that ended cleanly are woken on their tickets.");
       else if (h.kind === "building") await end("Runner update build hold cancelled", "note", "New runs start again. If the image build is still going, the swap will wait for work again once it is built.");
       else await end("Runner update cancelled", "note", "New runs start again. Runners not swapped yet still run the old image; start the update again when you like.");
