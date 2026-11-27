@@ -147,7 +147,7 @@ guide_removal() {
   docker ps -aq --filter "label=com.bossman.install=$P" | xargs -r docker rm -f >/dev/null 2>&1
   docker ps -aq --filter label=boss-man.launcher=1 | xargs -r docker rm -f >/dev/null 2>&1
   docker ps -aq --filter label=boss-man.netguard=1 | xargs -r docker rm -f >/dev/null 2>&1
-  dc down -v --remove-orphans >/dev/null 2>&1
+  dc down -v --remove-orphans > "$T/down.log" 2>&1
   docker volume ls -q --filter "label=com.bossman.install=$P" | xargs -r docker volume rm >/dev/null 2>&1
   docker volume ls -q --filter name=boss-man-claude-pack | xargs -r docker volume rm >/dev/null 2>&1
 }
@@ -157,7 +157,13 @@ cleanup() {
   # The guide's two look-only listings, plus the runners and guards: all must be empty.
   left_c="$(docker ps -a --format '{{.Names}}' --filter "label=com.bossman.install=$P"; docker ps -a --format '{{.Names}}' --filter label=boss-man.launcher=1; docker ps -a --format '{{.Names}}' --filter label=boss-man.netguard=1)"
   left_v="$(docker volume ls -q --filter "name=${P}_"; docker volume ls -q --filter "label=com.bossman.install=$P"; docker volume ls -q --filter name=boss-man-claude-pack)"
-  if [ -n "$left_c$left_v" ]; then bad "removal left behind (containers: ${left_c//$'\n'/ }; volumes: ${left_v//$'\n'/ })"; else ok "the guide's removal left no container and no volume behind"; fi
+  if [ -n "$left_c$left_v" ]; then
+    bad "removal left behind (containers: ${left_c//$'\n'/ }; volumes: ${left_v//$'\n'/ })"
+    # Say why: the output of down, every container left on the host with its labels, and who still mounts each leftover volume.
+    echo "--- down -v said: $(tail -n 12 "$T/down.log" 2>&1 | tr '\n' ';' | cut -c1-600)"
+    echo "--- containers left: $(docker ps -a --format '{{.Names}} {{.Status}} {{.Label "com.bossman.install"}}' | tr '\n' ';' | cut -c1-600)"
+    for v in $left_v; do echo "--- volume $v used by: $(docker ps -a --filter "volume=$v" --format '{{.Names}}' | tr '\n' ' ')"; done
+  else ok "the guide's removal left no container and no volume behind"; fi
   rm -rf "$T"
   [ "$rc" -eq 0 ] || exit "$rc"
   exit "$fail"
