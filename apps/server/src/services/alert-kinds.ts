@@ -40,7 +40,12 @@ export type ClearWhen =
   /** A failing sweep step's card (BOS-2160): the step ran without an error in the last pass. */
   | { kind: "sweepStepOk"; step: string }
   /** A host warning's alert (BOS-2674): the host no longer reports that failing check or stopped add-on. */
-  | { kind: "hostWarningGone"; key: string };
+  | { kind: "hostWarningGone"; key: string }
+  /**
+   * A token-expiry card (BOS-2825): the secret has a newer version than the one the card named, so a new value
+   * was saved. The date closing it would miss a token replaced early but saved without a new date.
+   */
+  | { kind: "secretReplaced"; secretId: string; version: number };
 
 export type AlertRung = "scrum_master" | "ceo" | "owner";
 
@@ -152,8 +157,11 @@ export const ALERT_KINDS = {
     // The key names the company too (BOS-498): the dedupe key is unique across companies, so without it one
     // company's open card on a shared funding source would swallow another company's raise.
     groupBy: (c) => (c.companyId && c.account ? `account:${c.companyId}:${c.account.fundingSourceId}:account_limit` : null),
-    title: (c, n) =>
-      `${c.account?.name ?? "An account"}: ${n} run${n === 1 ? "" : "s"} failed on ${c.account?.window ?? "a usage limit or auth error"}${c.agents?.length ? ` (${c.agents.length} agent${c.agents.length === 1 ? "" : "s"})` : ""}`,
+    title: (c, n) => {
+      // A refused token (BOS-2825) is not a limit: say what needs replacing, so the owner doesn't wait for room.
+      const why = c.account?.auth ? "Claude refused its token (make a new one)" : `failed on ${c.account?.window ?? "a usage limit or auth error"}`;
+      return `${c.account?.name ?? "An account"}: ${n} run${n === 1 ? "" : "s"} ${why}${c.agents?.length ? ` (${c.agents.length} agent${c.agents.length === 1 ? "" : "s"})` : ""}`;
+    },
     // A usage limit lifts when the account has room again; an auth or credit failure does not, because
     // a revoked key leaves the quota windows empty. That one waits for a clean run on the account.
     clearWhen: (c) => {
@@ -284,6 +292,13 @@ export const ALERT_KINDS = {
   // restart the server; one card per step, closes by itself (sweepStepOk) after the step's next success.
   sweep_step_failing: {
     topRung: "owner",
+  },
+  // token-expiry.ts (BOS-2825): a GitHub or Claude token's own end date is within 7 days (or already past). Only the
+  // owner can make a new token and paste it in, so it starts with them: one card per secret, closed by itself
+  // (secretReplaced) once a new value is saved. A token saved without a date raises nothing.
+  token_expiry: {
+    topRung: "owner",
+    clearWhen: () => [],
   },
   // spend-rate.ts (BOS-2173): a day's spend is over 3 times the usual daily rate. Only the owner can judge whether the
   // spend is expected; one alert per company per UTC day. A plain notice: it has no cause to close on.

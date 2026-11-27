@@ -7,7 +7,7 @@
 import { and, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import { mergeContext } from "./decision-context.js";
 import type { Db } from "../db/client.js";
-import { decisions, features, reviewRequests, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
+import { decisions, features, reviewRequests, runners, runs, secrets, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { record } from "./activity.js";
 import { signoffClearedReason } from "./signoff.js";
 import { allMergeOrder, commitIsLive } from "./go-live-wait.js";
@@ -86,7 +86,9 @@ export type ClearWhen =
   | { kind: "landingTurnEnded"; companyId: string; ticketId: string }
   /** A failing sweep step's card (BOS-2160): the step ran without an error in the last pass. */
   | { kind: "sweepStepOk"; step: string }
-  | { kind: "hostWarningGone"; key: string };
+  | { kind: "hostWarningGone"; key: string }
+  /** A token-expiry card (BOS-2825): that secret now has a newer version, so a new value was saved. */
+  | { kind: "secretReplaced"; secretId: string; version: number };
 
 type Card = { id: string; companyId: string; status: string; createdAt: Date; question: string; context: unknown };
 
@@ -161,6 +163,9 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
         break;
       case "hostWarningGone":
         if (typeof c.key === "string") out.push({ kind: "hostWarningGone", key: c.key });
+        break;
+      case "secretReplaced":
+        if (typeof c.secretId === "string" && typeof c.version === "number") out.push({ kind: "secretReplaced", secretId: c.secretId, version: c.version });
         break;
       case "sweepStepOk":
         if (typeof c.step === "string") out.push({ kind: "sweepStepOk", step: c.step });
@@ -348,6 +353,11 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
         return sweepStepOkReason(db, c.step);
       case "hostWarningGone":
         return hostWarningGoneReason(db, c.key);
+      case "secretReplaced": {
+        const [s] = await db.select({ version: secrets.version, name: secrets.name }).from(secrets).where(eq(secrets.id, c.secretId));
+        if (!s) return "the secret is no longer on record";
+        return s.version > c.version ? `a new value was saved for ${s.name}` : null;
+      }
       case "landingTurnEnded":
         if (!deps.landingTurnHeld) return null;
         return (await deps.landingTurnHeld(c.companyId, c.ticketId)) ? null : "that ticket no longer holds the landing turn";

@@ -1,5 +1,5 @@
 import { and, desc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
-import { checkSecretFormat, normaliseSecret, secretHint, type SecretKind } from "@boss-man/shared";
+import { checkSecretFormat, normaliseSecret, parseEndsOn, secretHint, type SecretKind } from "@boss-man/shared";
 import { decryptSecret, encryptSecret, type MasterKey } from "../crypto.js";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
@@ -14,7 +14,18 @@ export class SecretRejected extends Error {
   }
 }
 
-export type SecretInput = { name: string; kind: SecretKind; value: string; acceptUnusualFormat?: boolean; verify?: boolean };
+/**
+ * The day a saved token ends on, when the owner gave one (BOS-2825), as the storage's YYYY-MM-DD. Only a token kind
+ * can end; an API key or a private key has no date, so a date given for one is ignored rather than stored.
+ */
+function endOfDay(endsOn: string | null | undefined): string | null {
+  if (!endsOn) return null;
+  return parseEndsOn(endsOn) ? endsOn : null;
+}
+
+const TOKEN_KINDS: ReadonlySet<SecretKind> = new Set(["claude_oauth_token", "generic"]);
+
+export type SecretInput = { name: string; kind: SecretKind; value: string; endsOn?: string | null; acceptUnusualFormat?: boolean; verify?: boolean };
 
 async function prepare(kind: SecretKind, raw: string, opts: { acceptUnusualFormat?: boolean; verify?: boolean }, live?: LiveValidator) {
   const value = normaliseSecret(kind, raw);
@@ -88,6 +99,7 @@ export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) 
     version: secrets.version,
     createdAt: secrets.createdAt,
     updatedAt: secrets.updatedAt,
+    expiresAt: secrets.expiresAt,
   };
 
   return {
@@ -109,22 +121,26 @@ export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) 
     async create(input: SecretInput) {
       const { value, warnings, verified } = await prepare(input.kind, input.value, input, live);
       const sealed = encryptSecret(master, value);
+      const endsOn = TOKEN_KINDS.has(input.kind) ? endOfDay(input.endsOn) : null;
       const [row] = await db
         .insert(secrets)
-        .values({ name: input.name, kind: input.kind, hint: secretHint(value), ...sealed })
+        .values({ name: input.name, kind: input.kind, hint: secretHint(value), expiresAt: endsOn, ...sealed })
         .returning(publicFields);
       return { secret: row!, warnings, verified };
     },
 
     /** Rotation: every company granted this secret gets the new value on its next run. */
-    async rotate(id: string, raw: string, opts: { acceptUnusualFormat?: boolean; verify?: boolean } = {}) {
+    async rotate(id: string, raw: string, opts: { acceptUnusualFormat?: boolean; verify?: boolean; endsOn?: string | null } = {}) {
       const [existing] = await db.select({ kind: secrets.kind, version: secrets.version }).from(secrets).where(eq(secrets.id, id));
       if (!existing) return null;
       const { value, warnings, verified } = await prepare(existing.kind as SecretKind, raw, opts, live);
       const sealed = encryptSecret(master, value);
+      // A new value keeps the old end date unless a new one is given, since the owner may be replacing a token
+      // that still works; the reminder card closes on the version, not the date, so it can tell either way.
+      const endsOn = opts.endsOn !== undefined ? (TOKEN_KINDS.has(existing.kind as SecretKind) ? endOfDay(opts.endsOn) : null) : undefined;
       const [row] = await db
         .update(secrets)
-        .set({ ...sealed, hint: secretHint(value), version: existing.version + 1, updatedAt: new Date() })
+        .set({ ...sealed, hint: secretHint(value), version: existing.version + 1, updatedAt: new Date(), ...(endsOn !== undefined ? { expiresAt: endsOn } : {}) })
         .where(eq(secrets.id, id))
         .returning(publicFields);
       changed(await grantsOf(id));
@@ -239,7 +255,7 @@ export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) 
 
     async grantsForCompany(companyId: string) {
       const rows = await db
-        .select({ id: secretGrants.id, envName: secretGrants.envName, deployTargetId: secretGrants.deployTargetId, secretId: secrets.id, secretName: secrets.name, hint: secrets.hint })
+        .select({ id: secretGrants.id, envName: secretGrants.envName, deployTargetId: secretGrants.deployTargetId, secretId: secrets.id, secretName: secrets.name, hint: secrets.hint, expiresAt: secrets.expiresAt })
         .from(secretGrants)
         .innerJoin(secrets, eq(secrets.id, secretGrants.secretId))
         .where(eq(secretGrants.companyId, companyId))

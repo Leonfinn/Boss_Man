@@ -5,6 +5,7 @@ import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { DIFFERENT_APPROACH, loopGuards } from "../src/services/loop-guards.js";
+import { kindRow } from "../src/services/alert-kinds.js";
 import { budgetPolicies, costEvents, decisions, runners, runs, tickets, wakes } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -94,6 +95,57 @@ describe("circular failures (R50)", () => {
     const alerts = await circular();
     expect(alerts).toHaveLength(1);
     expect(alerts[0]!.question).toMatch(/^An agent run has hit the same failure 3 times in 2 hours on "Add rate limiting"/);
+  });
+});
+
+describe("a refused Claude token (BOS-2825)", () => {
+  // The guards alone, with a stub that records what would reach the alert ladder and who it names as the account.
+  async function guardRuns(texts: string[], source: { id: string; name: string; provider?: string } | null) {
+    const { db, close } = await openPglite();
+    const raised: Array<Record<string, unknown>> = [];
+    const c = (await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws" })).app;
+    const s = await c.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
+    const cookie = `bm_session=${s.cookies.find((x) => x.name === "bm_session")!.value}`;
+    const { company } = (await c.inject({ method: "POST", url: "/api/companies", headers: { cookie }, payload: { name: "App Co" } })).json();
+    const agentId = (await c.inject({ method: "POST", url: `/api/companies/${company.id}/agents`, headers: { cookie }, payload: { name: "Engineer" } })).json().id;
+    const loops = loopGuards(db, { alert: async (input) => (raised.push(input as unknown as Record<string, unknown>), { id: "card" }), fundingSourceFor: async () => source });
+    for (const text of texts) await loops.failure({ companyId: company.id, ticketId: null, agentId, text, what: "An agent run" });
+    await c.close();
+    await close();
+    return raised;
+  }
+  const CLAUDE = { id: "fs-claude", name: "App Co Claude" };
+
+  it("reads as a refused token with the two steps, not as a usage limit", async () => {
+    const raised = await guardRuns(["App Co Claude: invalid api key: authentication failed", "App Co Claude: invalid api key: authentication failed", "App Co Claude: invalid api key: authentication failed"], CLAUDE);
+    expect(raised).toHaveLength(1);
+    const q = String(raised[0]!.question);
+    expect(q).toContain("Claude refused the account's token: make a new one and paste it in Settings → Credentials → Add, choose Claude setup-token");
+    expect(q).toContain("isn't a usage limit and waiting won't clear it");
+    expect(q).not.toContain("usage limit or auth error");
+    expect(raised[0]!.cause).toMatchObject({ account: { auth: true, fundingSourceId: "fs-claude" } });
+  });
+
+  it("keeps the usage-limit words for a real limit on the same account", async () => {
+    const raised = await guardRuns(["App Co Claude: weekly limit reached", "App Co Claude: weekly limit reached", "App Co Claude: weekly limit reached"], CLAUDE);
+    const q = String(raised[0]!.question);
+    expect(q).not.toContain("Claude refused the account's token");
+    expect(q).toContain("Last output:");
+    expect(raised[0]!.cause).toMatchObject({ account: { window: "the weekly limit", fundingSourceId: "fs-claude" } });
+    expect((raised[0]!.cause as { account: { auth?: boolean } }).account.auth).toBeUndefined();
+  });
+
+  it("keeps the plain auth wording for an account that isn't Claude's", async () => {
+    const raised = await guardRuns(["OpenAI Pro: invalid api key", "OpenAI Pro: invalid api key", "OpenAI Pro: invalid api key"], { id: "fs-openai", name: "OpenAI Pro", provider: "openai" });
+    expect(String(raised[0]!.question)).not.toContain("Claude refused the account's token");
+  });
+
+  it("the alert's heading says the token was refused, not that it failed on a limit", async () => {
+    const claude = kindRow("account_limit", "owner");
+    const title = claude.title!;
+    const line = title({ account: { fundingSourceId: "fs-claude", name: "App Co Claude", auth: true }, agents: ["a"] }, 3);
+    expect(line).toBe("App Co Claude: 3 runs Claude refused its token (make a new one) (1 agent)");
+    const limit = title({ account: { fundingSourceId: "fs-claude", name: "App Co Claude", window: "the weekly limit" } }, 1);    expect(limit).toBe("App Co Claude: 1 run failed on the weekly limit");
   });
 });
 
