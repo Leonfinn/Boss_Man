@@ -11,7 +11,7 @@ import { agents, checkWorkers, companies, decisions, runnerEvents, runs, setting
 import { CANCEL_RUNNER_UPDATE, CANCEL_UPDATE, DEADLINE_WAIT_MINUTES, STOP_AND_UPDATE, STOP_CHECKS_UPDATE_NOW, STOP_THESE_CARRY_ON, SWAP_WHEN_DONE, WAIT_TEN_MORE } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 import { expectRestart } from "./runner-restarts.js";
-import { untrusted, wrapUpEndWords, type WrapEnd, type WrapTieView } from "@boss-man/shared";
+import { untrusted, wrapUpEndWords, wrapUpWords, type WrapEnd, type WrapTieView } from "@boss-man/shared";
 import { EMPTY_CHAIN, forUpdateOf, stepTie, tieView, type UpdateChain, type WrapTie } from "./update-chain.js";
 import { chatRunsByCompany, runnerBusy, runnerChecks, runsByCompany, updateWaitCountsRun, workerChecks, type RunnerCheck } from "./runner-busy.js";
 import { updateHoldHistory } from "./update-hold-history.js";
@@ -235,6 +235,12 @@ export const OVERDUE_GRACE_MS = 5 * 60_000;
 /** A clock time for a card: 24-hour UTC, so it reads the same on any host. */
 const fmtTime = (d: Date) => `${d.toISOString().slice(11, 16)} UTC`;
 
+/** BOS-2811: what a wrap-up is tied to, in plain words, for the hold's record. */
+export function wrapTieWords(tie: WrapTie | undefined): string {
+  const parts = [tie?.server ? `the server update (${tie.server.stage})` : "", tie?.runner ? `the runner update (${tie.runner.stage})` : ""].filter(Boolean);
+  return `Wrap-up tied to: ${parts.length ? parts.join(" and ") : "nothing (no update was waiting)"}`;
+}
+
 /**
  * Whether the hold keeps new runs and checks from starting right now. While a drain is under way (before its
  * deadline), and after the deadline until the owner answers or the hard cap passes (HOLD_CAP_MINUTES): work that
@@ -354,6 +360,24 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     await db.insert(settings).values({ key: MAINTENANCE_KEY, value: h }).onConflictDoUpdate({ target: settings.key, set: { value: h } });
     await history.upsert(h);
   };
+
+  /**
+   * BOS-2811: records what a wrap-up is tied to and the exact banner wrapUpWords gives now, once per text, so a later
+   * "the banner named the update" check reads it from the hold's record. Never throws; no error text goes in.
+   */
+  async function noteWrap(h: Hold) {
+    const since = h.wrapSince;
+    if (!since) return;
+    try {
+      const view = h.kind === "wrapup" ? tieView(h.tie, since, { liftsAt: new Date(Date.parse(since) + STANDALONE_WRAPUP_MS).toISOString() }) : tieView(h.tie, since, { swapping: true });
+      const runs = (await liveWorkRuns(db, since, h.wrapTold)).length;
+      const words = wrapUpWords(view, runs, (iso) => fmtTime(new Date(iso)));
+      await history.event(h.since, wrapTieWords(h.tie));
+      await history.event(h.since, `Wrap-up banner said: ${words.banner}`);
+    } catch (err) {
+      deps.log?.(`wrap-up record failed: ${(err as Error).message}`);
+    }
+  }
 
   /**
    * Live runs per company. `workOnly` leaves out the owner's chat and the CEO's reply lane (BOS-349):
@@ -492,9 +516,14 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
   }
 
   /** `update`: set when a runner update (an image swap) ended, to how it ended; its watchers are woken (BOS-2755). */
-  async function end(title: string, level: NotifyInput["level"], bodyIn: string, update?: "deployed" | "partial" | "failed") {
+  async function end(title: string, level: NotifyInput["level"], bodyIn: string, update?: "deployed" | "partial" | "failed", wrapLift?: string) {
     let body = bodyIn;
     const h = await getHold(db);
+    // BOS-2811: the lift line goes on the record before it is closed (a closed record takes no events). Fixed words only.
+    if (h && (h.kind === "wrapup" || h.wrapSince)) {
+      const how = update === "deployed" ? "update live" : update ? "update failed" : "cancelled by the owner";
+      await history.event(h.since, wrapLift ?? (h.kind === "wrapup" ? `Wrap-up lifted (${how}): ${title}. ${bodyIn}` : `Wrap-up lifted (${how}): it ended with the runner update. Work has restarted.`));
+    }
     // BOS-2056: a wrap-up that joined this update's hold ends with it, and the owner is told so once, here.
     // BOS-2672: one taken over from a wrap-up tied to a server update names both steps.
     if (h && h.kind !== "wrapup" && h.wrapSince) body = `${body} The wrap-up you asked for${h.tie?.server ? " (for the server update and this runner update)" : ""} ended with it: work has restarted.`;
@@ -519,7 +548,8 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
   /** BOS-2672: a wrap-up ends by itself, with the one notice wrap-up-words.ts gives for how it ended. */
   async function endWrap(e: WrapEnd) {
     const w = wrapUpEndWords(e, fmtTime(now()));
-    await end(w.title, "note", w.body);
+    const why = { in: "update live", failed: "update failed", cancelled: "update cancelled", "gave-up": "update gave up", standalone: "nothing was waiting for it" }[e.how];
+    await end(w.title, "note", w.body, undefined, e.how === "cancelled" ? `Wrap-up lifted (${why}): ${w.title}.` : `Wrap-up lifted (${why}): ${w.title}. ${w.body}`);
   }
 
   /** The one question at a deadline. The key names the deadline, so "Keep waiting" earns a new one at the next. */
@@ -663,6 +693,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
           const up: Hold = { ...have, wrapSince: asked, wrapNotRespondingAfter: WRAPUP_NOT_RESPONDING_MINUTES, forUpdate: "runner" };
           await save(up);
           const told = await tell(WRAP_UP_DURING_UPDATE, up, "wrapTold");
+          await noteWrap({ ...up, wrapTold: told });
           return { ...up, wrapTold: told };
         }
         // A setting change asked for during an image update: recreate every runner from now on, including any
@@ -682,6 +713,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
           // The wrap-up's own record ends here (its start time is the key); the update opens a new one below.
           await history.close(have.since, { ok: true, title: "Taken over by a runner update (the wrap-up carries on as part of it)", body: "" });
           await save(up);
+          await noteWrap(up);
           await tellOnce(kind === "settings" ? WRAP_UP_SETTINGS : WRAP_UP, up);
           return up;
         }
@@ -707,6 +739,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       await save(h);
       const said = kind === "settings" ? WRAP_UP_SETTINGS : kind === "wrapup" ? WRAP_UP_ASKED : WRAP_UP;
       const told = kind === "wrapup" ? await tell(said, h, "wrapTold") : await tell(said, h, "startTold");
+      if (kind === "wrapup") await noteWrap({ ...h, wrapTold: told });
       await deps.notify({
         companyId: null,
         level: "note",
@@ -828,6 +861,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       if (!h.wrapSince) return false;
       const { wrapSince: _s, wrapNotRespondingAfter: _n, wrapTold: _t, ...rest } = h;
       await save(rest);
+      await history.event(h.since, "Wrap-up lifted (cancelled by the owner): the update keeps waiting. New runs start again once it is in.");
       return true;
     },
 
@@ -962,7 +996,10 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
           const r = stepTie(h.tie ?? {}, chain, t, { building: asked === "building", buildMaxMin: BUILD_HOLD_MAX_MINUTES });
           if (r.end) return endWrap(r.end);
           const next: Hold = { ...h, tie: r.tie, forUpdate: forUpdateOf(r.tie) };
-          if (JSON.stringify(next) !== JSON.stringify(h)) await save(next);
+          if (JSON.stringify(next) !== JSON.stringify(h)) {
+            await save(next);
+            await noteWrap(next);
+          }
           h = next;
         }
         if (forUpdateOf(h.tie) === "none" && t.getTime() - Date.parse(h.wrapSince ?? h.since) > STANDALONE_WRAPUP_MS) await endWrap({ how: "standalone" });

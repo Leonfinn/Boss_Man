@@ -38,6 +38,7 @@ import { runnerWatchService } from "./services/runner-watch.js";
 import { runnerReportService } from "./services/runner-report.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
 import { serverStatusService } from "./services/server-status.js";
+import { WRAP_LINE } from "./services/watch-triggers.js";
 import { failuresForStatus } from "./services/merge-failures.js";
 import { raiseCostAlert } from "./services/cost-check.js";
 import { addonsService, mergeHostAddons, unknownAddons } from "./services/addons.js";
@@ -702,6 +703,7 @@ export async function buildApp(opts: AppOptions) {
     netguardAllow,
     runLimits: (id) => scheduler.runLimits(id),
     mergeFailures: (id) => failuresForStatus(db, id),
+    holdRecords: async () => (await maintenance.history(5)).map((r) => ({ startedAt: r.startedAt.toISOString(), kind: r.kind, endedAt: r.endedAt?.toISOString() ?? null, endTitle: r.endTitle, wrapUpLines: r.events.filter((e) => e.text === "Wrap-up asked" || WRAP_LINE.test(e.text)).map((e) => `${e.at}: ${e.text}`) })),
     mergeTrain: (id) => mergeTrainStatus(db, id, undefined, (ticketId) => review.seatPhase(ticketId)),
     // BOS-2119: read when server_status is asked, after `review` below is built.
     landingTurns: (id) => review.landingTurnStatus(id),

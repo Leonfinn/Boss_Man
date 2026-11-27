@@ -66,23 +66,36 @@ const hhmm = (d: Date) => `${d.toISOString().slice(11, 16)} UTC`;
  * that was on at any time in the window counts. Returns when it was asked, or null.
  */
 export async function wrapUpDuring(db: Db, from: Date, to: Date): Promise<Date | null> {
+  return (await wrapUpRecord(db, from, to)).asked;
+}
+
+/** BOS-2811: the lines the hold record keeps about a wrap-up (what it was tied to, the banner's words, how it lifted). */
+export const WRAP_LINE = /^Wrap-up (tied to:|banner said:|lifted \()/;
+
+/** When the wrap-up was asked, and the recorded lines of every wrap-up that was on in the window, oldest first. */
+export async function wrapUpRecord(db: Db, from: Date, to: Date): Promise<{ asked: Date | null; lines: string[] }> {
   const rows = await db
     .select({ startedAt: updateHolds.startedAt, kind: updateHolds.kind, events: updateHolds.events })
     .from(updateHolds)
-    .where(and(lte(updateHolds.startedAt, to), or(isNull(updateHolds.endedAt), gte(updateHolds.endedAt, from))));
+    .where(and(lte(updateHolds.startedAt, to), or(isNull(updateHolds.endedAt), gte(updateHolds.endedAt, from))))
+    .orderBy(updateHolds.startedAt);
   let first: Date | null = null;
+  const lines: string[] = [];
   for (const r of rows) {
     const asked = r.kind === "wrapup" ? r.startedAt : (() => { const e = r.events.find((x) => x.text === "Wrap-up asked"); return e ? new Date(e.at) : null; })();
     if (asked && (!first || asked < first)) first = asked;
+    if (asked) for (const e of r.events) if (WRAP_LINE.test(e.text)) lines.push(`${hhmm(new Date(e.at))}: ${e.text}`);
   }
-  return first;
+  return { asked: first, lines };
 }
 
 /** The wake's detail for an update that ended: which one (commit, times), how it ended, and whether a wrap-up was pressed. */
-export function updateDetail(u: { what: "server" | "runner"; commit: string; result: string; started: Date | null; ended: Date; wrapUpAt: Date | null }): string {
+export function updateDetail(u: { what: "server" | "runner"; commit: string; result: string; started: Date | null; ended: Date; wrapUpAt: Date | null; wrapLines?: string[] }): string {
   const ran = u.started ? `from ${hhmm(u.started)} to ${hhmm(u.ended)}` : `at ${hhmm(u.ended)}`;
   const wrap = u.wrapUpAt ? `a wrap-up was pressed for it (asked ${hhmm(u.wrapUpAt)})` : "no wrap-up was pressed for it";
-  return `${u.what} update to ${u.commit.slice(0, 8) || "an unknown commit"} ended "${u.result}" ${ran} on ${u.ended.toISOString().slice(0, 10)}; ${wrap}`;
+  // BOS-2811: what the hold record kept of the wrap-up (its tie, the banner's exact words, how it lifted), to quote.
+  const lines = u.wrapUpAt && u.wrapLines?.length ? ` Recorded wrap-up lines: ${u.wrapLines.map((l) => `[${l}]`).join(" ")}` : "";
+  return `${u.what} update to ${u.commit.slice(0, 8) || "an unknown commit"} ended "${u.result}" ${ran} on ${u.ended.toISOString().slice(0, 10)}; ${wrap}${lines}`;
 }
 
 /** Wakes the watchers of a server or runner update that ended. Never throws. */
@@ -91,8 +104,9 @@ export async function wakeUpdateWatchers(db: Db, notify: WatchNotify | undefined
     if (!notify) return 0;
     // The window starts a little before the update so a wrap-up pressed just before it was sent still counts.
     const from = new Date((u.started ?? u.ended).getTime() - 10 * 60_000);
-    const wrapUpAt = u.wrapUpAt ?? (await wrapUpDuring(db, from, u.ended));
-    return await wakeWatchers(db, notify, u.what === "server" ? "server_update" : "runner_update", updateDetail({ ...u, wrapUpAt }));
+    const rec = await wrapUpRecord(db, from, u.ended);
+    const wrapUpAt = u.wrapUpAt ?? rec.asked;
+    return await wakeWatchers(db, notify, u.what === "server" ? "server_update" : "runner_update", updateDetail({ ...u, wrapUpAt, wrapLines: rec.lines }));
   } catch (err) {
     log?.(`waking the ${u.what}-update watchers failed: ${(err as Error).message}`);
     return 0;
