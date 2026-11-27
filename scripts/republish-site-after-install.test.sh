@@ -6,7 +6,9 @@ t="$(mktemp -d)"; trap 'rm -rf "$t"' EXIT
 fail() { echo "FAIL: $*"; exit 1; }
 s="$here/republish-site-after-install.sh"
 
+# shellcheck disable=SC2016 # the fakes must keep their $ for when they run
 printf '#!/usr/bin/env bash\necho "publish result=$(jq -r .result "$INSTALL_RESULT_FILE")" >>"$FAKE_LOG"\n[ -z "${PUBLISH_FAIL:-}" ]\n' >"$t/publish"
+# shellcheck disable=SC2016
 printf '#!/usr/bin/env bash\necho "gh $*" >>"$FAKE_LOG"\n' >"$t/gh"
 chmod +x "$t/publish" "$t/gh"
 echo '{"version":"0.1.0-beta.3","result":"pass","minutes":4.2}' >"$t/pass.json"
