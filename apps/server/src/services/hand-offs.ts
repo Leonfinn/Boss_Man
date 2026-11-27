@@ -8,7 +8,7 @@ import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { carriedCriteria, criteriaText, criterionText, readCriteria, readVerdicts, ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, companies, ticketMessages, tickets } from "../db/schema.js";
+import { agents, companies, features, ticketMessages, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
 import { openLongWatchChecks } from "./after-merge-check-tickets.js";
 import type { workService } from "./work.js";
@@ -38,6 +38,31 @@ export function handOffPhrase(...texts: (string | null | undefined)[]): { label:
   return null;
 }
 
+/**
+ * BOS-2682: a delivered feature is baselined. Adding a ticket to a released feature (create_ticket featureId,
+ * update_ticket featureId, the feature's own "add a ticket" route) is refused unless the caller gives an
+ * exceptionReason, and then the reason is kept on the ticket and in the activity log. The typical exception is a
+ * bug fix that restores what the released feature promised. Returns the refusal, or null when it may join.
+ */
+export function baselineRefusal(feature: { title: string; status: string; id: string }, exceptionReason: string | undefined | null): string | null {
+  if (feature.status !== "released") return null;
+  if (exceptionReason?.trim()) return null;
+  return `The feature "${feature.title}" is released, so it is baselined: its promised work is delivered, and new work on it is filed as its own feature (create_feature) instead of a ticket that never lets it close. If this restores what the feature promised (a bug fix), pass exceptionReason (one line saying what is broken) and the ticket joins it.`;
+}
+
+/**
+ * BOS-2682: whether a follow-up inherits the closing ticket's feature. Only when the feature is not released yet
+ * and the follow-up carries a failed or unreported criterion of it: the feature's promised work isn't delivered
+ * without that. Anything else (an enhancement, a tidy-up) is filed with no feature, so the feature can close.
+ */
+export function followUpJoinsFeature(feature: { status: string } | null | undefined, carried: readonly unknown[]): boolean {
+  return !!feature && feature.status !== "released" && carried.length > 0;
+}
+
+export const followUpInheritsLine = (feature: { title: string; status: string }): string =>
+  `**Why it is in the feature "${feature.title}":** it carries work the feature (not released yet) still promises, so it belongs to it (BOS-2682).`;
+
+/**
 /**
  * BOS-2679: wording that names a known edge case or limitation. Such a case needs a follow-up ticket, a ticket id in the
  * same sentence, or noFollowUpReason. Edit this list only; a false positive is cleared with noFollowUpReason.
@@ -69,7 +94,7 @@ export function edgeCasePhrase(...texts: (string | null | undefined)[]): { label
 /** The line in the reviewer's brief (BOS-2679). */
 export const EDGE_CASE_REVIEW_LINE = "Known edge cases (BOS-2679): if the summary or the author's replies name an edge case, limitation, caveat or \"not handled\" case and no ticket id, followUps entry or noFollowUpReason covers it, request changes: it must be ticketed, not just mentioned.";
 
-export const FOLLOW_UP_HELP = "followUps: work you are handing on, one entry each {title, assignee (an agent's name, or \"CEO\"), why, criterion?}. Boss Man opens each as a ticket in the same project (and feature), linked to this one, and wakes the assignee. When this ticket's criteria leave one failed or not reported, the follow-up gets that criterion's text, unchanged, as its own acceptance criterion (all of them when the entry names no criterion): the new ticket then has to show the outcome, not just do the task. criterion names one, by its number, to carry exactly that one. A carried after-merge criterion that needs a watch of a day or more (\"over 3 days live\", \"a week on\", \"for 48 hours\") is opened as its own check ticket, waiting on the follow-up's merge, so the follow-up can close once it is live. Only the CEO or a manager can assign a follow-up to a colleague; from anyone else a named colleague is kept as a suggested assignee and the ticket goes to the CEO. Opened only on a real change of state. Use it whenever the summary or a reply says someone else will do something next. noFollowUpReason: when nothing is handed on although the wording sounds like it (up to 240 characters).";
+export const FOLLOW_UP_HELP = "followUps: work you are handing on, one entry each {title, assignee (an agent's name, or \"CEO\"), why, criterion?}. Boss Man opens each as a ticket in the same project, linked to this one, and wakes the assignee. It is NOT put under this ticket's feature: a delivered feature is baselined, and an enhancement to it is a new feature (create_feature), unless the follow-up is carrying a criterion this ticket's feature still promises and the feature is not released yet (then it joins the feature, and the ticket says why). When this ticket's criteria leave one failed or not reported, the follow-up gets that criterion's text, unchanged, as its own acceptance criterion (all of them when the entry names no criterion): the new ticket then has to show the outcome, not just do the task. criterion names one, by its number, to carry exactly that one. A carried after-merge criterion that needs a watch of a day or more (\"over 3 days live\", \"a week on\", \"for 48 hours\") is opened as its own check ticket, waiting on the follow-up's merge, so the follow-up can close once it is live. Only the CEO or a manager can assign a follow-up to a colleague; from anyone else a named colleague is kept as a suggested assignee and the ticket goes to the CEO. Opened only on a real change of state. Use it whenever the summary or a reply says someone else will do something next. noFollowUpReason: when nothing is handed on although the wording sounds like it (up to 240 characters).";
 
 export const followUpsSchema = z.array(z.object({ title: z.string().trim().min(1).max(200), assignee: z.string().trim().min(1).max(100), why: z.string().trim().min(1).max(1500), criterion: z.number().int().min(1).max(10).optional().describe("The number (1-based) of this ticket's criterion to carry into the follow-up, when only one applies. Left out, every failed or not-yet-reported criterion is carried.") })).max(20);
 export type FollowUpInput = z.infer<typeof followUpsSchema>[number];
@@ -127,35 +152,43 @@ export async function resolveFollowUpAssignees(db: Db, companyId: string, follow
   return { ids, suggested };
 }
 
-/** Opens each follow-up as a ready ticket in the closing ticket's project and feature, with a link each way. */
+/** Opens each follow-up as a ready ticket in the closing ticket's project, with a link each way (BOS-2682: only joins its feature when the feature is unreleased and the follow-up carries its criterion). */
 export async function openFollowUps(db: Db, work: Work, ticketId: string, followUps: FollowUpInput[], assigneeIds: string[], byAgentId: string | null, opts: { isManager: boolean; suggested: (string | null)[] }) {
   const [row] = await db.select({ t: tickets, prefix: companies.ticketPrefix }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(eq(tickets.id, ticketId));
   if (!row) return [];
   const { t, prefix } = row;
   const ref = ticketRef(prefix, t.number) ?? `"${t.title}"`;
+  // BOS-2682: the feature only stays if it is unreleased and the follow-up carries its unfinished promise.
+  const [feature] = t.featureId ? await db.select({ id: features.id, title: features.title, status: features.status }).from(features).where(eq(features.id, t.featureId)) : [];
   // BOS-2599 (cock-ups G1): the criterion the hand-on came from goes with it, so the follow-up has to show the outcome
   // and not just do the task. Read here, after the move, so the note is the one this close stored.
   const [fresh] = await db.select({ criteria: tickets.acceptanceCriteria, note: tickets.stateNote }).from(tickets).where(eq(tickets.id, ticketId));
-  const opened: { id: string; ref: string; title: string; assignee: string; carried: string[]; checks: string[] }[] = [];
+  const opened: { id: string; ref: string; title: string; assignee: string; carried: string[]; checks: string[]; feature: string | null }[] = [];
   for (const [i, f] of followUps.entries()) {
     const suggestion = opts.suggested[i] ? [`**Suggested assignee:** ${opts.suggested[i]} (named by the closing agent; the CEO decides).`, ""] : [];
     const carry = fresh ? carriedCriteria(readCriteria(fresh.criteria), fresh.note, f.criterion !== undefined ? [f.criterion] : undefined) ?? [] : [];
     const carried = carry.length
       ? [`**Done when** (carried from ${ref}, which left ${carry.length > 1 ? "these criteria" : "this criterion"} failed or not reported):`, ...carry.map((c) => `- ${criterionText(c)}`), "Not reported: say pass or fail for each before moving this ticket to review.", ""]
       : [];
-    const body = [`**Why:** ${f.why}`, "", ...suggestion, ...carried, `Handed on by ${ref} ("${t.title}") when it closed: [${ref}](#/tickets/${t.id}).`, "", "Opened by Boss Man from the closing ticket's followUps (BOS-1361)."].join("\n");
-    const made = await work.createTicket(t.projectId, { title: f.title, body, risk: t.risk ?? "medium", state: "ready", overLimit: opts.isManager, assigneeAgentId: assigneeIds[i]!, featureId: t.featureId, createdByAgentId: byAgentId, ...(carry.length ? { acceptanceCriteria: carry } : {}) });
+    const joins = followUpJoinsFeature(feature, carry) ? feature : null;
+    const footer = [
+      "",
+      "Opened by Boss Man from the closing ticket's followUps (BOS-1361).",
+      joins ? followUpInheritsLine(joins) : `Not put under a feature (BOS-2682): a delivered feature is baselined, so an enhancement belongs in a new feature. Attach this ticket to one with update_ticket featureId, or create one with create_feature, when someone decides it is wanted.`,
+    ];
+    const body = [`**Why:** ${f.why}`, "", ...suggestion, ...carried, `Handed on by ${ref} ("${t.title}") when it closed: [${ref}](#/tickets/${t.id}).`, ...footer].join("\n");
+    const made = await work.createTicket(t.projectId, { title: f.title, body, risk: t.risk ?? "medium", state: "ready", overLimit: opts.isManager, assigneeAgentId: assigneeIds[i]!, featureId: joins?.id ?? null, createdByAgentId: byAgentId, ...(carry.length ? { acceptanceCriteria: carry } : {}) });
     const [numbered] = await db.select({ number: tickets.number }).from(tickets).where(eq(tickets.id, made.id));
     const newRef = ticketRef(prefix, numbered?.number) ?? `"${made.title}"`;
     const [who] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, assigneeIds[i]!));
     // BOS-2643: a carried watch of a day or more goes to its own check ticket, with the follow-up's assignee, so the
     // follow-up can close at go-live instead of sitting open for the watch (BOS-2302, BOS-2298).
     const checks = await openLongWatchChecks(db, work, made.id, { byAgentId, assigneeAgentId: assigneeIds[i]!, suggested: opts.suggested[i] ?? null });
-    const link = `Follow-up: ${newRef} (#/tickets/${made.id}) for ${who?.name ?? "someone"}${checks.length ? `, with check ticket${checks.length > 1 ? "s" : ""} ${checks.map((c) => c.ref).join(", ")} for its long watch` : ""}.`;
+    const link = `Follow-up: ${newRef} (#/tickets/${made.id}) for ${who?.name ?? "someone"}${joins ? `, kept under the unreleased feature "${joins.title}" because it carries its unfinished criterion` : ", filed with no feature (a delivered feature is baselined)"}${checks.length ? `, with check ticket${checks.length > 1 ? "s" : ""} ${checks.map((c) => c.ref).join(", ")} for its long watch` : ""}.`;
     const [now] = await db.select({ note: tickets.stateNote }).from(tickets).where(eq(tickets.id, t.id));
     await db.update(tickets).set({ stateNote: `${(now?.note ?? "").trim()}${now?.note?.trim() ? " " : ""}${link}`.slice(0, 4000) }).where(eq(tickets.id, t.id));
     await record(db, { companyId: t.companyId, ticketId: t.id, agentId: byAgentId, kind: "follow_up", summary: link, detail: { followUpTicketId: made.id } });
-    opened.push({ id: made.id, ref: newRef, title: made.title, assignee: who?.name ?? "someone", carried: criteriaText(carry), checks: checks.map((c) => c.ref) });
+    opened.push({ id: made.id, ref: newRef, title: made.title, assignee: who?.name ?? "someone", carried: criteriaText(carry), checks: checks.map((c) => c.ref), feature: joins?.title ?? null });
   }
   return opened;
 }

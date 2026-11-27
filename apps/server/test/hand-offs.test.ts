@@ -184,7 +184,7 @@ describe("set_ticket_state done with hand-off wording", () => {
     expect((r as { isError?: boolean }).isError).toBeFalsy();
   });
 
-  it("followUps opens a linked ticket for the CEO in the same project and feature, and the move goes through", async () => {
+  it("followUps opens a linked ticket for the CEO in the same project, with no feature by default (BOS-2682), and the move goes through", async () => {
     const t = await ctx.ticket();
     const c = await ctx.agent(ctx.dev.id);
     const r = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "Done. The CEO will attach them.", followUps: [{ title: "Attach the 34 features", assignee: "CEO", why: "BOS-958 listed them but nothing attached them." }] } });
@@ -192,6 +192,8 @@ describe("set_ticket_state done with hand-off wording", () => {
     expect(textOf(r)).toContain("opened the follow-up");
     const made = (await ctx.db.select().from(tickets)).find((x) => x.title === "Attach the 34 features")!;
     expect(made.projectId).toBe(ctx.project.id);
+    expect(made.featureId).toBeNull();
+    expect(made.body).toContain("Not put under a feature");
     expect(made.assigneeAgentId).toBe(ctx.co.ceo.id);
     expect(made.body).toContain(`#/tickets/${t.id}`);
     expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.stateNote).toContain(`#/tickets/${made.id}`);
@@ -321,7 +323,7 @@ describe("set_ticket_state done with hand-off wording", () => {
       expect(await openBlockers(ctx.db, made.id)).toEqual([]);
       expect(textOf(r)).toMatch(/with its long watch on check ticket [A-Z]+-\d+/);
       // The closing ticket's note names both, so whoever reads it finds the watch.
-      expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.stateNote).toMatch(/for Dev, with check ticket [A-Z]+-\d+ for its long watch/);
+      expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.stateNote).toMatch(/for Dev, .*with check ticket [A-Z]+-\d+ for its long watch/);
     });
 
     it("a follow-up whose carried criteria need no long watch opens no check ticket", async () => {

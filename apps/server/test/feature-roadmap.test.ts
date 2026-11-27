@@ -25,14 +25,18 @@ describe("feature roadmap", () => {
     const growth = (await c.req("POST", `/api/companies/${c.company.id}/objectives`, { title: "Grow revenue", priority: 2 })).json();
     const beta = (await c.req("POST", `/api/objectives/${launch.id}/milestones`, { title: "Beta", targetDate: "2026-12-01" })).json();
 
+    // BOS-2682: tickets can't be filed on a released feature through the route, so the work is made first and the
+    // feature kept in progress; going to released here releases it with its tickets already on it.
     const building = await c.feature({ title: "Dark mode", status: "in_progress", milestoneId: beta.id, rank: 2 });
     const planned = await c.feature({ title: "CSV export", status: "planned", objectiveId: growth.id });
     const idea = await c.feature({ title: "Mobile app", status: "idea" });
     const shipped = await c.feature({ title: "Sign-in", status: "released", objectiveId: launch.id });
     const dropped = await c.feature({ title: "Not this", status: "declined", objectiveId: launch.id });
 
-    await c.ticket({ title: "Build the toggle", featureId: building.id, milestoneId: beta.id, state: "done" });
+    // BOS-2682: both tickets go on the feature while it is still in progress (a release takes the open one with it), and
+    // the done one is created second so the feature is not released after the first (which would refuse the second).
     await c.ticket({ title: "Persist the choice", featureId: building.id, state: "in_progress" });
+    await c.ticket({ title: "Build the toggle", featureId: building.id, milestoneId: beta.id, state: "done" });
 
     const board = (await c.req("GET", "/api/roadmap/features")).json();
     const [co] = board.filter((x: { id: string }) => x.id === c.company.id);

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { activity, decisions, features, ticketDependencies, tickets } from "../src/db/schema.js";
 import { effectiveSize, forecastMilestone } from "../src/services/planning.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
@@ -279,10 +279,13 @@ describe("feature forecast (BOS-2396)", () => {
   it("shows points done/left, unsized tasks and a finish on the detail, points on the list, and none for released", async () => {
     const c = await setup();
     const feat = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Big one", status: "in_progress" })).json();
-    const done = await c.ticket("Done 5", { featureId: feat.id, state: "done" });
-    const open = await c.ticket("Open 8", { featureId: feat.id, state: "in_progress" });
-    await c.ticket("Open unsized", { featureId: feat.id, state: "in_progress" });
-    const gone = await c.ticket("Cancelled 5", { featureId: feat.id, state: "done", outcome: "cancelled" });
+    // BOS-2682: a ticket can't be filed on a released feature through the route, so the tickets are made first and then
+    // put on the feature here (the forecast is what this test is about, not the attach path).
+    const done = await c.ticket("Done 5", { state: "done" });
+    const open = await c.ticket("Open 8", { state: "in_progress" });
+    const unsized = await c.ticket("Open unsized", { state: "in_progress" });
+    const gone = await c.ticket("Cancelled 5", { state: "done", outcome: "cancelled" });
+    await c.db.update(tickets).set({ featureId: feat.id }).where(inArray(tickets.id, [done.id, open.id, unsized.id, gone.id]));
     await c.db.update(tickets).set({ size: 5 }).where(eq(tickets.id, done.id));
     await c.db.update(tickets).set({ size: 8 }).where(eq(tickets.id, open.id));
     await c.db.update(tickets).set({ size: 5 }).where(eq(tickets.id, gone.id));
