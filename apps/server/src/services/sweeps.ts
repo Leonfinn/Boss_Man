@@ -23,7 +23,7 @@ import { blockedHolds, openBlockers, ticketBlockerFinished, ticketBlockerOpenSql
 import { checkPriority } from "./check-gate.js";
 import { getHold, holdBlocksStarts } from "./maintenance.js";
 import { sweepPhoneApprove } from "./approve-tokens.js";
-import { heldTicketIds, mergeHolds, mergeWaits, wakeReadyHolds } from "./review-holds.js";
+import { chaseReadyHolds, heldTicketIds, mergeHolds, mergeWaits, wakeReadyHolds } from "./review-holds.js";
 import { escalateStuckLineHolders } from "./line-holder.js";
 import { activeRows, endedNormally, endedNormallySql, evaluate, latestRows, fallbackReason, reviewAskPattern, reviewWaitedSince, roundStartedAt } from "./review-kinds.js";
 import { ownerWaitWatch } from "./owner-todo.js";
@@ -1785,6 +1785,14 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       // after three failing passes in a row, raises one owner card that closes itself after the step's next success.
       const guard = await sweepStepGuard(db, { log: opts.log, alert: opts.alert, homeCompany: opts.homeCompany });
       const step = guard.step;
+      // While the update hold is on nothing can start, so an idle ticket is not forgotten work.
+      const held = holdBlocksStarts(await getHold(db), t);
+      // A review hold whose wait is over (BOS-808): the holding reviewer is asked once to re-check and release. BOS-2870:
+      // first in the pass and guarded, so a later step that throws can't stop it (BOS-2713 and BOS-2692 sat ready and
+      // unwoken for about a day); and a ready hold nobody released is asked about again after an hour, then raised as a
+      // card after two.
+      const holdWakes = held ? 0 : await step("hold wakes", () => wakeReadyHolds(db, t, (input) => opts.wake(input)), 0);
+      if (!held) await step("hold chase", () => chaseReadyHolds(db, t, { wake: (input) => opts.wake(input), alert: (input) => opts.alert(input) }), undefined);
       const goalChecks = await raiseDueGoalChecks(db, t);
       await opts.expireSkills?.();
       await opts.endUnconfirmedCancels(t);
@@ -1805,8 +1813,6 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       const lost = await lostRuns(t);
       const staleB = await staleBlockers(t);
       const stalled = await stalledRuns(t);
-      // While the update hold is on nothing can start, so an idle ticket is not forgotten work.
-      const held = holdBlocksStarts(await getHold(db), t);
       // Cards whose cause has gone close themselves here (DR-016, BOS-470), on any tier: a limit that
       // has reset, an agent that has run cleanly since, a ticket that has finished.
       const closedCards = await opts.clearAlerts?.();
@@ -1858,8 +1864,6 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       // hold and starts the merge itself; no reviewer re-checks unchanged code. A repeat round on passed code goes too.
       if (!held && opts.releaseHolds) await step("release holds", () => opts.releaseHolds!(), undefined);
       if (!held && opts.withdrawRepeatRounds) await step("withdraw repeat rounds", () => opts.withdrawRepeatRounds!(judgedRounds), undefined);
-      // A review hold whose wait is over (BOS-808): the holding reviewer is asked once to re-check and release.
-      const holdWakes = held ? 0 : await wakeReadyHolds(db, t, (input) => opts.wake(input));
       // A main fix that has held merges for 2 hours wakes the CEO once with quarantine-or-revert (R40). Only tells.
       if (!held) await step("stuck line holders", () => escalateStuckLineHolders(db, t, (input) => opts.wake(input)), 0);
       // A run with no ticket after ten minutes is the Scrum Master's to settle or stop (BOS-254).

@@ -33,6 +33,8 @@ import { StatusLineView, type StatusLine } from "./MergeQueue";
 import { CopyLinkButton } from "../components/CopyLinkButton";
 import { RecurringTag } from "../components/RecurringTag";
 import { TicketDownloadButton } from "../components/TicketDownloadButton";
+import { holdWords } from "../hold-words";
+import { ReviewHeldNote, ReviewHoldBanner } from "../components/ReviewHold";
 
 /** The mark for one verdict on a "Done when" checklist row. */
 const VERDICT_MARK: Record<string, string> = { pass: "✓ pass", fail: "✗ fail", none: "not reported" };
@@ -72,7 +74,7 @@ function DiffView({ diff }: { diff: WorkspaceDiff }) {
 }
 
 /** A section that folds away behind an arrow (R76); closed unless it's asked to start open. */
-function Fold({ title, hint, open, className, children }: { title: string; hint?: string; open?: boolean; className?: string; children: React.ReactNode }) {
+export function Fold({ title, hint, open, className, children }: { title: string; hint?: string; open?: boolean; className?: string; children: React.ReactNode }) {
   return (
     <details className={`card fold${className ? ` ${className}` : ""}`} open={open || undefined}>
       <summary>
@@ -732,6 +734,10 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
       : `Approving runs ${t.verifyCommand ? `\`${t.verifyCommand}\`` : "the project's check"} and, if it passes, merges ${t.branch ?? "its branch"} into ${t.defaultBranch} of ${repo}. The change is under Changes above.`;
   // One hold notice, computed once, so the headline and detail always agree.
   const hold = holdBanner(t);
+  // BOS-2870: a reviewer's (or Boss Man's) hold, in one set of words for the banner and the Review box.
+  const reviewHold = t.hold ? holdWords(t.hold, now) : null;
+  // The owner's turn only when their sign-off is owed: a held ticket that doesn't need it waits on the holder, not on them.
+  const heldNotOwner = !!reviewHold && !t.ownerSignoff && t.signoff !== "waiting" && t.signoff !== "missing";
   // A reviewer's hold on the merge (BOS-808): the owner can let it go on (the normal approval and merge follow) or withdraw the reviewer's pass.
   const endReviewHold = async (how: "release" | "cancel") => {
     setBusy(true);
@@ -813,24 +819,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
         </div>
       )}
 
-      {t.hold && t.systemState === "review" && (
-        <div className="card review-hold" role="status" style={{ marginBottom: 16, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-          <span style={{ flex: "1 1 320px" }}>
-            <strong>Held: {t.hold.label}</strong> <span className="muted">· by {t.hold.reviewer ?? "a reviewer"}</span>
-            <br />
-            <span className="muted">
-              {t.hold.reason} The review passed; the merge starts only after the hold is released.
-              {t.hold.ready ? " What it waited for is done, so the reviewer has been asked to re-check it." : ""}
-            </span>
-          </span>
-          <button type="button" className="btn primary" disabled={busy} onClick={() => void endReviewHold("release")}>
-            Release hold
-          </button>
-          <button type="button" className="btn" disabled={busy} onClick={() => void endReviewHold("cancel")}>
-            Cancel hold and review again
-          </button>
-        </div>
-      )}
+      {t.hold && t.systemState === "review" && <ReviewHoldBanner hold={t.hold} now={now} busy={busy} onRelease={() => void endReviewHold("release")} onCancel={() => void endReviewHold("cancel")} />}
 
       {/* Only when the ticket's next step really needs its agent to run (BOS-471): in review, waiting on the
           owner, or done, the hold changes nothing for this ticket, so it is not shown. */}
@@ -1080,6 +1069,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                 staleCheck ? "the merge check looks stuck; you can try again" :
                 t.pullRequestNumber && t.pullRequestNote ? "waiting on the pull request" :
                 open.length ? `waiting for ${who}${t.ownerSignoff ? ", then you" : ""}` :
+                heldNotOwner ? reviewHold!.hint :
                 // Said from the decisions themselves (BOS-503), not guessed from the policy.
                 t.signoff === "waiting" || t.signoff === "missing" ? "waiting for your sign-off" :
                 t.signoff === "signed_off" ? "you signed it off; it merges next" :
@@ -1132,7 +1122,9 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                     {decide}
                   </details>
                 </>
-              ) : checking ? null : (
+              ) : checking ? null : heldNotOwner ? (
+                <ReviewHeldNote hold={t.hold!} now={now} />
+              ) : (
                 decide
               )}
             </Fold>
