@@ -887,7 +887,7 @@ button.preset-card { cursor: pointer; }
 }
 @media (max-width: 899px) {
   /* "‹ Settings" at the top takes the page back to the menu (the menu is the phone's opening screen). */
-  .set-back { display: inline-flex; }
+  .set-back { display: flex; }
   /* A page shows only that back link, not the whole menu above it (BOS-1224); the bare #/settings menu is outside .set-layout. */
   .set-layout .set-nav { display: none; }
   /* The menu is the phone's opening screen: each row carries its hint and a chevron. */
@@ -2030,3 +2030,53 @@ details.pushes[open] > summary { margin-bottom: 8px; }
 .chat-find p { flex: 1 0 100%; margin: 0; font-size: 13px; }
 .find-hit { background: #ffe58a; color: inherit; border-radius: 2px; }
 .find-hit.current { background: #ffb020; outline: 2px solid var(--badge); }
+
+/* ---------- Custom shortcuts (BOS-2669 ticket 2) ---------- */
+/* The chip beside a page's title: the title shrinks to its words so the chip sits on its line, and wraps under on a phone. */
+.page-head h1:has(+ .pin-chip) { display: inline-block; margin-right: 12px; vertical-align: middle; }
+.pin-chip { display: inline-flex; align-items: center; gap: 6px; vertical-align: middle; min-height: 32px; padding: 4px 12px; border-radius: 999px; border: 1px solid var(--line-strong); background: var(--card); color: var(--ink); font-size: 13px; cursor: pointer; }
+.pin-chip:hover { border-color: var(--link); }
+.pin-chip[aria-pressed="true"] { background: var(--raise); color: var(--head); font-weight: 600; }
+@media (max-width: 640px) { .pin-chip { min-height: 44px; } }
+/* The menu's Shortcuts section: the heading is small, rows are the menu's own rows. */
+.side .side-shortcuts-title { margin: 0; padding: 0 10px 4px; font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--side-muted); }
+.side a.nav.just-added { outline: 2px solid var(--badge); outline-offset: -2px; }
+.side a.nav.gone svg { color: var(--amber-ink); }
+/* The icon strip exists only above a phone's width: a phone's sheet always shows the heading and Edit. */
+@media (min-width: 641px) { .side.collapsed .side-shortcuts-head, .side.collapsed .side-shortcuts-title { display: none; } }
+.side .side-shortcuts-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-right: 6px; }
+.side .side-shortcuts-edit { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; padding: 2px 8px; border: 0; border-radius: 6px; background: none; color: var(--side-muted); font-size: 12px; cursor: pointer; }
+.side .side-shortcuts-edit:hover { color: var(--side-text); background: var(--side-raised); }
+@media (max-width: 640px) { .side .side-shortcuts-edit { min-height: 44px; padding: 4px 12px; font-size: 14px; } }
+/* The Edit shortcuts dialog (BOS-2669 ticket 3): about 520 px on a computer, a full-screen sheet on a phone. */
+.shortcut-edit-backdrop { position: fixed; inset: 0; z-index: 80; display: flex; align-items: center; justify-content: center; background: rgb(0 0 0 / 0.55); padding: 12px; }
+.shortcut-edit { display: flex; flex-direction: column; width: 520px; max-width: 100%; max-height: min(90vh, 720px); background: var(--card); color: var(--ink); border: 1px solid var(--line-strong); border-radius: 12px; box-shadow: 0 10px 30px rgb(0 0 0 / 0.35); }
+.shortcut-edit-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 16px 16px 4px; }
+.shortcut-edit-head h2 { margin: 0; font-size: 18px; }
+.shortcut-edit-count { font-size: 13px; color: var(--muted); }
+.shortcut-edit-hint { margin: 0; padding: 0 16px 8px; font-size: 13px; color: var(--muted); }
+.shortcut-edit-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; margin: 0; padding: 0 16px; list-style: none; }
+.shortcut-edit-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid var(--line); }
+.shortcut-edit-handle { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 28px; min-height: 40px; color: var(--muted); cursor: grab; touch-action: none; user-select: none; }
+.shortcut-edit-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.shortcut-edit-name { width: 100%; min-height: 40px; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--field); color: var(--ink); font: inherit; font-size: 14px; }
+.shortcut-edit-dest { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.shortcut-edit-actions { flex: none; display: flex; gap: 4px; }
+.shortcut-edit-btn { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; padding: 0; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--card); color: var(--ink); cursor: pointer; }
+.shortcut-edit-btn:hover:not(:disabled) { border-color: var(--link); }
+.shortcut-edit-empty, .shortcut-edit-error { margin: 0; padding: 8px 16px; font-size: 14px; }
+.shortcut-edit-error { color: var(--red-ink, #f0a0a0); }
+.shortcut-edit-foot { flex: none; display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
+@media (max-width: 640px) {
+  .shortcut-edit-backdrop { padding: 0; align-items: stretch; }
+  .shortcut-edit { width: 100%; max-height: none; height: 100dvh; border-radius: 0; border: 0; }
+  .shortcut-edit-btn { width: 44px; height: 44px; }
+  .shortcut-edit-actions { gap: 2px; }
+  .shortcut-edit-foot .btn { flex: 1; min-height: 44px; }
+}
+@media (pointer: coarse) { .shortcut-edit-btn { width: 44px; height: 44px; } }
+.side.collapsed .nav-groups .side-shortcuts + section { border-top: 1px solid var(--line); padding-top: 8px; }
+/* The toast after a press: bottom centre, above everything but the menu sheet, with room for Undo. */
+.pin-toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 60; display: flex; align-items: center; gap: 14px; max-width: min(520px, calc(100vw - 24px)); padding: 10px 16px; border-radius: 10px; background: var(--raise); color: var(--head); border: 1px solid var(--line-strong); box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4); font-size: 14px; }
+.pin-toast-undo { flex: none; min-height: 36px; padding: 4px 12px; border: 0; border-radius: 8px; background: none; color: var(--link); font: inherit; font-weight: 600; text-decoration: underline; cursor: pointer; }
+@media (max-width: 640px) { .pin-toast-undo { min-height: 44px; } }

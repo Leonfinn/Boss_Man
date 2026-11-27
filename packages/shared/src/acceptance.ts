@@ -329,8 +329,38 @@ export function longWatchPhrase(text: string): string | null {
   return null;
 }
 
-/** BOS-2643: 0-based indexes of the after-merge criteria that name a watch of a day or more. */
-export const longWatchIndexes = (criteria: readonly Criterion[]): number[] => criteria.flatMap((c, i) => (isAfterMerge(c) && longWatchPhrase(criterionText(c)) ? [i] : []));
+/**
+ * BOS-2797: the one list of future events an after-merge criterion can wait on, which open it as its own check ticket
+ * exactly like a duration (BOS-2663 "after the next beta release", BOS-974 "one real install", BOS-2778/2779 "on the
+ * next real update" each sat open or bounced until split by hand). A single go-live reading ("the live page shows X",
+ * "on the owner's host") is not an event: it is settled once the work is live, so it stays on the build ticket.
+ * "the next release date/number/notes..." names a thing on a page, not an event, so it is left out.
+ */
+const EVENT_WATCH: readonly RegExp[] = [
+  // the next release / beta release / weekly release / real server update / runner rebuild / install
+  /\bthe\s+next\s+(?:(?:real|live|published|public|beta|weekly|nightly|stable|full|routine|official|server|runner|host|image|app|boss\s+man)[\s-]+){0,3}(?:release|update|upgrade|install(?:ation)?|deploy(?:ment)?|rebuild|publish)s?\b(?![\s-]+(?:date|number|name|notes?|tag|version|button|time|card|link|field|list)\b)/i,
+  // one real install, a real image install, another real update (from published images, on x86 and ARM...)
+  /\b(?:one|a|another|two|three)\s+real\s+(?:[a-z0-9-]+\s+){0,2}?(?:install(?:ation)?|update|upgrade|release|deploy(?:ment)?)s?\b/i,
+  // the first real stuck alert, first real update...
+  /\b(?:the\s+)?first\s+real\s+[a-z][a-z-]*\b/i,
+  // on the owner's device / machine / phone (their own hardware, at a time they choose)
+  /\bon\s+(?:the\s+)?owner'?s\s+(?:own\s+)?(?:device|machine|phone|laptop|computer|tablet|browser)s?\b/i,
+];
+
+/** BOS-2797: the phrase that makes a criterion's text wait on a future event, or null (see EVENT_WATCH). */
+export function eventWatchPhrase(text: string): string | null {
+  for (const re of EVENT_WATCH) {
+    const m = re.exec(text);
+    if (m) return m[0].trim();
+  }
+  return null;
+}
+
+/** BOS-2643 + BOS-2797: the phrase that opens an after-merge criterion as its own check ticket (a long watch or a future event), or null. */
+export const watchPhrase = (text: string): string | null => longWatchPhrase(text) ?? eventWatchPhrase(text);
+
+/** BOS-2643: 0-based indexes of the after-merge criteria that name a watch of a day or more, or (BOS-2797) a future event. */
+export const longWatchIndexes = (criteria: readonly Criterion[]): number[] => criteria.flatMap((c, i) => (isAfterMerge(c) && watchPhrase(criterionText(c)) ? [i] : []));
 
 /** Words that mean a check can only be settled once the work is live, not in a review. */
 const LIVE = /\b(after (the )?merg(?:e|ing)|once (it'?s |it is )?(merged|live|deployed|in production)|post-?merge|standby window|live deploy|on a real host|on the (real|production) host|on your (own )?(host|machine|server)|on the (owner'?s )?(host|machine|server))\b/i;

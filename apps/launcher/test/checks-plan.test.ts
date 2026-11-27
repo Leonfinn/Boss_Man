@@ -10,13 +10,14 @@ const base: LauncherConfig = { dataRoot: "/mnt/data", network: "boss-man_default
 describe("planChecks from Agents at once (BOS-1498)", () => {
   it("is 2 GB plus 1 GB an agent plus 3 GB a check, and says so with the machine's size", () => {
     // The defaults: 4 in a company + 2 background = 6 agents, 1 check.
-    expect(planChecks({ ...base, requestedSlots: 1, requestedAgents: 6, hostMemoryBytes: 32 * GIB })).toEqual({ requested: 1, slots: 1, memoryBytes: 11 * GIB, reason: null, agents: 6, why: "11 GB: 6 agents at once and 1 check, on a 32 GB machine." });
+    expect(planChecks({ ...base, requestedSlots: 1, requestedAgents: 6, hostMemoryBytes: 32 * GIB })).toEqual({ requested: 1, slots: 1, memoryBytes: 11 * GIB, reason: null, agents: 6, why: "11 GB: 6 agents at once and 1 check, on a 32 GB machine.", ceilingBytes: 30 * GIB });
     expect(planChecks({ ...base, requestedSlots: 2, requestedAgents: 1 })).toMatchObject({ memoryBytes: 9 * GIB, why: "9 GB: 1 agent at once and 2 checks." });
   });
   it("is cut to the machine's memory less 2 GB, and says what it would have needed", () => {
     const p = planChecks({ ...base, requestedSlots: 1, requestedAgents: 6, hostMemoryBytes: 8 * GIB });
     expect(p).toMatchObject({ slots: 1, memoryBytes: 6 * GIB, reason: null });
     expect(p.why).toBe("6 GB: 6 agents at once and 1 check would need 11 GB; this 8 GB machine keeps 2 GB for the server and database.");
+    expect(p.ceilingBytes).toBe(6 * GIB); // BOS-2802: the server turns this into "this machine can run 4 agents"
   });
   it("on a small machine the machine's limit wins over the 4 GB floor, and the line says so", () => {
     const p = planChecks({ ...base, requestedSlots: 1, requestedAgents: 2, hostMemoryBytes: 5 * GIB });
@@ -71,7 +72,7 @@ describe("planChecks from Agents at once (BOS-1498)", () => {
 
 describe("planChecks", () => {
   it("keeps the .env values until the server has sent the setting", () => {
-    expect(planChecks({ ...base, checkSlots: 2, memoryBytes: 8 * GIB })).toEqual({ requested: null, slots: 2, memoryBytes: 8 * GIB, reason: null, agents: null, why: "8 GB: the starting size, until Boss Man sends your settings." });
+    expect(planChecks({ ...base, checkSlots: 2, memoryBytes: 8 * GIB })).toEqual({ requested: null, slots: 2, memoryBytes: 8 * GIB, reason: null, agents: null, why: "8 GB: the starting size, until Boss Man sends your settings.", ceilingBytes: null });
     expect(planChecks({ ...base, memoryBytes: 8 * GIB, envMemoryCap: 8 * GIB }).why).toBe("8 GB: set by BOSSMAN_RUNNER_MEMORY in the host's .env.");
   });
   it("follows the setting with no .env lines: 13 GB plus 3 GB a slot, so one slot is today's 16 GB", () => {

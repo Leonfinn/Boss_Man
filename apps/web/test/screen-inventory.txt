@@ -429,6 +429,10 @@ reads:
   - /api/secrets
   - /api/setup-progress
 
+## #/shortcut-gone
+sections: (none)
+reads: (none)
+
 ## #/skills
 sections: 
   - Add a skill

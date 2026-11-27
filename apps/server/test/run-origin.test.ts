@@ -216,8 +216,9 @@ describe("what a run without a ticket was doing (BOS-118)", () => {
     await c.db.insert(runs).values({ id: runId, companyId: c.company.id, agentId: c.worker.id, ticketId: null, origin: "review requested", startedAt: new Date() });
     const client = await agent(c, c.worker.id, runId);
     const r = (await client.callTool({ name: "review", arguments: { action: "diff", ticketId: b.id } })) as { isError?: boolean; content: Array<{ text: string }> };
-    // The project has no repo, so the diff itself fails; touching the ticket is what this checks.
-    expect(r.content[0]!.text).toMatch(/no git repo/);
+    // The project has no repo, so the diff shows what the ticket produced (BOS-2820); touching the ticket is what this checks.
+    expect(r.isError).toBeFalsy();
+    expect(r.content[0]!.text).toMatch(/## What it produced/);
     // Reading the diff made it the run's ticket, in the runs list too.
     expect(await c.latestRun(c.worker.id)).toMatchObject({ id: runId, ticketId: b.id, origin: "review requested" });
     const listed = (await c.req("GET", "/api/runs")).json() as Array<{ id: string; ticketId: string | null; runTicketRef: string | null }>;

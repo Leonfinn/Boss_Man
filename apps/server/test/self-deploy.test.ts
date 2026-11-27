@@ -278,14 +278,17 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     await watch(804, "a week with no new stuck alerts", null);
     const [onMain] = await watch(805, "a GitHub release", "github_main_failed");
     // The owner's wrap-up for it had already lifted (it lifts when the server is in) before the host's "ended" is read.
-    await c.db.insert(updateHolds).values({ startedAt: new Date("2026-10-20T12:00:30Z"), kind: "wrapup", reason: "asking agents to wrap up for the server update", endedAt: new Date("2026-10-20T12:02:40Z") });
+    await c.db.insert(updateHolds).values({ startedAt: new Date("2026-10-20T12:00:30Z"), kind: "wrapup", reason: "asking agents to wrap up for the server update", endedAt: new Date("2026-10-20T12:02:40Z"), events: [{ at: "2026-10-20T12:00:30Z", text: "Wrap-up tied to: the server update (approved)" }, { at: "2026-10-20T12:00:30Z", text: "Wrap-up banner said: Wrapping up for the server update you approved at 11:58 UTC." }, { at: "2026-10-20T12:02:40Z", text: "Wrap-up lifted (update live): Wrap-up over" }, { at: "2026-10-20T12:00:31Z", text: "Stop-and-update-now chosen: runs still going are stopped" }] });
     const woken = async () => (await c.db.select().from(wakes)).filter((x) => x.reason === "watch trigger");
     await c.status({ id: randomUUID(), result: "deployed", to_commit: B });
     await c.selfDeploy.sync();
     await c.selfDeploy.sync();
     const first = await woken();
     expect(first.map((w) => w.ticketId).sort()).toEqual([byTrigger!.id, byWords!.id].sort());
-    expect(first[0]!.note).toContain('a server update ended (server update to bbbbbbbb ended "deployed" from 12:01 UTC to 12:03 UTC on 2026-10-20; a wrap-up was pressed for it (asked 12:00 UTC))');
+    expect(first[0]!.note).toContain('a server update ended (server update to bbbbbbbb ended "deployed" from 12:01 UTC to 12:03 UTC on 2026-10-20; a wrap-up was pressed for it (asked 12:00 UTC) Recorded wrap-up lines:');
+    // BOS-2811: the woken agent is given the recorded lines to quote, and only the wrap-up ones.
+    expect(first[0]!.note).toContain("[12:00 UTC: Wrap-up tied to: the server update (approved)] [12:00 UTC: Wrap-up banner said: Wrapping up for the server update you approved at 11:58 UTC.] [12:02 UTC: Wrap-up lifted (update live): Wrap-up over]");
+    expect(first[0]!.note).not.toContain("Stop-and-update-now");
     // A failed runner build ends the runner update: its watchers are woken; a refused one is not an update.
     await c.status({ id: randomUUID(), target: "runner", result: "rejected", to_commit: B, ended: "2026-10-20T13:00:00Z" });
     await c.selfDeploy.sync();
