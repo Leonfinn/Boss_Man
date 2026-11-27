@@ -63,15 +63,15 @@ Release step: adding to this file is part of every release (Release Manager, on 
    The weekly run is Tuesday 10:00 UTC: record the check before then, or that week's release is refused.
 
 8. Label the week's entries in the Monday docs check, so the What's new page never says "not in an image yet" about the image
-   that copies it (BOS-2840, with the label format from 2/3 and the check from BOS-2841). On every Monday docs-vs-code
+   the entries went out in (BOS-2840, with the label format from 2/3 and the check from BOS-2841). On every Monday docs-vs-code
    check (BOS-2667), work out the next weekly version (the newest release's number plus one) and run
    scripts/changelog-label.sh label 0.1.0-beta.N on main's CHANGELOG.md. It turns each "Not in an image yet:" line that has
    entries under it into "In image 0.1.0-beta.N" and changes nothing else; run it twice and the second run does nothing.
    Commit it with this week's docs check, and let CI publish that commit's images. The weekly release then refuses and says
    so, if an entry still has no label (BOS-2841's gate), so do the label in the same Monday pass, not on release day. Label
-   after merging, not before: a line merged after the tag is not sent to search engines. The label is in the image because
-   the weekly release copies this file into its image after the install test, so the website and GitHub show it in the same
-   step. You still do nothing by hand after the release: this is the one place the label is remembered.
+   after merging, not before: a line merged after the tag is not sent to search engines. No image contains this file (no
+   Dockerfile copies it): the label is in the released commit, so the website, which is built from this file on main after the
+   install test, and the release notes show it. You still do nothing by hand after the release: this is the one place the label is remembered.
 
 Check before committing: pnpm --filter @boss-man/site build (it stops on a heading that is not a date, or one out of order).
 Remember to put an empty line after any line you add outside this comment, so the comment's own closing marker still closes it.
