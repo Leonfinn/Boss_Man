@@ -28,6 +28,9 @@ const STEPS = [
   { id: "before", title: "Before you go", why: "What is ready, what still stops agents starting, and how Boss Man reaches you." },
 ] as const;
 
+/** The saved step number keeps its old meaning (2 = the workspace, 3 = Claude) so an owner mid-wizard when the Claude step moved ahead of the workspace resumes on the same step. The swap is its own inverse: use it on read and on write. */
+const savedStep = (n: number) => (n === 2 ? 3 : n === 3 ? 2 : n);
+
 /** The last step (BOS-2818): what is ready and what still stops agents, how permission cards work, and the optional phone push. */
 export function BeforeStep({ items, onFix }: { items: ChecklistItem[]; onFix: (stepId: string) => void }) {
   const parts = items.filter((i) => i.id !== "ticket" && STEPS.some((s) => s.id === i.id));
@@ -444,7 +447,7 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
   const [chosen, setChosen] = useState<Work | null>(null);
   useEffect(() => {
     if (progress.data && step === null) {
-      setStep(Math.min(progress.data.step, STEPS.length - 1));
+      setStep(savedStep(Math.min(progress.data.step, STEPS.length - 1)));
       setCompanyId(progress.data.companyId);
     }
   }, [progress.data, step]);
@@ -455,7 +458,7 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
     if (step !== null && shown.current !== null && shown.current !== step) formRef.current?.focus({ preventScroll: true });
     shown.current = step;
   }, [step]);
-  const company =companies.find((c) => c.id === companyId) ?? (companyId ? undefined : companies[0]);
+  const company = companies.find((c) => c.id === companyId) ?? (companyId ? undefined : companies[0]);
   const list = usePoll((signal) => (company ? api<ChecklistItem[]>(`/api/companies/${company.id}/setup-checklist`, { signal }) : Promise.resolve([])), 3_000, `setup-steps-${company?.id ?? "none"}`);
   const projs = usePoll((signal) => (company ? api<Project[]>(`/api/companies/${company.id}/projects`, { signal }) : Promise.resolve([] as Project[])), 15_000, `setup-work-${company?.id ?? "none"}`);
   if (step === null) return null;
@@ -473,7 +476,7 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
   const save = (patch: Partial<Progress>) => void api("/api/setup-progress", { method: "PUT", body: patch }).catch(() => {});
   const move = (to: number) => {
     setStep(to);
-    save({ step: to, companyId: company?.id ?? null });
+    save({ step: savedStep(to), companyId: company?.id ?? null });
     window.scrollTo({ top: 0 });
   };
   const finish = () => {

@@ -51,6 +51,8 @@ describe.skipIf(!browser)("setup frame, in a browser", () => {
   for (const [name, opts] of [
     ["desktop", { viewport: { width: 1440, height: 900 } }],
     ["phone", { viewport: { width: 380, height: 800 }, hasTouch: true, isMobile: true }],
+    // A touch tablet: wide enough to keep the step list, and a coarse pointer, so the list's buttons must be 44px.
+    ["tablet", { viewport: { width: 900, height: 800 }, hasTouch: true, isMobile: true }],
   ] as const) {
     it(`lays out the bar, step list and buttons at ${name} width`, async () => {
       const page = await browser!.newPage(opts);
@@ -79,7 +81,19 @@ describe.skipIf(!browser)("setup frame, in a browser", () => {
         expect(m.skip).toBeGreaterThanOrEqual(44);
       } else {
         expect(m.stepperShown).toBe(true);
+        if (name === "tablet") {
+          expect(m.stepButton).toBeGreaterThanOrEqual(44);
+          expect(m.next).toBeGreaterThanOrEqual(44);
+        }
       }
     });
   }
+});
+
+// The snippet above is hand-written, so make sure the real page still uses the classes it measures.
+describe("setup frame markup", () => {
+  it("Setup.tsx still renders the bar, step list and nav the browser test measures", () => {
+    const src = readFileSync(new URL("../src/pages/Setup.tsx", import.meta.url), "utf8");
+    for (const cls of ['className="setup-bar"', 'className="stepper"', 'className="setup-nav"', 'className="linkish"']) expect(src).toContain(cls);
+  });
 });

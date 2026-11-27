@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
 import { Setup, SetupChecklist } from "../src/pages/Setup";
@@ -95,7 +95,7 @@ describe("setup wizard: what will your team work on (BOS-2813)", () => {
   });
 
   it("goes from the Claude and runner steps straight on to funding without the code steps", async () => {
-    mockDocs(2);
+    mockDocs(3); // saved step numbers keep the old order: 3 is the Claude step
     render(<Setup companies={[company]} go={() => {}} onChanged={() => {}} />);
     await screen.findByLabelText("Claude sign-in code");
     // A team that has never used git sees none of these words on the Claude step (criterion 5).
@@ -123,7 +123,7 @@ describe("setup wizard: Claude and runner steps (BOS-1495)", () => {
         const method = init?.method ?? "GET";
         calls.push({ url, method, body: init?.body ? JSON.parse(String(init.body)) : null });
         const body =
-          url === "/api/setup-progress" ? { dismissed: false, step: 2, companyId: "c1" }
+          url === "/api/setup-progress" ? { dismissed: false, step: 3, companyId: "c1" }
           : url === "/api/secrets" && method === "POST" ? { secret: { id: "s1" }, warnings: [] }
           : url === "/api/funding-sources" && method === "POST" ? { id: "f1" }
           : url.endsWith("/setup-checklist") || url.endsWith("/grants") || url === "/api/secrets" ? []
@@ -155,7 +155,7 @@ describe("setup wizard: Claude and runner steps (BOS-1495)", () => {
       vi.fn(async (url: string, init?: RequestInit) => {
         calls.push(`${init?.method ?? "GET"} ${url}`);
         const body =
-          url === "/api/setup-progress" ? { dismissed: false, step: 2, companyId: "c1" }
+          url === "/api/setup-progress" ? { dismissed: false, step: 3, companyId: "c1" }
           : url.endsWith("/grants") ? [{ id: "g1", envName: "CLAUDE_CODE_OAUTH_TOKEN", secretId: "s1", secretName: "App Co Claude setup-token", hint: null, deployTargetId: null, agentIds: [] }]
           : url.endsWith("/setup-checklist") ? allDone
           : [];
@@ -176,7 +176,7 @@ describe("setup wizard: Claude and runner steps (BOS-1495)", () => {
       vi.fn(async (url: string, init?: RequestInit) => {
         const method = init?.method ?? "GET";
         const body =
-          url === "/api/setup-progress" ? { dismissed: false, step: 2, companyId: "c1" }
+          url === "/api/setup-progress" ? { dismissed: false, step: 3, companyId: "c1" }
           : url === "/api/secrets" && method === "POST" ? { secret: { id: "s1" }, warnings: [] }
           : url === "/api/funding-sources" && method === "POST" ? { id: "f1" }
           : url.endsWith("/setup-checklist") ? allDone
@@ -205,7 +205,7 @@ describe("setup wizard: Claude and runner steps (BOS-1495)", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string) => {
-        const body = url === "/api/setup-progress" ? { dismissed: false, step: 3, companyId: "c1" } : url.endsWith("/runner") ? { registered: false } : [];
+        const body = url === "/api/setup-progress" ? { dismissed: false, step: 2, companyId: "c1" } : url.endsWith("/runner") ? { registered: false } : [];
         return new Response(JSON.stringify(body), { status: 200 });
       }),
     );
@@ -221,7 +221,7 @@ describe("setup wizard: Claude and runner steps (BOS-1495)", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string) => {
-        const body = url === "/api/setup-progress" ? { dismissed: false, step: 3, companyId: "c1" } : url.endsWith("/runner") ? { registered: false, launcher: null, memoryLine: line } : [];
+        const body = url === "/api/setup-progress" ? { dismissed: false, step: 2, companyId: "c1" } : url.endsWith("/runner") ? { registered: false, launcher: null, memoryLine: line } : [];
         return new Response(JSON.stringify(body), { status: 200 });
       }),
     );
@@ -233,7 +233,7 @@ describe("setup wizard: Claude and runner steps (BOS-1495)", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string) => {
-        const body = url === "/api/setup-progress" ? { dismissed: false, step: 3, companyId: "c1" } : url.endsWith("/runner") ? runner : [];
+        const body = url === "/api/setup-progress" ? { dismissed: false, step: 2, companyId: "c1" } : url.endsWith("/runner") ? runner : [];
         return new Response(JSON.stringify(body), { status: 200 });
       }),
     );
@@ -382,6 +382,15 @@ describe("Before you go, leaving and the checklist count (BOS-2818)", () => {
     expect(go).toHaveBeenCalledWith("board");
     expect(puts.some((p) => (p as { left?: boolean }).left === true)).toBe(true);
     expect(puts.some((p) => "dismissed" in (p as object))).toBe(false);
+  });
+
+  it("keeps saved step numbers in their old order: Claude saves as 3, the workspace as 2 (resume after the swap)", async () => {
+    const puts = stub(3);
+    render(<Setup companies={[company]} go={() => {}} onChanged={() => {}} />);
+    expect((await screen.findByRole("heading", { level: 1 })).textContent).toBe("Claude account");
+    fireEvent.click(await screen.findByText("Skip this step"));
+    await waitFor(() => expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Your agents' workspace"));
+    expect(puts.some((p) => (p as { step?: number }).step === 2)).toBe(true);
   });
 
   it("shows 'Setup: 2 of 4 done' on the card", async () => {
