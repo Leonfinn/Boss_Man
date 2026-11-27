@@ -1,0 +1,1 @@
+ALTER TABLE "features" ADD COLUMN "live_baseline_at" timestamp with time zone;
