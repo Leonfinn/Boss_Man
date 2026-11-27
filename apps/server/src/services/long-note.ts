@@ -12,8 +12,10 @@ const MIN_REPEAT_LEN = 12;
 /** Every repeat of an earlier line (a short line is left alone) is dropped; the first shows "(same line ×N)". */
 export function collapseRepeats(text: string): string {
   const lines = text.split("\n");
+  // not state: a local of one call
   const counts = new Map<string, number>();
   for (const l of lines) if (l.trim().length >= MIN_REPEAT_LEN) counts.set(l, (counts.get(l) ?? 0) + 1);
+  // not state: a local of one call
   const seen = new Set<string>();
   const out: string[] = [];
   for (const l of lines) {
