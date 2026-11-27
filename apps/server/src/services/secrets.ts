@@ -135,9 +135,10 @@ export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) 
       if (!existing) return null;
       const { value, warnings, verified } = await prepare(existing.kind as SecretKind, raw, opts, live);
       const sealed = encryptSecret(master, value);
-      // A new value keeps the old end date unless a new one is given, since the owner may be replacing a token
-      // that still works; the reminder card closes on the version, not the date, so it can tell either way.
-      const endsOn = opts.endsOn !== undefined ? (TOKEN_KINDS.has(existing.kind as SecretKind) ? endOfDay(opts.endsOn) : null) : undefined;
+      // A new value drops the old end date unless a new one is given: the date belongs to the token it was saved
+      // with, so keeping it would put the new value straight back inside the warning window and raise a second
+      // card right after the owner replaced the token (BOS-2825).
+      const endsOn = TOKEN_KINDS.has(existing.kind as SecretKind) ? endOfDay(opts.endsOn) : null;
       const [row] = await db
         .update(secrets)
         .set({ ...sealed, hint: secretHint(value), version: existing.version + 1, updatedAt: new Date(), ...(endsOn !== undefined ? { expiresAt: endsOn } : {}) })

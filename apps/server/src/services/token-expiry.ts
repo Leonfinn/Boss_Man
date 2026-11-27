@@ -16,13 +16,21 @@ export const EXPIRY_WARN_MS = 7 * 86_400_000;
 export const tokenExpiryKey = (secretId: string) => `alert:token-expiry:${secretId}`;
 
 /** What the token is, in the owner's words; the secret's name is already the label for it. */
-const KIND_NOUN = (kind: string): string => (kind === "claude_oauth_token" ? "Claude setup-token" : "git token");
+const KIND_NOUN = (kind: string): string => (kind === "claude_oauth_token" ? "Claude setup-token" : "token");
 
-/** Why to paste it in, by kind: the two places the owner saved a token from. */
-const WHERE = (kind: string): string =>
-  kind === "claude_oauth_token"
-    ? "Settings → Secrets → Add, choose Claude setup-token"
-    : "Settings → Secrets → Add, choose Git token (GitHub or Gitea)";
+/** How to make a replacement, by kind. */
+const MAKE = (t: TokenExpiryCandidate): string =>
+  t.kind === "claude_oauth_token"
+    ? "run `claude setup-token` on your own computer and sign in"
+    : t.name.toLowerCase().includes("gitea")
+      ? "in Gitea, create a token with the write:repository scope"
+      : "on GitHub, make a fine-grained token for the company's repos with Contents, Pull requests and Workflows read and write, plus Actions read and write";
+
+/**
+ * Where to paste it: the Rotate box on this same secret (Settings → Secrets → its name → Rotate), not Add, which
+ * would make a new secret and leave this one and its reminder card behind (BOS-2825).
+ */
+const WHERE = (t: TokenExpiryCandidate): string => `Settings → Secrets → ${t.name} → Rotate, with the new value`;
 
 export type TokenExpiryDeps = {
   now: () => Date;
@@ -54,7 +62,7 @@ export function expiryQuestion(t: TokenExpiryCandidate, now: Date): string {
   const when = days < 0 ? "this date has passed, so it may already have stopped working" : days === 0 ? "today" : days === 1 ? "tomorrow" : `in ${days} days`;
   return [
     `Your ${KIND_NOUN(t.kind)} **${t.name}** ends ${endsOnDay(t.expiresAt)} (${when}). Once it ends, runs and work that use it will fail until it is replaced.`,
-    `Two steps: 1. Make a new token (${t.kind === "claude_oauth_token" ? "run `claude setup-token` on your own computer and sign in" : t.name.toLowerCase().includes("gitea") ? "in Gitea, create a token with the write:repository scope" : "on GitHub, make a fine-grained token for the company's repos with Contents, Pull requests and Workflows read and write, plus Actions read and write"}). 2. Paste it under ${WHERE(t.kind)}, with the same variable name, and give it an end date so the next reminder comes on time.`,
+    `Two steps: 1. Make a new token (${MAKE(t)}). 2. Paste it under ${WHERE(t)}, and give it an end date so the next reminder comes on time.`,
     "This card closes by itself once a new value is saved for this token. You get one card, not one every day.",
   ].join("\n\n");
 }

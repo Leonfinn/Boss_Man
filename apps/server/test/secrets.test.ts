@@ -107,15 +107,16 @@ describe("secrets store", () => {
     expect(await t.secrets.resolveCompanyEnv(homelab, "run")).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: rotated });
   });
 
-  it("keeps the end date when a token's value is replaced without a new date, and takes the new one when given (BOS-2825)", async () => {
+  it("drops the old end date when a token's value is replaced without a new one, and takes a new date when given (BOS-2825)", async () => {
     const saved = await t.app.inject({ method: "POST", url: "/api/secrets", headers: { cookie }, payload: { name: "Claude setup-token date", kind: "claude_oauth_token", value: TOKEN, endsOn: "2027-11-27" } });
     expect(saved.statusCode).toBe(201);
     const secretId = saved.json().secret.id;
     expect(saved.json().secret.expiresAt).toBe("2027-11-27");
-    // A rotated token that still works keeps its date, so the reminder still knows when it ends.
-    const kept = await t.app.inject({ method: "PUT", url: `/api/secrets/${secretId}/value`, headers: { cookie }, payload: { value: `${TOKEN.slice(0, -4)}1111` } });
-    expect(kept.json().secret.expiresAt).toBe("2027-11-27");
-    expect(kept.json().secret.version).toBe(2);
+    // A new value with no date drops the old one: that date belonged to the token it replaced, and keeping it would
+    // raise a fresh "ends soon" card right after the owner replaced it.
+    const dropped = await t.app.inject({ method: "PUT", url: `/api/secrets/${secretId}/value`, headers: { cookie }, payload: { value: `${TOKEN.slice(0, -4)}1111` } });
+    expect(dropped.json().secret.expiresAt).toBeNull();
+    expect(dropped.json().secret.version).toBe(2);
     // A new date given with the new value is stored.
     const changed = await t.app.inject({ method: "PUT", url: `/api/secrets/${secretId}/value`, headers: { cookie }, payload: { value: `${TOKEN.slice(0, -4)}2222`, endsOn: "2028-01-15" } });
     expect(changed.json().secret.expiresAt).toBe("2028-01-15");

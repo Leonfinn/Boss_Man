@@ -85,7 +85,7 @@ describe("token end dates (BOS-2825)", () => {
     expect((cards[0]!.context as { ladder?: { kind?: string } }).ladder?.kind).toBe("token_expiry");
     expect(cards[0]!.question).toContain("App Co Claude token");
     expect(cards[0]!.question).toContain("Claude setup-token");
-    expect(cards[0]!.question).toContain("Settings → Secrets → Add, choose Claude setup-token");
+    expect(cards[0]!.question).toContain("Settings → Secrets → App Co Claude token → Rotate, with the new value");
     expect(cards[0]!.question).toContain("claude setup-token");
     expect(clearWhenOf(cards[0]!.context)).toEqual([{ kind: "secretReplaced", secretId, version: 1 }]);
     // A second pass the same day, and the next day, raises nothing more while it is open.
@@ -100,6 +100,30 @@ describe("token end dates (BOS-2825)", () => {
     expect(closed!.status).toBe("withdrawn");
     expect(closed!.question).toBe(cards[0]!.question);
     expect((closed!.context as { withdrawn?: { note?: string } }).withdrawn?.note).toMatch(/a new value was saved for App Co Claude token/);
+  });
+
+  it("does not warn again when the owner replaces the token with no new date, and an Add leaves the old secret's card alone", async () => {
+    const at = new Date("2026-11-27T09:00:00Z");
+    const now = { at };
+    const c = (ctx = await setup(now));
+    const ends = day(at, 6);
+    const saved = (await c.save({ name: "App Co git token", kind: "generic", value: GIT_TOKEN, endsOn: ends })).json() as { secret: { id: string } };
+    const secretId = saved.secret.id;
+    expect(await pass(c)).toEqual([secretId]);
+    // Rotated the way the Secrets page sends it with the date left empty: the old date goes, so the next pass is quiet.
+    const rotated = (await c.req("PUT", `/api/secrets/${secretId}/value`, { value: GIT_TOKEN.replace(/9$/, "8"), endsOn: null })).json() as { secret: { expiresAt: string | null; version: number } };
+    expect(rotated.secret.version).toBe(2);
+    expect(rotated.secret.expiresAt).toBeNull();
+    expect(await pass(c)).toEqual([]);
+    expect(await openCards(c)).toHaveLength(0);
+    // A put that leaves the date out altogether clears it too: the date belonged to the old value.
+    const again = (await c.req("PUT", `/api/secrets/${secretId}/value`, { value: GIT_TOKEN.replace(/8$/, "7") })).json() as { secret: { expiresAt: string | null } };
+    expect(again.secret.expiresAt).toBeNull();
+    // Adding a new secret is a different secret: it has its own date and card, and the old one is untouched.
+    now.at = new Date(Date.parse(`${ends}T00:00:00Z`) - 5 * DAY);
+    const added = (await c.save({ name: "App Co git token 2", kind: "generic", value: GIT_TOKEN, endsOn: day(now.at, 4) })).json() as { secret: { id: string } };
+    expect(await pass(c)).toEqual([added.secret.id]);
+    expect(await openCards(c)).toHaveLength(1);
   });
 
   it("raises no reminder for a token saved before this change, which has no date", async () => {
@@ -135,9 +159,9 @@ describe("the expiry card's words", () => {
   it("say the day, the days left, and the two steps for a git token", () => {
     const now = new Date("2026-11-27T09:00:00Z");
     const text = expiryQuestion({ id: "s", name: "App Co git token", kind: "generic", version: 1, expiresAt: "2026-12-01" }, now);
-    expect(text).toContain("git token **App Co git token** ends 1 Dec 2026 (in 4 days)");
+    expect(text).toContain("token **App Co git token** ends 1 Dec 2026 (in 4 days)");
     expect(text).toContain("on GitHub, make a fine-grained token");
-    expect(text).toContain("Settings → Secrets → Add, choose Git token (GitHub or Gitea)");
+    expect(text).toContain("Settings → Secrets → App Co git token → Rotate, with the new value");
     expect(text).toContain("closes by itself");
   });
 
