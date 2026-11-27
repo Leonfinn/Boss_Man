@@ -13,7 +13,7 @@ import { Funding } from "./settings/Funding";
 import { ProjectRow } from "./settings/Projects";
 import { ClaudeStep, fundingHint, RunnerStep } from "./SetupClaude";
 
-type Progress = { dismissed: boolean; step: number; companyId: string | null; firstMerge?: { ref: string; minutes: number } | null; work?: "docs" | "code" };
+type Progress = { dismissed: boolean; left?: boolean; step: number; companyId: string | null; firstMerge?: { ref: string; minutes: number } | null; work?: "docs" | "code" };
 export type ChecklistItem = { id: string; label: string; done: boolean };
 
 /** The connect step's title (BOS-2815), also used as the wizard's heading so it reads the same in both places. */
@@ -28,7 +28,51 @@ const STEPS = [
   { id: "checks", title: "Checks before merging", why: "Boss Man looks at the repo, through the runner, and proposes the check that runs before work merges. High-risk work can add a slower one." },
   { id: "funding", title: "What pays for the CEO", why: "Funding sources track cost and quota. Choose the one the CEO runs on; the Agents page sets the rest." },
   { id: "ticket", title: "A first task", why: "Optional: something for the team to start on." },
+  { id: "before", title: "Before you go", why: "What is ready, what still stops agents starting, and how Boss Man reaches you." },
 ] as const;
+
+/** The last step (BOS-2818): what is ready and what still stops agents, how permission cards work, and the optional phone push. */
+export function BeforeStep({ items, onFix }: { items: ChecklistItem[]; onFix: (stepId: string) => void }) {
+  const parts = items.filter((i) => i.id !== "ticket" && STEPS.some((s) => s.id === i.id));
+  const ready = parts.filter((i) => i.done);
+  const missing = parts.filter((i) => !i.done);
+  return (
+    <div className="setup-before">
+      <h2 style={{ fontSize: 16, fontWeight: 600 }}>Ready</h2>
+      {ready.length ? (
+        <ul>
+          {ready.map((i) => (
+            <li key={i.id}>
+              <span>✓ {i.label}</span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="muted">Nothing yet.</p>
+      )}
+      <h2 style={{ fontSize: 16, fontWeight: 600 }}>Still stops agents starting</h2>
+      {missing.length ? (
+        <ul>
+          {missing.map((i) => (
+            <li key={i.id}>
+              <span>○ {i.label}</span>
+              <button type="button" className="btn" onClick={() => onFix(i.id)}>
+                Fix this
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="muted">Nothing. Your agents can start.</p>
+      )}
+      <h2 style={{ fontSize: 16, fontWeight: 600 }}>When an agent needs your OK</h2>
+      <p style={{ margin: 0 }}>When an agent needs your OK it asks in Decisions. If nobody answers in 10 minutes it is treated as No.</p>
+      <p style={{ margin: 0 }}>
+        Optional: <a href="#/settings/notifications">Get a push on your phone when agents need you</a>.
+      </p>
+    </div>
+  );
+}
 
 function CompanyStep({ company, onCreated }: { company: Company | undefined; onCreated: (id: string) => void }) {
   const [name, setName] = useState(company?.name ?? "");
@@ -376,6 +420,11 @@ export function SetupChecklist({ companyId, go, folded = false }: { companyId: s
         </span>
       </div>
       {act.view}
+      {!folded && (
+        <p className="setup-count">
+          Setup: {doneCount} of {items.length} done
+        </p>
+      )}
       <ul className="checklist">
         {items.map((i) => (
           <li key={i.id} className={i.done ? "done" : ""}>
@@ -424,7 +473,8 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
     window.scrollTo({ top: 0 });
   };
   const finish = () => {
-    save({ dismissed: true, step: STEPS.length - 1 });
+    // Leaving closes the wizard only; the checklist stays until it is all done or Dismiss is pressed on it (F20).
+    save({ left: true, step: STEPS.length - 1 });
     go("board");
   };
   const s = STEPS[step]!;
@@ -472,6 +522,7 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
         {step === 5 && company && <ChecksStep company={company} onChanged={refresh} />}
         {step === 6 && company && <FundingStep company={company} onChanged={refresh} goTo={move} saved={connected} />}
         {step === 7 && company && <TicketStep company={company} />}
+        {step === 8 && company && <BeforeStep items={list.data ?? []} onFix={(id) => move(STEPS.findIndex((x) => x.id === id))} />}
         <div className="setup-nav">
           {step > 0 && (
             <button type="button" className="btn" onClick={() => move([...visible].reverse().find(({ i }) => i < step)?.i ?? step - 1)}>
@@ -486,12 +537,12 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
             </>
           ) : (
             <button type="button" className="btn primary" onClick={finish}>
-              Finish
+              Leave setup for now
             </button>
           )}
           {step === 0 && (
             <button type="button" className="linkish" onClick={finish}>
-              I know what I'm doing, let me get on with it
+              Skip setup for now
             </button>
           )}
         </div>

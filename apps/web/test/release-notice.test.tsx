@@ -8,7 +8,7 @@ import { stubFetchByUrl } from "./stub-fetch";
 
 afterEach(cleanup);
 
-const base = { active: true, current: "0.1.0-beta.2", channel: "beta", enabled: true, ntfy: false, checkedAt: "2026-11-26T10:00:00Z", couldntCheck: false };
+const base = { active: true, current: "0.1.0-beta.2", channel: "beta", enabled: true, ntfy: false, checkedAt: "2026-11-26T10:00:00Z", couldntCheck: false, install: { linked: true, updater: null } };
 const available = { version: "0.1.0-beta.3", url: "https://github.com/example-org/boss-man/releases/tag/v0.1.0-beta.3", summary: "Faster updates.", publishedAt: null, prerelease: true };
 
 describe("ReleaseNotice", () => {
@@ -32,6 +32,51 @@ describe("ReleaseNotice", () => {
     render(<ReleaseNotice />);
     expect(await screen.findByText(/Couldn't check for a new release just now/)).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  // BOS-2713: the Install button sends the version on offer, and the line shows what the updater is doing.
+  it("Install sends the version shown, and a refusal reads as a plain sentence", async () => {
+    const posts: unknown[] = [];
+    stubFetchByUrl({
+      "/api/release-watch": { ...base, available },
+      "/api/release-watch/install": (_u: string, init?: RequestInit) => {
+        posts.push(JSON.parse(String(init?.body)));
+        return new Response(JSON.stringify({ error: "An update is already running. Its progress is shown here." }), { status: 409, headers: { "content-type": "application/json" } });
+      },
+    });
+    render(<ReleaseNotice />);
+    fireEvent.click(await screen.findByRole("button", { name: "Install 0.1.0-beta.3" }));
+    await waitFor(() => expect(posts).toEqual([{ version: "0.1.0-beta.3" }]));
+    expect((await screen.findByRole("alert")).textContent).toContain("An update is already running");
+  });
+
+  it("while the updater works: progress in plain words, no Install button", async () => {
+    stubFetchByUrl({ "/api/release-watch": { ...base, available, install: { linked: true, updater: { stage: "pulling", version: "0.1.0-beta.3", error: null, report: null } } } });
+    render(<ReleaseNotice />);
+    expect(await screen.findByText(/Downloading the new version/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Install/ })).toBeNull();
+  });
+
+  it("an install made before the link existed is told to install by hand, with no dead button", async () => {
+    stubFetchByUrl({ "/api/release-watch": { ...base, available, install: { linked: false, updater: null } } });
+    render(<ReleaseNotice />);
+    expect(await screen.findByText(/install this release by hand/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Install/ })).toBeNull();
+  });
+
+  it("a finished move can be dismissed with Got it", async () => {
+    const posts: string[] = [];
+    stubFetchByUrl({
+      "/api/release-watch": { ...base, available: null, install: { linked: true, updater: { stage: "done", version: "0.1.0-beta.3", error: null, report: { level: "info", text: "Updated to 0.1.0-beta.3.", acknowledged: false } } } },
+      "/api/release-watch/ack": () => {
+        posts.push("ack");
+        return {};
+      },
+    });
+    render(<ReleaseNotice />);
+    expect(await screen.findByText(/Updated to 0\.1\.0-beta\.3/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Got it" }));
+    await waitFor(() => expect(posts).toEqual(["ack"]));
   });
 
   it("turns the daily check off, and the phone push on", async () => {

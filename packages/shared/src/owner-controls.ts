@@ -53,7 +53,7 @@ export const OWNER_CONTROLS = {
   "Log in": ["Create owner account", "Log in"],
   Setup: [
     "Create the company", "Add the project", "Check the token against …", "Add the task to …", "Continue", "Dismiss", "Saving",
-    "Back", "Next", "Skip for now", "Finish", "I know what I'm doing, let me get on with it",
+    "Back", "Next", "Skip for now", "Leave setup for now", "Skip setup for now", "Fix this",
     // The connect and runner steps (BOS-1495, BOS-2815: one row per way to pay, then its Save; the connect step's
     // two "What's this?" links go in a new tab, so they are links, not buttons, and are not listed here), then the
     // credentials, funding and project panels Setup shares with Settings and Projects.
@@ -194,7 +194,7 @@ export const OWNER_CONTROLS = {
   ],
   "Server and runner": [
     "Reconnect runner", "Start runner", "Restart", "Stop", "Download CSV", "Copy token", "Issue a new runner token", "Register a runner",
-    "Review and deploy", "Check for updates now", "Build and update runners", "Deploy to staging", "Cancel queued runner update", "Save", "Save add-ons", "Cancel the update", "Update runners (finish runs first)",
+    "Install", "Got it", "Review and deploy", "Check for updates now", "Build and update runners", "Deploy to staging", "Cancel queued runner update", "Save", "Save add-ons", "Cancel the update", "Update runners (finish runs first)",
     // The update wait (BOS-420): the same button reads by phase.
     "Stop making room", "Lift the hold now",
     // The server-wide hold (BOS-836); Resume is on the banner every screen shows while it is on.

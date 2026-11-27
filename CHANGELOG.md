@@ -68,10 +68,17 @@ Remember to put an empty line after any line you add outside this comment, so th
 
 <!-- Docs checked up to 688f2bc5a6c5f50810649a7cfa7af9e4bcec5d37 -->
 
+## 27 November 2026
+
+- Pin the pages you open most. Press **Add to shortcuts** beside the title of any page inside Product, Team, Activity or Settings (for example Settings → Server and runner → Updates). The page then appears in a Shortcuts section at the top of the menu, on every device you sign in from. You can have up to 6. Press the button again, or Undo, to take it out. The menu is unchanged until you add one.
+- **Edit** beside Shortcuts lets you rename, reorder or remove them. Nothing changes until you press Save.
+- With the keyboard, press g then 1 to open your first shortcut, g then 2 for the second, and so on up to 6. The numbers follow the order in the menu. Press ? to see which number opens which page.
+
 ## 26 November 2026
 
 **Not in an image yet:** comes with the next weekly image (Tuesdays).
 
+- Keyboard shortcuts are easier to find. On a computer, press the keyboard button at the bottom of the menu, between Settings and Log out (or press ?), to see them, starting with the keys for the page you're on. Hover over a menu item to see its key, for example "Decisions (g then i)". Don't want single-letter keys, for example because you use voice control? Untick "Use single-letter keys" in Settings → Account → Keyboard shortcuts. The choice follows your login to every browser, and Ctrl K for search always works.
 - A new beta release now goes out by itself every Tuesday morning (10:00 UTC), with that week's changes in its notes, as long as the newest code has passed its checks and its images are ready. If there is nothing new or nothing ready, it skips that week. You don't need to press anything.
 - Boss Man is now in beta, no longer alpha. The website, the GitHub README and the contribution and security pages say so. You can install it from the ready-made Docker images on the GitHub releases page, or build it from the source.
 - In the company brief (Wiki → Company brief), the "In flight" list now marks an agent whose run is on a ticket it does not own, review or have a card on: the line ends "(not assigned: woken by …)" with the reason it was started, so a stray run stands out. Runs on an agent's own tickets look as before.

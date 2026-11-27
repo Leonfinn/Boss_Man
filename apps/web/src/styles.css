@@ -854,8 +854,8 @@ button.preset-card { cursor: pointer; }
   .set-layout { display: grid; grid-template-columns: 228px minmax(0, 1fr); gap: 28px; align-items: start; }
   .set-nav { position: sticky; top: 16px; align-self: start; }
   .set-nav li > a { min-height: 40px; padding: 8px 12px; }
+  /* The wizard button sits top right on a wide screen (it was hidden at every wide width, F21). */
   .set-nav .set-wizard { display: none; }
-  .set-head-wizard { display: none; }
   .set-jump a { min-height: 24px; }
   /* (BOS-1126 Q8) The bare #/settings menu on a wide screen: each page's one-line hint under its name, two columns of pages (the sidebar beside a page stays names only). */
   .set-nav-index ul { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
@@ -1551,7 +1551,12 @@ p.dash-line { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0;
 .stepper li.done .linkish span { background: var(--green-soft); color: var(--green-ink); }
 .stepper li[aria-current="step"] .linkish { color: var(--ink); font-weight: 600; }
 .stepper li[aria-current="step"] .linkish span { background: var(--accent); color: #fff; }
-.checklist { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px 16px; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); font-size: 14px; }
+.checklist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
+.setup-count { margin: 0; font-size: 14px; color: var(--muted); }
+.setup-before { display: flex; flex-direction: column; gap: 10px; max-width: 640px; }
+.setup-before ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.setup-before li { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: space-between; }
+.side-setup { display: block; margin: 0 0 8px; padding: 8px 10px; border-radius: 6px; font-size: 14px; font-weight: 600; background: var(--side-hover, rgba(255,255,255,0.08)); color: inherit; text-decoration: none; }
 .checklist li > span[aria-hidden] { display: inline-block; width: 1.2em; color: var(--muted); }
 .checklist li.done { color: var(--muted); }
 .checklist li.done > span[aria-hidden] { color: var(--green-ink); }
