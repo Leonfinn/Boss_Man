@@ -58,14 +58,17 @@ describe("what keeps today's handling (BOS-2856 must-stay rows)", () => {
   it.each([
     ["write to /dev/null", "echo hi > /dev/null"],
     ["append to /dev/null", "echo hi >> /dev/null"],
+    // test-lines-ok: command text is the input under test, nothing here runs it
     ["both streams to /dev/null", "echo hi &> /dev/null"],
     ["program output to a log, both streams", `npm test > ${S}/out.log 2>&1`],
     ["program output to a log, append", `node run.js >> ${S}/out.log 2>&1`],
     ["log of a script run by full path", `${S}/run.sh > ${S}/out.log 2>&1`],
     ["stderr only to a log", `echo hi 2> ${S}/err.log`],
+    // test-lines-ok: command text is the input under test, nothing here runs it
     ["stderr to /dev/null", "ls 2>/dev/null"],
     ["fd copy", "echo hi >&2"],
     ["fd copy both", "ls 2>&1"],
+    // test-lines-ok: command text is the input under test, nothing here runs it
     ["fd close", "ls 2>&-"],
     ["tee of program output (a log)", `npm test 2>&1 | tee ${S}/out.log`],
     ["tee of cat on a file", `cat a.log | tee ${S}/b.log`],

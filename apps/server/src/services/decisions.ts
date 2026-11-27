@@ -2023,7 +2023,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
       // BOS-2856: a shell command that writes a file (`echo x >> f`, `tee`, a here-doc into a file, `sed -i`) is refused at once with
       // one fixed hint and raises no card: the rule is to use the Write or Edit tool. Like the refusal above it only replaces a card.
-      if (outcome !== "allow" && outcome !== "deny" && event.kind === "execute") {
+      // A plain `echo >> f` is a built-in allow (no card), so the rule applies to an allow too: the agent is sent to its Write tool either way.
+      if (outcome !== "deny" && event.kind === "execute") {
         const shell = (event.rawInput as Record<string, unknown> | null)?.["command"];
         const refusal = typeof shell === "string" ? shellFileWriteRefusal(shell) : null;
         if (refusal) {
