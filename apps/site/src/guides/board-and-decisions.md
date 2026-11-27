@@ -125,6 +125,8 @@ A red **Not re-checked** strip means nobody re-checked the card in time. It says
 
 On a plan or sign-off card, a note box sits under the buttons. What you type there is sent with **Keep planning** or **Send it back**.
 
+Some buttons promise a screenshot, for example **Done, screenshot attached**. The box under the buttons then says which button needs one. Paste the screenshot into the box, or choose **Attach file**, then press the button. If nothing is attached, the card says "Attach the screenshot first" and sends nothing.
+
 If you run more than one company, the **All companies** filter shows cards from every company together.
 
 ### The sign-off card
@@ -145,3 +147,17 @@ When a card leaves your list before you answer it, for example because the updat
 Cards closed in the last 30 days are folded at the bottom under **Closed in the last 30 days**. Each line starts with what happened: **Answered**, **Allowed**, **Denied**, **Withdrawn** or **Replaced**.
 
 A plan marked **Replaced** says who wrote the newer plan and when. Choose **Open the newer card** to go to it.
+
+## Keyboard shortcuts
+
+Press **?** to see every shortcut. The keyboard button at the bottom of the sidebar, between **Settings** and **Log out**, opens the same list.
+
+- **g** then a letter goes to a page, for example **g** then **i** for Decisions.
+- On the Board, Decisions, Runs and Features, **j** and **k** move between cards or rows, and **Enter** opens one.
+- **Ctrl K** (**⌘ K** on a Mac) opens search.
+
+The first time you move around with the keyboard, a small tip says Boss Man has shortcuts. It shows once for your login.
+
+To switch off the single-letter keys, open **Settings > Account** and clear **Use single-letter keys**. Do this if you use voice control or press keys by accident. The setting follows your login to every browser. **Ctrl K** still works.
+
+On a touch screen the list says "These need a keyboard." On a phone the keyboard button and the tip are not shown.
