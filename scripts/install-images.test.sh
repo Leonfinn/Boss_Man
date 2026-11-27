@@ -68,7 +68,7 @@ echo "$cfg" | jq -r '.services.updater.environment.UPDATER_SELF_MOUNTS' | grep -
 if grep -v '^[[:space:]]*#' docker-compose.images.yml | grep -Eq '\b(openssl|sudo|chown|stat -c)\b'; then bad "compose file uses host tools"; else ok "no host openssl, chown, stat or sudo"; fi
 [ -f docs/35-install-from-images.md ] && ok "the install guide exists" || bad "docs/35-install-from-images.md is missing"
 # BOS-2803: the guide's removal steps, in order (the real half's cleanup runs the same commands for its own project).
-guide_cmds=('label=com.bossman.install=boss-man | xargs -r docker rm -f' 'label=boss-man.launcher=1 | xargs' 'label=boss-man.netguard=1 | xargs' 'down -v --remove-orphans' 'docker volume ls -q --filter label=com.bossman.install=boss-man' 'docker volume ls -q --filter name=boss-man-claude-pack')
+guide_cmds=('label=com.bossman.install=boss-man | xargs -r docker rm -f' 'label=boss-man.launcher=1 | xargs' 'label=boss-man.netguard=1 | xargs' 'down -v --remove-orphans' 'docker volume ls -q --filter label=com.bossman.install=boss-man' 'docker volume ls -q --filter name=boss-man-claude-pack' 'docker volume ls -q --filter name=^boss-man_ | xargs')
 prev=0; order_ok=1
 for c in "${guide_cmds[@]}"; do
   n="$(grep -nF -- "$c" docs/35-install-from-images.md | head -1 | cut -d: -f1)"
@@ -150,6 +150,8 @@ guide_removal() {
   dc down -v --remove-orphans > "$T/down.log" 2>&1
   docker volume ls -q --filter "label=com.bossman.install=$P" | xargs -r docker volume rm >/dev/null 2>&1
   docker volume ls -q --filter name=boss-man-claude-pack | xargs -r docker volume rm >/dev/null 2>&1
+  # Compose left config and data behind in CI (nothing mounted them); the guide's last removal takes what is named for the project.
+  docker volume ls -q --filter "name=^${P}_" | xargs -r docker volume rm >/dev/null 2>&1
 }
 cleanup() {
   rc=$?

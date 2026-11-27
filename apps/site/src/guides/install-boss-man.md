@@ -190,6 +190,12 @@ docker volume ls -q --filter label=com.bossman.install=boss-man | xargs -r docke
 docker volume ls -q --filter name=boss-man-claude-pack | xargs -r docker volume rm
 ```
 
+Compose can leave the `config` and `data` volumes behind, so remove whatever is still named for the project (`boss-man_`, or your own project name):
+
+```sh Run in the folder with images.env
+docker volume ls -q --filter name=^boss-man_ | xargs -r docker volume rm
+```
+
 5. Check nothing is left. Both commands only list, and both must print nothing:
 
 ```sh Run in the folder with images.env

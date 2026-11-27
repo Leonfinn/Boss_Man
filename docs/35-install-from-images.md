@@ -192,6 +192,12 @@ The order matters. The updater made the server and the launcher, and the launche
    docker volume ls -q --filter name=boss-man-claude-pack | xargs -r docker volume rm
    ```
 
+   Compose can leave the `config` and `data` volumes behind (the real install test found this), so remove whatever is still named for the project (`boss-man_`, or your own project name):
+
+   ```
+   docker volume ls -q --filter name=^boss-man_ | xargs -r docker volume rm
+   ```
+
 5. Check nothing is left. Both commands only list, and both must print nothing:
 
    ```
