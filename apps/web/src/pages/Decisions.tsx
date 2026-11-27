@@ -1607,13 +1607,15 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
                                   }
                                 }}>
                                   {!modelEdits[d.id] && d.options.map((o, i) => {
+                                    // (BOS-2824) A team plan's hire button follows the ticks, so it says how many will be hired.
+                                    const shown = d.context?.type === "team_plan" && o === "Hire the ticked ones" ? `Hire the ${(picks[d.id] ?? d.context.hires!.map((_, j) => j)).length} ticked` : o;
                                     const rec = o === eff.option;
                                     const effect = effects.get(o);
                                     const effectId = `effect-${d.id}-${i}`;
                                     const waitsForNote = noteEmpty && noteFor.includes(o);
                                     const button = (
-                                      <button type="button" key={o} className={`btn${rec ? " primary" : ""}`} aria-label={rec ? `${o}, recommended` : undefined} aria-describedby={effect ? effectId : waitsForNote ? `note-first-${d.id}` : undefined} disabled={busy === d.id || waitsForNote || (d.context?.type === "workflow_change" && !notes[d.id]?.trim())} title={waitsForNote ? `${NOTE_FIRST}: the box above` : d.context?.type === "workflow_change" && !notes[d.id]?.trim() ? "Type a reason above to Apply or Skip" : undefined} onClick={() => (d.context?.type === "model_change" && o === "Edit" ? setModelEdits((m) => ({ ...m, [d.id]: true })) : o === "Reassign" && d.context?.type === "stale_blocker" && d.context.blockerTicketId ? void openReassign(d) : pressOption(d, o))}>
-                                        {o}
+                                      <button type="button" key={o} className={`btn${rec ? " primary" : ""}`} aria-label={rec ? `${shown}, recommended` : undefined} aria-describedby={effect ? effectId : waitsForNote ? `note-first-${d.id}` : undefined} disabled={busy === d.id || waitsForNote || (d.context?.type === "workflow_change" && !notes[d.id]?.trim())} title={waitsForNote ? `${NOTE_FIRST}: the box above` : d.context?.type === "workflow_change" && !notes[d.id]?.trim() ? "Type a reason above to Apply or Skip" : undefined} onClick={() => (d.context?.type === "model_change" && o === "Edit" ? setModelEdits((m) => ({ ...m, [d.id]: true })) : o === "Reassign" && d.context?.type === "stale_blocker" && d.context.blockerTicketId ? void openReassign(d) : pressOption(d, o))}>
+                                        {shown}
                                         {rec && !stacked && recTag}
                                       </button>
                                     );

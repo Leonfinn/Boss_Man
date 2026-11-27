@@ -71,8 +71,12 @@ describe("decision queue", () => {
     });
     const { container } = render(<Decisions decisions={[plan]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
     expect(screen.getByText("Gets from the start: dogfood", { exact: false })).toBeTruthy();
+    // The hire button follows the ticks (BOS-2824): both to start, then one after unticking Rae.
+    expect(screen.getByRole("button", { name: "Hire the 2 ticked, recommended" })).toBeTruthy();
     fireEvent.click(screen.getByRole("checkbox", { name: /Rae/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Hire the ticked ones, recommended" }));
+    expect(screen.getByRole("button", { name: "Hire the 1 ticked, recommended" })).toBeTruthy();
+    // The answer sent is still the plan's own option, so the server ticks the rows it knows.
+    fireEvent.click(screen.getByRole("button", { name: "Hire the 1 ticked, recommended" }));
     // (BOS-2824) The model setup is folded into "Technical details" and the plain cost line is on the card,
     // so the card says each hire once.
     expect(container.textContent).toContain("On your Claude Max: no extra cost");

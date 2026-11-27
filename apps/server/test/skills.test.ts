@@ -407,6 +407,9 @@ describe("skills library (R71)", () => {
     const names = (await c.db.select().from(agents)).map((a) => a.name);
     expect(names).toContain("Quinn");
     expect(names).not.toContain("Rae");
+    // (BOS-2824) The CEO hears who was hired and, when one fails, who was not and why, on its next run's notes.
+    const told = (await c.db.select().from(notifications)).map((n) => `${n.title}\n${n.body ?? ""}`).join("\n");
+    expect(told).toContain("Hired from the team plan: Quinn");
   });
 
   it("tells the CEO, on its next run only, about projects, objectives and milestones the owner added (docs/13)", async () => {
