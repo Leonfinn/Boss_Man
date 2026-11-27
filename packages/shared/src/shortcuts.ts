@@ -5,11 +5,14 @@
 // A shortcut is saved as a page id plus an optional name of your own; never as a free web address, so it can
 // never point outside the app, and when an update renames or moves a page the shortcut follows it.
 
-import { z } from "zod";
-import { SavedShortcut, SHORTCUTS_MAX } from "./shortcut-shape.js";
+import type { SavedShortcut } from "./shortcut-shape.js";
+import { SHORTCUTS_MAX } from "./shortcut-max.js";
 
-// Most shortcuts at once; re-exported so callers of the list don't need the shape module too.
-export { SavedShortcut, SHORTCUTS_MAX };
+// Most shortcuts at once; re-exported so callers of the list don't need another module too. SavedShortcut is
+// exported by shortcut-shape.ts (index.ts re-exports both); it is only a type here, so this file stays free of zod
+// and the app's first load can read the page list without the schema code (BOS-2669 ticket 2).
+export { SHORTCUTS_MAX };
+export type { SavedShortcut };
 
 /** Most characters in a shortcut's own name. */
 export const SHORTCUT_NAME_MAX = 40;
@@ -116,18 +119,17 @@ export function isGoneShortcutPage(id: string): boolean {
  * What the menu draws for one saved shortcut: the page's details from the shared list (or, for a page this build
  * no longer has, the stored name and a "gone" mark so it is never dropped silently).
  */
-export const ShortcutEntry = z.object({
-  id: z.string(),
+export type ShortcutEntry = {
+  id: string;
   /** The name to show: the owner's own name, else the page's name, else (for a gone page) the stored name. */
-  name: z.string(),
-  path: z.string(),
-  icon: z.string(),
+  name: string;
+  path: string;
+  icon: string;
   /** The address it opens, worked out from the page; empty for a page that has gone. */
-  address: z.string(),
+  address: string;
   /** True when this build no longer has the page, but the owner's shortcut is still kept. */
-  gone: z.boolean().default(false),
-});
-export type ShortcutEntry = z.infer<typeof ShortcutEntry>;
+  gone: boolean;
+};
 
 /** A name over the limit, in characters as the owner sees them. */
 export function shortcutNameTooLong(name: string): boolean {

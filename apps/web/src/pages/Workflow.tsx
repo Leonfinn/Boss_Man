@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { AddToShortcuts } from "../pinned-pages";
 import { api, type Company } from "../api";
 import { usePoll } from "../hooks";
 import { away } from "../server-watch";
@@ -366,6 +367,7 @@ export function Workflow({ company }: { company: Company | undefined }) {
         <div>
           <p className="label">{company.name}</p>
           <h1>Workflow report</h1>
+          <AddToShortcuts page="workflow" />
           <p className="sub">How work moves through the team, and where it waits. Times only count tickets that moved after this page was released.</p>
         </div>
         <select aria-label="Period" value={days} onChange={(e) => setDays(Number(e.target.value))}>

@@ -17,6 +17,7 @@ import { inLineOf, MergesStuckBannerFor } from "./components/MergesStuckBanner";
 import { useStartBlock } from "./components/StartBlock";
 import { SearchPalette } from "./components/SearchPalette";
 import { Shortcuts } from "./components/Shortcuts";
+import { PinnedProvider, ShortcutGone } from "./pinned-pages";
 import { DEFAULT_PREFERENCES, PreferencesContext, type Preferences } from "./preferences";
 import type { OwnerPreferences } from "@boss-man/shared";
 
@@ -398,11 +399,13 @@ function Signed({ onLogout, username, initialPreferences }: { onLogout: () => vo
   }, [companies.data, page, go]);
   return (
     <PreferencesContext.Provider value={preferences}>
+    <PinnedProvider companyId={companyId}>
     <div className={`app${collapsed ? " side-collapsed" : ""}`}>
       <Sidebar
         collapsed={collapsed}
         onToggleCollapsed={() => rememberCollapsed(!collapsed, setCollapsed)}
         narrow={narrow}
+        route={route}
         active={page === "funding" || page === "rules" || page === "secrets" ? "settings" : page}
         activeAgent={route[2]}
         activeProject={route[1]}
@@ -474,6 +477,8 @@ function Signed({ onLogout, username, initialPreferences }: { onLogout: () => vo
           </Settings>
         ) : page === "engagements" ? (
           route[1] ? <Engagement id={route[1]} /> : <Engagements />
+        ) : page === "shortcut-gone" && route[1] ? (
+          <ShortcutGone id={route[1]} />
         ) : page === "setup" ? (
           <Setup companies={list} go={go} onChanged={companies.reload} />
         ) : page === "decisions" ? (
@@ -485,6 +490,7 @@ function Signed({ onLogout, username, initialPreferences }: { onLogout: () => vo
         </PageGuard>
       </main>
     </div>
+    </PinnedProvider>
     </PreferencesContext.Provider>
   );
 }

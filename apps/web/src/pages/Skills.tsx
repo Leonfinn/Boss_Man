@@ -1,6 +1,7 @@
 // Skills (R71): the company's library of Agent Skills, and who has each. A skill is added from
 // a GitHub link (pinned to a commit), written here, or uploaded as a folder, files or a zip.
 import { harnessLabel, harnessLoadsSkills, RUNNER_ADDONS } from "@boss-man/shared";
+import { AddToShortcuts } from "../pinned-pages";
 import { NoCompany } from "../components/NoCompany";
 import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
 import { unzipSync } from "fflate";
@@ -783,6 +784,7 @@ export function Skills({ company, skillId }: { company: Company | undefined; ski
         <div>
           <p className="label">{company.name}</p>
           <h1>Skills</h1>
+          <AddToShortcuts page="skills" />
           <p className="sub">Reusable instructions your agents load when they're relevant, in the Agent Skills format (a SKILL.md and any files it needs). Give each agent the skills its work calls for.</p>
         </div>
         <button type="button" className="btn primary" onClick={() => (setAdding(true), setPicked(null))}>

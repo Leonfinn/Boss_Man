@@ -43,6 +43,7 @@ export * from "./permission-judge.js";
 export * from "./self-set-variable.js";
 export * from "./devices.js";
 export * from "./shortcuts.js";
+export { SavedShortcut } from "./shortcut-shape.js";
 export * from "./second-opinion.js";
 export * from "./owner-controls.js";
 export * from "./owner-forms.js";

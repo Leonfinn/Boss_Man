@@ -1,6 +1,7 @@
 // Agents (R62): who works for the company, what each is doing and has used this month, and
 // hiring from role templates. Every change is kept with what it was before, and can be undone.
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { AddToShortcuts } from "../pinned-pages";
 import { NoCompany } from "../components/NoCompany";
 import { Star } from "lucide-react";
 import { DAY_NAMES, describeRoles, HARNESSES, isInfiniteModel, reviewRolesOf, SENIOR_DEV_TEMPLATE, THINKING_LEVELS, type ReviewPolicy as SharedPolicy } from "@boss-man/shared";
@@ -1106,6 +1107,7 @@ export function Agents({ company, agentId, onChanged }: { company: Company | und
         <div>
           <p className="label">{company.name}</p>
           <h1>Agents</h1>
+          <AddToShortcuts page="agents" />
           <p className="sub">Who works for {company.name}, what each is doing, and what they've used this month. Hire from a role template and tailor the instructions; every change is kept and can be undone.</p>
         </div>
         <button type="button" className="btn primary" aria-expanded={hiring} onClick={() => setHiring(!hiring)}>

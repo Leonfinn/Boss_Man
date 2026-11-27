@@ -46,6 +46,8 @@ describe("the setup wizard (R56)", () => {
     const c = (ctx = await setup());
     const { company, ceo } = (await c.req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string }; ceo: { id: string } };
     const todo = async () => ((await c.req("GET", `/api/companies/${company.id}/setup-checklist`)).json() as Array<{ id: string; done: boolean }>).filter((i) => !i.done).map((i) => i.id);
+    // Without a choice, or a repo, a company gets the no-code list (see the test below); "Code" keeps the code items.
+    await c.req("PUT", "/api/setup-progress", { work: "code" });
     expect(await todo()).toEqual(["company", "project", "runner", "credential", "git", "checks", "funding", "ticket", "merged"]);
 
     await c.req("PATCH", `/api/companies/${company.id}`, { mission: "Ship the shop." });

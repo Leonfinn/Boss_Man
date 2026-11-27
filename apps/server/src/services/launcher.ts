@@ -37,6 +37,8 @@ export type LauncherChecks = {
   agents?: number | null;
   /** BOS-1498: the launcher's one line on what a runner made now is given and why. Absent from an older launcher. */
   why?: string;
+  /** BOS-2802: the most memory a runner can be given here; null when nothing limits it. Absent from an older launcher. */
+  ceilingBytes?: number | null;
 };
 
 const SLUG_KEY = "runner-slug:";
@@ -396,6 +398,7 @@ export function launcherService(
           runners: r.runners,
           ...(typeof r.agents === "number" || r.agents === null ? { agents: r.agents } : {}),
           ...(typeof r.why === "string" ? { why: r.why } : {}),
+          ...(typeof r.ceilingBytes === "number" || r.ceilingBytes === null ? { ceilingBytes: r.ceilingBytes } : {}),
         };
       } catch {
         return null;
