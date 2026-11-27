@@ -256,6 +256,24 @@ describe("Boss Man's own wrap-up for a runner update queued behind a trial (BOS-
     expect((await c.maint()).last.body).toContain("Boss Man won't wrap up again for this runner update");
   });
 
+  it("after the owner cancels their own wrap-up for one runner press, a later, different press still gets Boss Man's wrap-up", async () => {
+    const c = (ctx = await setup());
+    const trialEnd = new Date(c.now().getTime() + 14 * MIN);
+    await c.onTrial(trialEnd);
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    await c.queueRunner(trialEnd);
+    await c.pass();
+    await c.req("POST", "/api/maintenance/cancel", {});
+    await c.pass();
+    expect(await getHold(c.db)).toBeNull();
+    // The owner cancels that press and presses Build and update runners again: a new press, with its own time.
+    await c.db.delete(settings).where(eq(settings.key, "self_deploy_runner_due"));
+    c.advance(MIN);
+    await c.queueRunner(trialEnd);
+    await c.pass();
+    expect(await getHold(c.db)).toMatchObject({ kind: "wrapup", auto: expect.any(Object) });
+  });
+
   it("the owner cancels their own wrap-up with nothing queued: a runner update queued later still gets Boss Man's wrap-up", async () => {
     const c = (ctx = await setup());
     const trialEnd = new Date(c.now().getTime() + 14 * MIN);
