@@ -104,8 +104,10 @@ describe.skipIf(!browser)("the one-time tip stays clear of the menu's pinned row
         // Beside the menu's column (240 px wide, or the 64 px strip when folded), not over it.
         const menuWidth = d.collapsed ? 64 : 240;
         expect(got.tip!.left).toBeGreaterThanOrEqual(menuWidth);
-        // And above the pinned row's top, so the whole row stays readable.
-        expect(got.tip!.bottom).toBeLessThanOrEqual(got.key!.top);
+        if (!d.collapsed) {
+          // The expanded menu has the pinned row along its bottom: the tip sits above it, so the row stays readable.
+          expect(got.tip!.bottom).toBeLessThanOrEqual(got.key!.top);
+        }
         const path = await shotPath(d.name);
         if (path) await p.screenshot({ path });
       } finally {
