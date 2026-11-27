@@ -86,6 +86,26 @@ describe("the setup wizard (R56)", () => {
     expect((await checklist()).find((i) => i.id === "merged")!.done).toBe(true);
   });
 
+  it("gives a company with no repo a list that can finish: no git token or checks, first task finished", async () => {
+    const c = (ctx = await setup());
+    const { company } = (await c.req("POST", "/api/companies", { name: "Docs Co" })).json() as { company: { id: string } };
+    const list = async () => (await c.req("GET", `/api/companies/${company.id}/setup-checklist`)).json() as Array<{ id: string; label: string; done: boolean }>;
+    expect((await list()).map((i) => i.id)).toEqual(["company", "project", "runner", "credential", "funding", "ticket", "merged"]);
+    expect((await list()).find((i) => i.id === "project")).toMatchObject({ label: "Choose what you work on", done: false });
+    const project = (await c.req("POST", `/api/companies/${company.id}/projects`, { name: "Research" })).json() as { id: string };
+    expect((await list()).find((i) => i.id === "project")!.done).toBe(true);
+    const t = (await c.req("POST", `/api/projects/${project.id}/tickets`, { title: "Summarise the market" })).json() as { id: string };
+    expect((await list()).find((i) => i.id === "merged")).toMatchObject({ label: "First task finished", done: false });
+    // A finished task counts, merged or not; a cancelled one doesn't.
+    await c.db.update(tickets).set({ systemState: "done", outcome: "cancelled" }).where(eq(tickets.id, t.id));
+    expect((await list()).find((i) => i.id === "merged")!.done).toBe(false);
+    await c.db.update(tickets).set({ systemState: "done", outcome: "completed" }).where(eq(tickets.id, t.id));
+    expect((await list()).find((i) => i.id === "merged")!.done).toBe(true);
+    // A repo brings the code items back.
+    await c.req("PATCH", `/api/projects/${project.id}`, { repoUrl: `${GITEA}/leon/site.git` });
+    expect((await list()).map((i) => i.id)).toContain("git");
+  });
+
   it("names what keeps agents from starting, and clears it as each must-have is set (BOS-2814)", async () => {
     const c = (ctx = await setup());
     const { company, ceo } = (await c.req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string }; ceo: { id: string } };
