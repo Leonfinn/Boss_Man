@@ -37,7 +37,7 @@ An agent **cannot reach**:
 
 - other tasks' folders or other agents' home folders
 - the runner's own key and your company's git login
-- other runs' temporary files, and the shared temporary folder
+- other runs' temporary folders, and the runner's shared temporary folder (`/tmp`)
 
 When the fence refuses something, the agent sees "Permission denied", and Boss Man writes it to the permission log. The fence never asks you anything and does not change which permission cards you get. Permission cards are a separate check: see [Permissions and the CEO-first rule](/guides/permissions).
 
