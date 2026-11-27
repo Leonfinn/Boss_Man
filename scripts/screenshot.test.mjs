@@ -24,6 +24,11 @@ function fakePage({ missing = [], unclickable = [] } = {}) {
       calls.push(["click", sel]);
       if (unclickable.includes(sel)) throw new Error("element is not enabled\nCall log:\n  - waiting for locator");
     },
+    keyboard: {
+      async press(key) {
+        calls.push(["press", key]);
+      },
+    },
     async screenshot(opts) {
       calls.push(["screenshot", opts.path]);
     },
@@ -54,6 +59,22 @@ test("waits for --wait, then waits for and clicks each --click in order, then wa
     ["click", "#run"],
     ["wait", ".result", "visible", 1234],
   ]);
+});
+
+test("--key is repeatable and pressed in order after the clicks and before --wait-after (BOS-2690)", async () => {
+  assert.deepEqual(parseArgs(base).keys, []);
+  const page = fakePage();
+  const o = parseArgs([...base, "--click", "#tab", "--key", "Tab", "--key", "Control+k", "--wait-after", ".tip"]);
+  await afterLoad(page, o, "http://127.0.0.1:1/#x");
+  assert.deepEqual(page.calls, [
+    ["wait", "#page", "visible", 20000],
+    ["wait", "#tab", "visible", 20000],
+    ["click", "#tab"],
+    ["press", "Tab"],
+    ["press", "Control+k"],
+    ["wait", ".tip", "visible", 20000],
+  ]);
+  assert.throws(() => parseArgs([...base, "--key"]), /--key needs a value/);
 });
 
 test("a --click selector that never appears fails with one line naming it, keeps OUT.failed.png and clicks nothing after", async () => {

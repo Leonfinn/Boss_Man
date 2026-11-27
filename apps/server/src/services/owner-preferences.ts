@@ -12,17 +12,18 @@ export function ownerPreferencesService(db: Db) {
     const [row] = await db.select().from(ownerPreferences).where(eq(ownerPreferences.ownerId, ownerId));
     if (!row) return OwnerPreferences.parse({});
     // A row written by an older version may be missing a newer field; its default fills the gap.
-    return OwnerPreferences.parse({ singleLetterKeys: row.singleLetterKeys, pinnedPages: row.pinnedPages });
+    return OwnerPreferences.parse({ singleLetterKeys: row.singleLetterKeys, pinnedPages: row.pinnedPages, keyboardTipSeen: row.keyboardTipSeen });
   }
 
   /** Change only what the page sent, and return all of it, so the page can show what was saved. */
   async function update(ownerId: string, patch: unknown): Promise<OwnerPreferences> {
     const body = OwnerPreferencesPatch.parse(patch);
     const merged = OwnerPreferences.parse({ ...(await get(ownerId)), ...body });
+    const values = { ownerId, singleLetterKeys: merged.singleLetterKeys, pinnedPages: merged.pinnedPages, keyboardTipSeen: merged.keyboardTipSeen };
     await db
       .insert(ownerPreferences)
-      .values({ ownerId, singleLetterKeys: merged.singleLetterKeys, pinnedPages: merged.pinnedPages })
-      .onConflictDoUpdate({ target: ownerPreferences.ownerId, set: { singleLetterKeys: merged.singleLetterKeys, pinnedPages: merged.pinnedPages, updatedAt: new Date() } });
+      .values(values)
+      .onConflictDoUpdate({ target: ownerPreferences.ownerId, set: { ...values, updatedAt: new Date() } });
     return merged;
   }
 

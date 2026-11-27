@@ -43,6 +43,8 @@ export const OWNER_CONTROLS = {
     "Search", "Close", "Clear",
     // The "?" list's single-letter-key links (BOS-2689, BOS-2671 part 3d), on any screen it opens from.
     "Turn them on", "Turn off single-letter keys",
+    // The one-time keyboard tip (BOS-2690, part 3e), on any screen it shows on.
+    "Show shortcuts", "Got it",
   ],
   "Log in": ["Create owner account", "Log in"],
   Setup: [
