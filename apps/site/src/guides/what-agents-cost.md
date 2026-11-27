@@ -3,19 +3,19 @@ title: "What agents cost: funding sources and limits"
 description: How Boss Man pays for your agents' work, the limits you can set, what happens when a limit is reached, and where to see what your agents have spent.
 group: Set it up your way
 order: 5
-lead: Every agent's work is paid from the account it runs on: a Claude or ChatGPT plan, or an API key. Boss Man records what each one spends, and you can set limits so a bill never surprises you.
+lead: Every agent's work is paid from a Claude plan or an API key. Boss Man records what each one spends, and you can set limits so a bill never surprises you.
 ---
 
 ## Funding sources
 
-A funding source is the account agents' work is charged to, with its limits: a Claude plan or Anthropic API key, a ChatGPT plan or OpenAI API key, or another provider such as Ollama Cloud, Synthetic or OpenRouter. Each agent is paid from one funding source. You choose it under **Paid from** when you hire the agent, and you can change it on the **Agents** page.
+A funding source is a Claude plan or an API key that agents' work is charged to, with its limits. Each agent is paid from one funding source. You choose it under **Paid from** when you hire the agent, and you can change it on the **Agents** page.
 
 There are two kinds you will meet first:
 
-- **A plan** (Claude Pro or Max, or a ChatGPT plan). You pay a fixed monthly price to the provider. Agents' work uses up the plan's allowance, not money, so Boss Man shows it in tokens, not dollars.
-- **An API key** (pay as you go). Each piece of work costs money from your provider's credit. Boss Man shows an estimate in dollars at list prices. It is not a bill: the provider's website has the real figure.
+- **A plan** (Claude Pro, Max or Ultra, connected with a setup token). You pay a fixed monthly price to Anthropic. Agents' work uses up the plan's allowance, not money, so Boss Man shows it in tokens, not dollars.
+- **An API key** (pay as you go). Each piece of work costs money from your Anthropic credit. Boss Man shows an estimate in dollars at list prices. It is not a bill: Anthropic's Console has the real figure.
 
-When you connect an account in the setup wizard's **How do you want to connect your first agent?** step, Boss Man makes its funding source and points the CEO at it, whichever option you pick. To add or change one, open **Settings → Funding**. To choose between a plan and a key, see [Connect a Claude account](/guides/connect-a-claude-account).
+If you connected Claude in the setup wizard with a setup token, Boss Man has already made the CEO's funding source. To add or change one, open **Settings → Funding**. To choose between a plan and a key, see [Connect a Claude account](/guides/connect-a-claude-account).
 
 ## The limits you can set
 

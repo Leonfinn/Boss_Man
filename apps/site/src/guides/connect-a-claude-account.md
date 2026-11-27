@@ -41,12 +41,12 @@ Open **API keys** ([platform.claude.com/settings/keys](https://platform.claude.c
 
 ### 5. Paste it into Boss Man
 
-In the setup wizard's **How do you want to connect your first agent?** step, choose **Anthropic API key**. Its steps open; paste the key into **Anthropic key** and choose **Save and connect**. Leave the other boxes as they are.
+In the setup wizard's **Claude** step, open **Use an API key instead**. Under **Add**, choose **Anthropic API key**. Paste the key into **Value** and choose **Save**. Leave the other boxes as they are.
 
-Saving it also sets up what pays for the CEO, so the wizard's **What pays for the CEO** step is already done. The funding source is how Boss Man tracks what your agents spend: see [What agents cost](/guides/what-agents-cost).
+Then, in the wizard's **What pays for the CEO** step, add a funding source. Name it, for example "Anthropic API". For **Kind**, choose **API, pay as you go**, and for **Provider**, choose **Anthropic**. Choose **Add funding source**, then pick it under "The CEO runs on". The funding source is how Boss Man tracks what your agents spend: see [What agents cost](/guides/what-agents-cost).
 
 :::worked
-The connect step shows **Connected**, and names the Anthropic account your agents run on.
+Under **Settings → Secrets** the key is listed for your company. Choose **Check** beside it to try it.
 :::
 
 ## Connect a Claude plan with a setup token
@@ -88,10 +88,10 @@ This is how Anthropic's [authentication page](https://code.claude.com/docs/en/au
 
 ### 4. Paste it into Boss Man
 
-In the setup wizard's **How do you want to connect your first agent?** step, choose **Claude Pro or Max plan**. Its steps open; paste the token into **The setup token** and choose **Save and connect**. This also sets up what pays for the CEO, so the wizard's **What pays for the CEO** step is already done.
+In the setup wizard's **Claude** step, paste the token into **Claude setup token** and choose **Save the token**. This also sets up what pays for the CEO, so the wizard's **What pays for the CEO** step is already done.
 
 :::worked
-The connect step shows **Connected**, and names the Claude plan the token came from.
+The Claude step shows **Connected**, and names the saved token.
 :::
 
 A year later, the token stops working. Run step 3 again and save the new token under **Settings → Secrets**.
@@ -102,8 +102,8 @@ Paste it only into Boss Man's forms. Never put one in a chat, a task or the wiki
 
 ## If something goes wrong
 
-- **"That isn't a setup token: one starts with "sk-ant-oat01-"."** What you pasted is not a setup token. Copy the whole token the command printed, from `sk-ant-oat01-` to the end, and paste it again. Do not paste an API key here: choose **Anthropic API key** in the list instead.
-- **"That isn't an Anthropic API key: one starts with "sk-ant-api"."** What you pasted is not an API key. Go back to the Console's **API keys** page. If you no longer have the key, create a new one: the Console never shows a key again.
+- **"Expected the value to start with "sk-ant-oat01-"."** What you pasted is not a setup token. Copy the whole token the command printed, from `sk-ant-oat01-` to the end, and paste it again. Do not paste an API key here: it goes under **Use an API key instead**.
+- **"Expected the value to start with "sk-ant-api"."** What you pasted is not an API key. Go back to the Console's **API keys** page. If you no longer have the key, create a new one: the Console never shows a key again.
 - **`claude: command not found`, or "not recognized" on Windows.** The terminal was opened before Claude Code was installed. Close it, open a new one, and run `claude setup-token` again. If that still fails, run the install command from step 2 again.
 - **The key is saved but agents' work is refused.** Your Console credit has run out, or you reached your monthly spend limit. Check **Billing** and **Spend limits** in the Console.
 - **The token worked, then stopped.** It is more than a year old, or you changed your plan. Make a new one (step 3) and save it under **Settings → Secrets**.
