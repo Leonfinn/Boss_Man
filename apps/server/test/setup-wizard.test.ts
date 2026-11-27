@@ -115,7 +115,7 @@ describe("the setup wizard (R56)", () => {
     const first = await read();
     expect(first.items.map((i) => i.id)).toEqual(["claude", "funding", "runner"]);
     expect(first.items.find((i) => i.id === "funding")!.reason).toBe("the CEO has no Claude account to run on yet");
-    expect(first.items.find((i) => i.id === "runner")!.reason).toBe("the agents' workspace isn't running");
+    expect(first.items.find((i) => i.id === "runner")!.reason).toBe("the runner isn't connected");
     expect(first.noFunding).toContain(ceo.id);
     const { secret } = (await c.req("POST", "/api/secrets", { name: "Claude", kind: "claude_oauth_token", value: "sk-ant-oat01-example-token-value" })).json();
     await c.req("POST", `/api/secrets/${secret.id}/grants`, { companyId: company.id, envName: "CLAUDE_CODE_OAUTH_TOKEN" });

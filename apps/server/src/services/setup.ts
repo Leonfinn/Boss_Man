@@ -74,7 +74,7 @@ export function setupService(db: Db, deps: { isConnected: (runnerId: string) => 
         const who = ceo.name === "CEO" ? "the CEO" : ceo.name;
         items.push({ id: "funding", label: "what pays for the CEO", reason: `${who} has no Claude account to run on yet` });
       }
-      if (!runner || !deps.isConnected(runner.id)) items.push({ id: "runner", label: "a running workspace", reason: "the agents' workspace isn't running" });
+      if (!runner || !deps.isConnected(runner.id)) items.push({ id: "runner", label: "a connected runner", reason: "the runner isn't connected" });
       return { items, noFunding: team.filter((a) => !a.fundingSourceId).map((a) => a.id) };
     },
 

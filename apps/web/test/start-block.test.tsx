@@ -12,7 +12,7 @@ import { Decisions } from "../src/pages/Decisions";
 
 afterEach(cleanup);
 
-const item = (id: "claude" | "funding" | "runner") => ({ id, label: { claude: "a Claude account", funding: "what pays for the CEO", runner: "a running workspace" }[id] });
+const item = (id: "claude" | "funding" | "runner") => ({ id, label: { claude: "a Claude account", funding: "what pays for the CEO", runner: "a connected runner" }[id] });
 const block = (...ids: Array<"claude" | "funding" | "runner">): StartBlock => ({ items: ids.map(item), noFunding: [] });
 
 describe("the red bar", () => {
@@ -33,14 +33,14 @@ describe("the red bar", () => {
   });
 
   it("joins two items with 'and' only", () => {
-    expect(missingText([item("claude"), item("runner")])).toBe("a Claude account and a running workspace");
+    expect(missingText([item("claude"), item("runner")])).toBe("a Claude account and a connected runner");
   });
 });
 
 describe("a task's 'Not started' reason", () => {
-  it("is the missing account for the CEO, then the workspace, each with its own fix link", () => {
+  it("is the missing account for the CEO, then the runner, each with its own fix link", () => {
     expect(notStartedReason(block("claude"), "ceo1", "the CEO", "c1")).toEqual({ text: "Not started: the CEO has no Claude account to run on yet.", link: "#/setup", linkText: "Connect one" });
-    expect(notStartedReason(block("runner"), "ceo1", "the CEO", "c1")).toEqual({ text: "Not started: the agents' workspace isn't running.", link: "#/settings/c1/runner", linkText: "Start it" });
+    expect(notStartedReason(block("runner"), "ceo1", "the CEO", "c1")).toEqual({ text: "Not started: the runner isn't connected.", link: "#/settings/c1/runner", linkText: "Start it" });
     // An agent that nothing pays for can't run even when the company has a Claude account.
     expect(notStartedReason({ items: [], noFunding: ["w1"] }, "w1", "Fern", "c1")?.linkText).toBe("Connect one");
   });

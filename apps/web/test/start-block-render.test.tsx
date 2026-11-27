@@ -42,7 +42,7 @@ afterAll(async () => {
 
 const scratch = process.env.BOSSMAN_SCRATCH;
 const html = `<!doctype html><html><head><meta charset="utf-8"><style>${css}</style></head><body><main class="main">${renderToStaticMarkup(
-  <StartBlockBar block={{ items: [{ id: "claude", label: "a Claude account" }, { id: "funding", label: "what pays for the CEO" }, { id: "runner", label: "a running workspace" }], noFunding: [] }} />,
+  <StartBlockBar block={{ items: [{ id: "claude", label: "a Claude account" }, { id: "funding", label: "what pays for the CEO" }, { id: "runner", label: "a connected runner" }], noFunding: [] }} />,
 )}</main></body></html>`;
 
 const read = () => {

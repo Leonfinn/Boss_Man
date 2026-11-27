@@ -1,5 +1,5 @@
 // BOS-2814: never leave a first task silently stuck. What keeps a company's agents from starting (a Claude account,
-// what pays for the CEO, a running workspace) is read once from the server and shown as a red bar on the Dashboard and
+// what pays for the CEO, a connected runner) is read once from the server and shown as a red bar on the Dashboard and
 // Decisions, and as a "Not started" line on a task whose assignee can't run. Every message has a button to the fix.
 import { api } from "../api";
 import { usePoll } from "../hooks";
@@ -13,7 +13,7 @@ export function useStartBlock(companyId: string | undefined): StartBlock | null 
   return read.data ?? null;
 }
 
-/** "a Claude account and a running workspace", at most two named, then "and 1 more". */
+/** "a Claude account and a connected runner", at most two named, then "and 1 more". */
 export function missingText(items: StartBlockItem[]): string {
   const named = items.slice(0, 2).map((i) => i.label);
   const more = items.length - named.length;
@@ -39,6 +39,6 @@ export function notStartedReason(block: StartBlock | null, agentId: string | nul
   const who = agentName ?? "The assignee";
   const noAccount = block.items.some((i) => i.id === "claude") || block.noFunding.includes(agentId);
   if (noAccount) return { text: `Not started: ${who} has no Claude account to run on yet.`, link: "#/setup", linkText: "Connect one" };
-  if (block.items.some((i) => i.id === "runner")) return { text: `Not started: the agents' workspace isn't running.`, link: `#/settings/${companyId}/runner`, linkText: "Start it" };
+  if (block.items.some((i) => i.id === "runner")) return { text: `Not started: the runner isn't connected.`, link: `#/settings/${companyId}/runner`, linkText: "Start it" };
   return null;
 }
