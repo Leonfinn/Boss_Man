@@ -1483,7 +1483,8 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
       const signoffLog = await signoffHistory(db, ticketId);
       const mergeState = t.systemState === "review" ? await review.mergeState(ticketId) : null;
       const hv = t.systemState === "review" ? await holdView(db, ticketId) : null;
-      const holdLine = hv ? `Merge held by ${hv.reviewer ?? "a reviewer"} (${hv.label}): ${hv.reason}.${hv.ready ? " What it waited for is done; the reviewer re-checks and releases it." : ""}` : null;
+      // BOS-2870: Boss Man's own hold names itself, and a ready reviewer hold says since when the holder was asked.
+      const holdLine = hv ? `Merge held by ${hv.system ? "Boss Man" : hv.reviewer ?? "a reviewer"} (${hv.label}): ${hv.reason}.${hv.ready ? (hv.system ? " What it waited for is done; Boss Man releases it by itself." : ` What it waited for is done; ${hv.reviewer ?? "the reviewer"} re-checks and releases it${hv.readySince ? ` (asked at ${hv.readySince.slice(11, 16)} UTC; asked again after 1 h, and a card goes up after 2 h)` : ""}.`) : ""}` : null;
       const openReviews = t.systemState === "review" ? await openReviewLines(db, t) : [];
       const ciLine = await review.branchChecksLine(ticketId, scope.companyId);
       const liveLine = await goLiveLine(db, t);
