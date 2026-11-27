@@ -8,6 +8,7 @@ import { decisions as decisionsTable } from "./db/schema.js";
 import { markSearched, remember } from "./services/pa.js";
 import { fail, text, type Scope } from "./mcp-common.js";
 import type { Services } from "./mcp.js";
+import { guardSecrets } from "./mcp-secret-guard.js";
 
 /** The shared registrars still living in mcp.ts, handed in so this file never imports mcp.ts at run time. */
 export type PaTools = {
@@ -42,7 +43,8 @@ function readOnly(server: McpServer, runId: string): Pick<McpServer, "registerTo
 
 /** The PA's server: the read tools plus pa_reply and pa_escalate, and nothing that writes (R87). */
 export function buildPaServer(db: Db, { notes, wiki, skills, skillProposals, review, agents: team, pa, images }: Services, scope: Scope, { registerSharedTools, registerViewImage, registerBoard, registerListMyWork }: PaTools) {
-  const server = new McpServer({ name: "bossman", version: "0.1.0" });
+  // pa_reply goes to the owner and is stored, so it gets the same secret check as every other writing tool (BOS-2760).
+  const server = guardSecrets(new McpServer({ name: "bossman", version: "0.1.0" }));
   const reads = readOnly(server, scope.runId);
   registerSharedTools(reads as McpServer, db, { notes, wiki, skills, skillProposals, review, agents: team }, scope);
   registerViewImage(server, images, scope);
