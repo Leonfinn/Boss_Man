@@ -1,6 +1,7 @@
 // The setup wizard (R56): where the owner is in it, and a checklist worked out from what's
 // actually set up, so it's right however each thing got done (wizard, Settings, or the CEO).
 import { and, asc, eq, inArray, isNotNull, sql } from "drizzle-orm";
+import { CONNECT_ENV_NAMES } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, owners, projects, runners, secretGrants, settings, tickets } from "../db/schema.js";
 
@@ -18,8 +19,12 @@ export function formatSetupDuration(minutes: number): string {
   const h = Math.floor((m % (24 * 60)) / 60);
   return h ? `${d} d ${h} h` : `${d} d`;
 }
-/** The variables any agent can run on: a Claude setup-token, an API key, or a Bedrock, Foundry or gateway credential. */
-const RUN_CREDENTIALS = ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "AWS_BEARER_TOKEN_BEDROCK", "ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
+/**
+ * The variables any agent can run on: a Claude setup-token, an API key, or a Bedrock, Foundry or gateway
+ * credential. The keys the connect step saves (CONNECT_ENV_NAMES, BOS-2815) are added too, so OpenRouter,
+ * Ollama Cloud and Synthetic keys count as well.
+ */
+const RUN_CREDENTIALS = ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "AWS_BEARER_TOKEN_BEDROCK", "ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_AUTH_TOKEN", ...CONNECT_ENV_NAMES];
 
 export function setupService(db: Db, deps: { isConnected: (runnerId: string) => boolean }) {
   return {

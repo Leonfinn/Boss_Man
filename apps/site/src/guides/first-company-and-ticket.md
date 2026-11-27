@@ -28,11 +28,15 @@ Under **When work is approved**, choose **Merge into the default branch** or **O
 
 Wait for the runner to say **Connected**. This can take up to a minute. If it says **Not connected**, choose **Start the runner**.
 
-## 4. Claude
+## 4. How do you want to connect your first agent?
 
-On your own computer, run `claude setup-token`. It prints a long-lived token for your Claude plan. In the wizard, paste the token into **Claude setup token** and choose **Save the token**. This also sets up what pays for the CEO.
+The step shows every account an agent can run on as a plain list of equal rows: your Claude Pro or Max plan, an Anthropic API key, the ChatGPT plan, an OpenAI API key, Ollama Cloud, Synthetic, OpenRouter, and one row for Amazon Bedrock, Microsoft Foundry and LLM gateways. Nothing is marked as the best or picked for you. Pick the one you already have, and the row opens its own short steps.
 
-Using another account? Open **Use an API key instead**, choose its kind under **Add**, such as **OpenRouter API key**, **Ollama Cloud API key** or **Synthetic API key**, paste the key and save. In step 7, pick the matching provider. If it is not a Claude account, change the CEO's agent to OpenCode or Codex on the **Agents** page.
+- **Claude Pro or Max plan.** If Claude Code isn't on your computer yet, install it first: the step links the page for a Mac and a Windows PC. Then run `claude setup-token`, sign in, and paste the token it prints; it is shown once and lasts a year. Its token starts `sk-ant-oat01-`.
+- **Anthropic API key.** Everything is in your browser on [platform.claude.com](https://platform.claude.com/): buy credit, set a monthly spend limit, create the key, and paste it; it starts `sk-ant-api`.
+- **The other providers.** Each row says whether it costs a fixed monthly price or is pay as you go, and whether you need a browser or one command on a computer. If you'd rather not use a terminal, pick a provider's API-key row.
+
+Saving any of them sets what pays for the CEO, so the wizard's last funding step is already done. If it isn't a Claude account, change the CEO's agent to OpenCode or Codex on the **Agents** page. More, with every step spelled out: [Connect a Claude account: plan or API key?](/guides/connect-a-claude-account).
 
 Paste tokens only into these forms. Never paste one into a chat, a ticket or the wiki, because agents can read those.
 

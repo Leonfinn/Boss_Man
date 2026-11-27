@@ -54,31 +54,38 @@ describe("setup wizard checks", () => {
   });
 });
 
-describe("setup wizard: Claude and runner steps (BOS-1495)", () => {
+describe("setup wizard: connect and runner steps (BOS-1495, BOS-2815)", () => {
   const withCeo: Company = { ...company, agents: [{ id: "a1", name: "CEO", role: "ceo", fundingSourceId: null } as Company["agents"][number]] };
 
-  it("saves the setup token, makes the funding source and points the CEO at it", async () => {
-    const calls: Array<{ url: string; method: string; body: unknown }> = [];
+  /** The step 3 page answering every write with an id, as the server would. */
+  const stubConnect = (calls: Array<{ url: string; method: string; body: unknown }>, extra: (url: string, method: string) => unknown = () => undefined) =>
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string, init?: RequestInit) => {
         const method = init?.method ?? "GET";
         calls.push({ url, method, body: init?.body ? JSON.parse(String(init.body)) : null });
         const body =
-          url === "/api/setup-progress" ? { dismissed: false, step: 3, companyId: "c1" }
+          extra(url, method) ??
+          (url === "/api/setup-progress" ? { dismissed: false, step: 3, companyId: "c1" }
           : url === "/api/secrets" && method === "POST" ? { secret: { id: "s1" }, warnings: [] }
           : url === "/api/funding-sources" && method === "POST" ? { id: "f1" }
-          : url.endsWith("/setup-checklist") || url.endsWith("/grants") || url === "/api/secrets" ? []
-          : {};
+          : url.endsWith("/setup-checklist") || url.endsWith("/grants") || url === "/api/secrets" || url === "/api/funding-sources" ? []
+          : {});
         return new Response(JSON.stringify(body), { status: 200 });
       }),
     );
+
+  it("saves the setup token, makes the funding source and points the CEO at it", async () => {
+    const calls: Array<{ url: string; method: string; body: unknown }> = [];
+    stubConnect(calls);
     render(<Setup companies={[withCeo]} go={() => {}} onChanged={() => {}} />);
-    const box = await screen.findByLabelText("Claude setup token");
-    expect(screen.queryByLabelText("Add")).toBeTruthy(); // the general form is there, but inside the closed details
-    expect(screen.getByText("Use an API key instead").closest("details")!.open).toBe(false);
+    // One row per way to pay; the setup-token row opens its own steps, and nothing else is open.
+    await screen.findByRole("list", { name: "Ways to connect an agent" });
+    expect(screen.queryByLabelText("The setup token")).toBeNull();
+    fireEvent.click(screen.getByText("Claude Pro or Max plan"));
+    const box = await screen.findByLabelText("The setup token");
     fireEvent.change(box, { target: { value: "sk-ant-oat01-made-up" } });
-    fireEvent.click(screen.getByText("Save the token"));
+    fireEvent.click(screen.getByText("Save and connect"));
     await screen.findByText(/stored encrypted/);
     const mine = calls.filter((c) => c.method !== "GET" && c.url !== "/api/setup-progress");
     expect(mine.map((c) => `${c.method} ${c.url}`)).toEqual(["POST /api/secrets", "POST /api/secrets/s1/grants", "POST /api/funding-sources", "PATCH /api/agents/a1"]);
@@ -107,7 +114,7 @@ describe("setup wizard: Claude and runner steps (BOS-1495)", () => {
     const funded: Company = { ...company, agents: [{ id: "a1", name: "CEO", role: "ceo", fundingSourceId: "f1" } as Company["agents"][number]] };
     render(<Setup companies={[funded]} go={() => {}} onChanged={() => {}} />);
     expect(await screen.findByText("Connected")).toBeTruthy();
-    expect(screen.queryByLabelText("Claude setup token")).toBeNull();
+    expect(screen.queryByLabelText("The setup token")).toBeNull();
     expect(screen.getByText("What pays for the CEO").closest("li")!.className).toBe("done");
     expect(calls.filter((c) => !c.startsWith("GET") && !c.startsWith("PUT /api/setup-progress"))).toEqual([]);
   });
@@ -130,10 +137,11 @@ describe("setup wizard: Claude and runner steps (BOS-1495)", () => {
       }),
     );
     render(<Setup companies={[{ ...company, agents: [{ id: "a1", name: "CEO", role: "ceo", fundingSourceId: null } as Company["agents"][number]] }]} go={() => {}} onChanged={() => {}} />);
-    fireEvent.change(await screen.findByLabelText("Claude setup token"), { target: { value: "sk-ant-oat01-made-up" } });
-    fireEvent.click(screen.getByText("Save the token"));
+    fireEvent.click(await screen.findByText("Claude Pro or Max plan"));
+    fireEvent.change(await screen.findByLabelText("The setup token"), { target: { value: "sk-ant-oat01-made-up" } });
+    fireEvent.click(screen.getByText("Save and connect"));
     await screen.findByText(/stored encrypted/);
-    fireEvent.click(await screen.findByText("Next")); // Claude -> git token
+    fireEvent.click(await screen.findByText("Next")); // connect -> git token
     expect((await screen.findByRole("heading", { level: 1 })).textContent).toBe("A git token");
     fireEvent.click(await screen.findByText("Next")); // git token -> checks
     await screen.findByText("Before merging, Boss Man will");
@@ -264,5 +272,158 @@ describe("the Finish setting up card and the first merge", () => {
     expect(await screen.findByText(/First ticket merged: BOS-12, 2 h 40 min after setup started/)).toBeTruthy();
     expect(screen.getByText("Setup finished")).toBeTruthy();
     expect(screen.getByText("Dismiss")).toBeTruthy();
+  });
+});
+
+describe("the connect step: one equal list of every way to pay (BOS-2815)", () => {
+  const withCeo: Company = { ...company, agents: [{ id: "a1", name: "CEO", role: "ceo", fundingSourceId: null } as Company["agents"][number]] };
+  // The owner's list (the card's answer): plans and keys by provider, nothing favoured; the rows come from funding.ts.
+  const TEST_SITE_STEPS = [
+    { name: "Claude Pro or Max plan", cost: "Fixed monthly", needs: "One command on a computer" },
+    { name: "Anthropic API key", cost: "Pay as you go", needs: "Browser only" },
+    { name: "ChatGPT plan", cost: "Fixed monthly", needs: "One command on a computer" },
+    { name: "OpenAI API key", cost: "Pay as you go", needs: "Browser only" },
+    { name: "Ollama Cloud plan", cost: "Fixed monthly", needs: "Browser only" },
+    { name: "Ollama Cloud API key", cost: "Pay as you go", needs: "Browser only" },
+    { name: "Synthetic", cost: "Pay as you go, or a fixed monthly plan", needs: "Browser only" },
+    { name: "OpenRouter", cost: "Pay as you go", needs: "Browser only" },
+    { name: "Other API provider", cost: "Pay as you go", needs: "Browser only" },
+  ];
+
+  const stub = (opts: { grants?: unknown; sources?: unknown; writes?: Array<{ url: string; method: string; body: unknown }> } = {}) =>
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        const method = init?.method ?? "GET";
+        opts.writes?.push({ url, method, body: init?.body ? JSON.parse(String(init.body)) : null });
+        const body =
+          url === "/api/setup-progress" ? { dismissed: false, step: 3, companyId: "c1" }
+          : url.endsWith("/grants") ? (opts.grants ?? [])
+          : url === "/api/funding-sources" && method === "GET" ? (opts.sources ?? [])
+          : url === "/api/secrets" && method === "POST" ? { secret: { id: "s9" }, warnings: [] }
+          : url === "/api/funding-sources" && method === "POST" ? { id: "f9" }
+          : url.endsWith("/setup-checklist") ? [] : [];
+        return new Response(JSON.stringify(body), { status: 200 });
+      }),
+    );
+
+  it("shows the step as a plain list of every option, each with its cost and what you need, and none picked or favoured", async () => {
+    stub();
+    render(<Setup companies={[withCeo]} go={() => {}} onChanged={() => {}} />);
+    const list = await screen.findByRole("list", { name: "Ways to connect an agent" });
+    const rows = Array.from(list.querySelectorAll<HTMLElement>("[data-testid^='setup-connect-row-']"));
+    const picked = rows.map((r) => {
+      const button = r.querySelector("button")!;
+      const name = button.querySelector(".connect-name")!.textContent;
+      const meta = button.querySelector(".connect-meta")!.textContent!;
+      const [cost, needs] = meta.split(" · ");
+      return { name, cost, needs, expanded: button.getAttribute("aria-expanded"), classes: r.className };
+    });
+    expect(picked.map(({ classes: _, ...rest }) => rest)).toEqual(TEST_SITE_STEPS.map((s) => ({ ...s, expanded: "false" })));
+    // Equal rows: one class, so no row is styled apart, and no text marks one as recommended or the default.
+    expect(new Set(picked.map((p) => p.classes))).toEqual(new Set(["connect-row"]));
+    expect(list.textContent).not.toMatch(/recommended|best|default|suggested/i);
+    // No detail is open until the owner picks one.
+    expect(screen.queryByText("Save and connect")).toBeNull();
+  });
+
+  it("a plan that needs a command says to install the tool first, with a link, before the command and the paste", async () => {
+    stub();
+    render(<Setup companies={[withCeo]} go={() => {}} onChanged={() => {}} />);
+    fireEvent.click(await screen.findByText("Claude Pro or Max plan"));
+    const steps = screen.getByText("Save and connect").closest(".connect-detail")!.querySelector("ol")!;
+    const items = Array.from(steps.querySelectorAll("li")).map((li) => li.textContent!);
+    expect(items[0]).toContain("Install Claude Code on your own computer");
+    expect(steps.querySelector("li a")!.getAttribute("href")).toBe("https://code.claude.com/docs/en/setup");
+    expect(items.some((t) => t.includes("claude setup-token"))).toBe(true);
+    expect(items.some((t) => t.includes("shown once"))).toBe(true);
+    expect(items.at(-1)).toMatch(/checked 27 November 2026/);
+    expect(screen.getByText(/starts with "sk-ant-oat01"/)).toBeTruthy();
+  });
+
+  it("saves an Anthropic API key from this step alone: secret, grant, funding source, then the CEO", async () => {
+    const writes: Array<{ url: string; method: string; body: unknown }> = [];
+    stub({ writes });
+    render(<Setup companies={[withCeo]} go={() => {}} onChanged={() => {}} />);
+    fireEvent.click(await screen.findByText("Anthropic API key"));
+    // Browser-only steps: the Console's pages, and a spending limit where the site has one.
+    const detail = screen.getByText("Save and connect").closest(".connect-detail")!;
+    expect(detail.textContent).toContain("platform.claude.com");
+    expect(detail.textContent).toContain("spending limit");
+    expect(detail.textContent).toMatch(/27 November 2026, checked against/);
+    fireEvent.change(screen.getByLabelText("Anthropic key"), { target: { value: "sk-ant-api03-made-up" } });
+    fireEvent.click(screen.getByText("Save and connect"));
+    await screen.findByText(/stored encrypted/);
+    const mine = writes.filter((c) => c.method !== "GET" && c.url !== "/api/setup-progress");
+    expect(mine.map((c) => `${c.method} ${c.url}`)).toEqual(["POST /api/secrets", "POST /api/secrets/s9/grants", "POST /api/funding-sources", "PATCH /api/agents/a1"]);
+    expect(mine[0]!.body).toMatchObject({ kind: "anthropic_api_key" });
+    expect(mine[1]!.body).toMatchObject({ envName: "ANTHROPIC_API_KEY", companyId: "c1" });
+    expect(mine[2]!.body).toMatchObject({ kind: "api_payg", provider: "anthropic", secretId: "s9" });
+    expect(mine[3]!.body).toEqual({ fundingSourceId: "f9" });
+  });
+
+  it("a key that doesn't start the way the provider's keys do says what to copy, tied to the field, and saves nothing", async () => {
+    const writes: Array<{ url: string; method: string; body: unknown }> = [];
+    stub({ writes });
+    render(<Setup companies={[withCeo]} go={() => {}} onChanged={() => {}} />);
+    fireEvent.click(await screen.findByText("Anthropic API key"));
+    const box = screen.getByLabelText("Anthropic key");
+    fireEvent.change(box, { target: { value: "sk-ant-oat01-a-setup-token" } });
+    fireEvent.click(screen.getByText("Save and connect"));
+    const error = await screen.findByRole("alert");
+    expect(error.textContent).toContain("That's a setup token, not an API key");
+    expect(error.textContent).toContain("See the guide");
+    expect(box.getAttribute("aria-describedby")).toBe(error.id);
+    expect(box.getAttribute("aria-invalid")).toBe("true");
+    const openAiWrites = writes.filter((c) => c.method !== "GET");
+    expect(openAiWrites).toEqual([]);
+  });
+
+  it("saving an option reuses the key this company already holds, instead of making a second secret", async () => {
+    const writes: Array<{ url: string; method: string; body: unknown }> = [];
+    stub({
+      writes,
+      grants: [{ id: "g9", envName: "ANTHROPIC_API_KEY", secretId: "s5", secretName: "App Co Anthropic API key", hint: null, deployTargetId: null, agentIds: [] }],
+      sources: [{ id: "f5", name: "App Co Anthropic", kind: "api_payg", provider: "anthropic", secretId: "s5" }],
+    });
+    render(<Setup companies={[withCeo]} go={() => {}} onChanged={() => {}} />);
+    fireEvent.click(await screen.findByText("Anthropic API key"));
+    fireEvent.change(screen.getByLabelText("Anthropic key"), { target: { value: "sk-ant-api03-made-up" } });
+    fireEvent.click(screen.getByText("Save and connect"));
+    await screen.findByText(/stored encrypted/);
+    expect(writes.filter((c) => c.method !== "GET").map((c) => `${c.method} ${c.url}`)).toEqual(["POST /api/secrets/s5/grants", "PATCH /api/agents/a1"]);
+  });
+
+  it("the other API provider row sends the owner to Settings > Secrets rather than a box that would fail", async () => {
+    stub();
+    render(<Setup companies={[withCeo]} go={() => {}} onChanged={() => {}} />);
+    fireEvent.click(await screen.findByText("Other API provider"));
+    expect(screen.getByText(/Amazon Bedrock, Microsoft Foundry and LLM gateways each use two or three values/)).toBeTruthy();
+    expect(screen.getByText("Open Settings → Secrets").getAttribute("href")).toBe("#/settings/c1/secrets");
+    expect(screen.queryByText("Save and connect")).toBeNull();
+  });
+
+  it("step 7 says to go back to the connect step until something there is saved, above the form", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) =>
+        new Response(
+          JSON.stringify(
+            url === "/api/setup-progress" ? { dismissed: false, step: 6, companyId: "c1" }
+            : url.endsWith("/setup-checklist") ? []
+            : url === "/api/funding-sources" ? []
+            : url.endsWith("/projects") ? [project]
+            : url.includes("check-presets") ? { standard: [], none: { id: "none", label: "Nothing", command: "", needs: [] }, detected: [], tools: null, error: null }
+            : [],
+          ),
+          { status: 200 },
+        ),
+      ),
+    );
+    render(<Setup companies={[withCeo]} go={() => {}} onChanged={() => {}} />);
+    const hint = await screen.findByTestId("setup-funding-hint");
+    expect(hint.textContent).toContain("Go back to the connect step; it sets this up for you.");
+    fireEvent.click(screen.getByText("Go back to the connect step"));
+    expect((await screen.findByRole("heading", { level: 1 })).textContent).toBe("How do you want to connect your first agent?");
   });
 });

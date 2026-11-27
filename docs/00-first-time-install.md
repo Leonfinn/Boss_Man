@@ -292,17 +292,17 @@ Check it worked: you see "Saved." and the step shows a tick.
 
 Check it worked: **Connected**. If not, see [docs/29, "The runner stays Offline"](29-tune-and-troubleshoot.md#the-runner-stays-offline-or-never-says-connected).
 
-## 9. Wizard steps "Claude" and "A git token"
+## 9. Wizard steps "How do you want to connect your first agent?" and "A git token"
 
-Make each secret on your own computer, then paste it into the form. Boss Man encrypts it and never shows it again. Paste a token only into these forms, never into a chat or a ticket.
+Make each secret in your browser or on your own computer, then paste it into the form. Boss Man encrypts it and never shows it again. Paste a token only into these forms, never into a chat or a ticket.
 
-**Claude.** One box, **Claude setup token**. On your own computer:
+**The connect step.** A plain list of every account an agent can run on, each the same: the Claude Pro or Max plan, an Anthropic API key, the ChatGPT plan, an OpenAI API key, Ollama Cloud, Synthetic, OpenRouter, and one row for Amazon Bedrock, Microsoft Foundry and LLM gateways. Pick the one you already have; it opens its own short steps. Each row says whether it costs a fixed monthly price or is pay as you go, and whether it needs only a browser or one command on a computer.
 
-```sh
-claude setup-token
-```
+- **A setup token (Claude plan).** It is shown once and lasts a year. If Claude Code isn't installed yet, install it first (the step links the page for a Mac and a Windows PC), then run `claude setup-token`, sign in, and paste the token; it starts `sk-ant-oat01-`.
+- **An API key.** Everything happens in the browser, on the site the step links (for Anthropic, platform.claude.com). Add credit, set a spending limit where the site offers one, create the key, and paste it.
+- **The ChatGPT and Ollama Cloud plans** are signed in to in Codex or Ollama themselves; the row says so. If you'd rather stay in the browser, pick that provider's API key instead.
 
-Sign in with your Claude Pro or Max account. It prints a long-lived token. Paste it into the box and choose **Save the token**. Boss Man refuses a token with stray spaces or quotes and says why. Saving also makes the funding source and sets the CEO to run on it, so you skip "What pays for the CEO". The step then shows **Connected**; to change it later, use **Settings → Money and access → Secrets**, in the section named after your company (for example "Acme's variables"). If you use an API key instead, open **Use an API key instead** and choose **Anthropic API key**. Codex or OpenCode agents use **OpenAI API key**, **OpenRouter API key**, **Ollama Cloud API key** or **Synthetic API key** from the same list.
+Saving any of them also makes the funding source and sets the CEO to run on it, so **"What pays for the CEO" is skipped**. The step then shows **Connected**; to change it later, use **Settings → Money and access → Secrets**, in the section named after your company (for example "Acme's variables"). A key that starts the wrong way (for example an API key pasted as a setup token) is refused with what to copy and paste again.
 
 **A git token.** Choose **Git token (GitHub or Gitea)** under **Add**. Boss Man's runner uses it as `GIT_TOKEN` for git; agents' own sessions never see it.
 - **GitHub:** create a fine-grained personal access token. Repository access: only the repos the company works on. Permissions: Contents, Pull requests and Workflows, read and write (Workflows lets agents change the repo's CI files under `.github/workflows/`). The wizard's **How do I get a token?** also lists Actions read and write: read so Boss Man can read CI runs, write so the merge gate can run a job again once when a test failed by chance in a file the branch doesn't change (with Actions read-only GitHub refuses that, and the ticket goes back to its agent instead).
@@ -324,7 +324,7 @@ Only the two pushes to `bossman-ci/*` use it; everything else keeps `GIT_TOKEN`.
 
 **Checks before merging.** Boss Man looks at the repo through the runner and proposes what runs before work merges. Under **Before merging, Boss Man will**, choose one. If the list is the standard one, choose **Re-detect** now that the runner and git token work.
 
-**What pays for the CEO.** If you saved a Claude setup token in step 9, the wizard skips this step: the token already made the funding source. If you used an API key instead, this tracks cost and quota:
+**What pays for the CEO.** If you saved anything in the connect step (step 9), the wizard skips this step: it already made the funding source. If nothing there was saved, the step says so above the form and sends you back to the connect step; the form below it is for a company that set its funding up by hand:
 1. Under **Funding sources**, name it (for example "Claude Max") and choose a **Kind**: **Subscription (setup-token)** for a Pro or Max plan, or **API credit, monthly grant** for an API key (then give the monthly grant in USD).
 2. Choose **Add**.
 3. Under "The CEO runs on", pick that source.
