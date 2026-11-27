@@ -25,6 +25,22 @@ describe("relinkServer", () => {
     expect(writes(s.daemon.calls).some((x) => x.endsWith("/exec") || x.includes("-migrate"))).toBe(false);
   });
 
+  test("a server not yet answering as leader is retried on the next call, not given up for the run", async () => {
+    const s = await setup();
+    const blue = s.daemon.containers.get("server-blue")!;
+    blue.env = ["BOSSMAN_IMAGE_INSTALL=1"];
+    blue.commit = NEW_COMMIT;
+    const real = s.deps.probe!;
+    let calls = 0;
+    const deps = { ...s.deps, probe: async (...a: Parameters<typeof real>) => (++calls === 1 ? null : real(...a)) };
+    const tried = { done: false };
+    expect((await relinkServer(deps, tried)).join(" ")).toMatch(/not answering as leader/);
+    expect(tried.done).toBe(false);
+    expect(s.daemon.containers.has("server-green")).toBe(false);
+    expect((await relinkServer(deps, tried)).join(" ")).toMatch(/Install button works/);
+    expect(tried.done).toBe(true);
+  });
+
   test("a colour that already has the link is left alone", async () => {
     const s = await setup();
     s.daemon.containers.get("server-blue")!.env = ["BOSSMAN_IMAGE_INSTALL=1", "BOSSMAN_UPDATER_URL=http://updater:3200"];

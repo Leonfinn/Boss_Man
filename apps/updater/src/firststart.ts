@@ -130,8 +130,8 @@ const LINK_ENV = "BOSSMAN_UPDATER_URL=";
 /**
  * BOS-2717: a server colour made before the Install button existed has no link to this updater. When the install can give one
  * (its key folder is mounted by the updater) the serving release is made again beside the old one with the link and switched to,
- * with no backup or migration (same release, same data). Quiet: no owner report, a note in the log. Tried once per updater start,
- * so a failure is not repeated every five minutes; a restart tries again. Never runs during another move.
+ * with no backup or migration (same release, same data). Quiet: no owner report, a note in the log. A "not leader yet" answer is
+ * retried at the next check; a real swap attempt is made once per updater start, so a failure is not repeated every five minutes. Never runs during another move.
  */
 export async function relinkServer(d: MoveDeps, tried: { done: boolean }): Promise<string[]> {
   if (!isSwap(d) || tried.done || !updaterLink(d.cfg)) return [];
@@ -145,9 +145,10 @@ export async function relinkServer(d: MoveDeps, tried: { done: boolean }): Promi
   const digest = digestOf(c);
   // Only a server this updater made for an image install (it carries the release labels and the image-install flag).
   if (!c || !version || !digest || !env.includes("BOSSMAN_IMAGE_INSTALL=1") || env.some((e) => e.startsWith(LINK_ENV))) return [];
-  tried.done = true;
   const probe = await (d.probe ?? httpProbe)(LIVE_ALIAS);
-  if (!probe?.ok || probe.role !== "leader" || !probe.commit) return ["The serving server has no link to the updater, but it is not answering as leader right now, so the link was not added. It is tried again at the next start of the updater."];
+  // Not leader yet (just started): do not mark tried, the next five-minute tick checks again.
+  if (!probe?.ok || probe.role !== "leader" || !probe.commit) return ["The serving server has no link to the updater, but it is not answering as leader right now, so the link was not added. It is tried again at the next check."];
+  tried.done = true;
   try {
     d.state.begin(version, digest);
     d.state.update({ stage: "starting-colour" });
