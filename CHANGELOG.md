@@ -55,7 +55,7 @@ Remember to put an empty line after any line you add outside this comment, so th
 
 ## 27 November 2026
 
-- The first time you move around Boss Man with the keyboard on a computer (pressing Tab outside a text box, or Ctrl K), a small tip at the bottom left says "Boss Man has keyboard shortcuts. Press ? any time to see them." Press Show shortcuts to open the list, or Got it (or Escape) to close it. It shows once per login, in any browser, and never on a phone or when single-letter keys are turned off.
+- The first time you move around Boss Man with the keyboard on a computer (pressing Tab outside a text box, or Ctrl K), a small tip at the bottom left says "Boss Man has keyboard shortcuts. Press ? any time to see them." Press Show shortcuts to open the list, or Got it (or Escape) to close it. It shows once per login, in any browser. It never shows on a phone, or if you have unticked "Use single-letter keys" in Settings → Account → Keyboard shortcuts.
 
 ## 26 November 2026
 
