@@ -65,7 +65,7 @@ export function ClaudeStep({ company, onChanged, onTokenSaved }: { company: Comp
             <label htmlFor="setup-claude-ends">Ends on</label>
             <input id="setup-claude-ends" type="date" aria-describedby="setup-claude-ends-hint" value={endsOn} onChange={(e) => setEndsOn(e.target.value)} />
             <p id="setup-claude-ends-hint" className="muted" style={{ fontSize: 13, margin: "4px 0 0" }}>
-              A Claude token lasts about a year, so this is filled in. A week before it ends you get a card saying how to replace it.
+              A sign-in code lasts about a year, so this is filled in. A week before it ends you get a card saying how to replace it.
             </p>
           </div>
           <button type="submit" className="btn primary" style={{ alignSelf: "flex-start" }} disabled={act.busy || !value.trim()}>
