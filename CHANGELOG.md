@@ -53,6 +53,10 @@ Remember to put an empty line after any line you add outside this comment, so th
 
 <!-- Docs checked up to 688f2bc5a6c5f50810649a7cfa7af9e4bcec5d37 -->
 
+## 27 November 2026
+
+- The first time you move around Boss Man with the keyboard on a computer (pressing Tab outside a text box, or Ctrl K), a small tip at the bottom left says "Boss Man has keyboard shortcuts. Press ? any time to see them." Press Show shortcuts to open the list, or Got it (or Escape) to close it. It shows once per login, in any browser, and never on a phone or when single-letter keys are turned off.
+
 ## 26 November 2026
 
 - A new beta release now goes out by itself every Tuesday morning (10:00 UTC), with that week's changes in its notes, as long as the newest code has passed its checks and its images are ready. If there is nothing new or nothing ready, it skips that week. You don't need to press anything.
