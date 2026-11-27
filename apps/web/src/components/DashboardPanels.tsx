@@ -52,8 +52,8 @@ const clock = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hou
 const hoursText = (ms: number) => waitedText(Math.max(0, Math.round(ms / 60_000)));
 
 /** The four lines, always in this order: Runner, Merges, Usage limits, Update. */
-export function healthLines(input: { health: HealthData | null | undefined; merges: MergeHealthView | null | undefined; stuck: StuckSummary | null; slow?: SlowSummary | null; running: number; companyId: string; now?: number }): HealthLine[] {
-  const { health, merges, stuck, slow, running, companyId } = input;
+export function healthLines(input: { health: HealthData | null | undefined; merges: MergeHealthView | null | undefined; stuck: StuckSummary | null; slow?: SlowSummary | null; running: number; companyId: string; now?: number; /** BOS-2814: a must-have is missing, so no agent can start. */ cantStart?: boolean }): HealthLine[] {
+  const { health, merges, stuck, slow, running, companyId, cantStart } = input;
   const now = input.now ?? Date.now();
   const system = `#/settings/${companyId}/updates`;
   const runnerHref = `#/settings/${companyId}/runner`;
@@ -90,7 +90,8 @@ export function healthLines(input: { health: HealthData | null | undefined; merg
     const who = u.accounts.length === 1 ? `${u.accounts[0]} account` : u.accounts.length > 1 ? `${u.accounts.length} accounts` : "An account";
     const reset = u.firstResetAt ? (u.accounts.length > 1 ? `, first resets at ${clock(u.firstResetAt)}` : ` resets at ${clock(u.firstResetAt)}`) : " has no reset time yet";
     usage = { key: "usage", tone: "warn", symbol: "‖", state: figureText("usage.held", u.agents), pill: u.firstResetAt ? `${u.agents} held till ${clock(u.firstResetAt)}` : `${u.agents} held`, text: `${who}${reset}.`, href: "#/agents", linkText: "Agents" };
-  } else usage = { key: "usage", tone: "ok", symbol: "✓", state: "No agent held by a usage limit", pill: "No limit holds", text: "Every agent can start when it has work.", href: "#/agents", linkText: "Agents" };
+  } else if (cantStart) usage = { key: "usage", tone: "warn", symbol: "‖", state: "No usage limit holds, but no agent can start yet", pill: "Can't start yet", text: "Agents can't start until setup is finished.", href: "#/setup", linkText: "Finish setting up" };
+  else usage = { key: "usage", tone: "ok", symbol: "✓", state: "No agent held by a usage limit", pill: "No limit holds", text: "Every agent can start when it has work.", href: "#/agents", linkText: "Agents" };
 
   let update: HealthLine;
   const up = health?.update;
@@ -190,7 +191,7 @@ export function waitLine(tally: DecisionTally | null | undefined, now = Date.now
   return parts.length ? parts.join(" · ") : null;
 }
 
-export function NeedsYou({ decisions, tally }: { decisions: Decision[] | null; tally: DecisionTally | null | undefined }) {
+export function NeedsYou({ decisions, tally, cantStart = false }: { decisions: Decision[] | null; tally: DecisionTally | null | undefined; /** BOS-2814: no agent can start yet, so "Nothing needs you" would mislead. */ cantStart?: boolean }) {
   if (!decisions) {
     return (
       <section className="card dash-panel dash-needs" aria-labelledby="dash-needs" aria-busy="true">
@@ -214,7 +215,12 @@ export function NeedsYou({ decisions, tally }: { decisions: Decision[] | null; t
         {open > 0 && <span className="dash-count" aria-label={figureText("decisions.needYou", open)}>{open}</span>}
       </h2>
       {open > 0 && waitLine(tally) && <p className="muted dash-needs-wait">{waitLine(tally)}</p>}
-      {shown.length === 0 && open === 0 ? (
+      {shown.length === 0 && open === 0 && cantStart ? (
+        <p className="dash-calm">
+          <span className="dash-sym" aria-hidden="true">‖</span>
+          <span>No decisions yet. When an agent needs an answer, an approval or more budget, it appears here.</span>
+        </p>
+      ) : shown.length === 0 && open === 0 ? (
         <p className="dash-calm">
           <span className="dash-sym" aria-hidden="true">✓</span>
           <span>

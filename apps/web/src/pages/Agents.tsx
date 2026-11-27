@@ -1076,7 +1076,7 @@ export function Agents({ company, agentId, onChanged }: { company: Company | und
               )}
             </div>
             <div className="muted agent-stats">
-              <span className="mono">{a.model ?? "default model"}</span>{a.thinking ? `, ${a.thinking} thinking` : ""} · {a.funding ?? "No account to run on yet"} · this month {a.month.runs} run{a.month.runs === 1 ? "" : "s"}, {used}
+              <span className="mono">{a.model ?? "default model"}</span>{a.thinking ? `, ${a.thinking} thinking` : ""} · {a.funding ?? <span className="error" data-testid={`no-account-${a.id}`}>⚠ No account to run on yet. <a href="#/setup">Connect one</a></span>} · this month {a.month.runs} run{a.month.runs === 1 ? "" : "s"}, {used}
             </div>
             {a.offUntil && !a.retiredAt && (
               <div className="muted agent-stats" data-testid={`off-until-${a.id}`}>

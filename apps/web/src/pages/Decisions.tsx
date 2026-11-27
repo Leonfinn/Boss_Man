@@ -21,6 +21,7 @@ import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { DraftTextarea } from "../components/DraftTextarea";
 import { buildCsv, download } from "../csv";
 import { Loader } from "../components/Loader";
+import { StartBlockBar, type StartBlock } from "../components/StartBlock";
 import { LoadError } from "../components/LoadError";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
 
@@ -627,7 +628,7 @@ function useLinkedCard(): string | null {
   return id;
 }
 
-export function Decisions({ decisions, companies, loaded, loadError = false, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany, withTeam = [], advised = [], closedNotices = [], tally }: { decisions: Decision[]; companies: Company[]; loaded: boolean; loadError?: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode | ((folded: boolean) => ReactNode); elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void; withTeam?: TeamAlert[]; advised?: AdvisedDecision[]; closedNotices?: ClosedNoticeCard[]; tally?: DecisionTally | null }) {
+export function Decisions({ decisions, companies, loaded, loadError = false, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany, withTeam = [], advised = [], closedNotices = [], tally, startBlock = null }: { /** BOS-2814: what keeps agents from starting; the red bar and the empty state read it. */ startBlock?: StartBlock | null; decisions: Decision[]; companies: Company[]; loaded: boolean; loadError?: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode | ((folded: boolean) => ReactNode); elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void; withTeam?: TeamAlert[]; advised?: AdvisedDecision[]; closedNotices?: ClosedNoticeCard[]; tally?: DecisionTally | null }) {
   const [filter, setFilter] = useState<string | null>(null);
   const [savedProject, setSavedProject] = useState<string | null>(readProjectFilter);
   const pickProject = (v: string | null) => {
@@ -948,6 +949,7 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
           </div>
         )}
       </header>
+      <StartBlockBar block={startBlock} />
       {typeof banner === "function" ? (queueCards.length > 0 ? null : banner(false)) : banner}
       {withTeam.length > 0 && (
         // Alerts the Scrum Master or CEO still hold: listed so nothing is hidden, but not the owner's to answer yet.
@@ -973,7 +975,12 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
         ? <p className="banner" role="alert">Couldn't load your decisions. It will try again shortly.</p>
         : <Loader label="Loading decisions" />)}
       {loaded && queueCards.length === 0 && waitingCards.length === 0 && recheckCards.length === 0 ? (
-        agentsWorking > 0 ? (
+        startBlock && startBlock.items.length > 0 ? (
+          // BOS-2814: no agent can start yet, so no "Nothing needs you" and no celebration picture.
+          <section className="state" data-testid="no-decisions-yet">
+            <p>No decisions yet. When an agent needs an answer, an approval or more budget, it appears here.</p>
+          </section>
+        ) : agentsWorking > 0 ? (
           <State img={art.busy} alt="Agents at work, nothing needs you" title="Nothing needs you yet">
             <p>{agentsWorking === 1 ? "1 agent is" : `${agentsWorking} agents are`} working. They'll raise a decision here when they need an answer, an approval or more budget.</p>
           </State>

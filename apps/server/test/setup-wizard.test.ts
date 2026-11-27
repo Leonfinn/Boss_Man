@@ -86,6 +86,45 @@ describe("the setup wizard (R56)", () => {
     expect((await checklist()).find((i) => i.id === "merged")!.done).toBe(true);
   });
 
+  it("names what keeps agents from starting, and clears it as each must-have is set (BOS-2814)", async () => {
+    const c = (ctx = await setup());
+    const { company, ceo } = (await c.req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string }; ceo: { id: string } };
+    const read = async () => (await c.req("GET", `/api/companies/${company.id}/start-block`)).json() as { items: Array<{ id: string; reason: string }>; noFunding: string[] };
+    const first = await read();
+    expect(first.items.map((i) => i.id)).toEqual(["claude", "funding", "runner"]);
+    expect(first.items.find((i) => i.id === "funding")!.reason).toBe("the CEO has no Claude account to run on yet");
+    expect(first.items.find((i) => i.id === "runner")!.reason).toBe("the agents' workspace isn't running");
+    expect(first.noFunding).toContain(ceo.id);
+    const { secret } = (await c.req("POST", "/api/secrets", { name: "Claude", kind: "claude_oauth_token", value: "sk-ant-oat01-example-token-value" })).json();
+    await c.req("POST", `/api/secrets/${secret.id}/grants`, { companyId: company.id, envName: "CLAUDE_CODE_OAUTH_TOKEN" });
+    const source = (await c.req("POST", "/api/funding-sources", { name: "Claude Max", kind: "subscription", provider: "anthropic" })).json() as { id: string };
+    await c.req("PATCH", `/api/agents/${ceo.id}`, { fundingSourceId: source.id });
+    const after = await read();
+    // Only the runner is left (the account was added first), and the CEO is paid for.
+    expect(after.items.map((i) => i.id)).toEqual(["runner"]);
+    expect(after.noFunding).not.toContain(ceo.id);
+    expect((await c.req("GET", "/api/companies/00000000-0000-4000-8000-000000000000/start-block")).statusCode).toBe(404);
+  });
+
+  it("clears the start block in either order, and says nothing once the runner reports connected (BOS-2814)", async () => {
+    const c = (ctx = await setup());
+    const { company, ceo } = (await c.req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string }; ceo: { id: string } };
+    const read = async () => (await c.req("GET", `/api/companies/${company.id}/start-block`)).json() as { items: Array<{ id: string }>; noFunding: string[] };
+    // Runner first: register it and have its socket open, then the account arrives last.
+    const reg = (await c.req("POST", `/api/companies/${company.id}/runner`)).json() as { runnerId: string };
+    const [row] = await c.db.select().from(runnersTable).where(eq(runnersTable.id, reg.runnerId));
+    await c.runners.touch(row!);
+    c.runners.connect(reg.runnerId, () => true);
+    expect((await read()).items.map((i) => i.id)).toEqual(["claude", "funding"]);
+    const { secret } = (await c.req("POST", "/api/secrets", { name: "Claude", kind: "claude_oauth_token", value: "sk-ant-oat01-example-token-value" })).json();
+    await c.req("POST", `/api/secrets/${secret.id}/grants`, { companyId: company.id, envName: "CLAUDE_CODE_OAUTH_TOKEN" });
+    const source = (await c.req("POST", "/api/funding-sources", { name: "Claude Max", kind: "subscription", provider: "anthropic" })).json() as { id: string };
+    await c.req("PATCH", `/api/agents/${ceo.id}`, { fundingSourceId: source.id });
+    const done = await read();
+    expect(done.items).toEqual([]);
+    expect(done.noFunding).toEqual([]);
+  });
+
   it("says when the token can't push", async () => {
     const c = (ctx = await setup(false));
     const { company } = (await c.req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };

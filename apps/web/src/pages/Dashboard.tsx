@@ -14,6 +14,7 @@ import { WorkStands } from "../components/WorkStands";
 import { NeedsYou, RightNow, healthLines, type HealthData } from "../components/DashboardPanels";
 import { MergesStuckBanner, brakeOffSummary, pausedSummary, slowSummary, stuckSummary, type MergeHealthView } from "../components/MergesStuckBanner";
 import { RunLabelLink } from "./Runs";
+import { StartBlockBar, useStartBlock } from "../components/StartBlock";
 
 type Result = "running" | "succeeded" | "failed" | "other";
 type AgentCard = {
@@ -181,6 +182,8 @@ export function Dashboard({ company, decisions = null, tally = null, onChanged }
   const data = usePoll((signal) => (company ? api<DashboardData>(`/api/companies/${company.id}/dashboard`, { signal }) : Promise.resolve(null)), 10_000, company?.id ?? "none");
   // The Merges line and the banner share one read of the Merge queue; a failed read leaves the line "couldn't check".
   const merges = usePoll((signal) => (company ? api<MergeHealthView>(`/api/companies/${company.id}/merge-queue`, { signal }).catch(() => null) : Promise.resolve(null)), 20_000, `dash-merges-${company?.id ?? "none"}`);
+  const startBlock = useStartBlock(company?.id);
+  const cantStart = !!startBlock && startBlock.items.length > 0;
   if (!company) return <NoCompany />;
   if (data.error && !away(data.error)) return <LoadError what="the dashboard" message={data.error.message} onRetry={data.reload} />;
   const d = data.data;
@@ -191,7 +194,7 @@ export function Dashboard({ company, decisions = null, tally = null, onChanged }
   const stuck = merges.data && !company.paused ? stuckSummary(merges.data) : null;
   const slow = merges.data && !company.paused ? slowSummary(merges.data) : null;
   const paused = merges.data && !company.paused ? pausedSummary(merges.data) : null;
-  const lines = healthLines({ health: d.health ?? {}, merges: merges.data, stuck, slow, running: s.running, companyId: company.id });
+  const lines = healthLines({ health: d.health ?? {}, merges: merges.data, stuck, slow, running: s.running, companyId: company.id, cantStart });
   return (
     <>
       <header className="page-head">
@@ -201,6 +204,8 @@ export function Dashboard({ company, decisions = null, tally = null, onChanged }
         </div>
       </header>
 
+      <StartBlockBar block={startBlock} />
+
       <MergesStuckBanner stuck={stuck} slow={slow} paused={paused} brakeOff={merges.data && !company.paused ? brakeOffSummary(merges.data) : null} companyId={company.id} />
 
 
@@ -208,7 +213,7 @@ export function Dashboard({ company, decisions = null, tally = null, onChanged }
 
       <div className="dash-lead">
         <RightNow lines={lines} paused={company.paused} companyId={company.id} onResume={onChanged ? async () => { await setCompanyPause(company.id, false); onChanged(); } : undefined} />
-        <NeedsYou decisions={decisions} tally={tally} />
+        <NeedsYou decisions={decisions} tally={tally} cantStart={cantStart} />
       </div>
 
       <section aria-labelledby="dash-agents">
