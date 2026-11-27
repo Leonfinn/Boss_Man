@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ATTACH_FIRST, figureText, HARNESSES, harnessLabel, modelFitProblem, optionNeedsAttachment, parseStep, providerLabel, splitStepSource, type AlwaysTtl, type StepPiece, type StepSource, type Where } from "@boss-man/shared";
+import { ATTACH_FIRST, figureText, HARNESSES, harnessLabel, modelFitProblem, NOTE_FIRST, optionNeedsAttachment, optionNeedsNote, parseStep, providerLabel, splitStepSource, type AlwaysTtl, type StepPiece, type StepSource, type Where } from "@boss-man/shared";
 import { api, ApiError, type AdvisedDecision, type ClosedNoticeCard, type Company, type Decision, type DecisionTally, type DeployUpdate, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
 import { art } from "../brand";
 import { copyText, selectText } from "../clipboard";
@@ -849,6 +849,12 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
       document.getElementById(`note-${d.id}`)?.focus();
       return;
     }
+    // BOS-2798: and an option that says its answer is in the note is pressed only with something written there.
+    if (optionNeedsNote(o, d.context?.noteOptions) && !notes[d.id]?.trim() && !attachedTo(d.id).length) {
+      setErrors((e) => ({ ...e, [d.id]: `${NOTE_FIRST}: paste or write it in the note box under the answers, then press "${o}" again.` }));
+      document.getElementById(`note-${d.id}`)?.focus();
+      return;
+    }
     void answer(d, o);
   };
   const answer = async (d: Decision, option: string, extra: { custom?: boolean; modelConfig?: ModelConfigView; assigneeAgentId?: string } = {}) => {
@@ -1555,21 +1561,25 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
                                   // A to-do's "What went wrong" box takes a picture too.
                                   const shotFor = d.options.filter((o) => optionNeedsAttachment(o, d.context?.attachOptions));
                                   const attachable = shotFor.length > 0 || d.context?.type === "owner_todo";
-                                  if (!noted && !attachable) return null;
+                                  // BOS-2798: options whose answer is the note ("Done, output pasted in my note"): the box is shown open for them.
+                                  const noteFor = d.options.filter((o) => optionNeedsNote(o, d.context?.noteOptions) && !shotFor.includes(o));
+                                  if (!noted && !attachable && !noteFor.length) return null;
                                   const hasBase = noted || d.context?.type === "owner_todo";
                                   const shotLine = shotFor.length ? `Screenshot for "${shotFor.join('" or "')}": paste it here or use Attach file.` : attachable ? "Paste a screenshot here or use Attach file." : null;
                                   const mine = attachedTo(d.id);
                                   return (
-                                    <div className="field" data-testid={attachable ? "card-attach" : undefined}>
+                                    <div className="field" data-testid={attachable ? "card-attach" : noteFor.length ? "card-note" : undefined}>
                                       {/* The wording stays inline in the label: the owner-controls list guard reads field labels from here. */}
                                       <label htmlFor={`note-${d.id}`}>
                                         {d.options.includes("Edit") && d.options.includes("Add") ? "Your one-line reason, or the corrected lesson (needed for Edit)" : d.context?.type === "owner_todo" ? "What went wrong (if a step failed)" : noted ? `Note for ${d.context?.type === "risk_review" ? (d.context.builder ?? "the builder") : agentOf(d)}, sent with "${d.options.find((o) => o === "Keep planning" || o === "Send it back")}"` : null}
                                         {hasBase && shotLine ? `. ${shotLine}` : shotLine}
+                                        {noteFor.length && (hasBase || shotLine) ? ". " : null}
+                                        {noteFor.length ? `Your note for "${noteFor.join('" or "')}": paste the output or write your answer here, then press it.` : null}
                                       </label>
                                       <DraftTextarea
                                         draftKey={draftNote(d.id)}
                                         id={`note-${d.id}`}
-                                        rows={2}
+                                        rows={noteFor.length ? 4 : 2}
                                         value={notes[d.id] ?? ""}
                                         onChange={(text) => editNote(d.id, text)}
                                         onPaste={

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { attachmentIds, optionNeedsAttachment } from "../src/attach-options.js";
+import { attachmentIds, optionNeedsAttachment, optionNeedsNote } from "../src/attach-options.js";
 
 // BOS-2742: which card options can only be pressed with a screenshot attached.
 describe("optionNeedsAttachment", () => {
@@ -34,6 +34,39 @@ describe("optionNeedsAttachment", () => {
   it("an option the raiser flagged needs one whatever its words", () => {
     expect(optionNeedsAttachment("Done", ["Done"])).toBe(true);
     expect(optionNeedsAttachment("Not yet", ["Done"])).toBe(false);
+  });
+});
+
+// BOS-2798: which card options can only be pressed with text in the note.
+describe("optionNeedsNote", () => {
+  it.each([
+    // The card the owner hit on 27 Nov (BOS-2775), and the usual ways of saying the same.
+    "Done, output pasted in my note",
+    "Other (see my note)",
+    "Something else, in my note",
+    "Ran it, output below",
+    "It failed, error below",
+    "I'll paste the output",
+    "Done, pasted the log",
+    "Not done yet, details in my note",
+  ])("needs one: %s", (option) => {
+    expect(optionNeedsNote(option)).toBe(true);
+  });
+
+  it.each([
+    "Done",
+    "Yes, go ahead",
+    "Done, no output to paste",
+    "Done, nothing to note",
+    "Skip it",
+    "Keep the notes page as it is",
+  ])("needs none: %s", (option) => {
+    expect(optionNeedsNote(option)).toBe(false);
+  });
+
+  it("an option the raiser flagged needs one whatever its words", () => {
+    expect(optionNeedsNote("Sent", ["Sent"])).toBe(true);
+    expect(optionNeedsNote("Not yet", ["Sent"])).toBe(false);
   });
 });
 

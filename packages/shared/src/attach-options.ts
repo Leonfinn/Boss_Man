@@ -36,3 +36,27 @@ export function attachmentIds(text: string | null | undefined): string[] {
 
 /** The plain message the owner sees when they press such an option with nothing attached. */
 export const ATTACH_FIRST = "Attach the screenshot first";
+
+// BOS-2798: the same for an option that says its answer is in the note ("Done, output pasted in my note", "Other (see my
+// note)", "Ran it, output below"). Pressed with an empty note, the card used to close and the agent got nothing.
+/** Words that say the answer travels in the note: "in/see my note", "pasted", "I'll paste", "output below". */
+const NOTE_PROMISES = [
+  /\b(?:in|into|see|per|with)\s+(?:my|the|a)\s+note\b/i,
+  /\b(?:pasted|pasting)\b/i,
+  /\b(?:I'?ll|I will|I'?ve|I have)\s+(?:paste|written|write|noted|note)\b/i,
+  /\b(?:output|log|logs|result|results|answer|details?|reason|text|error)\s+(?:is\s+|are\s+)?below\b/i,
+];
+/** The same words, negated ("no output to paste", "nothing to note", "without a note"): those need no note. */
+const NOTE_NEGATED = /\b(?:no|not|nothing|without|skip|don't|do not|never)\b[^.,;:()]{0,20}\b(?:note|paste\w*|output|log|below)\b/i;
+
+/**
+ * Whether answering with `option` needs text in the card's note. True when the raiser flagged it (`flagged`, the option
+ * texts raise_decision's needsNote named) or when its words say the answer is in the note.
+ */
+export function optionNeedsNote(option: string, flagged?: readonly string[] | null): boolean {
+  if (flagged?.includes(option)) return true;
+  return NOTE_PROMISES.some((p) => p.test(option)) && !NOTE_NEGATED.test(option);
+}
+
+/** The plain message the owner sees when they press such an option with an empty note. */
+export const NOTE_FIRST = "Paste it in the note first";

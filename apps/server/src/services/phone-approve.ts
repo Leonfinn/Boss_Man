@@ -8,7 +8,7 @@
 // and pins the card's text with decision_rev (rule 5). A tap claims it, answers with the stored option
 // and finishes or releases it (rule 6), and every tap on a real token gets a reply push (rule 4).
 import { createHash, randomBytes } from "node:crypto";
-import { optionNeedsAttachment } from "@boss-man/shared";
+import { optionNeedsAttachment, optionNeedsNote } from "@boss-man/shared";
 import { and, count, eq, gt, isNull, lt, lte, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { approveTokens, decisions, owners, phoneActionHits, ticketDependencies } from "../db/schema.js";
@@ -101,6 +101,8 @@ export function phoneApprovable(d: Decision, isBlocker: boolean): boolean {
   if (!options.includes(d.recommendedOption)) return false;
   // BOS-2742: a phone Approve can't carry a screenshot, and the server refuses that answer without one.
   if (optionNeedsAttachment(d.recommendedOption)) return false;
+  // BOS-2798: nor a note. Checked here rather than as a RULE1_KEYS entry, so the card hash of every older card stays the same.
+  if (optionNeedsNote(d.recommendedOption, Array.isArray(ctx.noteOptions) ? (ctx.noteOptions as string[]) : null)) return false;
   const summary = summaryOf(d);
   if (!summary || cleanSummary(summary) !== summary || summary.length > SUMMARY_MAX) return false;
   if (d.status !== "open" || d.tier !== "owner" || d.forAgentId || (d.staleAt && d.recheckStage !== "lapsed")) return false;
