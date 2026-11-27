@@ -184,7 +184,7 @@ describe("set_ticket_state done with hand-off wording", () => {
     expect((r as { isError?: boolean }).isError).toBeFalsy();
   });
 
-  it("followUps opens a linked ticket for the CEO in the same project and feature, and the move goes through", async () => {
+  it("followUps opens a linked ticket for the CEO in the same project, with no feature by default (BOS-2682), and the move goes through", async () => {
     const t = await ctx.ticket();
     const c = await ctx.agent(ctx.dev.id);
     const r = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "Done. The CEO will attach them.", followUps: [{ title: "Attach the 34 features", assignee: "CEO", why: "BOS-958 listed them but nothing attached them." }] } });
@@ -192,6 +192,8 @@ describe("set_ticket_state done with hand-off wording", () => {
     expect(textOf(r)).toContain("opened the follow-up");
     const made = (await ctx.db.select().from(tickets)).find((x) => x.title === "Attach the 34 features")!;
     expect(made.projectId).toBe(ctx.project.id);
+    expect(made.featureId).toBeNull();
+    expect(made.body).toContain("Not put under a feature");
     expect(made.assigneeAgentId).toBe(ctx.co.ceo.id);
     expect(made.body).toContain(`#/tickets/${t.id}`);
     expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.stateNote).toContain(`#/tickets/${made.id}`);
@@ -321,7 +323,22 @@ describe("set_ticket_state done with hand-off wording", () => {
       expect(await openBlockers(ctx.db, made.id)).toEqual([]);
       expect(textOf(r)).toMatch(/with its long watch on check ticket [A-Z]+-\d+/);
       // The closing ticket's note names both, so whoever reads it finds the watch.
-      expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.stateNote).toMatch(/for Dev, with check ticket [A-Z]+-\d+ for its long watch/);
+      expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.stateNote).toMatch(/for Dev, .*with check ticket [A-Z]+-\d+ for its long watch/);
+    });
+
+    // BOS-2797: a carried criterion that waits on a future event is split the same way.
+    it("a carried criterion that waits on a future event opens its own check ticket, which waits on the follow-up's merge", async () => {
+      const EVENT = { text: "After the next beta release, a real image install shows the new-release note within a day", after: "merge" as const };
+      const t = await ctx.ticket({ acceptanceCriteria: ["Note written", EVENT] });
+      const c = await ctx.agent(ctx.co.ceo.id);
+      const r = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "Note written; handing the check on.", followUps: [{ title: "Show the release note", assignee: "Dev", why: "Needs a release." }] } });
+      expect((r as { isError?: boolean }).isError, textOf(r)).toBeFalsy();
+      const all = await ctx.db.select().from(tickets);
+      const made = all.find((x) => x.title === "Show the release note")!;
+      const checks = all.filter((x) => x.checksTicketId === made.id);
+      expect(checks.map((x) => [x.checksCriterion, x.acceptanceCriteria, x.systemState])).toEqual([[2, [EVENT.text], "blocked"]]); // both criteria carried (neither reported), the event is 2nd
+      const deps = await ctx.db.select().from(ticketDependencies);
+      expect(deps.filter((d) => d.blockedTicketId === checks[0]!.id).map((d) => [d.blockerTicketId, d.until])).toEqual([[made.id, "merged"]]);
     });
 
     it("a follow-up whose carried criteria need no long watch opens no check ticket", async () => {

@@ -65,6 +65,16 @@ const TO_LIVE: Record<string, ReleaseHow> = {
   rolled_back: "rolled-back",
 };
 
+/** The company's live Release Manager: the template it was hired from, else its title, else its name. */
+export async function findReleaseManager(db: Db, companyId: string) {
+  const team = await db
+    .select({ id: agents.id, name: agents.name, title: agents.title, template: agents.template })
+    .from(agents)
+    .where(and(eq(agents.companyId, companyId), isNull(agents.retiredAt)))
+    .orderBy(asc(agents.createdAt));
+  return team.find((a) => a.template === "release-manager") ?? team.find((a) => a.title === "Release Manager") ?? team.find((a) => /^release manager$/i.test(a.name.split(" - ")[0]!.trim())) ?? null;
+}
+
 export const releaseLogService = (
   db: Db,
   deps: {
@@ -88,15 +98,7 @@ export const releaseLogService = (
   // shortcut: one pass at a time, so two observations of the same change can't both open a ticket.
   let busy = false;
 
-  /** The company's live Release Manager: the template it was hired from, else its title, else its name. */
-  async function releaseManagerOf(companyId: string) {
-    const team = await db
-      .select({ id: agents.id, name: agents.name, title: agents.title, template: agents.template })
-      .from(agents)
-      .where(and(eq(agents.companyId, companyId), isNull(agents.retiredAt)))
-      .orderBy(asc(agents.createdAt));
-    return team.find((a) => a.template === "release-manager") ?? team.find((a) => a.title === "Release Manager") ?? team.find((a) => /^release manager$/i.test(a.name.split(" - ")[0]!.trim())) ?? null;
-  }
+  const releaseManagerOf = (companyId: string) => findReleaseManager(db, companyId);
 
   /** Where the ticket goes: a project called Releases, else the company's newest open project. */
   async function releasesProjectId(companyId: string) {

@@ -43,8 +43,8 @@ The image install has not yet been run from start to finish on a real machine fo
 
 - a 64-bit machine (x86-64 or arm64) with at least 4 GB of memory, and Docker Engine with Docker Compose v2 (check with `docker compose version`). For agents to run, size it as in [What machine do I need](#what-machine-do-i-need).
 - internet access to the image registry, and to Anthropic if you use Claude Code
-- a GitHub or Gitea account, for the repositories your agents work in
-- an AI account: a Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic. A Claude Pro or Max plan is the easiest start, because the CEO is a Claude Code agent unless you change it.
+- only if your agents will work on code: a GitHub or Gitea account, for the repositories they work in. A team that works on documents and research does not need one.
+- an AI account: a Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic. A Claude Pro or Max plan is the easiest start, because the CEO is a Claude Code agent unless you change it. You pay for this account. Boss Man itself is free.
 - a computer with a web browser
 
 ### Which platforms work
@@ -100,12 +100,22 @@ The database image, `pgvector/pgvector`, always comes from Docker Hub, so that l
 Run this and every later command in the folder with the two files.
 
 ```sh Run in the folder with the files
-docker compose --env-file images.env run --rm setup
+docker compose --env-file images.env -f docker-compose.images.yml run --rm setup
 ```
 
 This writes the master key into a Docker volume called `config`, and the database password into one called `db-secret`. It is safe to run again: it never replaces a file that exists.
 
-**Back up both volumes**, and keep the copies off this machine. Without the master key, Boss Man cannot read your stored secrets again. Without the database password, the server cannot reach its database.
+**Back up both volumes**, and keep the copies off this machine. Without the master key, Boss Man cannot read your stored secrets again. Without the database password, the server cannot reach its database. After step 5, run these two in the same folder (they use the default project name `boss-man`; not yet run on a real install):
+
+```sh Copy the two key volumes into one file
+docker run --rm -v boss-man_config:/from/config:ro -v boss-man_db-secret:/from/db-secret:ro -v "$PWD":/to pgvector/pgvector:0.8.7-pg17-bookworm tar czf /to/boss-man-keys.tgz -C /from .
+```
+
+```sh Copy the database backups into a folder
+docker compose --env-file images.env -f docker-compose.images.yml cp backup:/backups/. ./boss-man-backups
+```
+
+Boss Man makes a database backup every day by itself (the newest 14 are kept on this machine, so copy them off now and then). Move `boss-man-keys.tgz` and the `boss-man-backups` folder to another machine or disk, and treat the keys file like a password. To restore onto a fresh install, follow "Daily database backup, copy-off and restore" in [`docs/35-install-from-images.md`](@repo/blob/main/docs/35-install-from-images.md).
 
 ### 4. Choose who can reach it
 
@@ -124,15 +134,15 @@ Keep the port off the internet. Skip this step if you only open Boss Man in a br
 ### 5. Start Boss Man
 
 ```sh Run in the folder with the files
-docker compose --env-file images.env up -d
+docker compose --env-file images.env -f docker-compose.images.yml up -d
 ```
 
 This starts Boss Man. Compose starts only the database, a small proxy and the updater; the updater then downloads the server, launcher, runner and network-guard images by their digests and makes the server and the launcher itself, so the first start takes a few minutes longer than later ones.
 
 :::worked
-`docker compose --env-file images.env ps` shows `db`, `server` and `launcher` running, and `http://<this machine>:3100` opens a Boss Man page. (Expected from the compose file; not yet seen on a real install.)
+`docker compose --env-file images.env -f docker-compose.images.yml ps` shows `db`, `server` and `launcher` running, and `http://<this machine>:3100` opens a Boss Man page. (Expected from the compose file; not yet seen on a real install.)
 
-If `ps` shows the server restarting, run `docker compose --env-file images.env logs server` to see why, and check the list under "If something goes wrong" below.
+If `ps` shows the server restarting, run `docker compose --env-file images.env -f docker-compose.images.yml logs server` to see why, and check the list under "If something goes wrong" below.
 :::
 
 ### 6. Make the owner account
@@ -163,7 +173,7 @@ You do not run `docker compose pull` or `up -d` for a release any more. Do not r
 - **`required variable BOSSMAN_REGISTRY is missing`.** You left out `--env-file images.env`.
 - **The server cannot read `master.key`, or the database says its password file is missing.** Run step 3 first.
 - **A pull is refused or "denied".** You may have hit Docker Hub's limit (step 2). Run `docker login` for that registry.
-- **The login page reloads.** `images.env` is missing `BOSSMAN_INSECURE_COOKIES=1` (step 4). Add it and run `docker compose --env-file images.env up -d`.
+- **The login page reloads.** `images.env` is missing `BOSSMAN_INSECURE_COOKIES=1` (step 4). Add it and run `docker compose --env-file images.env -f docker-compose.images.yml up -d`.
 
 Do not forward the web port on your router. For access from outside your home, use Tailscale (see [Add-ons](/guides/add-ons)).
 
@@ -175,8 +185,8 @@ The second option: build every image on your own machine from the code. Use it i
 
 - a 64-bit Linux machine with Docker Engine and Docker Compose v2 (check with `docker compose version`)
 - `git`, `openssl` and `curl` on that machine
-- a GitHub or Gitea account, for the repositories your agents work in
-- an AI account: a Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic. A Claude Pro or Max plan is the easiest start, because the CEO is a Claude Code agent unless you change it.
+- only if your agents will work on code: a GitHub or Gitea account, for the repositories they work in. A team that works on documents and research does not need one.
+- an AI account: a Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic. A Claude Pro or Max plan is the easiest start, because the CEO is a Claude Code agent unless you change it. You pay for this account. Boss Man itself is free.
 - a computer with a web browser on the same network
 
 Boss Man needs Linux because two safety features use the Linux kernel: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. Settings shows whether each one is working on your machine: the network guard under **Settings → Server and runner → This server**, and the agent fence under **Settings → Permissions → Agent fence**.

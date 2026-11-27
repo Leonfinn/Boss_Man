@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { ceoPlanWake, needsCeoPlan } from "@boss-man/shared";
-import { decisions, milestones as msTable, settings, ticketDependencies, tickets as ticketsTable, agents } from "../src/db/schema.js";
+import { decisions, milestones as msTable, settings, ticketDependencies, tickets as ticketsTable, agents, wakes as wakesTable } from "../src/db/schema.js";
 import { milestoneRiskService, reasonForWake } from "../src/services/milestone-risk.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
@@ -464,6 +464,117 @@ describe("milestone at risk: the wake is never lost (BOS-2627, kept through tell
     advance(60);
     expect(await svc().run()).toEqual({ woken: 0 });
     expect(c.woken).toHaveLength(2);
+  });
+
+  // BOS-2843: the scheduler saves a held wake as "deferred", not "queued" (scheduler.wake's hold; tick()'s quota, budget
+  // and limit holds move a queued one there). Before, only "queued" was read as waiting, so a held wake counted as told.
+  it("a wake the scheduler holds as deferred is sent again after the grace, once (BOS-2843)", async () => {
+    const c = await setup();
+    const { m } = await lateNow(c);
+    await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
+    const held = new Map<string, string>();
+    let nowAt = new Date("2026-10-16T09:00:00Z");
+    const advance = (minutes: number) => (nowAt = new Date(nowAt.getTime() + minutes * 60_000));
+    const svc = () =>
+      milestoneRiskService(c.db, {
+        planning: c.planning,
+        wake: async (input) => {
+          c.woken.push(input);
+          const id = `wake-${c.woken.length}`;
+          held.set(id, nowAt.toISOString());
+          return { id, outcome: "deferred" };
+        },
+        wakeStatus: async (id) => (held.has(id) ? { status: "deferred", createdAt: held.get(id)! } : { status: "launched", createdAt: nowAt.toISOString() }),
+        now: () => nowAt,
+      });
+    expect(await svc().run()).toEqual({ woken: 1 });
+    advance(5);
+    expect(await svc().run()).toEqual({ woken: 0 });
+    // Still held half an hour on: the CEO was never told, so it is sent again, saying so.
+    advance(26);
+    expect(await svc().run()).toEqual({ woken: 1 });
+    expect(c.woken[1]!.note).toContain("still plan it and record it");
+    // The second one starts: quiet from then on.
+    held.delete("wake-2");
+    advance(60);
+    expect(await svc().run()).toEqual({ woken: 0 });
+    expect(c.woken).toHaveLength(2);
+  });
+
+  it("a wake saved and later dropped by the scheduler is sent again on the next pass (BOS-2843)", async () => {
+    const c = await setup();
+    const { m } = await lateNow(c);
+    await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
+    const status = new Map<string, string>();
+    const at = (now: string) =>
+      milestoneRiskService(c.db, {
+        planning: c.planning,
+        wake: async (input) => {
+          c.woken.push(input);
+          const id = `wake-${c.woken.length}`;
+          status.set(id, "queued");
+          return { id, outcome: "queued" };
+        },
+        wakeStatus: async (id) => ({ status: status.get(id) ?? "launched", createdAt: "2026-10-16T09:00:00Z" }),
+        now: () => new Date(`${now}T09:00:00Z`),
+      });
+    expect(await at("2026-10-16").run()).toEqual({ woken: 1 });
+    // Saved as queued (so tellOnce counted it), then dropped before it started: the CEO was never told.
+    status.set("wake-1", "dropped");
+    expect(await at("2026-10-16").run()).toEqual({ woken: 1 });
+    status.set("wake-2", "launched");
+    expect(await at("2026-10-16").run()).toEqual({ woken: 0 });
+    expect(c.woken).toHaveLength(2);
+  });
+
+  it("a switched-on milestone with no work turns At risk because tickets were added, and the CEO is woken once (BOS-2843)", async () => {
+    const c = await setup();
+    const o = await c.objective();
+    const m = await c.milestone(o.id, "Ready for anyone to install", "2026-10-30");
+    await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
+    const started = new Set<string>();
+    const svc = () =>
+      milestoneRiskService(c.db, {
+        planning: c.planning,
+        wake: async (input) => (c.woken.push(input), { id: `wake-${c.woken.length}`, outcome: "queued" }),
+        wakeStatus: async (id) => ({ status: started.has(id) ? "launched" : "queued", createdAt: "2026-10-16T09:00:00Z" }),
+        now: () => new Date("2026-10-16T09:00:00Z"),
+      });
+    const status = async () => (await c.req("GET", "/api/roadmap?today=2026-10-16")).json()[0].objectives[0].milestones[0].status as string;
+    expect(await status()).not.toBe("at_risk");
+    expect(await svc().run()).toEqual({ woken: 0 });
+    // A review adds a batch of tickets to it: nothing finished lately and due within 4 weeks, so it turns At risk.
+    for (const title of ["Fix one", "Fix two", "Fix three"]) {
+      const made = await c.ticket(title, { milestoneId: m.id, state: "ready" });
+      await c.db.update(ticketsTable).set({ size: 2 }).where(eq(ticketsTable.id, made.id));
+    }
+    expect(await status()).toBe("at_risk");
+    expect(await svc().run()).toEqual({ woken: 1 });
+    started.add("wake-1");
+    expect(await svc().run()).toEqual({ woken: 0 });
+    expect(await svc().run()).toEqual({ woken: 0 });
+    expect(c.woken).toHaveLength(1);
+    expect(c.woken[0]!.note).toContain('"Ready for anyone to install"');
+    expect(c.woken[0]!.note).toContain("is now At risk");
+  });
+
+  it("through the server's own sweep pass and scheduler, tickets added to a switched-on milestone save one CEO wake (BOS-2843)", async () => {
+    const c = await setup();
+    const o = await c.objective();
+    // The real pass reads the real clock, so the date is set from it: due in 10 days, nothing finished, so At risk.
+    const due = new Date(Date.now() + 10 * 86_400_000).toISOString().slice(0, 10);
+    const m = await c.milestone(o.id, "Ready for anyone to install", due);
+    await c.req("PATCH", `/api/milestones/${m.id}`, { ceoManagesRisk: true });
+    const made = await c.ticket("Fix one", { milestoneId: m.id, state: "ready" });
+    await c.db.update(ticketsTable).set({ size: 2 }).where(eq(ticketsTable.id, made.id));
+    await c.req("POST", "/api/sweep");
+    await c.req("POST", "/api/sweep");
+    const rows = await c.db.select({ agentId: wakesTable.agentId, status: wakesTable.status, note: wakesTable.note }).from(wakesTable).where(eq(wakesTable.reason, "milestone at risk"));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.agentId).toBe(c.ceo.id);
+    expect(rows[0]!.note).toContain("is now At risk");
+    const [kept] = await c.db.select({ value: settings.value }).from(settings).where(eq(settings.key, `milestone_risk:${m.id}`));
+    expect(kept?.value).toMatchObject({ status: "at_risk", woke: true });
   });
 
   it("with no way to read the wake's row, a status change is still sent exactly once (BOS-2650)", async () => {

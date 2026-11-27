@@ -4,6 +4,9 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { figureText } from "@boss-man/shared";
 import type { Company, Decision } from "../api";
 import { useMediaQuery } from "../hooks";
+import { usePinned } from "../pinned-pages";
+import { SHORTCUT_ICONS } from "../shortcut-icons";
+import { CircleHelp, Pencil, TriangleAlert } from "lucide-react";
 import { Activity, BookOpen, ChevronDown, ChevronRight, ChevronsLeft, ChevronsRight, FolderGit2, Bell, GitMerge, Gavel, Handshake, Keyboard, LayoutDashboard, ListChecks, LogOut, Map, Menu as MenuIcon, MessageCircle, MessageSquare, Puzzle, Settings, ShieldCheck, Sparkles, Star, Users, Workflow as WorkflowIcon, type LucideIcon } from "lucide-react";
 import { art } from "../brand";
 import { SearchButton } from "./SearchPalette";
@@ -165,6 +168,8 @@ function CompanySwitcher({ companies, current, waiting, onPick, onCreate }: { co
  */
 export function Sidebar(props: {
   active: string;
+  /** The address parts on screen (e.g. ["settings", "c1", "updates"]), to mark the shortcut that is open. */
+  route?: string[];
   activeAgent?: string;
   activeProject?: string;
   companies: Company[];
@@ -172,6 +177,8 @@ export function Sidebar(props: {
   decisions: Decision[];
   /** (BOS-969) What needs the owner now, from the same server figure the Decisions page heading shows. */
   decisionsTally?: { open: number; waiting: number } | null;
+  /** (BOS-2818) Setup still open: its count, for the link at the top of the menu. */
+  setupOpen?: { done: number; total: number } | null;
   /** (BOS-1485) The same tally for every company, for the company switcher. */
   companyTallies?: Record<string, { open: number; waiting: number }>;
   unread: number;
@@ -270,6 +277,10 @@ export function Sidebar(props: {
   // badge reads exactly as the page, banner and dashboard write the same figure.
   const badge = (n: Item) =>
     n.id === "decisions" && badgeCount > 0 ? { value: badgeCount, label: `${figureText("decisions.needYou", badgeCount)}${props.decisionsTally && props.decisionsTally.waiting > 0 ? `, ${figureText("decisions.withTeam", props.decisionsTally.waiting)}` : ""}` } : n.id === "feedback" && props.feedback > 0 ? { value: props.feedback, label: figureText("feedback.toProcess", props.feedback) } : n.id === "merge-queue" && props.mergeStuck > 0 ? { value: props.mergeStuck, label: figureText("mergeQueue.lineStuck", props.mergeStuck), warn: true } : n.id === "merge-queue" && props.mergeWaiting > 0 ? { value: props.mergeWaiting, label: figureText("mergeQueue.inLine", props.mergeWaiting) } : n.id === "notifications" && props.unread > 0 ? { value: props.unread, label: figureText("notifications.unread", props.unread) } : null;
+  // BOS-2669: the owner's pinned pages. None pinned (or no provider, as in a bare menu): no section at all.
+  const pinned = usePinned();
+  const shortcutRows = pinned?.entries ?? [];
+  const hash = `#/${(props.route ?? []).join("/")}`;
   const itemLink = (n: Item) => {
     const b = badge(n);
     return (
@@ -302,6 +313,41 @@ export function Sidebar(props: {
       </div>
       <div id="nav-groups" className={`nav-groups${menu ? " open" : ""}`}>
         <div className="nav-scroll">
+        {props.setupOpen && !props.collapsed && (
+          <a className="side-setup" href="#/setup">
+            Setup: {props.setupOpen.done} of {props.setupOpen.total}
+          </a>
+        )}
+        {shortcutRows.length > 0 && (
+          <section className="side-shortcuts" aria-label="Shortcuts">
+            <div className="side-shortcuts-head">
+              <p className="side-shortcuts-title">Shortcuts</p>
+              {pinned && (
+                <button type="button" className="side-shortcuts-edit" data-edit-shortcuts aria-label="Edit shortcuts" onClick={() => pinned.openEditor()}>
+                  <Pencil size={13} strokeWidth={1.75} aria-hidden="true" />
+                  <span>Edit</span>
+                </button>
+              )}
+            </div>
+            <ul>
+              {shortcutRows.map((e) => {
+                const Icon = e.gone ? TriangleAlert : (SHORTCUT_ICONS[e.icon] ?? CircleHelp);
+                const here = e.gone ? hash === `#/shortcut-gone/${e.id}` : hash === e.address;
+                return (
+                  <li key={e.id}>
+                    <a className={`nav${pinned?.justAdded === e.id ? " just-added" : ""}${e.gone ? " gone" : ""}`} href={e.gone ? `#/shortcut-gone/${e.id}` : e.address} onClick={closeIfNarrow} title={e.gone ? `${e.name}: page no longer exists` : `Opens ${e.path}`} aria-current={here ? "page" : undefined}>
+                      <Icon size={18} strokeWidth={1.75} aria-hidden="true" />
+                      <span className="nav-label">
+                        {e.name}
+                        {e.gone && <small className="nav-here">Page no longer exists</small>}
+                      </span>
+                    </a>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        )}
         {BLOCKS.map((block, bi) => (
           <section key={bi} aria-label={["Overview", "Work", "Company"][bi]}>
             <ul>

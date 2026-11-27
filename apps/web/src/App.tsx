@@ -16,6 +16,7 @@ import { atTime, drainTiming, updateWaitExtras, waitingFor, wrapUpBannerText, ty
 import { inLineOf, MergesStuckBannerFor } from "./components/MergesStuckBanner";
 import { SearchPalette } from "./components/SearchPalette";
 import { Shortcuts } from "./components/Shortcuts";
+import { PinnedProvider, ShortcutGone } from "./pinned-pages";
 import { DEFAULT_PREFERENCES, PreferencesContext, type Preferences } from "./preferences";
 import type { OwnerPreferences } from "@boss-man/shared";
 
@@ -358,6 +359,23 @@ function Signed({ onLogout, username, initialPreferences }: { onLogout: () => vo
     `decisions-tally-${current?.id}`,
   );
   useEffect(() => decisionsTally.reload(), [current?.id]);
+  // (BOS-2818) "Setup: 2 of 5" at the top of the menu while setup is open: not dismissed, not all done.
+  const setupOpen = usePoll(
+    (signal) =>
+      current
+        ? api<{ dismissed: boolean }>("/api/setup-progress", { signal })
+            .then((p) =>
+              p.dismissed
+                ? null
+                : api<{ done: boolean }[]>(`/api/companies/${current.id}/setup-checklist`, { signal }).then((items) =>
+                    !items.length || items.every((i) => i.done) ? null : { done: items.filter((i) => i.done).length, total: items.length },
+                  ),
+            )
+            .catch(() => null)
+        : Promise.resolve(null),
+    60_000,
+    `setup-open-${current?.id}`,
+  );
   // (BOS-1485) The company switcher's figure for every company: the same tally call, once per company.
   const companyIds = (companies.data ?? []).map((c) => c.id);
   const companyTallies = usePoll(
@@ -389,17 +407,19 @@ function Signed({ onLogout, username, initialPreferences }: { onLogout: () => vo
     if (!firstLoad.current || companies.data === null) return;
     firstLoad.current = false;
     if (companies.data.length || page !== "dashboard") return;
-    void api<{ dismissed: boolean }>("/api/setup-progress").then((p) => {
-      if (!p.dismissed) go("setup");
+    void api<{ dismissed: boolean; left?: boolean }>("/api/setup-progress").then((p) => {
+      if (!p.dismissed && !p.left) go("setup");
     }, () => {});
   }, [companies.data, page, go]);
   return (
     <PreferencesContext.Provider value={preferences}>
+    <PinnedProvider companyId={companyId}>
     <div className={`app${collapsed ? " side-collapsed" : ""}`}>
       <Sidebar
         collapsed={collapsed}
         onToggleCollapsed={() => rememberCollapsed(!collapsed, setCollapsed)}
         narrow={narrow}
+        route={route}
         active={page === "funding" || page === "rules" || page === "secrets" ? "settings" : page}
         activeAgent={route[2]}
         activeProject={route[1]}
@@ -409,6 +429,7 @@ function Signed({ onLogout, username, initialPreferences }: { onLogout: () => vo
         onCreateCompany={createCompany}
         decisions={decisions.data ?? []}
         decisionsTally={decisionsTally.data}
+        setupOpen={setupOpen.data}
         companyTallies={companyTallies.data ?? undefined}
         unread={feed.data?.unread ?? 0}
         feedback={companyFigure(unprocessed.data, current?.id)}
@@ -471,6 +492,8 @@ function Signed({ onLogout, username, initialPreferences }: { onLogout: () => vo
           </Settings>
         ) : page === "engagements" ? (
           route[1] ? <Engagement id={route[1]} /> : <Engagements />
+        ) : page === "shortcut-gone" && route[1] ? (
+          <ShortcutGone id={route[1]} />
         ) : page === "setup" ? (
           <Setup companies={list} go={go} onChanged={companies.reload} />
         ) : page === "decisions" ? (
@@ -482,6 +505,7 @@ function Signed({ onLogout, username, initialPreferences }: { onLogout: () => vo
         </PageGuard>
       </main>
     </div>
+    </PinnedProvider>
     </PreferencesContext.Provider>
   );
 }

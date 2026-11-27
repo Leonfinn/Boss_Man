@@ -28,16 +28,17 @@ import { runnersService } from "./services/runners.js";
 import { connectionSummary } from "./services/runner-connections.js";
 import { allowsPrivate, type HostLookup, LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { watchCiTokenGrant } from "./services/ci-identity-card.js";
-import { AnswerError, clearOwnerTodo, decisionsService, setDecisionSettledListener, setOwnerTodoFacts } from "./services/decisions.js";
+import { AnswerError, UPDATE_RUNNERS, clearOwnerTodo, decisionsService, setDecisionSettledListener, setOwnerTodoFacts } from "./services/decisions.js";
 import { githubWatchService, WATCH_TOKEN_ENV } from "./services/github-watch.js";
 import { markOwnerOpened, recentClosedNotices } from "./services/closed-notice.js";
-import { getHold, holdBlocksStarts, maintenanceService, runnerCardHold } from "./services/maintenance.js";
-import { runnerBusy, runnerChecks, serverWaitChecks, updateWaitCountsRun, workerChecks } from "./services/runner-busy.js";
-import { activeWaits, runnerHoldWait } from "./services/update-waits.js";
+import { getHold, holdBlocksStarts, maintenanceService } from "./services/maintenance.js";
+import { runnerBusy, runnerChecks, serverWaitChecks, updateCheckMarks, updateWaitCountsRun, workerChecks } from "./services/runner-busy.js";
+import { activeWaits, checkCountingWaits, runnerHoldWait } from "./services/update-waits.js";
 import { runnerWatchService } from "./services/runner-watch.js";
 import { runnerReportService } from "./services/runner-report.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
 import { serverStatusService } from "./services/server-status.js";
+import { WRAP_LINE } from "./services/watch-triggers.js";
 import { failuresForStatus } from "./services/merge-failures.js";
 import { raiseCostAlert } from "./services/cost-check.js";
 import { addonsService, mergeHostAddons, unknownAddons } from "./services/addons.js";
@@ -122,7 +123,7 @@ import { meaningBriefLines, ticketMeaningEmbedLoop } from "./services/ticket-mea
 import { SecondOpinionSettings, secondOpinionService } from "./services/second-opinion.js";
 import { wikiService } from "./services/wiki.js";
 import { UPDATE_ALERT_REASON, DEFAULT_LIMITS, OWNER_OVERRIDE_PRIORITY, schedulerService, type Limits } from "./services/scheduler.js";
-import { memoryLine, readRunnerAgents } from "./services/check-limit.js";
+import { checksRunHere, memoryLine, readRunnerAgents } from "./services/check-limit.js";
 import { exportCompany } from "./services/company-export.js";
 import { applyPackage, ImportError, previewPackage, readPackage } from "./services/company-import.js";
 import { mcpRoutes } from "./mcp.js";
@@ -177,7 +178,8 @@ const OWNER_TZ = timeZoneOr(process.env.TZ);
 /** Set on the blue/green colours only (deploy/truenas-bluegreen.yml); null on a single server. */
 const colour = () => (process.env.BOSSMAN_COLOUR === "blue" || process.env.BOSSMAN_COLOUR === "green" ? process.env.BOSSMAN_COLOUR : null);
 const STARTED_AT = new Date().toISOString();
-const SERVER_VERSION = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
+// BOS-2799: an image install is told its release by the updater (BOSSMAN_VERSION); package.json stays 0.0.0 until the package is stamped.
+const SERVER_VERSION = process.env.BOSSMAN_VERSION?.trim() || (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
 
 export type AppOptions = {
   db: Db;
@@ -423,9 +425,13 @@ export async function buildApp(opts: AppOptions) {
   const checks = checkDispatcher(db, {
     // BOS-1471: while a runner drain is under way (image update or setting change) no new check goes to a runner about to be swapped.
     // BOS-2108: which wait it is, so the dispatcher stops only what that wait's WAIT_RULES row blocks (a worker keeps its quick checks).
+    // BOS-2786: a wrap-up (the owner's or Boss Man's own) is its own row, which blocks every runner check as its message to
+    // agents says ("no new checks either"); it used to be read through runnerCardHold, which leaves a wrap-up out, so merge
+    // and quick checks kept starting during one.
     drainPending: async () => {
-      const h = runnerCardHold(await getHold(db));
-      return h && holdBlocksStarts(h, opts.now?.() ?? new Date()) ? runnerHoldWait(h) : null;
+      const h = await getHold(db);
+      if (!h || !holdBlocksStarts(h, opts.now?.() ?? new Date())) return null;
+      return h.kind === "wrapup" ? "wrapup" : runnerHoldWait(h);
     },
     scanList: () => privateDetails.forRunner(),
     scanListWarning,
@@ -537,6 +543,8 @@ export async function buildApp(opts: AppOptions) {
       });
     },
     onReleased: (f) => notes.notify({ companyId: f.companyId, level: "note", title: `Released: ${f.title}`, body: "Every ticket delivering it is done.", link: `#/features/${f.companyId}/${f.id}` }),
+    // BOS-2686: a merge is live once the server runs it; a fresh server has nothing recorded yet, so it is its own commit.
+    liveCommit: () => process.env.BOSSMAN_COMMIT || null,
   });
   // The scheduler is made below; the chat only needs it once a message is sent.
   const trace = chatTraceService();
@@ -567,6 +575,8 @@ export async function buildApp(opts: AppOptions) {
     limits: opts.limits,
     workspaceRoot: opts.workspaceRoot,
     now: opts.now,
+    // BOS-2780: runsSvc is built further down; this only runs when a held Ready ticket ends an idle run.
+    cancelRun: (runId, reason) => runsSvc.cancel(runId, undefined, reason),
     quietHours: async () => (await notes.getSettings()).quietHours,
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     tickOnWake: opts.tickOnWake,
@@ -698,6 +708,7 @@ export async function buildApp(opts: AppOptions) {
     netguardAllow,
     runLimits: (id) => scheduler.runLimits(id),
     mergeFailures: (id) => failuresForStatus(db, id),
+    holdRecords: async () => (await maintenance.history(5)).map((r) => ({ startedAt: r.startedAt.toISOString(), kind: r.kind, endedAt: r.endedAt?.toISOString() ?? null, endTitle: r.endTitle, wrapUpLines: r.events.filter((e) => e.text === "Wrap-up asked" || WRAP_LINE.test(e.text)).map((e) => `${e.at}: ${e.text}`) })),
     mergeTrain: (id) => mergeTrainStatus(db, id, undefined, (ticketId) => review.seatPhase(ticketId)),
     // BOS-2119: read when server_status is asked, after `review` below is built.
     landingTurns: (id) => review.landingTurnStatus(id),
@@ -1173,6 +1184,7 @@ export async function buildApp(opts: AppOptions) {
       return r;
     },
     composeCmd: () => hostFacts.value("compose.cmd"),
+    imageInstall: () => process.env.BOSSMAN_IMAGE_INSTALL === "1",
     log: (m) => app.log.warn(m),
   });
   // BOS-2674: a host warning seen in 2 reports in a row tells the CEO; the panel reads what is being done about each one.
@@ -1226,6 +1238,8 @@ export async function buildApp(opts: AppOptions) {
     // BOS-1602: train seats count only slots that can run a merge check.
     checkCapacity: (companyId) => checks.mergeCapacity(companyId),
     alert: (input) => alerts.raise(input as Parameters<typeof alerts.raise>[0]),
+    // BOS-2686: when a merge goes live, the features its ticket delivers get their release rule worked out again.
+    onLive: (ticketId) => feedback.syncFeaturesOf([ticketId]),
   });
   review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
   // The main-CI watcher (BOS-1072): a ticket for each distinct failing step of GitHub CI on main.
@@ -1306,6 +1320,8 @@ export async function buildApp(opts: AppOptions) {
       const h = await getHold(db);
       return !!h && h.kind !== "wrapup";
     },
+    // BOS-2786: a wrap-up holds new checks too (drainPending above), so a waiting merge names it, not "a slot".
+    wrapUpOn: async () => (await getHold(db))?.kind === "wrapup",
     launcherOn: () => launch.enabled,
     // BOS-2359: the landing turns and the usual GitHub wait, for the holder's line and the estimates.
     landingTurns: (companyId) => review.landingTurnStatus(companyId),
@@ -1979,7 +1995,7 @@ export async function buildApp(opts: AppOptions) {
       const [r] = await db.select().from(runnersTable).where(eq(runnersTable.companyId, id));
       const launcher = await launch.status(id);
       // BOS-1498: what this company's runner is given and why, for the wizard's runner step.
-      const memory = launcher ? memoryLine(await launch.checks(), launcher.slug) : null;
+      const memory = launcher ? memoryLine(await launch.checks(), launcher.slug, await checksRunHere(db, await checkWorkersSvc.list(), id)) : null;
       if (!r) return { registered: false, launcher, memoryLine: memory };
       const report = await runnerReport.companyPanel(id);
       // One entry per safety feature for Settings' cards (DR-049 point 1): proven, or the owner chose to run without it on this platform.
@@ -2453,14 +2469,26 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/companies/:id/dashboard", async (req) => dashboard.get(IdParam.parse(req.params).id));
 
     // The merge queue, read-only (BOS-587): what is running now, what waits and how the last ones ended.
-    owner.get("/api/companies/:id/merge-queue", async (req) => mergeQueue.get(IdParam.parse(req.params).id));
+    // BOS-2861: while an update drains, which of the company's running checks it waits for, from the waits' own reads
+    // (runner-busy.ts updateCheckMarks). Absent when no such wait is on; a failed read leaves the rows unmarked, never wrong.
+    const updateWaitMarks = async (companyId: string) => {
+      const waits = await checkCountingWaits(db);
+      if (!waits.runner && !waits.server) return {};
+      const checks = await updateCheckMarks(db, companyId, waits);
+      return { updateWait: { update: waits.runner ? ("runner" as const) : ("server" as const), checks } };
+    };
+    owner.get("/api/companies/:id/merge-queue", async (req) => {
+      const id = IdParam.parse(req.params).id;
+      const [view, marks] = await Promise.all([mergeQueue.get(id), updateWaitMarks(id).catch(() => ({}))]);
+      return { ...view, ...marks };
+    });
     // The live check queue, for the Merge queue page's "Queued checks" tab (BOS-1174). Read-only.
     owner.get("/api/companies/:id/check-queue", async (req) => {
       const id = IdParam.parse(req.params).id;
       const queue = await checkQueueSvc.list(id, new Date(), await checks.capacity(id), await checks.machines(id));
       // R46: "free, not taking X because …" for every machine with a free slot that declined a job it could take.
       // BOS-1942: the server's own host name, so "Running on this server (name)" reads the same as on the Merges tab.
-      return { ...queue, serverHost: await hostFacts.serverHost().catch(() => null), idleSlots: (await checkIdle.view(id)).map(idleView) };
+      return { ...queue, serverHost: await hostFacts.serverHost().catch(() => null), idleSlots: (await checkIdle.view(id)).map(idleView), ...(await updateWaitMarks(id).catch(() => ({}))) };
     });
     // BOS-1517: one ticket's status line for its page; null when it isn't in the merge pipeline.
     owner.get("/api/companies/:id/merge-queue/:ticketId/status", async (req) => {
@@ -2798,7 +2826,7 @@ export async function buildApp(opts: AppOptions) {
     });
 
     // Scheduling and kill switches, the runner update hold, self-deploy, restart and deploy targets (R30, R14, R15).
-    serverAdminRoutes(owner, { db, scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun: (runId) => runsSvc.cancel(runId), activeWaits: () => currentUpdateWaits(), releaseWatch });
+    serverAdminRoutes(owner, { db, scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun: (runId) => runsSvc.cancel(runId), activeWaits: () => currentUpdateWaits(), releaseWatch, approveRunnerCard: async (id, req) => decisionsSvc.answer(id, UPDATE_RUNNERS, { by: await ownerName(req), via: "approved by owner via Updates panel" }) });
 
     // The decision queue (R20), ranked, with what each row holds up.
     owner.get("/api/decisions", async () => decisionsSvc.queue());
@@ -2853,7 +2881,9 @@ export async function buildApp(opts: AppOptions) {
         .object({
           answer: z.string().trim().min(1).max(OWNER_MESSAGE_MAX),
           assigneeAgentId: Uuid.optional(),
-          note: z.string().trim().max(2000).optional(),
+          // BOS-2798: a note can carry pasted command output, which the raiser's wake gets whole; 2000 refused most logs.
+          // What reads it for a short field (a lesson, a change reason) caps or checks it there.
+          note: z.string().trim().max(20_000).optional(),
           reasonLink: z.string().trim().max(400).optional(),
           custom: z.boolean().optional(),
           alwaysScope: z.enum(["agent", "company"]).optional(),
@@ -3047,5 +3077,5 @@ export async function buildApp(opts: AppOptions) {
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
   /** BOS-2159: removes login rows past their expiry (they are refused already; this stops the table growing). Returns how many. */
   const sweepExpiredSessions = async () => (await db.delete(sessions).where(lte(sessions.expiresAt, new Date())).returning({ h: sessions.tokenHash })).length;
-  return { app, webhooks, sweepExpiredSessions, mailer, weeklySummary, launcher: launch, githubWatch, memory, serverHealth, dailyBackup, hostWarnings, checks, releaseLog, mainCi, secretScan, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, planning: roadmapPlanning, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, ticketMeaningEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
+  return { app, webhooks, sweepExpiredSessions, mailer, weeklySummary, launcher: launch, githubWatch, memory, serverHealth, dailyBackup, hostWarnings, checks, releaseLog, mainCi, secretScan, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, planning: roadmapPlanning, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, ticketMeaningEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer, syncFeatures: (ids: Array<string | null | undefined>) => feedback.syncFeaturesOf(ids) };
 }

@@ -725,6 +725,66 @@ describe("scheduler", () => {
     expect(newWake!.runId).toBeNull();
   });
 
+  // BOS-2780: the 26-27 Nov lane case. Basil's run stayed open on a ticket already in review, so his Ready ticket never started.
+  describe("an idle run on a finished ticket holds the agent's slot (BOS-2780)", () => {
+    async function laneCase() {
+      ctx = await setup();
+      const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Basil" })).json();
+      const old = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Old tests ticket" })).json();
+      const next = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Next tests ticket" })).json();
+      await ctx.db.update(tickets).set({ assigneeAgentId: worker.id, systemState: "in_progress" }).where(eq(tickets.id, old.id));
+      await ctx.db.update(tickets).set({ assigneeAgentId: worker.id, systemState: "ready" }).where(eq(tickets.id, next.id));
+      await ctx.db.delete(wakes);
+      await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, ticketId: old.id, reason: "assigned", priority: 2 });
+      await ctx.tick();
+      expect(ctx.commands).toHaveLength(1);
+      const oldRunId = ctx.commands[0]!.runId;
+      return { worker, old, next, oldRunId };
+    }
+    const nudgeAbout = (c: Awaited<ReturnType<typeof laneCase>>) => ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: c.worker.id, ticketId: c.next.id, reason: "nudge", priority: 2, note: "Ready, no run started" });
+    const cancels = () => ctx.sent.filter((c) => c.type === "run.cancel");
+
+    it("ends a run whose ticket sat in review, so the Ready ticket's wake starts on that ticket", async () => {
+      const c = await laneCase();
+      await ctx.db.update(tickets).set({ systemState: "review", stateChangedAt: new Date(Date.now() - 3_600_000) }).where(eq(tickets.id, c.old.id));
+      await nudgeAbout(c);
+      await ctx.tick();
+      expect(cancels()).toEqual([expect.objectContaining({ runId: c.oldRunId })]);
+      expect(ctx.commands).toHaveLength(1); // still the old run, until the runner confirms it ended
+      await ctx.endRun(c.oldRunId);
+      await ctx.tick();
+      expect(ctx.commands).toHaveLength(2);
+      expect(ctx.commands[1]!.prompt).toContain("Next tests ticket");
+      const [run] = await ctx.db.select().from(runs).where(eq(runs.id, ctx.commands[1]!.runId));
+      expect(run!.ticketId).toBe(c.next.id);
+    });
+
+    it("leaves a run alone while its ticket only just went to review", async () => {
+      const c = await laneCase();
+      await ctx.db.update(tickets).set({ systemState: "review", stateChangedAt: new Date() }).where(eq(tickets.id, c.old.id));
+      await nudgeAbout(c);
+      await ctx.tick();
+      expect(cancels()).toHaveLength(0);
+    });
+
+    it("leaves a run alone while its ticket is still in progress", async () => {
+      const c = await laneCase();
+      await ctx.db.update(tickets).set({ stateChangedAt: new Date(Date.now() - 3_600_000) }).where(eq(tickets.id, c.old.id));
+      await nudgeAbout(c);
+      await ctx.tick();
+      expect(cancels()).toHaveLength(0);
+    });
+
+    it("leaves a run alone when its ticket has a wake of its own waiting", async () => {
+      const c = await laneCase();
+      await ctx.db.update(tickets).set({ systemState: "review", stateChangedAt: new Date(Date.now() - 3_600_000) }).where(eq(tickets.id, c.old.id));
+      await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: c.worker.id, ticketId: c.old.id, reason: "check_result", priority: 2 });
+      await nudgeAbout(c);
+      await ctx.tick();
+      expect(cancels()).toHaveLength(0);
+    });
+  });
+
   it("drops older unstarted wakes for the same ticket and reason, keeping the newest (BOS-1555)", async () => {
     ctx = await setup({ agent: 5 });
     const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();

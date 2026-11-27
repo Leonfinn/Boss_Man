@@ -3,9 +3,9 @@
 // BOS-993 pushed the setting to the launcher only when the owner changed it or a runner was recreated. A launcher that lost its copy
 // (a rebuilt or replaced launcher with no saved file) fell back to 1 slot, the server never sent the setting again, and the panel
 // showed "1 at once" with no reason because the launcher's number was not the setting it had been sent. This service closes that gap.
-import { eq } from "drizzle-orm";
+import { and, eq, isNotNull } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { settings } from "../db/schema.js";
+import { projects, settings } from "../db/schema.js";
 import type { LauncherChecks } from "./launcher.js";
 
 type RunLimits = { instance: number; company: number; background: number };
@@ -46,13 +46,51 @@ const gb = (b: number) => `${Math.round((b / 1024 ** 3) * 10) / 10} GB`;
  * is given and why. When the company's runner (or, with no slug, any runner) still has another size, it says so first, because
  * the new size only applies once the runner is recreated. Null when the launcher is off, unreachable or too old to say.
  */
-export function memoryLine(lc: LauncherChecks | null, slug?: string): string | null {
+export function memoryLine(lc: LauncherChecks | null, slug?: string, checksHere = true): string | null {
   if (!lc?.why) return null;
+  const line = capacityLine(lc, checksHere) ?? lc.why;
   const mine = lc.runners.filter((r) => slug === undefined || r.slug === slug);
   const off = mine.filter((r) => r.memoryBytes !== lc.memoryBytes);
-  if (!off.length) return lc.why;
+  if (!off.length) return line;
   const now = [...new Set(off.map((r) => gb(r.memoryBytes)))].join(" or ");
-  return `Has ${now} now; from its next restart, ${lc.why}`;
+  return `Has ${now} now; from its next restart, ${line}`;
+}
+
+/** BOS-1498 sizing, the same as the launcher's: 2 GB for the runner, 1 GB per agent, 3 GB per check. */
+const BASE_GB = 2;
+const AGENT_GB = 1;
+const CHECK_GB = 3;
+const agentsWord = (k: number) => `${k} ${k === 1 ? "agent" : "agents"}`;
+
+/**
+ * BOS-2802: leads with what the machine can run ("This machine can run 4 agents at once"), explains a check once, and says what to
+ * change when the saved settings don't fit. `checksHere` is false when this company has no check to run on its runner (no code
+ * project, or a check worker takes them all): then checks are not counted at all. Null when the launcher didn't send the
+ * machine's limit (an older one, or before it has the agents number): the caller falls back to the launcher's own line.
+ */
+function capacityLine(lc: LauncherChecks, checksHere: boolean): string | null {
+  if (typeof lc.ceilingBytes !== "number" || typeof lc.agents !== "number") return null;
+  const room = Math.floor(lc.ceilingBytes / 1024 ** 3) - BASE_GB;
+  const alone = Math.max(0, Math.floor(room / AGENT_GB));
+  if (!checksHere) {
+    const fit = lc.agents <= alone;
+    return `This machine can run ${agentsWord(alone)} at once.${fit ? "" : ` Agents at once is set to ${lc.agents}: lower it to ${alone}.`}`;
+  }
+  const withCheck = Math.floor((room - CHECK_GB) / AGENT_GB);
+  const what = " (A check is an automated test run of code changes before they merge; only code projects need one.)";
+  if (withCheck < 1) return `This machine can run ${agentsWord(alone)} at once, with no room for a check beside them.${what}`;
+  const lower = lc.agents > withCheck ? ` Agents at once is set to ${lc.agents}: lower it to ${withCheck} to keep room for a check.` : "";
+  return `This machine can run ${agentsWord(alone)} at once, or ${agentsWord(withCheck)} plus 1 check.${what}${lower}`;
+}
+
+/**
+ * BOS-2802: whether checks run on this machine's runner: some project (of this company, or of any when `companyId` is left out)
+ * has a git repo, and no check worker is set up to take all of that company's checks (enabled, takes merges and quick checks).
+ * A knowledge-work company has no repo, so it never has a check to run.
+ */
+export async function checksRunHere(db: Db, workers: { companies: { id: string }[]; enabled: boolean; takes: string }[], companyId?: string): Promise<boolean> {
+  const rows = await db.selectDistinct({ companyId: projects.companyId }).from(projects).where(and(isNotNull(projects.repoUrl), companyId ? eq(projects.companyId, companyId) : undefined));
+  return rows.some((r) => !workers.some((w) => w.enabled && w.takes === "both" && w.companies.some((c) => c.id === r.companyId)));
 }
 
 type Deps = {

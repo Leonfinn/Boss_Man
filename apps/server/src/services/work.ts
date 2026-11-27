@@ -31,6 +31,7 @@ import { fixesLiveProblem } from "./decisions.js";
 import { hiddenWhileRechecked } from "./card-validity.js";
 import { cantMoveSql, isWorkingRun, wipExemptKind } from "./agent-wip.js";
 import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, wakes, watchdogFlags, workflowColumns } from "../db/schema.js";
+import { baselineRefusal } from "./hand-offs.js";
 import { looksStuck, type StuckFlag } from "./board-stuck.js";
 import { SCRUM_MASTER_DUTY } from "./watchdog.js";
 import { checkQueue } from "./check-queue.js";
@@ -86,7 +87,9 @@ type TicketPatch = {
   size?: TaskSize | null;
   /** The feature request this ticket delivers. */
   featureId?: string | null;
-  /** Makes this a sub-task of that task: it joins the parent's feature and the parent waits on it. Null on an update takes it out. */
+  /** BOS-2682: why a ticket may join a released (baselined) feature, e.g. a bug fix that restores what it promised. */
+  featureExceptionReason?: string | null;
+  /** Makes this a sub-task of that task: it inherits the parent's feature when that is allowed (BOS-2682) and the parent waits on it. Null on an update takes it out. */
   parentTicketId?: string | null;
   /** Moves the ticket, with its sub-tasks, to another project in the company (update only). */
   projectId?: string;
@@ -239,6 +242,16 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
   async function assertFeatureInCompany(id: string, companyId: string) {
     const [f] = await db.select({ id: features.id }).from(features).where(and(eq(features.id, id), eq(features.companyId, companyId)));
     if (!f) throw new WorkError(422, "That feature isn't in this company.");
+  }
+
+  /** BOS-2682: why joining a released (baselined) feature may be an exception, kept on the ticket; null when fine. */
+  async function featureJoinCheck(featureId: string | null | undefined, exceptionReason: string | undefined | null, companyId: string): Promise<string | null> {
+    if (!featureId) return null;
+    const [f] = await db.select({ title: features.title, status: features.status }).from(features).where(and(eq(features.id, featureId), eq(features.companyId, companyId)));
+    if (!f) throw new WorkError(422, "That feature isn't in this company.");
+    const refusal = baselineRefusal({ id: featureId, ...f }, exceptionReason);
+    if (refusal) throw new WorkError(409, refusal);
+    return f.status === "released" ? (exceptionReason?.trim() ?? null) : null;
   }
 
   /**
@@ -595,7 +608,10 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       if (badFix) throw new WorkError(400, badFix);
       const parent = input.parentTicketId ? await parentOf(input.parentTicketId, p.companyId) : null;
       if (parent) await assertLinkWriteAllowed(p.companyId, [parent.id], input.createdByAgentId ?? null);
+      // BOS-2682: a sub-task stays with its parent (the parent's feature is not new work on a released one); any other
+      // ticket joining a released feature needs a reason.
       const featureId = parent ? parent.featureId : (input.featureId ?? null);
+      const featureExceptionReason = parent ? null : await featureJoinCheck(featureId, input.featureExceptionReason, p.companyId);
       const featureP1 = featureId ? !!(await db.select({ p: features.priorityOne }).from(features).where(eq(features.id, featureId)))[0]?.p : false;
       const col = await placement(projectId, { columnId: input.columnId, state: input.state }, { overLimit: input.overLimit });
       // BOS-1571: a feature's ticket, or one with owner setup steps, carries the usability gate from the start.
@@ -634,6 +650,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         })
         .returning();
       await record(db, { companyId: p.companyId, ticketId: t!.id, kind: "ticket_created", summary: `Created "${t!.title}" in ${t!.systemState}${t!.assigneeAgentId ? ", assigned" : ""}`, at: now() });
+      // BOS-2682: joining a released (baselined) feature is only for an exception, and the reason is kept on the ticket.
+      if (featureExceptionReason && featureId) await record(db, { companyId: p.companyId, ticketId: t!.id, agentId: input.createdByAgentId ?? null, kind: "reorganised", summary: `Joined the released feature "${(await db.select({ title: features.title }).from(features).where(eq(features.id, featureId)))[0]?.title ?? featureId}" as an exception: ${featureExceptionReason}`, at: now() });
       if (parent) await this.waitOnSubtask(parent, t!.id, input.createdByAgentId ?? null);
       if (featureId) await hooks.onFeature?.(featureId);
       if (t!.assigneeAgentId && t!.systemState !== "done") await hooks.onAssigned?.(t!);
@@ -774,7 +792,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       if (patch.milestoneId) await assertLinkInCompany("milestone", patch.milestoneId, t.companyId);
       if (patch.keyResultId) await assertLinkInCompany("keyResult", patch.keyResultId, t.companyId);
       if (patch.featureId) await assertFeatureInCompany(patch.featureId, t.companyId);
-      const { overLimit: _ignored, internal: _internal, reviewRound: _round, moveReason: _why, expectedVersion: _v, titleLoaded: _tl, bodyLoaded: _bl, acceptanceCriteriaLoaded: _acl, state: _s, columnId: _c, projectId: _p, parentTicketId: newParent, ...fields } = patch;
+      const { overLimit: _ignored, internal: _internal, reviewRound: _round, moveReason: _why, expectedVersion: _v, titleLoaded: _tl, bodyLoaded: _bl, acceptanceCriteriaLoaded: _acl, state: _s, columnId: _c, projectId: _p, parentTicketId: newParent, featureExceptionReason: exceptionGiven, ...fields } = patch;
       const dest = patch.projectId && patch.projectId !== t.projectId ? await project(patch.projectId) : null;
       const kids = dest || newParent ? await db.select().from(tickets).where(eq(tickets.parentTicketId, t.id)) : [];
       if (dest) {
@@ -792,8 +810,12 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         if (parent.id === t.id) throw new WorkError(422, "A ticket can't be its own parent.");
         if (kids.length) throw new WorkError(422, "It has sub-tasks of its own, so it can't become a sub-task.");
         if (parent.projectId !== (dest?.id ?? t.projectId)) throw new WorkError(422, "The parent task is in another project. Move the parent, or move this ticket to the parent's project in the same call.");
+        // BOS-2682: a sub-task stays with its parent, and the parent's feature is not new work on it.
         fields.featureId = parent.featureId;
       }
+      // BOS-2682: joining a released (baselined) feature needs an exception reason. A ticket already on that feature
+      // is not joining it again, so its other writes are not held up.
+      const featureExceptionReason = patch.featureId && patch.featureId !== t.featureId ? await featureJoinCheck(patch.featureId, exceptionGiven, t.companyId) : null;
       // BOS-1516: switching urgent off (by anyone) drops the owner's mark too; turning it on keeps whatever the caller said (agents never set it).
       if (patch.urgent === false) fields.urgentByOwner = false;
       if (dest && t.parentTicketId && newParent === undefined) {
@@ -878,6 +900,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         if (parent && updated!.systemState !== "done") await this.waitOnSubtask(parent, t.id, actor);
         await record(db, { companyId: t.companyId, ticketId: t.id, kind: "parent", summary: parent ? `Now a sub-task of "${parent.title}"` : "No longer a sub-task", at: now() });
       }
+      // BOS-2682: the reason for joining a released (baselined) feature is kept on the ticket.
+      if (featureExceptionReason && patch.featureId) await record(db, { companyId: t.companyId, ticketId: t.id, agentId: actor ?? undefined, kind: "reorganised", summary: `Joined the released feature "${(await db.select({ title: features.title }).from(features).where(eq(features.id, patch.featureId)))[0]?.title ?? patch.featureId}" as an exception: ${featureExceptionReason}`, at: now() });
       if (updated!.assigneeAgentId !== t.assigneeAgentId) {
         const [to] = updated!.assigneeAgentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, updated!.assigneeAgentId)) : [];
         await record(db, { companyId: t.companyId, ticketId: t.id, kind: "assigned", agentId: patch.byAgentId ?? undefined, summary: `Assigned to ${to?.name ?? "nobody"}`, at: now() });

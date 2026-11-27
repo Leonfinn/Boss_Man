@@ -477,7 +477,8 @@ export async function notifyChecks(this: ReviewSelf, ctx: ReviewCtx, ticketId: s
  * do what it should. Boss Man opens the follow-up itself, so it is never a bare title nobody owns (BOS-542):
  * what failed and what was reported, the merged ticket's project, risk and feature, its assignee (the CEO
  * when it has none), the failed checks as its criteria, and a link each way. The CEO is told. Returns the
- * new ticket, or null when nothing failed.
+ * new ticket, or null when nothing failed. BOS-2682: the feature is NOT inherited: a delivered feature is
+ * baselined, and a fix to live work is filed with no feature so the feature can close.
  */
 export async function followUpFailedChecks(this: ReviewSelf, ctx: ReviewCtx, ticketId: string, failed: string[], reported: string, byAgentId: string | null) {
   const { db, deps, tellCeo } = ctx;
@@ -509,7 +510,7 @@ export async function followUpFailedChecks(this: ReviewSelf, ctx: ReviewCtx, tic
     state: "ready",
     overLimit: true,
     assigneeAgentId,
-    featureId: t.featureId,
+    featureId: null,
     milestoneId: t.milestoneId,
     urgent: t.urgent,
     acceptanceCriteria: failed.map((text) => ({ text, after: "merge" as const })),

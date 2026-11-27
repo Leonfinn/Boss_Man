@@ -12,6 +12,7 @@ import { redact, ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { companies, meaningEmbeddings, ownerChatMessages, ticketMessages, tickets } from "../db/schema.js";
 import type { Embedder, SemanticHit } from "./wiki-semantic.js";
+import { stripCodeNotes } from "./reply-notes.js";
 
 /** How long a meaning search waits for the provider before callers use word search alone. */
 export const TICKET_MEANING_TIMEOUT_MS = 3000;
@@ -171,7 +172,7 @@ async function adviceNear(db: Db, companyId: string, q: { e: Embedder; v: number
   for (const n of kept) {
     const c = chats.find((x) => x.id === n.sourceId);
     const m = comments.find((x) => x.id === n.sourceId);
-    if (n.kind === "advice_chat" && c) out.push({ kind: "chat", sourceId: c.id, text: c.text, at: c.at, ticketRef: null, score: n.score });
+    if (n.kind === "advice_chat" && c) out.push({ kind: "chat", sourceId: c.id, text: stripCodeNotes(c.text), at: c.at, ticketRef: null, score: n.score });
     if (n.kind === "advice_comment" && m) out.push({ kind: "comment", sourceId: m.id, text: m.text, at: m.at, ticketRef: ticketRef(m.prefix, m.number), score: n.score });
   }
   return out.slice(0, limit);

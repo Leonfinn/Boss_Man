@@ -1858,6 +1858,12 @@ export const features = pgTable(
     createdAt: createdAt(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     releasedAt: timestamp("released_at", { withTimezone: true }),
+    /**
+     * BOS-2686: when the feature first went live. The first ticket that delivers it is live once it is done and live,
+     * or once this is set. Tickets on the feature from before this are delivery work; one created after it is a
+     * follow-up, which shows on the feature but neither holds it nor reopens it.
+     */
+    liveBaselineAt: timestamp("live_baseline_at", { withTimezone: true }),
     /** When to ask whether the released feature moved its goal. Set once, on the first release, and never again. */
     goalCheckDueAt: timestamp("goal_check_due_at", { withTimezone: true }),
     /** Set when that question has been put to the owner. */
@@ -2417,8 +2423,11 @@ export const ownerPreferences = pgTable(
       .references(() => owners.id, { onDelete: "cascade" }),
     /** The single-letter-key switch (BOS-2671 3d); on until turned off. */
     singleLetterKeys: boolean("single_letter_keys").notNull().default(true),
-    /** BOS-2669 part 3: the page ids the owner pinned to the menu, in their order. */
-    pinnedPages: jsonb("pinned_pages").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+    /** BOS-2669 part 3: the pages the owner pinned to the menu, in their order. Each is a page id from the shared
+     * list, plus the owner's own name for it if they gave one. Read through the shared ShortcutEntry, which marks a
+     * page this build no longer has instead of dropping it. The column may hold an early row's bare ids; the service
+     * reads those back as a shortcut with no name. */
+    pinnedPages: jsonb("pinned_pages").$type<{ id: string; name?: string }[]>().notNull().default(sql`'[]'::jsonb`),
     /** BOS-2690 (BOS-2671 3e): the one-time keyboard tip has been seen for this login; off until it is. */
     keyboardTipSeen: boolean("keyboard_tip_seen").notNull().default(false),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

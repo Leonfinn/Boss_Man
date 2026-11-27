@@ -68,8 +68,9 @@ const list = (singleLetterKeys: boolean) =>
     <Shortcuts go={() => {}} hasProjects singleLetterKeys={singleLetterKeys} onTurnKeysOn={() => {}} initialOpen />,
   );
 
-// The one-time keyboard tip (BOS-2690), drawn at the bottom left for the layout check. The real tip only opens
-// on a Tab or Ctrl K; the rendering test asks for it on the first draw instead.
+// The one-time keyboard tip (BOS-2690), drawn beside the menu for the layout check (BOS-2769 moved it clear of
+// the menu's pinned bottom row). The real tip only opens on a Tab or Ctrl K; the rendering test asks for it on
+// the first draw instead.
 const tip = () =>
   renderToStaticMarkup(
     <Shortcuts go={() => {}} hasProjects keyboardTipSeen={false} onTipSeen={() => {}} initialTip />,
@@ -210,15 +211,15 @@ const readTip = () => {
     tipText: text?.innerText ?? null,
     showText: show?.innerText ?? null,
     gotItText: gotIt?.innerText ?? null,
-    // Bottom left, inside the window, and all of it visible (no part off the bottom edge).
-    bottomLeft: !!r && r.left >= 0 && r.left <= 40 && r.bottom <= h && r.top >= 0,
+    // Beside the menu (BOS-2769: clear of the 240 px column), inside the window, and all of it visible.
+    beside: !!r && r.left >= 240 && r.bottom <= h && r.top >= 0,
     inside: !!r && r.left >= 0 && r.right <= w + 0.5,
   };
 };
 
 describe.skipIf(!browser)("the one-time keyboard tip (BOS-2690)", () => {
   for (const d of devices.filter((x) => !x.isMobile)) {
-    it(`${d.name}: the tip sits at the bottom left, inside the window, with both ways to close`, async () => {
+    it(`${d.name}: the tip sits beside the menu, inside the window, with both ways to close`, async () => {
       const page = await browser!.newPage({ viewport: d.viewport, deviceScaleFactor: d.deviceScaleFactor, hasTouch: d.hasTouch, isMobile: d.isMobile });
       try {
         await page.setContent(html(tip()), { waitUntil: "load" });
@@ -228,7 +229,7 @@ describe.skipIf(!browser)("the one-time keyboard tip (BOS-2690)", () => {
         expect(got.tipText).toBe("Boss Man has keyboard shortcuts. Press ? any time to see them.");
         expect(got.showText).toBe("Show shortcuts");
         expect(got.gotItText).toBe("Got it");
-        expect(got.bottomLeft).toBe(true);
+        expect(got.beside).toBe(true);
         expect(got.inside).toBe(true);
         const path = await shotPath(`${d.name}-tip`);
         if (path) await page.screenshot({ path });

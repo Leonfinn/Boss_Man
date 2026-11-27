@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { deploys, features, ticketDependencies, tickets } from "../src/db/schema.js";
+import { deploys, features, settings, ticketDependencies, tickets } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -78,16 +78,50 @@ describe("feature status follows its tasks", () => {
     await c.close();
   });
 
-  it("waits for a successful production deploy when the company has a production target", async () => {
+  // BOS-2686: "live" is the merge running on the server (or a production deploy of it). A done ticket with no merge
+  // commit (a no-code ticket) has nothing to deploy, so it is live at once; a merged one waits for its deploy.
+  it("releases a done ticket with nothing to deploy, and one whose merge is live on the server", async () => {
+    const f = await ctx.feature();
+    const t = await ctx.work.createTicket(ctx.p.id, { title: "A", featureId: f.id, noCode: true });
+    await move(t.id, "done");
+    expect(await ctx.status(f.id)).toBe("released");
+
+    const g = await ctx.feature(ctx.co.company.id, "Merged work");
+    const m = await ctx.work.createTicket(ctx.p.id, { title: "B", featureId: g.id });
+    await ctx.db.update(tickets).set({ mergeCommit: "b".repeat(40) }).where(eq(tickets.id, m.id));
+    await move(m.id, "done");
+    expect(await ctx.status(g.id)).toBe("released");
+  });
+
+  // BOS-2686: a merge is "live" by one rule (BOS-1021's): the server runs it. No live commit recorded (a fresh
+  // install) counts as the commit this process was built from, and a production deploy of it settles it too.
+  it("counts a merge live when the server runs it, and a production deploy as live as well", async () => {
+    const { commitIsLive } = await import("../src/services/go-live-wait.js");
     const f = await ctx.feature();
     const t = await ctx.work.createTicket(ctx.p.id, { title: "A", featureId: f.id });
-    await ctx.req("POST", `/api/companies/${ctx.co.company.id}/deploy-targets`, { name: "Prod", kind: "ssh", endpoint: "deploy@nas.lan", isProduction: true });
-    await move(t.id, "done");
-    expect(await ctx.status(f.id)).toBe("in_progress");
-    const [target] = await ctx.deploys.listTargets(ctx.co.company.id);
-    const [d] = await ctx.db.insert(deploys).values({ companyId: ctx.co.company.id, targetId: target!.id, ticketId: t.id, ref: "v1", status: "running" }).returning();
-    await ctx.deploys.report({ companyId: ctx.co.company.id }, { deployId: d!.id, outcome: "succeeded" });
+    const merge = "d".repeat(40);
+    await ctx.db.update(tickets).set({ mergeCommit: merge, goLiveWait: "server", systemState: "done" }).where(eq(tickets.id, t.id));
+    // The server runs a commit that does not contain this merge.
+    await ctx.db.insert(settings).values({ key: `live_release:${ctx.co.company.id}`, value: { old: "e".repeat(40), new: "e".repeat(40) } });
+    expect(await commitIsLive(ctx.db, ctx.co.company.id, merge, "server", { serverFallback: null })).toBe(false);
+    expect(await ctx.status(f.id)).not.toBe("released");
+    // The server has moved onto it: released.
+    await ctx.db.update(settings).set({ value: { old: merge, new: merge } }).where(eq(settings.key, `live_release:${ctx.co.company.id}`));
+    expect(await commitIsLive(ctx.db, ctx.co.company.id, merge, "server", { serverFallback: null })).toBe(true);
+    await ctx.syncFeatures([t.id]);
     expect(await ctx.status(f.id)).toBe("released");
+    // A production deploy of the ticket's merge is live too, even when the server's own record says otherwise.
+    const g = await ctx.feature(ctx.co.company.id, "Deployed work");
+    const m = await ctx.work.createTicket(ctx.p.id, { title: "B", featureId: g.id });
+    await ctx.db.update(tickets).set({ mergeCommit: "f".repeat(40), goLiveWait: "own", systemState: "done" }).where(eq(tickets.id, m.id));
+    await ctx.syncFeatures([m.id]);
+    expect(await ctx.status(g.id)).not.toBe("released");
+    await ctx.req("POST", `/api/companies/${ctx.co.company.id}/deploy-targets`, { name: "Prod", kind: "ssh", endpoint: "deploy@nas.lan", isProduction: true });
+    const [target] = await ctx.deploys.listTargets(ctx.co.company.id);
+    const [d] = await ctx.db.insert(deploys).values({ companyId: ctx.co.company.id, targetId: target!.id, ticketId: m.id, ref: "v1", status: "running" }).returning();
+    await ctx.deploys.report({ companyId: ctx.co.company.id }, { deployId: d!.id, outcome: "succeeded" });
+    await ctx.syncFeatures([m.id]);
+    expect(await ctx.status(g.id)).toBe("released");
   });
 });
 
