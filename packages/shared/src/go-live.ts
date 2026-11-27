@@ -22,6 +22,7 @@ export const RUNNER_BUILD_INPUTS: readonly string[] = [
   "apps/netguard/netguard.sh",
   "packages/shared/package.json",
   "packages/shared/src/",
+  "packages/shared/src/secret-rules.mjs",
   "scripts/check-slot.sh",
   "scripts/scan-added-lines.mjs",
   "scripts/scan-allow.txt",
