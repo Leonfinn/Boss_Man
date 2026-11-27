@@ -12,7 +12,7 @@ import { openPglite } from "../src/db/client.js";
 import { activity, checkTicketLinks, features, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { workflowService } from "../src/services/workflow.js";
 import { issueRunToken } from "../src/mcp.js";
-import { appendLine, CHECK_REPORTED_REASON, checkTicketDoneRefusal, checkTicketVerdict, LONG_WATCH_FROM, openLongWatchChecks } from "../src/services/after-merge-check-tickets.js";
+import { appendLine, CHECK_REPORTED_REASON, checkTicketDoneRefusal, checkTicketVerdict, FOLD_FROM, LONG_WATCH_FROM, openLongWatchChecks } from "../src/services/after-merge-check-tickets.js";
 import { openBlockers } from "../src/services/ticket-links.js";
 import { wakeClass } from "../src/services/wake-classes.js";
 import { wakeWatchers } from "../src/services/watch-triggers.js";
@@ -595,5 +595,19 @@ describe("BOS-2643: a watch of a day or more is opened as its own check ticket",
     expect(reset.isError, reset.text).toBe(false);
     expect(await checksOf(c, old!.id)).toEqual([]);
     expect((await c.row(old!.id)).acceptanceCriteria).toEqual([BEFORE, EVENT]);
+  });
+
+  it("a check ticket stored before the change is left as it is: a build on the same event opens its own check", async () => {
+    const c = await setup();
+    const before = new Date(FOLD_FROM.getTime() - 3_600_000);
+    const [build] = await c.db.insert(tickets).values({ companyId: c.co.company.id, projectId: c.project.id, title: "Older build", systemState: "blocked", assigneeAgentId: c.dev.id, acceptanceCriteria: [BEFORE, UPDATE_A], createdAt: before }).returning();
+    const [old] = await c.db.insert(tickets).values({ companyId: c.co.company.id, projectId: c.project.id, title: "Older check", systemState: "blocked", assigneeAgentId: c.dev.id, acceptanceCriteria: [UPDATE_A.text], checksTicketId: build!.id, checksCriterion: 2, createdAt: before }).returning();
+    const b = await c.create(c.co.ceo.id, { title: "New build on the same update", noCode: false, assignee: "Dev", acceptanceCriteria: [BEFORE, UPDATE_B] });
+    expect(b.isError, b.text).toBe(false);
+    expect(b.text).not.toContain(old!.id);
+    expect((await checksOf(c, b.id!)).map((x) => x.checksCriterion)).toEqual([2]);
+    expect((await c.row(old!.id)).acceptanceCriteria).toEqual([UPDATE_A.text]);
+    expect(await c.db.select().from(checkTicketLinks).where(eq(checkTicketLinks.checkTicketId, old!.id))).toEqual([]);
+    expect(await c.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, old!.id))).toEqual([]);
   });
 });

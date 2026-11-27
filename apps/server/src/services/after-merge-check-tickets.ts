@@ -5,7 +5,7 @@
 // assignee is woken. Closing the parent stays a person's step (out of scope on the ticket).
 // BOS-2417: a merged parent whose only unreported criteria are tied to open check tickets may close at go-live (the
 // tie is not a reason to sit Blocked for a week); its watch moves to the check tickets, and the result still lands here.
-import { and, asc, eq, inArray, isNotNull, ne, or, sql } from "drizzle-orm";
+import { and, asc, eq, gte, inArray, isNotNull, ne, or, sql } from "drizzle-orm";
 import { checkTicketLine, criterionText, eventKey, isAfterMerge, longWatchIndexes, longWatchPhrase, readCriteria, readVerdicts, ticketRef, unreportedAfterMerge, watchPhrase, type Criterion } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { activity, agents, checkTicketLinks, companies, tickets } from "../db/schema.js";
@@ -120,12 +120,19 @@ async function openTies(db: Db, buildId: string): Promise<Tie[]> {
 /** A criterion is at most 500 characters (acceptanceCriteriaSchema). */
 const CRITERION_MAX = 500;
 
+/**
+ * BOS-2855 (criterion 5): check tickets opened before this was built are never folded into, so a check its assignee
+ * already planned against keeps its criteria and report-back. A fixed date like LONG_WATCH_FROM (the day it was built);
+ * the open duplicates from before stay a person's call (out of scope on the ticket).
+ */
+export const FOLD_FROM = new Date("2026-11-27T00:00:00Z");
+
 /** BOS-2855: open check tickets of a project, oldest first, that can take one more criterion. */
 async function openChecksOf(db: Db, projectId: string) {
   const rows = await db
     .select({ id: tickets.id, number: tickets.number, title: tickets.title, criteria: tickets.acceptanceCriteria, companyId: tickets.companyId })
     .from(tickets)
-    .where(and(eq(tickets.projectId, projectId), isNotNull(tickets.checksTicketId), ne(tickets.systemState, "done")))
+    .where(and(eq(tickets.projectId, projectId), isNotNull(tickets.checksTicketId), ne(tickets.systemState, "done"), gte(tickets.createdAt, FOLD_FROM)))
     .orderBy(asc(tickets.createdAt));
   return rows.map((r) => ({ ...r, criteria: readCriteria(r.criteria) })).filter((r) => r.criteria.length && r.criteria.length < 10);
 }
