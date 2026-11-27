@@ -3,7 +3,9 @@
 // tier, so the owner can pick a model from what their runner offers.
 
 export type ModelTier = "most capable" | "balanced" | "fast";
-export type AgentTemplate = { id: string; title: string; role: "manager" | "worker"; modelTier: ModelTier; summary: string; instructions: string; /** Skills every hire on this template gets without asking (Boss Man's built-in skills, BOS-2631). */ defaultSkills?: string[]; /** A standing job Boss Man gives whoever is hired from it; one per company (R87). */ duty?: string };
+/** What a role is for, in groups the Hire form shows (BOS-2824): work of any kind, or work in code. */
+export type TemplateWorksOn = "any" | "code";
+export type AgentTemplate = { id: string; title: string; role: "manager" | "worker"; modelTier: ModelTier; summary: string; /** BOS-2824: which group the Hire form puts the role in: "code" for software roles, "any" for everything else. */ worksOn: TemplateWorksOn; instructions: string; /** Skills every hire on this template gets without asking (Boss Man's built-in skills, BOS-2631). */ defaultSkills?: string[]; /** A standing job Boss Man gives whoever is hired from it; one per company (R87). */ duty?: string };
 
 export const AGENT_TEMPLATES: AgentTemplate[] = [
   {
@@ -12,6 +14,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     role: "worker",
     modelTier: "balanced",
     summary: "Builds and fixes things in the project's repo.",
+    worksOn: "code",
     instructions: [
       "You build and fix software in the ticket's repository, and leave it better and no bigger than it needs to be.",
       "- Read the ticket's goal and definition of done first, then the code around where you will change it, including its tests. Follow the existing style, names and patterns, and never guess at code you have not opened.",
@@ -30,6 +33,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     role: "worker",
     modelTier: "balanced",
     summary: "Finds things out and writes them up in the wiki.",
+    worksOn: "any",
     instructions: [
       "You find things out and write them up so the owner can act on them. You do not change code.",
       "- Restate the question in one line and note what decision the answer will feed. If it is unclear and the answer could change the work a lot, ask one clear question with ticket_reply instead of guessing.",
@@ -48,6 +52,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     role: "worker",
     modelTier: "balanced",
     summary: "Designs screens and flows, and writes clear UI copy.",
+    worksOn: "code",
     instructions: [
       "You design screens and flows so they are simple, consistent and usable by everyone.",
       "- Start with who is using it and what they are trying to do, and write that in a sentence. Reuse what exists (the app's styles, components, the wiki) before inventing.",
@@ -66,6 +71,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     role: "worker",
     modelTier: "balanced",
     summary: "Tests work before it ships and reports what breaks.",
+    worksOn: "code",
     instructions: [
       "You find out whether work really does what the ticket asked, before the owner relies on it.",
       "- Turn the ticket's definition of done into a short test list: normal use, edge cases (empty, huge, odd characters, duplicates, slow), failure paths, and nearby things it could break.",
@@ -84,6 +90,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     role: "worker",
     modelTier: "balanced",
     summary: "Writes docs, guides and announcements.",
+    worksOn: "any",
     instructions: [
       "You write documentation, guides and announcements a reader can follow without asking anyone.",
       "- Begin with who is reading and what they want to get done, and put the answer or first step at the top.",
@@ -102,6 +109,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     role: "worker",
     modelTier: "fast",
     summary: "Watches tickets and gives the owner short status updates.",
+    worksOn: "any",
     instructions: [
       "You keep the owner and the CEO informed about how the work is going, and spot work that is stuck. You report; you do not do the work.",
       "- Post one short update per watched ticket: where it is, what changed, what it waits on and for whom, and what (if anything) the owner or CEO must do. Read the ticket's state note and recent conversation, not just the title.",
@@ -119,6 +127,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     modelTier: "fast",
     duty: "assistant",
     summary: "The CEO's PA: answers the owner's status questions in chat from the board, and passes the rest to the CEO.",
+    worksOn: "any",
     instructions: [
       "You are the CEO's PA. You answer the owner's routine questions from what your tools return, and pass everything else to the CEO.",
       "- Look it up first (board, tickets, decisions, wiki). Answer only from what the tools return; if it is not there, say so. Never answer from memory.",
@@ -134,6 +143,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     role: "worker",
     modelTier: "most capable",
     summary: "Reviews plans and code for risky or complex work, and builds the hardest pieces.",
+    worksOn: "code",
     instructions: [
       "You are the company's senior developer: a second opinion on risky or complex work, and the builder of the hardest pieces.",
       "- When a ticket comes to you for review (the company's review settings name you for its risk), read its goal and plan, then the changes (review diff), and give your verdict with review submit. Plans put to you arrive as decisions; answer them with the decisions tool. A ticket may need other reviews too (security, infra, adversarial) running at the same time; judge only the code and leave those to their reviewers. If you hold more than one review on a ticket, say which with kind. If the CEO ordered the reviews and yours is not up yet, you are woken when it is.",
@@ -154,6 +164,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     role: "worker",
     modelTier: "most capable",
     summary: "Reviews changes for security and threat-models new features.",
+    worksOn: "code",
     instructions: [
       "You review work for security and report what you can show. When the company's review settings require a security review, you are woken with the ticket: read the changes with review diff and give your verdict with review submit (kind security). Approve, or ask for changes with the findings below. Other reviews run alongside yours; the CEO may order them or overrule one.",
       "- For a new feature or high-risk change, threat-model first in a few lines: what it protects, who can reach it (anonymous, logged-in, another company, the agents themselves), what they could abuse, and what an attacker gains.",
@@ -172,6 +183,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     role: "worker",
     modelTier: "most capable",
     summary: "Tries to break a change before it ships and reports what actually breaks.",
+    worksOn: "code",
     instructions: [
       "You try to break a change before it ships and report only what you can show. When the company's review settings require an adversarial review, you are woken with the ticket: read the changes with review diff and give your verdict with review submit (kind adversarial). Blockers mean changes requested; other reviews run alongside yours.",
       "- List the assumptions the change depends on, then attack them: hostile, empty, huge and duplicate inputs; double submits and races; retries and timeouts; partial failure (a crash half-way, a service down, a full disk); old data and old clients; time zones; permissions; rollback and restart.",
@@ -188,6 +200,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     role: "worker",
     modelTier: "most capable",
     summary: "Owns CI, Docker, deploys, networking, storage, backups and monitoring.",
+    worksOn: "code",
     instructions: [
       "You look after what the software runs on: CI, containers, deploys, networking, storage, backups, monitoring and cost. When the company's review settings require an infra review, you are woken with the ticket: read the changes with review diff and give your verdict with review submit (kind infra), judging pipelines, deploys, rollback and cost. The CEO may order your review before another.",
       "- Make small, reversible changes. Before each one, write what you will change, how you will verify it and how to roll it back.",
@@ -209,6 +222,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     role: "worker",
     modelTier: "balanced",
     summary: "Turns fuzzy ideas into a short spec and well-formed tickets in priority order.",
+    worksOn: "any",
     // The feature, roadmap and milestone rules live in these built-in skills (BOS-2631), so the hire
     // has them from the first run in any company and the instructions below only point at them.
     defaultSkills: ["pm-align-work-to-features", "pm-roadmap-and-portal", "pm-milestones"],
@@ -233,6 +247,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     role: "worker",
     modelTier: "fast",
     summary: "Prepares releases, checks staging and rollback, and reports how each deploy went.",
+    worksOn: "code",
     instructions: [
       "You get finished work to users safely, and tell people what shipped.",
       "- Gather the tickets that were merged since the last release and write plain release notes: what changed for users, anything they must do, and known issues. Leave out internal detail.",
@@ -251,6 +266,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     role: "worker",
     modelTier: "balanced",
     summary: "Answers 'did it work?' with numbers, says what the data cannot show, and reports key results.",
+    worksOn: "any",
     instructions: [
       "You answer 'did it work?' with numbers the owner can trust, and say how far they can be trusted.",
       "- Restate the question and the decision it feeds. Define each measure exactly (what is counted, over what period, compared with what) before you calculate it.",
@@ -269,6 +285,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     role: "worker",
     modelTier: "fast",
     summary: "Triages feedback and requests, answers from the wiki, and escalates what it cannot answer.",
+    worksOn: "any",
     instructions: [
       "You are the first point of contact for feedback and requests from customers and other companies. You answer what the wiki can answer, and pass the rest on.",
       "- Read the message properly and work out what the person wants. Search the wiki and past tickets before you reply.",
@@ -288,6 +305,7 @@ export const CEO_TEMPLATE: Omit<AgentTemplate, "role"> = {
   title: "CEO",
   modelTier: "most capable",
   summary: "Runs the company: designs and plans the work, assigns it and reviews it.",
+  worksOn: "any",
   instructions: [
     "You run the company for the owner: turn goals into small, checkable pieces of work, assign each, and check what comes back. You are the owner's single point of contact.",
     "- Delegate first: use board to see the team, then assign_ticket or create_ticket with assignee. Do it yourself only when nobody can; if a gap keeps coming up, propose_hire.",

@@ -333,7 +333,7 @@ export type DecisionContext =
   | { type: "rename"; agentId: string; newName: string; before: string; byAgentId: string }
   /** A change to the company's standing rules (BOS-353), applied when the owner approves. */
   | { type: "standing_rules"; text: string; byAgentId: string }
-  | { type: "team_plan"; projectId: string | null; covered: string; hires: TeamHire[]; byAgentId: string }
+  | { type: "team_plan"; projectId: string | null; covered: string; /** BOS-2824: the plan's one-line cost, in plain words. */ costLine?: string; hires: TeamHire[]; byAgentId: string }
   /** A model-setup change for an existing agent (BOS-128): the owner approves, edits or rejects it. */
   | { type: "model_change"; agentId: string; before: AgentModelConfig; proposed: AgentModelConfig; byAgentId: string; runningRunId?: string | null; applied?: { at: string; afterRunId: string | null; config?: AgentModelConfig } }
   /** A permission rule the CEO drafted from the owner's plain request; added when they answer ADD_RULE. A "question" kind, so the owner can also answer in their own words. */
@@ -990,7 +990,7 @@ export { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, TAKE_REVIEW, REASSIGN_REVIEW,
 export type AgentModelConfig = { harness: string; provider: string; model: string; fundingSourceId: string; fundingSourceName?: string };
 
 /** One proposed hire in a team plan (docs/13). */
-export type TeamHire = { name: string; template?: string; title?: string | null; model?: string | null; fundingSourceId?: string | null; fundingSourceName?: string; harness?: string; provider?: string; skills?: string[]; reason: string; serves?: string | null };
+export type TeamHire = { name: string; template?: string; title?: string | null; model?: string | null; fundingSourceId?: string | null; fundingSourceName?: string; /** BOS-2824: the funding source's kind (subscription, api_payg, …), for the plan's cost line. */ fundingSourceKind?: string; harness?: string; provider?: string; skills?: string[]; reason: string; serves?: string | null };
 export type HireProposal = { name: string; template?: string; title?: string | null; instructions?: string | null; model?: string | null; fundingSourceId?: string | null; harness?: string; provider?: string; reason?: string; /** Skills or packs the new agent gets before its first run. */ skills?: string[]; /** Tickets waiting for this hire; they go to the new agent once hired. */ forTickets?: string[] };
 export const TEAM_HIRE = "Hire the ticked ones";
 export const TEAM_NOT_NOW = "Not now";
