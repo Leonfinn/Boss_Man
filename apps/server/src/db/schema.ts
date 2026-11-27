@@ -2417,8 +2417,11 @@ export const ownerPreferences = pgTable(
       .references(() => owners.id, { onDelete: "cascade" }),
     /** The single-letter-key switch (BOS-2671 3d); on until turned off. */
     singleLetterKeys: boolean("single_letter_keys").notNull().default(true),
-    /** BOS-2669 part 3: the page ids the owner pinned to the menu, in their order. */
-    pinnedPages: jsonb("pinned_pages").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+    /** BOS-2669 part 3: the pages the owner pinned to the menu, in their order. Each is a page id from the shared
+     * list, plus the owner's own name for it if they gave one. Read through the shared ShortcutEntry, which marks a
+     * page this build no longer has instead of dropping it. The column may hold an early row's bare ids; the service
+     * reads those back as a shortcut with no name. */
+    pinnedPages: jsonb("pinned_pages").$type<{ id: string; name?: string }[]>().notNull().default(sql`'[]'::jsonb`),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
 );

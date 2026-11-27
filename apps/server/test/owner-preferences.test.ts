@@ -30,15 +30,15 @@ describe("owner preferences service", () => {
     const svc = ownerPreferencesService(t.db);
     expect(await svc.update(ownerId, { singleLetterKeys: false })).toEqual({ singleLetterKeys: false, pinnedPages: [] });
     // BOS-2669 fills the same store: a pin save must not turn the keys back on.
-    expect(await svc.update(ownerId, { pinnedPages: ["updates", "agents"] })).toEqual({ singleLetterKeys: false, pinnedPages: ["updates", "agents"] });
-    expect(await svc.get(ownerId)).toEqual({ singleLetterKeys: false, pinnedPages: ["updates", "agents"] });
+    expect(await svc.update(ownerId, { pinnedPages: [{ id: "updates" }, { id: "agents" }] })).toEqual({ singleLetterKeys: false, pinnedPages: [{ id: "updates" }, { id: "agents" }] });
+    expect(await svc.get(ownerId)).toEqual({ singleLetterKeys: false, pinnedPages: [{ id: "updates" }, { id: "agents" }] });
     expect(await t.db.select().from(ownerPreferences).where(eq(ownerPreferences.ownerId, ownerId))).toHaveLength(1);
   });
 
   it("refuses a pin list over six, or a wrong type, and leaves the saved choice alone", async () => {
     const svc = ownerPreferencesService(t.db);
     await svc.update(ownerId, { singleLetterKeys: false });
-    await expect(svc.update(ownerId, { pinnedPages: ["a", "b", "c", "d", "e", "f", "g"] })).rejects.toThrow();
+    await expect(svc.update(ownerId, { pinnedPages: [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }, { id: "e" }, { id: "f" }, { id: "g" }] })).rejects.toThrow();
     await expect(svc.update(ownerId, { singleLetterKeys: "off" })).rejects.toThrow();
     expect(await svc.get(ownerId)).toEqual({ singleLetterKeys: false, pinnedPages: [] });
   });
