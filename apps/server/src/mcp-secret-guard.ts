@@ -33,6 +33,9 @@ const READ_ACTIONS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
   ["watchdog", new Set(["list", "alerts"])],
 ]);
 
+/** The tools named as reads only, which the check never opens. A test walks each live server's tool list against this. */
+export const skipsSecretCheck = (tool: string): boolean => READ_TOOLS.has(tool);
+
 function* strings(v: unknown, depth = 0): Generator<string> {
   if (typeof v === "string") yield v;
   else if (depth < 8 && Array.isArray(v)) for (const x of v) yield* strings(x, depth + 1);

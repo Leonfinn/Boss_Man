@@ -56,6 +56,11 @@ describe("secretRefusal (BOS-2731)", () => {
         ["set_ticket_state", { summary: p }],
         ["raise_decision", { steps: [p] }],
         ["nudge", { why: p }],
+        ["github_reply", { text: p }],
+        ["request_engagement", { message: p }],
+        ["review", { action: "submit", summary: p }],
+        ["wiki", { action: "attach", title: p }],
+        ["pa_reply", { text: p }],
       ] as Array<[string, Record<string, unknown>]>) expect(secretRefusal(tool, input), `${tool}: ${p}`).toBeNull();
     }
   });
@@ -115,6 +120,7 @@ describe("secretRefusal (BOS-2731)", () => {
       ["github_reply", { text: anthropic }],
       ["request_engagement", { message: anthropic }],
       ["review", { action: "submit", summary: anthropic }],
+      ["review", { action: "submit", comments: [{ text: anthropic }] }],
       ["notify_owner", { message: anthropic }],
       ["handoff", { summary: anthropic }],
       ["pa_reply", { text: anthropic, cites: [], confidence: "high" }],

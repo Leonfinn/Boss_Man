@@ -11,6 +11,7 @@ import { signedInOwner } from "./helpers/owner-session.js";
 import { sharedDatabase } from "./helpers/shared-server.js";
 import { activity, agentChanges, agentSkills, agents, companies, decisions, retros, skillProposals, skills, ticketReviews, tickets, wakes, wikiPages, workflowChanges } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
+import { expectEveryWriterGuarded } from "./secret-guard-walk.js";
 import { LESSON_ADD, LESSON_DROP } from "../src/services/project-brief.js";
 import { SKILL_ADD, SKILL_REJECT } from "../src/services/decisions.js";
 
@@ -218,8 +219,10 @@ describe("the retro agent's tools", () => {
     const pm = await open(c);
     const mine = (await pm.listTools()).tools.map((t) => t.name);
     expect(mine).toEqual(expect.arrayContaining(["workflow_scorecard", "save_retro", "propose_workflow_change"]));
+    expectEveryWriterGuarded(mine);
     const other = (await (await c.mcp(c.eng.id)).listTools()).tools.map((t) => t.name);
     expect(other).not.toContain("workflow_scorecard");
+    expectEveryWriterGuarded(other); // the ordinary run server's whole tool list
     expect(isError(await tool(await c.mcp(c.eng.id), "save_retro"))).toBe(true);
     // The owner moves the job to the engineer: the Product Manager loses the tools straight away.
     await c.req("PUT", `/api/companies/${c.company.id}/retro-settings`, { agentId: c.eng.id });
