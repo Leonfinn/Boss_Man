@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { AddToShortcuts } from "../pinned-pages";
 import { api, type EngagementRow, type EngagementSummary, type EngagementView } from "../api";
 import { useOlder, usePoll } from "../hooks";
 
@@ -133,6 +134,7 @@ export function Engagements() {
       <header className="page-head">
         <div>
           <h1>Engagements</h1>
+          <AddToShortcuts page="engagements" />
           <p className="sub">Work one company does for another, with agreed terms and a cost cap charged to the requester.</p>
         </div>
       </header>
