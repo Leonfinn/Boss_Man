@@ -5,6 +5,7 @@ import { and, desc, eq, inArray, isNull, like, max, min, ne, or, sql, type AnyCo
 import { KIND_FOCUS, REVIEW_KINDS, ruleFor, slotRef, ticketRef, type ReviewerRefValue, type ReviewSlot } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { activity, agents, companies, reviewRequests, runs, tickets, wakes } from "../db/schema.js";
+import { reviewReadLine, ticketHasRepo } from "./no-repo-wording.js";
 import { record } from "./activity.js";
 import { isAfterMerge, readVerdicts } from "@boss-man/shared";
 import { effectivePolicy, otherReviewers, resolveKindReviewer } from "./review-policy.js";
@@ -121,6 +122,7 @@ export async function requeueUnansweredReviews(db: Db, input: { reviewerAgentId:
     // The rows still waiting for this reviewer in the current round: a verdict (or a skip) has moved them on.
     const mine = activeRows(await latestRows(db, ticketId)).filter((r) => r.reviewerAgentId === input.reviewerAgentId);
     if (!mine.length) continue;
+    const read = reviewReadLine(await ticketHasRepo(db, t.id));
     for (const r of mine) {
       // The ticket is named on the wake as well as in its note, so several tickets re-queued at once stay
       // separate wakes (one per ticket) rather than merging into one.
@@ -129,7 +131,7 @@ export async function requeueUnansweredReviews(db: Db, input: { reviewerAgentId:
         priority: 3,
         ticketId: t.id,
         causedByRunId: input.causedByRunId ?? null,
-        note: `${reviewAskPrefix(t.id)}"${t.title}": still waiting for your ${r.kind} review (round ${r.round}). You were woken about more than one ticket last time and this one is left.\n  Read the changes with the review tool (action diff), then give your verdict with action submit.`,
+        note: `${reviewAskPrefix(t.id)}"${t.title}": still waiting for your ${r.kind} review (round ${r.round}). You were woken about more than one ticket last time and this one is left.\n  ${read}.`,
       });
     }
     requeued.push(ticketId);
@@ -182,12 +184,13 @@ export async function wakeReviewers(db: Db, t: Ticket, rows: ReviewRow[], notify
         .map((r, i) => `  - [${r.verdict ?? "not reported"}] ${r.criterion}${isAfterMerge(t.acceptanceCriteria[i]!) ? " (checked after merge: don't fail the review on it)" : ""}`)
         .join("\n") + `\n  If a before-merge one fails, request changes and say which.${after ? " Review can approve with the after-merge ones still unreported; the ticket keeps them open until they pass." : ""}`
     : "";
+  const hasRepo = Object.keys(byAgent).length ? await ticketHasRepo(db, t.id) : true;
   for (const [agentId, mine] of Object.entries(byAgent)) {
     const asks = (await Promise.all(mine.map(async (r) => {
       const why = await fallbackReason(db, t, r);
       return `  Your ${r.kind} review, round ${r.round}: look at ${KIND_FOCUS[r.kind as ReviewSlot]}.${why ? `\n  You hold the ${r.kind} review as a stand-in, not as its usual reviewer: ${why}.` : ""}`;
     }))).join("\n");
-    const how = `  Read the changes with the review tool (action diff), then give your verdict with action submit${mine.length > 1 ? " and the kind of each review" : ""}.`;
+    const how = `  ${reviewReadLine(hasRepo)}${mine.length > 1 ? " and the kind of each review" : ""}.`;
     await notify(agentId, { reason: REVIEW_REASON, priority: 3, causedByRunId, note: `${reviewAskPrefix(t.id)}"${t.title}": ${t.stateNote ?? "(no note)"}\n${asks}\n${how}${checklist ? `\nAcceptance criteria:\n${checklist}` : ""}` });
   }
 }

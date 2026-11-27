@@ -8,7 +8,7 @@ lead: A check is an automatic test Boss Man runs on finished code before it join
 
 ## Do I need a check?
 
-**No, if your company does not write code.** A company whose projects have no repository (the online folder where code is kept), such as one that writes reports or research, never runs a check. In the setup wizard, the checks step says "No project has a repo yet": choose **Skip for now** and carry on. The git token step (step 5) is for code companies too, so skip it the same way.
+**No, if your company does not write code.** A company whose projects have no repository (the online folder where code is kept), such as one that writes reports or research, never runs a check. If you pick **Documents, research and writing** in the setup wizard, it leaves out the **A git token** and **Checks before merging** steps, so there is nothing to skip.
 
 **No, if you would rather rely on reviews alone.** Choose **Nothing: merge after review only**. Approved work then joins the project as soon as its reviews pass. This is fine for a project with no tests, or one where a mistake is easy to put right.
 
@@ -25,7 +25,7 @@ Agents can also ask for a quick check of their own work before review. Those app
 
 ## Choosing the check
 
-In the setup wizard, step 6 **Checks before merging**:
+In the setup wizard's **Checks before merging** step:
 
 1. Boss Man looks at your repository and suggests a check under **Before merging, Boss Man will**, such as running the project's tests. Choose the suggestion, **Nothing: merge after review only**, or **Custom command…** to type your own.
 2. Optionally, under **For high-risk work, also**, choose a slower, fuller check for high-risk work.
@@ -65,7 +65,7 @@ After a runner update, a check worker needs nothing. If the **Checks** section s
 
 ## Git token
 
-A git token is a key from GitHub or Gitea that lets agents save work to your repository. You add it in step 5 of the setup wizard. The wizard's **How do I get a token?** shows these steps for your host.
+A git token is a key from GitHub or Gitea that lets agents save work to your repository. You add it in the setup wizard's **A git token** step. The wizard's **How do I get a token?** shows these steps for your host.
 
 **On GitHub** (a fine-grained personal access token):
 

@@ -157,6 +157,7 @@ export const CARRY_ON_MS = 15 * 60_000;
 export { CARRY_ON_NOTE } from "./check-wording.js";
 import { CARRY_ON_NOTE } from "./check-wording.js";
 import { RENDER_CHECK_REVIEW_GUIDANCE } from "./render-check-gate.js";
+import { NO_REPO_RESULT_LINE, noRepoFolderNote } from "./no-repo-wording.js";
 import { SURFACES_REVIEW_GUIDANCE } from "./surfaces-gate.js";
 
 /**
@@ -862,6 +863,7 @@ export function schedulerService(
           "Keep proofs and check logs (a recording, a screenshot, a long test output, a check log) in $BOSSMAN_SCRATCH, this ticket's folder on the runner's kept disk: it survives runner restarts, where /tmp is wiped. scripts/check-quick.sh and scripts/check-all.sh write their logs there by themselves when it is set. If it isn't set on this run, /tmp is all you have; say where you put the proof in your state note. Never commit proofs or logs to the repo.",
         );
         if (t.repoUrl) lines.push("", "Commit your work on the ticket's branch but never git push: Boss Man merges or pushes it once it passes review.");
+        else lines.push("", NO_REPO_RESULT_LINE);
         if ((agent.role === "ceo" || agent.role === "manager") && t.t.assigneeAgentId === agent.id) {
           const team = await db
             .select({ name: agents.name, role: agents.role, title: agents.title })
@@ -1299,7 +1301,7 @@ export function schedulerService(
       ...(ticket?.planFirst && !ticket.planApprovedAt && w.reason !== REVIEW_REASON ? { mode: "plan" as const } : {}),
       ...(ticket?.repoUrl && workTicketId && !copy ? { workspace: { projectId: ticket.projectId, ticketId: workTicketId, repoUrl: ticket.repoUrl, baseRef: ticket.defaultBranch } } : {}),
       ...(copy ? { workspace: { projectId: copy.projectId, ticketId: copy.ticketId, repoUrl: copy.repoUrl, baseRef: copy.baseRef, review: true } } : {}),
-      prompt: (chapter?.prompt ?? wakePrompt) + (noCheckout ? noCheckoutNote(runFolder(workspaceRoot, agent.id, { ticketId: workTicketId, reply })) : "") + withheldNote,
+      prompt: (chapter?.prompt ?? wakePrompt) + (noCheckout ? (workTicketId && ticket && !ticket.repoUrl ? noRepoFolderNote : noCheckoutNote)(runFolder(workspaceRoot, agent.id, { ticketId: workTicketId, reply })) : "") + withheldNote,
       mcpToken,
       // Every run gets the Boss Man tools; a runner that can't reach them stops the run loudly
       // rather than let it work blind (BOS-552). An older runner ignores it and behaves as before.

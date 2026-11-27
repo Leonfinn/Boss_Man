@@ -6,7 +6,7 @@ import type { Company, Decision } from "../api";
 import { useMediaQuery } from "../hooks";
 import { usePinned } from "../pinned-pages";
 import { SHORTCUT_ICONS } from "../shortcut-icons";
-import { CircleHelp, TriangleAlert } from "lucide-react";
+import { CircleHelp, Pencil, TriangleAlert } from "lucide-react";
 import { Activity, BookOpen, ChevronDown, ChevronRight, ChevronsLeft, ChevronsRight, FolderGit2, Bell, GitMerge, Gavel, Handshake, Keyboard, LayoutDashboard, ListChecks, LogOut, Map, Menu as MenuIcon, MessageCircle, MessageSquare, Puzzle, Settings, ShieldCheck, Sparkles, Star, Users, Workflow as WorkflowIcon, type LucideIcon } from "lucide-react";
 import { art } from "../brand";
 import { SearchButton } from "./SearchPalette";
@@ -177,6 +177,8 @@ export function Sidebar(props: {
   decisions: Decision[];
   /** (BOS-969) What needs the owner now, from the same server figure the Decisions page heading shows. */
   decisionsTally?: { open: number; waiting: number } | null;
+  /** (BOS-2818) Setup still open: its count, for the link at the top of the menu. */
+  setupOpen?: { done: number; total: number } | null;
   /** (BOS-1485) The same tally for every company, for the company switcher. */
   companyTallies?: Record<string, { open: number; waiting: number }>;
   unread: number;
@@ -311,9 +313,22 @@ export function Sidebar(props: {
       </div>
       <div id="nav-groups" className={`nav-groups${menu ? " open" : ""}`}>
         <div className="nav-scroll">
+        {props.setupOpen && !props.collapsed && (
+          <a className="side-setup" href="#/setup">
+            Setup: {props.setupOpen.done} of {props.setupOpen.total}
+          </a>
+        )}
         {shortcutRows.length > 0 && (
           <section className="side-shortcuts" aria-label="Shortcuts">
-            <p className="side-shortcuts-title">Shortcuts</p>
+            <div className="side-shortcuts-head">
+              <p className="side-shortcuts-title">Shortcuts</p>
+              {pinned && (
+                <button type="button" className="side-shortcuts-edit" data-edit-shortcuts aria-label="Edit shortcuts" onClick={() => pinned.openEditor()}>
+                  <Pencil size={13} strokeWidth={1.75} aria-hidden="true" />
+                  <span>Edit</span>
+                </button>
+              )}
+            </div>
             <ul>
               {shortcutRows.map((e) => {
                 const Icon = e.gone ? TriangleAlert : (SHORTCUT_ICONS[e.icon] ?? CircleHelp);

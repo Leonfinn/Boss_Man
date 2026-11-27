@@ -28,16 +28,17 @@ import { runnersService } from "./services/runners.js";
 import { connectionSummary } from "./services/runner-connections.js";
 import { allowsPrivate, type HostLookup, LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { watchCiTokenGrant } from "./services/ci-identity-card.js";
-import { AnswerError, clearOwnerTodo, decisionsService, setDecisionSettledListener, setOwnerTodoFacts } from "./services/decisions.js";
+import { AnswerError, UPDATE_RUNNERS, clearOwnerTodo, decisionsService, setDecisionSettledListener, setOwnerTodoFacts } from "./services/decisions.js";
 import { githubWatchService, WATCH_TOKEN_ENV } from "./services/github-watch.js";
 import { markOwnerOpened, recentClosedNotices } from "./services/closed-notice.js";
 import { getHold, holdBlocksStarts, maintenanceService } from "./services/maintenance.js";
-import { runnerBusy, runnerChecks, serverWaitChecks, updateWaitCountsRun, workerChecks } from "./services/runner-busy.js";
-import { activeWaits, runnerHoldWait } from "./services/update-waits.js";
+import { runnerBusy, runnerChecks, serverWaitChecks, updateCheckMarks, updateWaitCountsRun, workerChecks } from "./services/runner-busy.js";
+import { activeWaits, checkCountingWaits, runnerHoldWait } from "./services/update-waits.js";
 import { runnerWatchService } from "./services/runner-watch.js";
 import { runnerReportService } from "./services/runner-report.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
 import { serverStatusService } from "./services/server-status.js";
+import { WRAP_LINE } from "./services/watch-triggers.js";
 import { failuresForStatus } from "./services/merge-failures.js";
 import { raiseCostAlert } from "./services/cost-check.js";
 import { addonsService, mergeHostAddons, unknownAddons } from "./services/addons.js";
@@ -177,7 +178,8 @@ const OWNER_TZ = timeZoneOr(process.env.TZ);
 /** Set on the blue/green colours only (deploy/truenas-bluegreen.yml); null on a single server. */
 const colour = () => (process.env.BOSSMAN_COLOUR === "blue" || process.env.BOSSMAN_COLOUR === "green" ? process.env.BOSSMAN_COLOUR : null);
 const STARTED_AT = new Date().toISOString();
-const SERVER_VERSION = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
+// BOS-2799: an image install is told its release by the updater (BOSSMAN_VERSION); package.json stays 0.0.0 until the package is stamped.
+const SERVER_VERSION = process.env.BOSSMAN_VERSION?.trim() || (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
 
 export type AppOptions = {
   db: Db;
@@ -706,6 +708,7 @@ export async function buildApp(opts: AppOptions) {
     netguardAllow,
     runLimits: (id) => scheduler.runLimits(id),
     mergeFailures: (id) => failuresForStatus(db, id),
+    holdRecords: async () => (await maintenance.history(5)).map((r) => ({ startedAt: r.startedAt.toISOString(), kind: r.kind, endedAt: r.endedAt?.toISOString() ?? null, endTitle: r.endTitle, wrapUpLines: r.events.filter((e) => e.text === "Wrap-up asked" || WRAP_LINE.test(e.text)).map((e) => `${e.at}: ${e.text}`) })),
     mergeTrain: (id) => mergeTrainStatus(db, id, undefined, (ticketId) => review.seatPhase(ticketId)),
     // BOS-2119: read when server_status is asked, after `review` below is built.
     landingTurns: (id) => review.landingTurnStatus(id),
@@ -1181,6 +1184,7 @@ export async function buildApp(opts: AppOptions) {
       return r;
     },
     composeCmd: () => hostFacts.value("compose.cmd"),
+    imageInstall: () => process.env.BOSSMAN_IMAGE_INSTALL === "1",
     log: (m) => app.log.warn(m),
   });
   // BOS-2674: a host warning seen in 2 reports in a row tells the CEO; the panel reads what is being done about each one.
@@ -2465,14 +2469,26 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/companies/:id/dashboard", async (req) => dashboard.get(IdParam.parse(req.params).id));
 
     // The merge queue, read-only (BOS-587): what is running now, what waits and how the last ones ended.
-    owner.get("/api/companies/:id/merge-queue", async (req) => mergeQueue.get(IdParam.parse(req.params).id));
+    // BOS-2861: while an update drains, which of the company's running checks it waits for, from the waits' own reads
+    // (runner-busy.ts updateCheckMarks). Absent when no such wait is on; a failed read leaves the rows unmarked, never wrong.
+    const updateWaitMarks = async (companyId: string) => {
+      const waits = await checkCountingWaits(db);
+      if (!waits.runner && !waits.server) return {};
+      const checks = await updateCheckMarks(db, companyId, waits);
+      return { updateWait: { update: waits.runner ? ("runner" as const) : ("server" as const), checks } };
+    };
+    owner.get("/api/companies/:id/merge-queue", async (req) => {
+      const id = IdParam.parse(req.params).id;
+      const [view, marks] = await Promise.all([mergeQueue.get(id), updateWaitMarks(id).catch(() => ({}))]);
+      return { ...view, ...marks };
+    });
     // The live check queue, for the Merge queue page's "Queued checks" tab (BOS-1174). Read-only.
     owner.get("/api/companies/:id/check-queue", async (req) => {
       const id = IdParam.parse(req.params).id;
       const queue = await checkQueueSvc.list(id, new Date(), await checks.capacity(id), await checks.machines(id));
       // R46: "free, not taking X because …" for every machine with a free slot that declined a job it could take.
       // BOS-1942: the server's own host name, so "Running on this server (name)" reads the same as on the Merges tab.
-      return { ...queue, serverHost: await hostFacts.serverHost().catch(() => null), idleSlots: (await checkIdle.view(id)).map(idleView) };
+      return { ...queue, serverHost: await hostFacts.serverHost().catch(() => null), idleSlots: (await checkIdle.view(id)).map(idleView), ...(await updateWaitMarks(id).catch(() => ({}))) };
     });
     // BOS-1517: one ticket's status line for its page; null when it isn't in the merge pipeline.
     owner.get("/api/companies/:id/merge-queue/:ticketId/status", async (req) => {
@@ -2810,7 +2826,7 @@ export async function buildApp(opts: AppOptions) {
     });
 
     // Scheduling and kill switches, the runner update hold, self-deploy, restart and deploy targets (R30, R14, R15).
-    serverAdminRoutes(owner, { db, scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun: (runId) => runsSvc.cancel(runId), activeWaits: () => currentUpdateWaits(), releaseWatch });
+    serverAdminRoutes(owner, { db, scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun: (runId) => runsSvc.cancel(runId), activeWaits: () => currentUpdateWaits(), releaseWatch, approveRunnerCard: async (id, req) => decisionsSvc.answer(id, UPDATE_RUNNERS, { by: await ownerName(req), via: "approved by owner via Updates panel" }) });
 
     // The decision queue (R20), ranked, with what each row holds up.
     owner.get("/api/decisions", async () => decisionsSvc.queue());
@@ -2865,7 +2881,9 @@ export async function buildApp(opts: AppOptions) {
         .object({
           answer: z.string().trim().min(1).max(OWNER_MESSAGE_MAX),
           assigneeAgentId: Uuid.optional(),
-          note: z.string().trim().max(2000).optional(),
+          // BOS-2798: a note can carry pasted command output, which the raiser's wake gets whole; 2000 refused most logs.
+          // What reads it for a short field (a lesson, a change reason) caps or checks it there.
+          note: z.string().trim().max(20_000).optional(),
           reasonLink: z.string().trim().max(400).optional(),
           custom: z.boolean().optional(),
           alwaysScope: z.enum(["agent", "company"]).optional(),

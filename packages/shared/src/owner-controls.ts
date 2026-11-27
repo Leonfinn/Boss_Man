@@ -22,6 +22,8 @@ export const OWNER_CONTROLS = {
     "Agents", "Skills", "Runs", "Merge queue", "Scrum Master log", "Workflow report", "Engagements", "Settings",
     // BOS-2669: the chip beside a page's title (26 pages), its toast's Undo, the gone-page screen's button, the menu section.
     "Add to shortcuts", "In shortcuts", "Undo", "Remove this shortcut",
+    // BOS-2669 ticket 3: the menu's Edit button and the full toast's link (the dialog's row buttons are named by page).
+    "Edit", "Edit shortcuts",
     "Switch company", "Create", "Creating", "New company", "Close menu", "Menu …", "Log out", "Keyboard shortcuts",
     "Save", "Saving", "Saved", "Attach file", "Attaching", "Remove", "Try again", "OK", "Cancel",
     // The error line a page shows when its first load fails (Features, Chat).
@@ -51,9 +53,9 @@ export const OWNER_CONTROLS = {
   "Log in": ["Create owner account", "Log in"],
   Setup: [
     "Create the company", "Add the project", "Check the token against …", "Add the task to …", "Continue", "Dismiss", "Saving",
-    "Back", "Next", "Skip for now", "Finish", "I know what I'm doing, let me get on with it",
+    "Back", "Next", "Skip for now", "Leave setup for now", "Skip setup for now", "Fix this",
     // The Claude and runner steps (BOS-1495), then the credentials, funding and project panels Setup shares with Settings and Projects.
-    "Save the token", "Start the runner",
+    "Save the code", "Start the runner",
     "Save", "Check with Claude", "Check", "Remove", "Edit", "Delete", "Add funding source", "Cancel", "Re-detect",
   ],
   Decisions: [
@@ -190,7 +192,7 @@ export const OWNER_CONTROLS = {
   ],
   "Server and runner": [
     "Reconnect runner", "Start runner", "Restart", "Stop", "Download CSV", "Copy token", "Issue a new runner token", "Register a runner",
-    "Review and deploy", "Check for updates now", "Build and update runners", "Deploy to staging", "Cancel queued runner update", "Save", "Save add-ons", "Cancel the update", "Update runners (finish runs first)",
+    "Install", "Got it", "Review and deploy", "Check for updates now", "Build and update runners", "Deploy to staging", "Cancel queued runner update", "Save", "Save add-ons", "Cancel the update", "Update runners (finish runs first)",
     // The update wait (BOS-420): the same button reads by phase.
     "Stop making room", "Lift the hold now",
     // The server-wide hold (BOS-836); Resume is on the banner every screen shows while it is on.
@@ -274,13 +276,13 @@ export const OWNER_FIELDS = {
   Setup: [
     "Company name", "What it's for", "Project name", "The CEO", "Title", "Description", "Give it to",
     // The credentials, funding and project panels Setup shares with Secrets, Access and funding, and Projects.
-    "Claude setup token", "Add", "Value", "Name", "Variable name",
+    "Claude sign-in code", "Add", "Value", "Name", "Variable name",
     "Editing …", "New funding source", "Kind", "Provider", "Monthly grant (USD)", "Cycle starts on",
     "Reviews for this project", "Cost cap per task (USD)", "Monthly spend cap (USD)", "Git repo", "Default branch",
     "When work is approved", "Before merging, Boss Man will", "For high-risk work, also",
   ],
   Decisions: [
-    "Harness", "Provider", "Model", "Paid from", "What went wrong (if a step failed)", "Note for",
+    "Harness", "Provider", "Model", "Paid from", "What went wrong (if a step failed)", "Note for", "Paste your output here for",
     "Why (shown on the Changes table, required)", "Wiki page that explains it (optional)",
     "Your answer, in your own words. It goes to …", "What's unclear (optional, one line)",
     "Every agent in this company",

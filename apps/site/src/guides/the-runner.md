@@ -10,7 +10,7 @@ lead: The runner is the separate, locked-down workspace your agents work in. You
 
 The runner is your agents' workspace. It is a sealed-off space on the machine that runs Boss Man, and each company has its own. Your agents read, write and test their work there, and nowhere else.
 
-You start it once, in step 3 of the setup wizard. After that it keeps running, and it comes back by itself after a restart or an update.
+You start it once, at the setup wizard's **The runner** step. After that it keeps running, and it comes back by itself after a restart or an update.
 
 If it stops, your agents cannot start new work. The home page says **Runner offline**, and after 3 minutes Boss Man tells you. Most of the time the fix is one button: see [If it says Not connected or Runner offline](#if-it-says-not-connected-or-runner-offline).
 
@@ -29,7 +29,7 @@ If the network guard cannot start, Boss Man pauses the runner on purpose, with i
 
 - **The home page** shows one line for the runner: **Runner connected** when all is well.
 - **Settings → Server and runner → Runner** shows its state and has its buttons.
-- **The setup wizard, step 3**, shows **Connected** or **Not connected**.
+- **The setup wizard's The runner step** shows **Connected** or **Not connected**.
 
 ## If it says Not connected or Runner offline
 

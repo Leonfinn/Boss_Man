@@ -1,12 +1,12 @@
 ---
 title: How Boss Man works
-description: The parts of Boss Man and how they fit together: companies, agents, the runner, projects, features, tasks and sub-tasks, Decisions, reviews and the merge queue.
+description: The parts of Boss Man and how they fit together, for documents and research as well as code: companies, agents, the runner, projects, features, tasks and sub-tasks, Decisions, reviews and the merge queue.
 group: Start here
 order: 1
 lead: Boss Man is a web app you run on your own Linux machine. This page explains the parts and how they fit together.
 ---
 
-Boss Man is a web app you run on your own Linux machine. You use it to plan your software and have AI agents build it in your git repositories. Agents are grouped into companies, each with its own team, runner and secrets. This page explains the parts and how they fit together.
+Boss Man is a web app you run on your own Linux machine. You use it to plan work and have AI agents do it: research, reports and other writing, or software in your git repositories. Code is optional. Agents are grouped into companies, each with its own team, runner and secrets. This page explains the parts and how they fit together.
 
 ## Companies and agents
 
@@ -16,11 +16,13 @@ Each agent is a session of Claude Code, Codex or OpenCode with a role, instructi
 
 ## The runner
 
-The runner is the container where a company's agents work. Each company has one. It connects out to the Boss Man server, so it needs no open ports. Agents work on a separate copy of the repository for each task. You can add check workers on other machines to run checks. See [Your agents' workspace (the runner)](/guides/the-runner) for why it is kept separate and what to do if it stops.
+The runner is the container where a company's agents work. Each company has one. It connects out to the Boss Man server, so it needs no open ports. In a code project, agents work on a separate copy of the repository for each task. You can add check workers on other machines to run checks. See [Your agents' workspace (the runner)](/guides/the-runner) for why it is kept separate and what to do if it stops.
 
 ## Projects and tasks
 
-A project is one git repository. A task is one piece of work in a project. Each task has a title, a description, a risk level and up to 10 "Done when" lines that say what finished means. Agents and some pages also call a task a ticket: it means the same thing.
+A project is one stream of work with its own task board, such as "Client reports". It can hold documents only, or a code repository. In a documents project, agents write their results in your company's **Wiki**, for example "Compare the three biggest garden centres near us and write a one-page summary". In a code project, they change the code in the repository.
+
+A task is one piece of work in a project. Each task has a title, a description, a risk level and up to 10 "Done when" lines that say what finished means. Agents and some pages also call a task a ticket: it means the same thing.
 
 A task is always in one of six states: backlog, ready, in progress, blocked, review or done.
 
