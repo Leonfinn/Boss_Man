@@ -494,7 +494,7 @@ reads:
 
 ## #/wiki
 sections: 
-  - Company brief
+  - Agents' briefing
   - Links
   - Wiki
 reads: 

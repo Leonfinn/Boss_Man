@@ -1074,7 +1074,7 @@ export function Agents({ company, agentId, onChanged }: { company: Company | und
                 <>
                   {" · "}
                   <span title="Tickets in progress, against the limit per agent set in Settings" className={a.wipCount > a.wipLimit ? "over-limit" : undefined}>
-                    {a.wipCount} of {a.wipLimit} tickets in progress{a.wipCount > a.wipLimit ? ", over the limit" : ""}
+                    Works on up to {a.wipLimit} task{a.wipLimit === 1 ? "" : "s"} at once{a.wipCount > a.wipLimit ? `, ${a.wipCount} now (over the limit)` : ""}
                   </span>
                   {!!a.beingChecked && <span title="Handed in, waiting for the quick check. Counts toward no limit."> · {a.beingChecked} being checked</span>}
                   {!!a.nextUp && <span title="Waiting in Ready; starts by itself when the agent finishes. Counts toward no limit."> · {a.nextUp} next up</span>}

@@ -46,7 +46,7 @@ describe("loading states (BOS-2102)", () => {
 
   it("wiki company brief shows Loading", async () => {
     never();
-    render(<Wiki companies={[company]} companyId={company.id} slug={undefined} go={() => {}} />);
+    render(<Wiki companies={[company]} companyId={company.id} slug="~brief" go={() => {}} />);
     expect(await screen.findByText(/Loading the company brief/, {}, slow)).toBeTruthy();
   });
 
@@ -87,7 +87,7 @@ describe("loading states (BOS-2102)", () => {
     page.unmount();
 
     const c4 = { ...company, id: "c4" };
-    render(<Wiki companies={[c4]} companyId={c4.id} slug={undefined} go={() => {}} />);
+    render(<Wiki companies={[c4]} companyId={c4.id} slug="~brief" go={() => {}} />);
     expect(await screen.findByText(/Couldn't load the company brief: brief boom/)).toBeTruthy();
     const b = calls.brief;
     fireEvent.click(screen.getAllByRole("button", { name: "Retry" })[0]!);
