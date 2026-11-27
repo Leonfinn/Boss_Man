@@ -68,7 +68,7 @@ const page = (collapsed: boolean, pinnedPages: { id: string; name?: string }[], 
             <main>
               <header className="page-head">
                 <div>
-                  <p className="label">Fernleaf Studio</p>
+                  <a className="set-back" href="#/settings">‹ Settings</a>
                   <h1>Roadmap</h1>
                   <AddToShortcuts page="roadmap" />
                   <p className="sub">What is planned.</p>
@@ -102,6 +102,7 @@ const measure = () => {
     settings: rect(document.querySelector(".side-pinned a.nav")),
     h1,
     chip,
+    back: rect(document.querySelector(".set-back")),
     chipText: document.querySelector(".pin-chip")?.textContent ?? null,
     h,
     w,
@@ -189,6 +190,8 @@ describe.skipIf(!browser)("the menu's Shortcuts section and the Add to shortcuts
           expect(got.chip!.left).toBeGreaterThanOrEqual(got.h1!.right);
           expect(Math.abs((got.chip!.top + got.chip!.bottom) / 2 - (got.h1!.top + got.h1!.bottom) / 2)).toBeLessThan(20);
         }
+        // On a phone the "‹ Settings" back link is its own line above the title, never beside it.
+        if (d.width <= 640) expect(got.h1!.top).toBeGreaterThanOrEqual(got.back!.bottom - 0.5);
         const path = await shotPath(`chip-${d.name}`);
         if (path) await p.screenshot({ path });
       } finally {

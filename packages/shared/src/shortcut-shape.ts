@@ -2,11 +2,11 @@
 // that only reads the owner's preferences, such as the app's first load, never drags the page list into its bundle.
 import { z } from "zod";
 
-/** Most shortcuts at once: 6 keeps the whole top block (Dashboard, Decisions, Notifications, Chat) in view. */
-export const SHORTCUTS_MAX = 6;
+import { SHORTCUTS_MAX } from "./shortcut-max.js";
+export { SHORTCUTS_MAX };
 
 /** One saved shortcut: which page (from the shared list) and the owner's own name for it, if they gave one. */
-export const SavedShortcut = z.object({
+export const SavedShortcut = /* @__PURE__ */ z.object({
   id: z.string(),
   name: z.string().optional(),
 });

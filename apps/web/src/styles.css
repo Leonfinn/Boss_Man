@@ -887,7 +887,7 @@ button.preset-card { cursor: pointer; }
 }
 @media (max-width: 899px) {
   /* "‹ Settings" at the top takes the page back to the menu (the menu is the phone's opening screen). */
-  .set-back { display: inline-flex; }
+  .set-back { display: flex; }
   /* A page shows only that back link, not the whole menu above it (BOS-1224); the bare #/settings menu is outside .set-layout. */
   .set-layout .set-nav { display: none; }
   /* The menu is the phone's opening screen: each row carries its hint and a chevron. */
