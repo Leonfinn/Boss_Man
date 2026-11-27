@@ -66,14 +66,14 @@ describe("setup wizard: what will your team work on (BOS-2813)", () => {
     );
   }
 
-  it("defaults to Documents: no repo fields, no git-token or checks steps, 'Step 2 of 6'", async () => {
+  it("defaults to Documents: no repo fields, no git-token or checks steps, 'Step 2 of 7'", async () => {
     mockDocs(1);
     render(<Setup companies={[company]} go={() => {}} onChanged={() => {}} />);
     expect(((await screen.findByLabelText("Documents, research and writing", { exact: false })) as HTMLInputElement).checked).toBe(true);
     expect(screen.queryByLabelText("Git repo")).toBeNull();
     expect(screen.queryByText(/A git token/)).toBeNull();
     expect(screen.queryByText(/Checks before merging/)).toBeNull();
-    expect(screen.getByText(/Step 2 of 6/)).toBeTruthy();
+    expect(screen.getByText(/Step 2 of 7/)).toBeTruthy();
   });
 
   it("Code shows the repo fields, saves the choice and brings the two steps back", async () => {
@@ -82,7 +82,7 @@ describe("setup wizard: what will your team work on (BOS-2813)", () => {
     fireEvent.click(await screen.findByLabelText("Code in a git repository", { exact: false }));
     expect(await screen.findByLabelText("Git repo")).toBeTruthy();
     expect(screen.getByText(/A git token/)).toBeTruthy();
-    expect(screen.getByText(/Step 2 of 8/)).toBeTruthy();
+    expect(screen.getByText(/Step 2 of 9/)).toBeTruthy();
     const put = vi.mocked(fetch).mock.calls.find(([u, i]) => u === "/api/setup-progress" && (i as RequestInit | undefined)?.method === "PUT");
     expect(JSON.parse(String((put![1] as RequestInit).body))).toEqual({ work: "code" });
   });
@@ -313,5 +313,55 @@ describe("the Finish setting up card and the first merge", () => {
     expect(await screen.findByText(/First ticket merged: BOS-12, 2 h 40 min after setup started/)).toBeTruthy();
     expect(screen.getByText("Setup finished")).toBeTruthy();
     expect(screen.getByText("Dismiss")).toBeTruthy();
+  });
+});
+
+describe("Before you go, leaving and the checklist count (BOS-2818)", () => {
+  const items = [
+    { id: "company", label: "Say what the company is for", done: true },
+    { id: "runner", label: "Start the runner", done: true },
+    { id: "credential", label: "Add a Claude sign-in code", done: false },
+    { id: "ticket", label: "Write a first ticket", done: false },
+  ];
+  const stub = (step: number) => {
+    const puts: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === "PUT") puts.push(JSON.parse(String(init.body)));
+        const body = url === "/api/setup-progress" ? { dismissed: false, step, companyId: "c1", work: "docs" } : url.endsWith("/setup-checklist") ? items : url.endsWith("/projects") ? [] : [];
+        return new Response(JSON.stringify(body), { status: 200 });
+      }),
+    );
+    return puts;
+  };
+
+  it("lists what is ready and what stops agents, explains permission cards and links the phone push", async () => {
+    stub(8);
+    render(<Setup companies={[company]} go={() => {}} onChanged={() => {}} />);
+    expect((await screen.findByRole("heading", { level: 1 })).textContent).toBe("Before you go");
+    expect(await screen.findByText(/Start the runner/, { selector: "span" })).toBeTruthy();
+    expect(screen.getByText(/Add a Claude sign-in code/, { selector: "span" })).toBeTruthy();
+    expect(screen.queryByText(/Write a first ticket/, { selector: "span" })).toBeNull();
+    expect(screen.getByText(/treated as No/)).toBeTruthy();
+    expect(screen.getByText("Get a push on your phone when agents need you").getAttribute("href")).toBe("#/settings/notifications");
+    fireEvent.click(screen.getByText("Fix this"));
+    expect((await screen.findByRole("heading", { level: 1 })).textContent).toBe("Claude");
+  });
+
+  it("Leave setup for now closes the wizard without dismissing the checklist", async () => {
+    const puts = stub(8);
+    const go = vi.fn();
+    render(<Setup companies={[company]} go={go} onChanged={() => {}} />);
+    fireEvent.click(await screen.findByText("Leave setup for now"));
+    expect(go).toHaveBeenCalledWith("board");
+    expect(puts.some((p) => (p as { left?: boolean }).left === true)).toBe(true);
+    expect(puts.some((p) => "dismissed" in (p as object))).toBe(false);
+  });
+
+  it("shows 'Setup: 2 of 4 done' on the card", async () => {
+    stub(0);
+    render(<SetupChecklist companyId="c1" go={() => {}} />);
+    expect(await screen.findByText("Setup: 2 of 4 done")).toBeTruthy();
   });
 });
