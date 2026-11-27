@@ -36,7 +36,7 @@ describe("every owner-card writer is listed", () => {
   it("raiseOwnerTodo callers (each checked inside raiseOwnerTodo itself)", () => {
     const callers = Object.fromEntries(all.map((f) => [f.file, count(f.text, /\braiseOwnerTodo\(/g)]).filter(([file, n]) => (n as number) > 0 && file !== "services/decisions.ts"));
     // A new caller needs its steps added to the rows above (or a test that raises its card) before it is listed here.
-    expect(callers).toEqual({ "services/ci-identity-card.ts": 1, "services/self-deploy.ts": 2 });
+    expect(callers).toEqual({ "services/ci-identity-card.ts": 1, "services/self-deploy.ts": 3 });
     // The hand-apply to-do is raised inside decisions.ts (its handSteps come from self-deploy.ts's builder).
     expect(count(all.find((f) => f.file === "services/decisions.ts")!.text, /\braiseOwnerTodo\(db,/g)).toBe(1);
   });
@@ -48,6 +48,7 @@ describe("every owner-card writer is listed", () => {
       "services/ci-identity-card.ts": ["owner-todo-check.test.ts", ["the CI-identity card is held while GitHub's docs have misled the owner"]],
       "services/self-deploy.ts (service cards)": ["self-deploy.test.ts", ["holds the database card when the host's own name is not the one its steps run on (R6)", "holds the proxy card when its check names the standby colour (R31c)"]],
       "services/self-deploy.ts (deployer-script card)": ["self-deploy.test.ts", ["holds a new deployer-script card on an R6 refusal", "keeps the open deployer-script card's old steps when the refreshed ones are refused"]],
+      "services/self-deploy.ts (by-hand steps left, BOS-2783)": ["self-deploy.test.ts", ["holds the remaining-steps card on an R6 refusal"]],
       "services/decisions.ts (hand-apply to-do)": ["owner-todo-check.test.ts", ["is held on an R6 host fence refusal", "is held on an R31 compose refusal", "a held card is raised again by the sweep"]],
     };
     for (const [writer, [file, titles]] of Object.entries(tests)) {

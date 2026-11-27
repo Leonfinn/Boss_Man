@@ -2634,6 +2634,143 @@ describe("an approval when main moves on before the host runs it (BOS-753)", () 
   });
 });
 
+// BOS-2783 (27 Nov): the owner applied a by-hand update (pin, rebuild-live.sh, copy host-deployer.sh, Build and update
+// runners). As soon as the server ran its commit the card closed with "You don't need to finish these steps", and a new
+// one-click card said it "brings in everything this one did", while the host still ran the old deployer script and the
+// runners an older image. The steps outside the server now move to one card that closes on the host's own evidence.
+describe("a by-hand update's steps outside the server outlive its live commit (BOS-2783)", () => {
+  const OLD = "1".repeat(64);
+  const NEW = "2".repeat(64);
+  const PATHS = { install: "/srv/bm", src: "/srv/bm/src", deployer: "/srv/bm/deployer" };
+  const HAND = { infraPaths: ["docker-compose.yml", "scripts/host-deployer.sh"], paths: ["docker-compose.yml", "scripts/host-deployer.sh", "apps/runner/x.ts"], runnerChanged: true, ...LAYOUT };
+  // The host's own report of its deployer script; the offer file is rewritten too, so the poller runs its pass (BOS-414).
+  const deployer = async (c: Awaited<ReturnType<typeof setup>>, scriptSha: string, over: Record<string, unknown> = {}) => {
+    await writeFile(path.join(c.dir, "outbox", "host.json"), JSON.stringify({ version: 1, name: "nas01", writtenAt: "2026-10-20T12:00:00Z", ownership: [], paths: PATHS, deployer: { scriptSha, repoSha: NEW } }));
+    await c.available(over);
+  };
+  const handLeft = async (c: Awaited<ReturnType<typeof setup>>) => (await c.todos()).filter((d) => d.dedupeKey === "self-deploy:hand-left");
+  const byId = async (c: Awaited<ReturnType<typeof setup>>, id: string) => (await c.db.select().from(decisions).where(eq(decisions.id, id)))[0]!;
+  const notice = (d: { context: unknown }) => (d.context as { closedNotice?: { text: string; stepsLeft?: boolean } }).closedNotice;
+  /** A hand card for B (deployer copy + runner rebuild) raised while the live commit is A, the runners built from A. */
+  const handCard = async () => {
+    const c = (ctx = await setup());
+    const [co] = await c.db.select().from(companies).limit(1);
+    await c.db.insert(runners).values({ companyId: co!.id, tokenHash: "x", imageCommit: A });
+    await deployer(c, NEW, HAND);
+    await c.selfDeploy.sync();
+    const [card] = await c.open();
+    expect(card!.context).toMatchObject({ infra: true, update: { needsDeployerCopy: true, needsRunnerUpdate: true } });
+    return { c, co: co!, card: card! };
+  };
+
+  it("the server reaching the commit while the deployer script is old leaves one card with only the copy and the rebuild", async () => {
+    const { c, card } = await handCard();
+    await c.req("POST", `/api/decisions/${card.id}/answer`, { answer: "Approve" });
+    const [todo] = (await c.todos()).filter((d) => (d.context as { target?: string }).target === "server");
+    // The owner ran the pin and rebuild-live.sh: the server runs B. The copy step isn't done (the host still runs OLD).
+    await deployer(c, OLD, { ...HAND, deployed: B, tip: B });
+    await c.selfDeploy.sync();
+    // The hand to-do closes on the live commit, but its notice says what is still to do and where, never "you can stop".
+    const closed = await byId(c, todo!.id);
+    expect(closed.status).toBe("answered");
+    expect(notice(closed)!.text).toContain("still to do: copy the deployer script into the deployer folder; and rebuild the runners");
+    expect(notice(closed)!.text).toContain('on the card "Finish the by-hand update"');
+    expect(notice(closed)!.text).not.toContain("You don't need to finish these steps");
+    expect(notice(closed)!.stepsLeft).toBe(true);
+    // One card holds only those two steps, with the host's own folders.
+    const [left] = await handLeft(c);
+    expect(left).toBeDefined();
+    expect(left!.question).toContain("Finish the by-hand update: the server already runs bbbbbbbb");
+    const steps = (left!.context as { steps: string[] }).steps.join("\n");
+    expect(steps).toContain("BOSSMAN_DEPLOYER=/srv/bm/deployer /srv/bm/src/scripts/install-deployer.sh");
+    expect(steps).toContain("Build and update runners");
+    expect(steps).not.toContain("rebuild-live.sh");
+    expect(steps).not.toContain("git merge --ff-only");
+    expect(left!.context).toMatchObject({ handLeft: { deployer: true, runner: true } });
+    // The separate deployer-script card isn't raised beside it, even after its grace.
+    const value = { state: "behind", since: new Date(Date.now() - 60 * 60_000).toISOString() };
+    await c.db.insert(settings).values({ key: "deployer_script_state", value }).onConflictDoUpdate({ target: settings.key, set: { value } });
+    await c.available({ ...HAND, deployed: B, tip: B });
+    await c.selfDeploy.sync();
+    expect((await c.todos()).filter((d) => d.dedupeKey === "self-deploy:deployer-script")).toHaveLength(0);
+    expect(await handLeft(c)).toHaveLength(1);
+  });
+
+  it("drops each step the host confirms and closes once none is left, saying what was confirmed", async () => {
+    const { c, co, card } = await handCard();
+    await c.req("POST", `/api/decisions/${card.id}/answer`, { answer: "Approve" });
+    await deployer(c, OLD, { ...HAND, deployed: B, tip: B });
+    await c.selfDeploy.sync();
+    const [first] = await handLeft(c);
+    // The owner copies the script: the host now runs NEW. Only the rebuild is left, on the same card.
+    await deployer(c, NEW, { ...HAND, deployed: B, tip: B });
+    await c.selfDeploy.sync();
+    const [second] = await handLeft(c);
+    expect(second!.id).toBe(first!.id);
+    expect(second!.context).toMatchObject({ handLeft: { deployer: false, runner: true } });
+    expect((second!.context as { steps: string[] }).steps.join("\n")).not.toContain("install-deployer.sh");
+    // The runners are rebuilt from B: nothing is left and the card closes by itself.
+    await c.db.update(runners).set({ imageCommit: B }).where(eq(runners.companyId, co.id));
+    await c.available({ ...HAND, deployed: B, tip: B });
+    await c.selfDeploy.sync();
+    expect(await handLeft(c)).toHaveLength(0);
+    const done = await byId(c, first!.id);
+    expect(done.status).toBe("answered");
+    expect(done.answer).toContain("Nothing else is left to do: the host runs the current deployer script, and the runners are built from the version the server runs");
+  });
+
+  it("a newer one-click card raised while the steps are left names them and lists their card first; the hand card's notice says so", async () => {
+    // The 27 Nov path: the hand card was never approved, and main moved on to C (one click) as the server came up on B.
+    const { c, card } = await handCard();
+    await deployer(c, OLD, { deployed: B, tip: C, commits: [{ sha: C, subject: "Add a button" }], paths: ["apps/server/src/x.ts"], infraPaths: [], runnerChanged: false });
+    await c.selfDeploy.sync();
+    const [left] = await handLeft(c);
+    expect(left).toBeDefined();
+    const [newer] = (await c.open()).filter((d) => (d.context as { target: string }).target === "server");
+    expect(newer!.id).not.toBe(card.id);
+    expect(newer!.question).toContain("Still to do from the last by-hand update: copy the deployer script into the deployer folder; and rebuild the runners");
+    expect(newer!.question).toContain('Do the card "Finish the by-hand update" first');
+    expect(((newer!.context as { doAfter?: { decisionId: string }[] }).doAfter ?? []).map((l) => l.decisionId)).toContain(left!.id);
+    // The old hand card is withdrawn with a notice that its server part is live and two steps are left, not "everything".
+    const old = await byId(c, card.id);
+    expect(old.status).toBe("withdrawn");
+    expect(notice(old)!.text).toContain("This card's server part is already live.");
+    expect(notice(old)!.text).toContain("two steps are still to do");
+    expect(notice(old)!.text).not.toContain("brings in everything this one did");
+  });
+
+  it("holds the remaining-steps card on an R6 refusal: the owner gets none and the CEO gets the fix card", async () => {
+    const { c, card } = await handCard();
+    await c.req("POST", `/api/decisions/${card.id}/answer`, { answer: "Approve" });
+    await deployer(c, OLD, { ...HAND, deployed: B, tip: B });
+    setOwnerTodoFacts(async () => ({ serverHost: "other-box", hosts: [{ name: "other-box", ownership: [] }] }));
+    try {
+      await c.selfDeploy.sync();
+    } finally {
+      setOwnerTodoFacts(null);
+    }
+    expect(await handLeft(c)).toHaveLength(0);
+    const fix = (await c.db.select().from(decisions)).filter((d) => d.dedupeKey === "owner-todo-fix:self-deploy:hand-left");
+    expect(fix).toHaveLength(1);
+    expect(fix[0]!.tier).toBe("ceo");
+    expect(fix[0]!.question).toContain(`but Boss Man runs on "other-box"`); // the R6 host fence
+  });
+
+  it("a hand card whose steps outside the server are all confirmed closes saying nothing is left, and leaves no card", async () => {
+    const { c, co, card } = await handCard();
+    await c.req("POST", `/api/decisions/${card.id}/answer`, { answer: "Approve" });
+    const [todo] = (await c.todos()).filter((d) => (d.context as { target?: string }).target === "server");
+    // Everything was done before Boss Man looked: the host runs NEW and the runners are built from B.
+    await c.db.update(runners).set({ imageCommit: B }).where(eq(runners.companyId, co.id));
+    await deployer(c, NEW, { ...HAND, deployed: B, tip: B });
+    await c.selfDeploy.sync();
+    expect(await handLeft(c)).toHaveLength(0);
+    const closed = await byId(c, todo!.id);
+    expect(notice(closed)!.text).toContain("Nothing else is left to do: the host runs the current deployer script, and the runners are built from the version the server runs.");
+    expect(notice(closed)!.stepsLeft).toBeUndefined();
+  });
+});
+
 // BOS-1010: the runner-update card is only raised when it can be acted on (no server deploy approved, waiting, running
 // or in its trial, and no host wait), and a later runner card withdraws every earlier one, by any path.
 describe("the runner update card only when it can be acted on, and one at a time (BOS-1010)", () => {
