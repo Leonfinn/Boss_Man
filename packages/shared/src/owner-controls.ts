@@ -152,6 +152,8 @@ export const OWNER_CONTROLS = {
     "Write", "Preview", "Cancel", "Edit", "New page here", "History …", "Delete", "Put this version back",
     "Back to the current one", "Re-embed all", "Test", "Hide pages", "Show pages", "New page", "Discard draft",
     "Deleted pages", "Restore", "Restoring", "Download",
+    // BOS-2828: the Wiki Maintainer banner's button.
+    "Turn it on",
     // A page's "Copy link", "Copied" for a moment after a copy (BOS-2259).
     "Copy link", "Copied",
   ],
