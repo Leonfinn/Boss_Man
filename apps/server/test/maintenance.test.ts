@@ -7,7 +7,8 @@ import { and, eq, isNull } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { checkJobs, checkWorkers, companies, decisions, notifications, projects, runners, runs, settings, tickets, updateHolds, wakes } from "../src/db/schema.js";
+import { updateHoldHistory } from "../src/services/update-hold-history.js";
+import { checkJobs,checkWorkers, companies, decisions, notifications, projects, runners, runs, settings, tickets, updateHolds, wakes } from "../src/db/schema.js";
 import { BUILD_HOLD_MAX_MINUTES, DRAIN_GO_AHEAD_MINUTES, drainForecast, drainGoAheadAt, getHold, HOLD_CAP_MINUTES, HOLD_REASON, holdBlocksStarts, holdCapAt, holdEndsAt, SWAP_WHEN_DONE_CAP_MINUTES, WRAP_UP, WRAPUP_HOLD_REASON,WRAP_UP_ASKED, WRAP_UP_DURING_UPDATE, WRAP_UP_SETTINGS } from "../src/services/maintenance.js";
 import { CEO_REPLY_REASON, MISSED_REASON, UPDATE_ALERT_REASON } from "../src/services/scheduler.js";
 import { FAILED_UPDATE_REASON } from "../src/services/owner-holds.js";
@@ -1277,6 +1278,11 @@ describe("Ask agents to wrap up (BOS-929): a mode of the same hold", () => {
     expect(((await c.db.select().from(updateHolds))[0]!.events.map((e) => e.text))).toContain("Wrap-up tied to: nothing (no update was waiting)");
     await c.req("POST", "/api/maintenance/cancel", {});
     expect((await c.db.select().from(updateHolds))[0]!.events.map((e) => e.text).some((t) => t.startsWith("Wrap-up lifted (cancelled by the owner)"))).toBe(true);
+    // After a restart (a new service instance on the same database) the lines read back unchanged.
+    const before = (await c.db.select().from(updateHolds))[0]!.events;
+    const [again] = await updateHoldHistory(c.db, c.now).list(5);
+    expect(again!.events).toEqual(before);
+    expect(before.length).toBeGreaterThanOrEqual(3);
     // The CEO's server_status lists the record read-only: start, kind, end title and the wrap-up lines.
     const a = await c.company("App Co", "app-co");
     const status = (await c.serverStatus.status(a.id)) as { holdRecords: Array<{ kind: string; endTitle: string; wrapUpLines: string[] }> };
