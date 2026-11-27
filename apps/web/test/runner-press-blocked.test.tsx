@@ -6,7 +6,8 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SelfDeploy, TrialLines } from "../src/pages/Settings";
-import { runnerPressBlocked, type SelfDeployView } from "../src/pages/settings/updates";
+import { runnerPressBlocked } from "../src/pages/settings/System";
+import type { SelfDeployView } from "../src/pages/settings/updates";
 import { stubFetchByUrl } from "./stub-fetch";
 
 afterEach(() => {

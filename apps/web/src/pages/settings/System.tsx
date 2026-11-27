@@ -15,7 +15,21 @@ import { Section, useAction } from "./shared";
 import { CheckWorkers, type CheckWorkerView } from "./CheckWorkers";
 import { ReleaseNotice } from "./ReleaseNotice";
 import { DEFAULT_POLICY, policyLine, policyValid, SlotSplitFields, type SlotPolicy } from "./SlotSplit";
-import { LiveState, RUNNER_QUEUED_REPLY, atTime, runnerPressBlocked, historyTag, historyWaitingOn, historyWhat, inAbout, runnerProgress, updateStatus, type RunnerProgress, type DeployWaitView, type HistoryRow, type MaintenanceView, type Report, type SelfDeployView, type UpdateStatus, type WrapUpRun, type WrapUpStatus } from "./updates";
+import { LiveState, RUNNER_QUEUED_REPLY, atTime, historyTag, historyWaitingOn, historyWhat, inAbout, runnerProgress, updateStatus, type RunnerProgress, type DeployWaitView, type HistoryRow, type MaintenanceView, type Report, type SelfDeployView, type UpdateStatus, type WrapUpRun, type WrapUpStatus } from "./updates";
+
+/**
+ * BOS-2701: why "Build and update runners" can't take a press now, or null when it can. The server queues a press at
+ * every stage of an update, including the minute after a deploy when the host's offer is gone; it refuses only when the
+ * deployer never reported or is late. Then the button is disabled with this one line, and nothing on the panel says "press".
+ * Kept here, not in updates.tsx, because App.tsx loads updates.tsx on first load and this belongs to the lazy Settings page.
+ */
+export function runnerPressBlocked(v: SelfDeployView): string | null {
+  const d = v.deployer;
+  if (v.available || (d?.reportedAt && !d.late)) return null;
+  return d?.reportedAt
+    ? `Build and update runners is ready again once the host deployer reports; it last reported ${when(d.reportedAt)}.`
+    : "Build and update runners is ready once the host deployer has reported for the first time.";
+}
 
 /** The company's workspace disk cap (R54, BOS-274): over it, the owner hears once a day; nothing is stopped. */
 export function WorkspaceDisk({ company, onChanged }: { company: Company; onChanged: () => void }) {
