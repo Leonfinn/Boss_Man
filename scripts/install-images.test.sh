@@ -65,6 +65,13 @@ echo "$cfg" | jq -r '.services.updater.environment.UPDATER_SELF_MOUNTS' | grep -
 # No host tools in the compose file's own steps (comments excluded).
 if grep -v '^[[:space:]]*#' docker-compose.images.yml | grep -Eq '\b(openssl|sudo|chown|stat -c)\b'; then bad "compose file uses host tools"; else ok "no host openssl, chown, stat or sudo"; fi
 [ -f docs/35-install-from-images.md ] && ok "the install guide exists" || bad "docs/35-install-from-images.md is missing"
+# BOS-2788: docker-compose.images.yml is not a default Compose file name, so every guide step that runs compose with images.env must
+# pass -f docker-compose.images.yml, as this test does. Both guides are read; a step with --env-file images.env and no -f fails.
+for guide in docs/35-install-from-images.md apps/site/src/guides/install-boss-man.md; do
+  [ -f "$guide" ] || { bad "$guide is missing"; continue; }
+  nof="$(grep -n 'docker compose .*--env-file images\.env' "$guide" | grep -v -- '-f docker-compose\.images\.yml' || true)"
+  [ -z "$nof" ] && ok "$guide: every image-install compose command names -f docker-compose.images.yml" || bad "$guide: compose command without -f docker-compose.images.yml: $nof"
+done
 
 # BOS-2388: the real install half below only runs with a Docker daemon and INSTALL_RELEASE_JSON, so a workflow that builds its
 # test release.json by hand can drift from what the install needs and only GitHub notices. Check the contract here, with no daemon:

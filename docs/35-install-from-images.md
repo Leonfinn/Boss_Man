@@ -67,7 +67,7 @@ Run these in the folder with the two files.
 1. Make the keys. This runs once and is safe to run again: it never replaces a file that exists.
 
    ```
-   docker compose --env-file images.env run --rm setup
+   docker compose --env-file images.env -f docker-compose.images.yml run --rm setup
    ```
 
    It writes the master key into a Docker volume called `config` and the database password into a second one called `db-secret` (in a project named `boss-man`, they are `boss-man_config` and `boss-man_db-secret`). The database container gets only `db-secret`, so it never sees the master key. **Back up both volumes.** Without `master.key`, the secrets Boss Man stores cannot be read again, and without the database password the server cannot reach its database.
@@ -75,7 +75,7 @@ Run these in the folder with the two files.
 2. Start Boss Man. Compose starts only the database, a small proxy and the updater; the updater then downloads the server, launcher, runner and network-guard images by their digests and makes the server and the launcher itself, so the first start takes a few minutes longer than later ones:
 
    ```
-   docker compose --env-file images.env up -d
+   docker compose --env-file images.env -f docker-compose.images.yml up -d
    ```
 
 3. Open `http://<this machine>:3100` and create the owner account. By default Boss Man listens only on the machine itself (`127.0.0.1`). To reach it from another computer, add `BOSSMAN_BIND=0.0.0.0` to `images.env` and run the start command in step 2 again, and keep the port off the internet. Logging in over plain `http://` on your home network also needs `BOSSMAN_INSECURE_COOKIES=1` in `images.env`; without it, login needs HTTPS.
@@ -98,13 +98,13 @@ Until this change compose itself started the server and the launcher. An install
 2. In the old folder stop and remove the old containers, keeping volumes (never add `-v`):
 
    ```
-   docker compose --env-file images.env down
+   docker compose --env-file images.env -f docker-compose.images.yml down
    ```
 
 3. In the new folder start the new stack. The updater finds no server and no launcher, makes both from the release the new `images.env` pins (no backup or soak, nothing is serving), and the existing database, keys and company data are used as they are:
 
    ```
-   docker compose --env-file images.env up -d
+   docker compose --env-file images.env -f docker-compose.images.yml up -d
    ```
 
 Runners keep their company data (it is in volumes); the new launcher picks them up by label and starts new ones as before.
@@ -151,8 +151,8 @@ Follow sections 1 to 3 in a terminal. The launcher finds where Docker keeps its 
 - **`required variable BOSSMAN_REGISTRY is missing`**: you left out `--env-file images.env`.
 - **The server cannot read `master.key`** or the database says its password file is missing: run step 1 first.
 - **A pull is refused or "denied"**: the package may be private, or you hit Docker Hub's limit (section 2). Run `docker login` for that registry.
-- **Start again from nothing** (this deletes everything, including your company data and keys): `docker compose --env-file images.env down -v`, then `docker rm -f launcher server-blue server-green updater` (the updater made those, so compose does not know them). Do not do this if you want to keep anything.
-- **Go back to the build install**: stop this one with `docker compose --env-file images.env down` (without `-v`, so the volumes stay) and follow [docs/00-first-time-install.md](00-first-time-install.md) in a different folder. The two installs do not share data.
+- **Start again from nothing** (this deletes everything, including your company data and keys): `docker compose --env-file images.env -f docker-compose.images.yml down -v`, then `docker rm -f launcher server-blue server-green updater` (the updater made those, so compose does not know them). Do not do this if you want to keep anything.
+- **Go back to the build install**: stop this one with `docker compose --env-file images.env -f docker-compose.images.yml down` (without `-v`, so the volumes stay) and follow [docs/00-first-time-install.md](00-first-time-install.md) in a different folder. The two installs do not share data.
 
 ## What the install changes on your machine
 
@@ -160,7 +160,7 @@ Only Docker objects: containers, networks and volumes whose names start with `bo
 
 ## Blue/green updates (the only way this install runs, since BOS-1227)
 
-Compose holds the database, a small Caddy `proxy` that owns the host ports and the name `server`, the `updater` and the one-shot `setup`. The updater makes `server-blue` (and later `server-green`) and the `launcher` itself, from the release `images.env` pins, and takes over from there. The updater swaps the server's two colours through the Docker API: it checks the signed release, backs up the database (the last 3 dumps stay in the `backups` volume), migrates while the old colour serves, starts the idle colour, hands over, moves the `server-live` alias on the private `front` network (the proxy dials it, so no file or reload is involved), watches for 15 minutes and switches back by itself if the new colour fails, then stops the old colour and keeps it as the standby. Going back to the standby's release needs no download; any other older release is refused. The updater replaces itself last, through a hand-over (`updater-next` must report in within 60 seconds, else it is removed and "Updater update failed" is recorded). Migrations must be expand-only so the old release runs on the new schema (docs/10-migrations.md). The first server and the launcher are made at the updater's first start with no backup and no soak. This has been tested against a fake Docker API only; **not yet confirmed on a real host** (the real-Docker proof runs in staging). The launcher is replaced one at a time: the new one is created, the old one stopped, the new one started and waited for; if it never becomes healthy it is removed and the old one starts again. Never delete the `backups` or `updater-state` volumes or remove the standby colour. Because compose no longer owns a server or launcher, `docker compose up -d` cannot bring an older one back; the updater, if compose starts it from an older digest than the release it recorded, moves itself forward again. `docker compose --env-file images.env down -v` (section "Start again from nothing") still deletes the volumes, and with them the updater's records.
+Compose holds the database, a small Caddy `proxy` that owns the host ports and the name `server`, the `updater` and the one-shot `setup`. The updater makes `server-blue` (and later `server-green`) and the `launcher` itself, from the release `images.env` pins, and takes over from there. The updater swaps the server's two colours through the Docker API: it checks the signed release, backs up the database (the last 3 dumps stay in the `backups` volume), migrates while the old colour serves, starts the idle colour, hands over, moves the `server-live` alias on the private `front` network (the proxy dials it, so no file or reload is involved), watches for 15 minutes and switches back by itself if the new colour fails, then stops the old colour and keeps it as the standby. Going back to the standby's release needs no download; any other older release is refused. The updater replaces itself last, through a hand-over (`updater-next` must report in within 60 seconds, else it is removed and "Updater update failed" is recorded). Migrations must be expand-only so the old release runs on the new schema (docs/10-migrations.md). The first server and the launcher are made at the updater's first start with no backup and no soak. This has been tested against a fake Docker API only; **not yet confirmed on a real host** (the real-Docker proof runs in staging). The launcher is replaced one at a time: the new one is created, the old one stopped, the new one started and waited for; if it never becomes healthy it is removed and the old one starts again. Never delete the `backups` or `updater-state` volumes or remove the standby colour. Because compose no longer owns a server or launcher, `docker compose up -d` cannot bring an older one back; the updater, if compose starts it from an older digest than the release it recorded, moves itself forward again. `docker compose --env-file images.env -f docker-compose.images.yml down -v` (section "Start again from nothing") still deletes the volumes, and with them the updater's records.
 
 ## How the install is tested
 
