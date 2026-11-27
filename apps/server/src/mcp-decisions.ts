@@ -71,6 +71,9 @@ export function registerDecisionTools(
         urgentWhy: z.string().max(200).optional(),
         /** reissue of a card linked to after-merge criteria (BOS-1155): what each option means, pass, fail or none. */
         optionVerdicts: z.record(z.string().max(200), z.enum(["pass", "fail", "none"])).optional(),
+        /** reissue (DR-078, BOS-2798): the new options that need a picture or file attached, or text in the note, as raise_decision takes them. */
+        needsAttachment: z.array(z.string().min(1).max(200)).max(6).optional(),
+        needsNote: z.array(z.string().min(1).max(200)).max(6).optional(),
         steps: z.array(z.string().min(1).max(500)).max(12).optional(),
         lintOverride: lintOverrideSchema.optional().describe(LINT_OVERRIDE_HELP),
         setsUp: z.enum(ADDONS).optional(),
@@ -289,7 +292,7 @@ export function registerDecisionTools(
             // BOS-1660: the owner reads the question, options and triedFirst with host tokens filled; a recommendation or verdict names its option's new text.
             const filledAs = new Map(input.options.map((o, i) => [o, ask.options?.[i] ?? o]));
             const verdicts = input.optionVerdicts ? Object.fromEntries(Object.entries(input.optionVerdicts).map(([k, v]) => [filledAs.get(k) ?? k, v])) : undefined;
-            r = await decisions.advise({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, outcome: "reissue", runId: scope.runId, question: ask.question ?? input.question, options: ask.options ?? input.options, recommended: filledAs.get(input.recommended) ?? input.recommended, triedFirst: (ask.triedFirst ?? input.triedFirst ?? "").trim(), steps: reissueSteps?.length ? reissueSteps : undefined, ...(reissueSteps?.length && ask.stepSources ? { stepSources: ask.stepSources } : {}), ...(reissueSteps?.length && ask.opening ? { opening: ask.opening } : {}), lint: ask.lint, ...(verdicts ? { optionVerdicts: verdicts } : {}), ...(input.urgent ? { urgentWhy: input.urgentWhy!.trim() } : {}) });
+            r = await decisions.advise({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, outcome: "reissue", runId: scope.runId, question: ask.question ?? input.question, options: ask.options ?? input.options, recommended: filledAs.get(input.recommended) ?? input.recommended, triedFirst: (ask.triedFirst ?? input.triedFirst ?? "").trim(), steps: reissueSteps?.length ? reissueSteps : undefined, ...(reissueSteps?.length && ask.stepSources ? { stepSources: ask.stepSources } : {}), ...(reissueSteps?.length && ask.opening ? { opening: ask.opening } : {}), lint: ask.lint, ...(verdicts ? { optionVerdicts: verdicts } : {}), ...(input.urgent ? { urgentWhy: input.urgentWhy!.trim() } : {}), ...(input.needsAttachment?.length ? { attachOptions: input.needsAttachment.map((o) => filledAs.get(o) ?? o) } : {}), ...(input.needsNote?.length ? { noteOptions: input.needsNote.map((o) => filledAs.get(o) ?? o) } : {}) });
           } else if (input.outcome === "advice") {
             const [card] = await db.select({ kind: decisionsTable.kind, context: decisionsTable.context }).from(decisionsTable).where(and(eq(decisionsTable.id, input.id), eq(decisionsTable.companyId, scope.companyId)));
             const permission = !!card && card.kind === "permission" && (card.context as { type?: string }).type === "permission";

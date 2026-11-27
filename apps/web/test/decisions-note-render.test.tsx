@@ -5,11 +5,11 @@ import { afterAll, describe, expect, it } from "vitest";
 import type { Company, Decision } from "../src/api";
 import { Decisions } from "../src/pages/Decisions";
 
-// BOS-2798: a card option that says its answer is in the note ("Done, output pasted in my note") now has the note box
-// shown open under the answers, four rows tall for pasted output. This renders the real Decisions page with the real
-// styles.css in a headless browser at the owner's two devices (Safari 1550 wide, the Brave foldable 1667×724) and a
-// 390 px phone, and checks the label and box are on screen, inside the card, below the answer buttons and clear of
-// them, taller than the two-row note, and that nothing makes the page scroll sideways.
+// BOS-2798 (DR-078): a card option that says its answer is in the note ("Done, output pasted in my note") now has the
+// note box shown open above the answers, named for the option, four rows tall for pasted output. This renders the real
+// Decisions page with the real styles.css in a headless browser at the owner's two devices (Safari 1550 wide, the Brave
+// foldable 1667×724) and a 390 px phone, and checks the label and box are on screen, inside the card, above the answer
+// buttons and clear of them, taller than the two-row note, and that nothing makes the page scroll sideways.
 //
 // Skipped, not failed, where no browser is installed (CI's web-browser job fails on a skip).
 
@@ -116,15 +116,16 @@ describe.skipIf(!browser)("the note box for an 'in my note' option in a real bro
         const got = await page.evaluate(read);
         expect(got).not.toBeNull();
         const g = got!;
-        expect(g.label).toMatch(/^Your note for "Done, output pasted in my note": paste the output or write your answer here, then press it\./);
+        expect(g.label).toBe('Paste your output here for "Done, output pasted in my note"');
         const [textarea, labelBox] = [g.textarea!, g.labelBox!];
         expect(textarea.width).toBeGreaterThan(200);
         // Four rows: room to see pasted output, more than three lines of text tall.
         expect(textarea.height).toBeGreaterThan(g.line * 3);
         expect(labelBox.bottom).toBeLessThanOrEqual(textarea.top + 0.5);
         expect(g.answers.length).toBe(card.options.length);
+        // Above the answers (DR-078): paste first, then press.
         for (const a of g.answers) {
-          expect(a!.bottom).toBeLessThanOrEqual(labelBox.top + 0.5);
+          expect(a!.top).toBeGreaterThanOrEqual(textarea.bottom - 0.5);
           expect(overlaps(a!, textarea)).toBe(false);
         }
         for (const b of [textarea, labelBox]) {

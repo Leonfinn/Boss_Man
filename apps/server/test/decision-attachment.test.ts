@@ -57,7 +57,7 @@ const textOf = (r: unknown) => ((r as { content: Array<{ text: string }> }).cont
 describe("an option that promises a screenshot (BOS-2742)", () => {
   it("is refused with nothing attached, and the card stays open", async () => {
     const c = (ctx = await setup());
-    const d = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Run Google's live test on the sitemap.", options: [DONE_SHOT, "It failed"], recommended: DONE_SHOT, blocksTicketId: c.ticket.id, triedFirst: "Only the owner can sign in to Search Console." });
+    const d = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Run Google's live test on the sitemap.", options: [DONE_SHOT, "It failed"], recommended: DONE_SHOT, attachOptions: [DONE_SHOT], blocksTicketId: c.ticket.id, triedFirst: "Only the owner can sign in to Search Console." });
     const r = await c.answer(d.id, { answer: DONE_SHOT });
     expect(r.statusCode).toBe(422);
     expect(r.json().message).toMatch(/^Attach the screenshot first/);
@@ -73,13 +73,13 @@ describe("an option that promises a screenshot (BOS-2742)", () => {
     const c = (ctx = await setup());
     const { company: other } = (await c.req("POST", "/api/companies", { name: "Other Co" })).json() as { company: { id: string } };
     const foreign = await c.upload(other.id);
-    const d = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Run the live test.", options: [DONE_SHOT, "It failed"], recommended: DONE_SHOT, blocksTicketId: c.ticket.id, triedFirst: "Only the owner can sign in." });
+    const d = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Run the live test.", options: [DONE_SHOT, "It failed"], recommended: DONE_SHOT, attachOptions: [DONE_SHOT], blocksTicketId: c.ticket.id, triedFirst: "Only the owner can sign in." });
     expect((await c.answer(d.id, { answer: DONE_SHOT, note: foreign.markdown })).statusCode).toBe(422);
   });
 
   it("is taken with the screenshot in the note, and the agent's wake lists the image id", async () => {
     const c = (ctx = await setup());
-    const d = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Run Google's live test on the sitemap.", options: [DONE_SHOT, "It failed"], recommended: DONE_SHOT, blocksTicketId: c.ticket.id, triedFirst: "Only the owner can sign in to Search Console." });
+    const d = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Run Google's live test on the sitemap.", options: [DONE_SHOT, "It failed"], recommended: DONE_SHOT, attachOptions: [DONE_SHOT], blocksTicketId: c.ticket.id, triedFirst: "Only the owner can sign in to Search Console." });
     const shot = await c.upload(c.company.id, c.ticket.id);
     const r = await c.answer(d.id, { answer: DONE_SHOT, note: `Passed.\n${shot.markdown}` });
     expect(r.statusCode).toBe(200);
@@ -90,6 +90,14 @@ describe("an option that promises a screenshot (BOS-2742)", () => {
     const note = woken.map((w) => w.note ?? "").join("\n");
     expect(note).toContain(shot.id);
     expect(note).toContain("open_attachment");
+  });
+
+  it("raise_decision refuses an option promising a screenshot that isn't flagged needsAttachment (DR-078)", async () => {
+    const c = (ctx = await setup());
+    const m = await c.mcp(c.worker.id);
+    const r = await m.callTool({ name: "raise_decision", arguments: { question: "Run Google's live test on the sitemap.", options: [DONE_SHOT, "It failed"], recommended: DONE_SHOT, blocksTicketId: c.ticket.id, triedFirst: "Only the owner can sign in to Search Console." } });
+    expect(textOf(r)).toMatch(/flag this option needsAttachment/);
+    expect(await c.db.select().from(decisions).where(eq(decisions.companyId, c.company.id))).toEqual([]);
   });
 
   it("raise_decision needsAttachment flags an option whatever its words, and refuses one that isn't an option", async () => {

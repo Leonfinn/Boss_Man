@@ -62,9 +62,10 @@ import {
   type StepSource,
   ATTACH_FIRST,
   attachmentIds,
-  optionNeedsAttachment,
   NOTE_FIRST,
-  optionNeedsNote,
+  handOverRefusal,
+  optionNeeds,
+  type OptionNeedFlags,
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import type { SecondOpinionCard, SecondOpinionResult } from "./second-opinion.js";
@@ -2203,6 +2204,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     async raise(input: { /** The open question card this one replaces (BOS-1193): it closes as superseded in the same call. Your own card, or any card for the CEO. */ replaces?: string; companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; /** Other tickets this one card holds too, so one answer releases them all (BOS-1591). */ alsoBlocksTicketIds?: string[]; /** Hold blocksTicketId's merge until this is answered (BOS-1078). */ holdsMerge?: boolean; triedFirst?: string; steps?: string[]; stepSources?: Array<StepSource | null>; stillNeeded?: string; ownerMustDo?: boolean; /** BOS-1660: the opening of a card with steps. */ opening?: CardOpening; approveSummary?: string; lint?: CardLint; setsUp?: Addon; /** Checkable conditions that close the card by itself (BOS-1161), already validated by the tool. */ clearWhen?: ClearWhen[]; /** The after-merge criteria this card settles, 0-based indexes into the ticket's list (BOS-963). */ criterionIndexes?: number[]; /** What each option means for those criteria (BOS-1155). */ optionVerdicts?: Record<string, "pass" | "fail" | "none">; /** The ticket's plan (BOS-531): stored on the ticket; approving the card sets planApprovedAt. */ plan?: string; doAfter?: OrderLink[]; doBefore?: OrderLink[]; resetsOnRestart?: boolean; /** Why only the owner can take this card (BOS-1318); it stays on the owner's queue. */ ownerOnly?: OwnerOnlyKind; /** The one-line reason an owner_choice card is the owner's. */ ownerOnlyWhy?: string; /** An agent's card via raise_decision (BOS-1318): goes to the CEO first unless it needs the owner. Plans and system cards leave it out and keep their routing. */ ceoFirst?: boolean; /** BOS-1797: the card asks what Boss Man's record has a value for; with ceoFirst it goes to the CEO first. */ recordSays?: boolean; /** BOS-2085: stored as goLive on the card, with the commit it names. */ goLive?: boolean; releasesCommit?: string; /** BOS-2742: options that need a screenshot attached; each must be one of the options. */ attachOptions?: string[]; /** BOS-2798: options that need text in the note; each must be one of the options. */ noteOptions?: string[] }) {
       // BOS-1318: where this card goes. Decided by routeAgentCard from the card's structure, never its wording.
       if (input.ownerOnly === "owner_choice" && !input.ownerOnlyWhy?.trim()) throw new AnswerError("ownerOnly owner_choice needs ownerOnlyWhy: one line saying why this choice is the owner's.");
+      // DR-078 (BOS-2798): an agent's option that promises a hand-over ("output pasted in my note", "link below") must be
+      // flagged, so the card asks for it. Boss Man's own cards (no agentId) are proven clean by a test over their strings
+      // rather than refused here, where a refusal would lose a system alert.
+      const handOver = input.agentId ? handOverRefusal(input.options, { attachOptions: input.attachOptions, noteOptions: input.noteOptions }) : null;
+      if (handOver) throw new AnswerError(handOver);
       let route: { tier: "owner" | "ceo"; why: string } = { tier: "owner", why: "unchanged" };
       let ceoRow: { id: string } | undefined;
       if (input.ceoFirst && !input.plan) {
@@ -3126,7 +3132,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
      * blocked onto it and closes the original without an answer; "handled" settles it (never an owner-only kind).
      * Returns null when the owner answered first.
      */
-    async advise(input: { id: string; companyId: string; agentId: string | null; outcome: "reissue"; runId?: string; question: string; options: string[]; recommended: string; triedFirst: string; steps?: string[]; stepSources?: Array<StepSource | null>; /** BOS-1660: the opening of a card with steps. */ opening?: CardOpening; lint?: CardLint; /** What each new option means for the criteria the card settles (BOS-1155); needed when the card is linked to criteria. */ optionVerdicts?: Record<string, string>; /** The owner must act now (BOS-1110): stored as the card's urgent mark, so it also reaches their phone. */ urgentWhy?: string } | { id: string; companyId: string; agentId: string | null; outcome: "handled"; runId?: string; summary: string; answer?: string } | { id: string; companyId: string; agentId: string | null; outcome: "advice"; runId?: string; what?: string; needed?: string; recommendation?: "allow" | "deny"; why: string }) {
+    async advise(input: { id: string; companyId: string; agentId: string | null; outcome: "reissue"; runId?: string; question: string; options: string[]; recommended: string; triedFirst: string; steps?: string[]; stepSources?: Array<StepSource | null>; /** BOS-1660: the opening of a card with steps. */ opening?: CardOpening; lint?: CardLint; /** What each new option means for the criteria the card settles (BOS-1155); needed when the card is linked to criteria. */ optionVerdicts?: Record<string, string>; /** The owner must act now (BOS-1110): stored as the card's urgent mark, so it also reaches their phone. */ urgentWhy?: string; /** DR-078 (BOS-2798): new options that need an attachment or a note; each must be one of the options. */ attachOptions?: string[]; noteOptions?: string[] } | { id: string; companyId: string; agentId: string | null; outcome: "handled"; runId?: string; summary: string; answer?: string } | { id: string; companyId: string; agentId: string | null; outcome: "advice"; runId?: string; what?: string; needed?: string; recommendation?: "allow" | "deny"; why: string }) {
       const via = input.runId ? ` (CEO run ${input.runId})` : "";
       const [d] = await db.select().from(decisions).where(and(eq(decisions.id, input.id), eq(decisions.companyId, input.companyId)));
       if (!d) throw new AnswerError("No decision with that id.");
@@ -3196,6 +3202,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           return { outcome: "reissue" as const, id: d.id, inPlace: true };
         }
         if (!input.options.includes(input.recommended)) throw new AnswerError("The recommended answer must be one of the options.");
+        // DR-078 (BOS-2798): the reworded options carry their hand-over needs as a raise does, flagged or refused.
+        const needFlags = { attachOptions: input.attachOptions?.filter((o) => input.options.includes(o)), noteOptions: input.noteOptions?.filter((o) => input.options.includes(o)) };
+        for (const [field, named] of [["needsAttachment", input.attachOptions], ["needsNote", input.noteOptions]] as const) {
+          const stray = named?.find((o) => !input.options.includes(o));
+          if (stray) throw new AnswerError(`${field} names "${stray}", which is not one of the options: give each option's exact text.`);
+        }
+        const handOver = handOverRefusal(input.options, needFlags);
+        if (handOver) throw new AnswerError(handOver);
         // A card linked to criteria keeps the link, and its reworded options must say what they mean (BOS-1155).
         const linked = (d.context as { criterionIndexes?: number[] }).criterionIndexes;
         if (linked?.length) {
@@ -3221,7 +3235,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             raisedByAgentId: d.raisedByAgentId,
             // The card says the CEO wrote it and points back at the original (advice.replaces).
             // A card that held its ticket's merge still does once reworded (BOS-1078): the hold moves with the link below.
-            context: { type: "question", ...(linked?.length ? { criterionIndexes: linked, optionVerdicts: input.optionVerdicts as OptionVerdicts } : {}), triedFirst: input.triedFirst.trim(), ...urgentMark, ...(input.steps?.length ? { steps: input.steps, ...(input.stepSources?.length ? { stepSources: input.stepSources } : {}), ...(input.opening ? { opening: input.opening } : {}) } : {}), ...(input.lint ? { lint: input.lint } : {}), ...((d.context as { holdsMerge?: boolean } | null)?.holdsMerge ? { holdsMerge: true as const, ...((d.context as { ticketId?: string }).ticketId ? { ticketId: (d.context as { ticketId?: string }).ticketId } : {}) } : {}), advice: { state: "replacement", replaces: d.id, at } satisfies Advice },
+            context: { type: "question", ...(linked?.length ? { criterionIndexes: linked, optionVerdicts: input.optionVerdicts as OptionVerdicts } : {}), triedFirst: input.triedFirst.trim(), ...urgentMark, ...(needFlags.attachOptions?.length ? { attachOptions: needFlags.attachOptions } : {}), ...(needFlags.noteOptions?.length ? { noteOptions: needFlags.noteOptions } : {}),...(input.steps?.length ? { steps: input.steps, ...(input.stepSources?.length ? { stepSources: input.stepSources } : {}), ...(input.opening ? { opening: input.opening } : {}) } : {}), ...(input.lint ? { lint: input.lint } : {}), ...((d.context as { holdsMerge?: boolean } | null)?.holdsMerge ? { holdsMerge: true as const, ...((d.context as { ticketId?: string }).ticketId ? { ticketId: (d.context as { ticketId?: string }).ticketId } : {}) } : {}), advice: { state: "replacement", replaces: d.id, at } satisfies Advice },
           });
           await tx.update(ticketDependencies).set({ blockerDecisionId: newId }).where(eq(ticketDependencies.blockerDecisionId, d.id));
           return true;
@@ -3484,17 +3498,16 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const handOff = (d.context as DecisionContext).type === "stale_blocker" && answer === LET_CEO_DECIDE; // also on cards raised before the option existed
       if (handOff && extra.settledBy) throw new AnswerError("Only the owner can hand this to the CEO; answer Chase, Reassign or Drop dependency.");
       if (options.length > 0 && !ownWords && !handOff && !options.includes(answer)) throw new AnswerError(`Answer must be one of: ${options.map(shortLabel).join(", ")}`);
-      // BOS-2742: an option that promises a screenshot ("Done, screenshot attached") is taken only with one: a link to an image
-      // of this company in the answer or its note. Checked here, not only on the card, so no screen or tool can close it without.
-      if (!ownWords && optionNeedsAttachment(answer, (d.context as { attachOptions?: string[] }).attachOptions)) {
+      // BOS-2742, BOS-2798 (DR-078): an option that promises a hand-over is taken only with it. A screenshot: a link to an image
+      // of this company in the answer or its note. A note: any text in it (an attachment travels in the note, so it counts).
+      // Checked here, not only on the card, so no screen or tool can close it without.
+      const need = ownWords ? null : optionNeeds(answer, d.context as OptionNeedFlags);
+      if (need === "attachment") {
         const ids = attachmentIds(`${answer}\n${extra.note ?? ""}`);
         const known = ids.length ? await db.select({ id: ticketImages.id }).from(ticketImages).where(and(inArray(ticketImages.id, ids), eq(ticketImages.companyId, d.companyId))) : [];
         if (!known.length) throw new AnswerError(`${ATTACH_FIRST}: "${shortLabel(answer)}" says a screenshot comes with it. Paste or attach it on the card, then press it again.`);
       }
-      // BOS-2798: likewise an option that says its answer is in the note ("Done, output pasted in my note") needs a note.
-      if (!ownWords && !extra.note?.trim() && optionNeedsNote(answer, (d.context as { noteOptions?: string[] }).noteOptions)) {
-        throw new AnswerError(`${NOTE_FIRST}: "${shortLabel(answer)}" says the answer is in the note. Paste or write it in the note box on the card, then press it again.`);
-      }
+      if (need === "note" && !extra.note?.trim()) throw new AnswerError(`${NOTE_FIRST}: "${shortLabel(answer)}" says the answer is in the note. Paste or write it in the note box on the card, then press it again.`);
       await validate(d, answer, extra);
       if (handOff) return handToCeo(d);
       const ctx = d.context as DecisionContext;
