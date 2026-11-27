@@ -218,6 +218,8 @@ docker volume ls -q --filter name=boss-man
 
 If either prints a name, run `docker ps -a` and remove that container with `docker rm -f` and its name, then repeat steps 3 to 5.
 
+Not yet confirmed on a real host as of 2026-11-27; the release install test runs these same steps after each real install.
+
 ### Updating to a new release
 
 Nothing updates by itself. Take a release from Boss Man's own update screen: the updater checks the signed release, downloads every image of it by digest, backs up the database, switches the server over, watches it for 15 minutes (going back by itself if it fails), and then moves the rest of the release. Your data and keys stay, because they are in volumes.
