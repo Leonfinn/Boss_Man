@@ -149,14 +149,15 @@ if [ -z "${INSTALL_ALLOW_SHARED_HOST:-}" ] && [ -n "$(docker ps -aq --filter lab
   bad "this host already has Boss Man runners or guards, and the removal step would delete them (set INSTALL_ALLOW_SHARED_HOST=1 to allow)"; exit 1
 fi
 guide_removal() {
-  docker ps -aq --filter "label=com.bossman.install=$P" | xargs -r docker rm -f >/dev/null 2>&1
-  docker ps -aq --filter label=boss-man.launcher=1 | xargs -r docker rm -f >/dev/null 2>&1
-  docker ps -aq --filter label=boss-man.netguard=1 | xargs -r docker rm -f >/dev/null 2>&1
+  # Output goes to a log file, not away: the listings after this step are what fail the test, and the log says why.
+  docker ps -aq --filter "label=com.bossman.install=$P" | xargs -r docker rm -f >> "$T/removal.log" 2>&1
+  docker ps -aq --filter label=boss-man.launcher=1 | xargs -r docker rm -f >> "$T/removal.log" 2>&1
+  docker ps -aq --filter label=boss-man.netguard=1 | xargs -r docker rm -f >> "$T/removal.log" 2>&1
   dc down -v --remove-orphans > "$T/down.log" 2>&1
-  docker volume ls -q --filter "label=com.bossman.install=$P" | xargs -r docker volume rm >/dev/null 2>&1
-  docker volume ls -q --filter name=boss-man-claude-pack | xargs -r docker volume rm >/dev/null 2>&1
+  docker volume ls -q --filter "label=com.bossman.install=$P" | xargs -r docker volume rm >> "$T/removal.log" 2>&1
+  docker volume ls -q --filter name=boss-man-claude-pack | xargs -r docker volume rm >> "$T/removal.log" 2>&1
   # Compose left config and data behind in CI (nothing mounted them); the guide's last removal takes what is named for the project.
-  docker volume ls -q --filter "name=^${P}_" | xargs -r docker volume rm >/dev/null 2>&1
+  docker volume ls -q --filter "name=^${P}_" | xargs -r docker volume rm >> "$T/removal.log" 2>&1
 }
 cleanup() {
   rc=$?
