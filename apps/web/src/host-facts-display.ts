@@ -47,6 +47,25 @@ export const NORMALLY_EMPTY_FACTS: ReadonlySet<string> = new Set(["repo.probeWhy
 /** The service names of unhealthy or restarting containers, "; "-joined (BOS-2481; the host writes it). */
 export const UNHEALTHY_CONTAINERS_KEY = "check.container_status.unhealthyNames";
 
+/** BOS-2781: staging-stack containers that are unhealthy or stopped, "; "-joined. They never count as a host warning. */
+export const STAGING_UNHEALTHY_KEY = "check.container_status.stagingUnhealthyNames";
+export const STAGING_STOPPED_KEY = "check.container_status.stagingStoppedNames";
+
+/**
+ * BOS-2781: the one quiet info line for faults in the staging stack, or null when there are none. Not a warning: it is
+ * not counted in the folded header and raises nothing.
+ */
+export function stagingFaultLine(d: HostFactsView): string | null {
+  const list = (k: string) => (d.facts[k]?.value ?? "").split("; ").map((s) => s.trim()).filter(Boolean);
+  const unh = list(STAGING_UNHEALTHY_KEY);
+  const stp = list(STAGING_STOPPED_KEY);
+  if (!unh.length && !stp.length) return null;
+  const bits: string[] = [];
+  if (unh.length) bits.push(`${unh.length} container${unh.length === 1 ? "" : "s"} unhealthy (${unh.join(", ")})`);
+  if (stp.length) bits.push(`${stp.length} container${stp.length === 1 ? "" : "s"} stopped (${stp.join(", ")})`);
+  return `Staging: ${bits.join("; ")}. This doesn't affect your live Boss Man.`;
+}
+
 /** The flattened value of the named stopped containers (the server writes it; see host-facts.ts). */
 export const STOPPED_CONTAINERS_KEY = "check.container_status.stopped.names";
 

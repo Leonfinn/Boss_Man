@@ -111,6 +111,14 @@ describe("flattenHostRecord: check lists", () => {
     expect(some["check.container_status.stagingUnhealthyNames"]).toBe("staging-runner");
   });
 
+  it("leaves an empty staging-stopped name list out, keeps a real one (BOS-2781)", () => {
+    const none = flattenHostRecord({ ...base(), checks: { container_status: { stagingStopped: 0, stagingStoppedNames: "" } } });
+    expect("check.container_status.stagingStoppedNames" in none).toBe(false);
+    const some = flattenHostRecord({ ...base(), checks: { container_status: { stagingStopped: 1, stagingStoppedNames: "staging-runner" } } });
+    expect(some["check.container_status.stagingStoppedNames"]).toBe("staging-runner");
+    expect(some["check.container_status.stagingStopped"]).toBe("1");
+  });
+
   it("carries the last health-probe reason, and leaves an empty one out (BOS-2680)", () => {
     const some = flattenHostRecord({ ...base(), checks: { container_status: { unhealthyReason: "runner (exit 1, 3 failed in a row)" } } });
     expect(some["check.container_status.unhealthyReason"]).toBe("runner (exit 1, 3 failed in a row)");

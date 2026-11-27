@@ -1,6 +1,6 @@
 import { actionClaim } from "@boss-man/shared";
 import { describe, expect, it } from "vitest";
-import { NORMALLY_EMPTY_FACTS, STOPPED_CONTAINERS_KEY, UNHEALTHY_CONTAINERS_KEY, failingCheckText, problemText, stoppedContainerNames, warningAdvice, type HostFactsView } from "../src/host-facts-display";
+import { NORMALLY_EMPTY_FACTS, STOPPED_CONTAINERS_KEY, UNHEALTHY_CONTAINERS_KEY, failingCheckText, problemText, stagingFaultLine, stoppedContainerNames, warningAdvice, type HostFactsView } from "../src/host-facts-display";
 
 // BOS-986: the "This host" panel says in plain words what is missing and what failed, rather than the raw
 // dotted key ("check.container_status.notRunning" told the owner nothing). These tests pin the wording the
@@ -209,6 +209,14 @@ describe("failingCheckText: what a failing check says (BOS-986)", () => {
     const k = "check.container_status.unhealthy";
     expect(warningAdvice(k, undefined, { ...base, ticket: { ref: "BOS-9", title: "Fix it", agent: "Dougal" } }).doing).toBe("Ticket BOS-9: Fix it. BOS-9 is assigned to Dougal; no run has started on it yet.");
     expect(warningAdvice(k, undefined, { ...base, ticket: { ref: "BOS-9", title: "Fix it", agent: "Dougal", startedAt: "2026-11-26T15:41:00Z" } }).doing).toBe("Ticket BOS-9: Fix it. Dougal started work on it on BOS-9 at 15:41 UTC.");
+  });
+
+  it("words the staging line, and says nothing when staging is fine (BOS-2781)", () => {
+    const f = (o: Record<string, string>) => stagingFaultLine(view(o));
+    expect(f({})).toBeNull();
+    expect(f({ "check.container_status.stagingUnhealthy": "0" })).toBeNull();
+    expect(f({ "check.container_status.stagingUnhealthyNames": "runner-a" })).toBe("Staging: 1 container unhealthy (runner-a). This doesn't affect your live Boss Man.");
+    expect(f({ "check.container_status.stagingStoppedNames": "a; b" })).toBe("Staging: 2 containers stopped (a, b). This doesn't affect your live Boss Man.");
   });
 
   it("asks the owner only for a fact only they can give (BOS-2674)", () => {
