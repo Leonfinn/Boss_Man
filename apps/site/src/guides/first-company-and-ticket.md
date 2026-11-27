@@ -30,7 +30,9 @@ Wait for the runner to say **Connected**. This can take up to a minute. If it sa
 
 ## 4. Claude
 
-On your own computer, run `claude setup-token`. It prints a long-lived token for your Claude plan. In the wizard, paste the token into **Claude setup token** and choose **Save the token**. This also sets up what pays for the CEO.
+Your agents need a Claude account: a Claude plan or an API key. To choose one, and for every step on a Mac or Windows, see [Connect a Claude account: plan or API key?](/guides/connect-a-claude-account)
+
+For a plan: on your own computer, install Claude Code, then run `claude setup-token`. It prints a long-lived token for your Claude plan. In the wizard, paste the token into **Claude setup token** and choose **Save the token**. This also sets up what pays for the CEO.
 
 Using another account? Open **Use an API key instead**, choose its kind under **Add**, such as **OpenRouter API key**, **Ollama Cloud API key** or **Synthetic API key**, paste the key and save. In step 7, pick the matching provider. If it is not a Claude account, change the CEO's agent to OpenCode or Codex on the **Agents** page.
 
@@ -51,7 +53,7 @@ Under **Before merging, Boss Man will**, choose the command Boss Man runs before
 
 ## 7. What pays for the CEO
 
-If you saved a Claude token in step 4, this step is already done, and **Next** skips it. Otherwise, under **Funding sources**, name your plan, for example "Claude Max", and choose a **Kind**. Choose **Add funding source**, then pick it under "The CEO runs on". Boss Man uses this to track cost and quota.
+If you saved a Claude token in step 4, this step is already done, and **Next** skips it. Otherwise, under **Funding sources**, name your plan, for example "Claude Max", and choose a **Kind**. Choose **Add funding source**, then pick it under "The CEO runs on". Boss Man uses this to track cost and quota. To learn about limits and where to see spend, see [What agents cost](/guides/what-agents-cost).
 
 ## 8. A first task
 
