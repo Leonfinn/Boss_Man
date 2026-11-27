@@ -119,7 +119,7 @@ export const CONNECT_OPTIONS: readonly ConnectOption[] = [
     secret: { kind: "anthropic_api_key", envName: "ANTHROPIC_API_KEY" },
     harness: "claude",
     valueStarts: "sk-ant-api",
-    steps: { site: "platform.claude.com: Billing (buy credit), then Settings → Spend limits, then Settings → API keys → Create key", url: "https://platform.claude.com/settings/keys", checked: "27 November 2026", note: "Anthropic's help pages; not yet walked through in a signed-in Console." },
+    steps: { site: "platform.claude.com: Billing (buy credit), then Spend limits (set a monthly cap), then API keys → Create key", url: "https://platform.claude.com/settings/keys", checked: "27 November 2026", note: "Anthropic's help pages; not yet walked through in a signed-in Console." },
     command: null,
     guide: "connect-a-claude-account",
   },
