@@ -52,8 +52,8 @@ export type HostWarningDeps = {
   isOpen: (dedupeKey: string) => Promise<boolean>;
   /** The newest card with this dedupe key, open or answered (BOS-2721): when it was raised and what the CEO answered. */
   card?: (dedupeKey: string) => Promise<{ status: string; createdAt: Date; answer: string | null } | null>;
-  /** The open ticket that names this warning key, if any. */
-  ticketFor?: (key: string) => Promise<{ ref: string; title: string } | null>;
+  /** The open ticket that names this warning key, if any, with its assignee and the first work run they started on it (BOS-2737). */
+  ticketFor?: (key: string) => Promise<WarningTicket | null>;
   raise: (input: Record<string, unknown>) => Promise<unknown>;
   log?: (m: string) => void;
 };
@@ -68,8 +68,11 @@ export type WarningHandling = {
   alertedAt?: string;
   /** The CEO's note on the card, with ceo_answered. */
   answer?: string;
-  ticket?: { ref: string; title: string };
+  ticket?: WarningTicket;
 };
+
+/** The ticket open for a warning: `agent` is its assignee's name (null when unassigned), `startedAt` their first work run on it (ISO). */
+export type WarningTicket = { ref: string; title: string; agent?: string | null; startedAt?: string };
 
 export function hostWarningService(db: Db, deps: HostWarningDeps) {
   return {

@@ -29,7 +29,7 @@ import { moveTicket } from "./services/ticket-moves.js";
 import { ceoMoveNote, ceoPlanText, IN_PROGRESS_BLOCKED_WARNING, leavesPlan, planHoldsAlerts, planMoveWarning, REVIEW_BLOCKED_REFUSAL, unexpiredPlan, urgentBackwards } from "./services/ceo-plan.js";
 import { conflictNote } from "./services/merge-line-conflicts.js";
 import { checkTicketDoneRefusal, closableChecks, holdableUnreported, longWatchNote, moveWatchToChecks, openLongWatchChecks, tiedCriteria, unreportedUntied } from "./services/after-merge-check-tickets.js";
-import { CARD_CITE_REFUSAL, hostFactRefusal, namesOutsideService, noCriteriaOutsideServiceRefusal, outsideServiceEvidenceRefusal, ownSiteHosts, pageShotRefusal, uncitedCardPasses } from "./services/host-fact-gate.js";
+import { CARD_CITE_REFUSAL, hostFactRefusal, namesOutsideService, noCriteriaOutsideServiceRefusal, outsideServiceEvidenceRefusal, ownerTextReceiptRefusal, ownSiteHosts, pageShotRefusal, uncitedCardPasses } from "./services/host-fact-gate.js";
 import { addTicketDependency, blockedHolds, openBlockers, openCardIds, openOwnerOnlyCard } from "./services/ticket-links.js";
 import { noteBlockedPark, refusalForNamedAgent, refusalForNamedTicket } from "./services/blocked-who-acts.js";
 import { githubOnlyMarkWarning } from "./services/line-holder.js";
@@ -866,6 +866,11 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         const namedTicket = await refusalForNamedTicket(db, { companyId: scope.companyId, ticketId, text: `${summary ?? ""}\n${blocked_reason ?? ""}`, holds: blockedNow });
         if (namedTicket) return fail(namedTicket);
       }
+      // BOS-2741 (R2): the state note is owner-facing text; a receipt as the result is held (a Blocked note may say it is waiting).
+      if (summary) {
+        const receiptHold = ownerTextReceiptRefusal(summary, { allowReceipt: state === "blocked" });
+        if (receiptHold) return fail(receiptHold);
+      }
       // BOS-1576: a note that says the ticket waits on the owner needs a card in their queue, in any state.
       if (state !== "done" && waitsOnOwnerNote(summary) && !(await ticketHasOpenCard(db, ticketId))) return fail(OWNER_WAIT_REFUSAL);
       // BOS-1591 (R21): a ticket parked in Backlog, Ready or Blocked for something needs a link to what settles it (a ticket, a card, an engagement or a date).
@@ -982,14 +987,16 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         const byCeo = me?.role === "ceo";
         const planned = unexpiredPlan(withCriteria, now) && leavesPlan(withCriteria.prev, state);
         const backwards = withCriteria.urgent && urgentBackwards(withCriteria.prev, state);
+        // BOS-2737: the reply says the CEO was alerted only when this wake was actually sent.
+        let ceoWokenAt: Date | null = null;
         if ((planned || backwards) && !byCeo && hooks.wake) {
           const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, scope.companyId), eq(agents.role, "ceo")));
           if (ceo && ceo.id !== scope.agentId) {
             const plan = planned ? ceoPlanText(withCriteria, now, 1000) : null;
-            await Promise.resolve(hooks.wake(ceo.id, { reason: "ticket moved off plan", ticketId, causedByRunId: scope.runId, note: ceoMoveNote({ title: withCriteria.title, ref: null, from: withCriteria.prev, to: state, mover: me?.name ?? "An agent", summary: summary?.trim() || null, plan, urgent: !!backwards }) })).catch(() => undefined);
+            ceoWokenAt = await Promise.resolve(hooks.wake(ceo.id, { reason: "ticket moved off plan", ticketId, causedByRunId: scope.runId, note: ceoMoveNote({ title: withCriteria.title, ref: null, from: withCriteria.prev, to: state, mover: me?.name ?? "An agent", summary: summary?.trim() || null, plan, urgent: !!backwards }) })).then(() => now, () => null);
           }
         }
-        if (planned) planNote = planMoveWarning(ceoPlanText(withCriteria, now, 1000)!, withCriteria.prev, state, !byCeo);
+        if (planned) planNote = planMoveWarning(ceoPlanText(withCriteria, now, 1000)!, withCriteria.prev, state, byCeo, ceoWokenAt);
         if (state === "blocked" && withCriteria.prev === "in_progress" && waitsOnMergeOnly && (await db.select({ id: reviewRequests.id }).from(reviewRequests).where(eq(reviewRequests.ticketId, ticketId)).limit(1)).length) planNote += `\n\n${IN_PROGRESS_BLOCKED_WARNING}`;
       }
       // BOS-2288: a watch names the event that wakes it; with none named, a daily re-read is booked so it can't go silent.

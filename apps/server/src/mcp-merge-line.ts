@@ -6,11 +6,13 @@
 // jobs and the gate's merge checks, which share the slots) plus one row per request_check answered by an existing
 // job (activity kind check_reused, since such a request makes no job). Same since/until/limit/format; eight named
 // fields per row, never the command, log, commit or requester.
-import { and, asc, eq, gte, lt } from "drizzle-orm";
+//
+// what: "cards" (BOS-2763) exports the merge and check cards (cardRow below), never their question or output.
+import { and, asc, eq, gte, lt, sql } from "drizzle-orm";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Db } from "./db/client.js";
-import { activity, checkJobs, checkWorkers } from "./db/schema.js";
+import { activity, checkJobs, checkWorkers, decisions } from "./db/schema.js";
 import { MERGE_LINE_KIND } from "./services/merge-line.js";
 import { CHECK_REUSED_KIND } from "./services/check-request.js";
 import { fail, text, type Scope } from "./mcp-common.js";
@@ -30,10 +32,18 @@ export const MERGE_LINE_COLUMNS = ["ticket_id", "at", "event", "hold", "heldMs",
  * in order (kept 14 days, then empty). All empty for a job from before or a reused row.
  */
 export const CHECK_JOB_COLUMNS = ["ticket_id", "kind", "scope", "queued", "started", "finished", "outcome", "reused", "ran_on", "busy_at_start", "ran", "steps"] as const;
+/**
+ * BOS-2763: what "cards" exports, one row per merge or check card (decisions with context.type "check_stuck", raised by
+ * raiseMergeStuck and raiseCheckStuck), so a card-routing check (BOS-1875) can be repeated from the export. Read from the
+ * cards themselves rather than recorded as new events: the card already keeps its ladder hops, answer and settler, and
+ * reading them covers cards raised before this change too. Never the question or the check output.
+ */
+export const CARD_COLUMNS = ["card_id", "ticket_id", "card", "raised", "first_rung", "rung", "to_owner", "outcome", "answer", "answered_by", "closed", "minutes"] as const;
 
 type Cell = string | number | boolean | null;
 type Row = Record<(typeof MERGE_LINE_COLUMNS)[number], Cell>;
 type JobRow = Record<(typeof CHECK_JOB_COLUMNS)[number], string | number | null>;
+type CardRow = Record<(typeof CARD_COLUMNS)[number], string | number | null>;
 
 const str = (v: unknown) => (typeof v === "string" ? v : null);
 const iso = (d: Date | null) => (d ? d.toISOString() : null);
@@ -80,6 +90,45 @@ export function reusedRow(r: { ticketId: string | null; at: Date; detail: Record
   return { ticket_id: r.ticketId, kind: "pre_review", scope: str(d.scope), queued: r.at.toISOString(), started: null, finished: null, outcome: str(d.outcome), reused: str(d.reused), ran_on: null, busy_at_start: null, ran: null, steps: null };
 }
 
+/**
+ * A merge or check card (BOS-2763). card: "merge" for a merge that didn't finish (raiseMergeStuck, no command), "check" for a
+ * check that couldn't finish. first_rung / rung: where the alert ladder put it first and where it is now; a card with no ladder
+ * went straight to the owner's queue (owner-first by design, or raised before BOS-1873), so both are "owner" and to_owner is
+ * its raise time. to_owner: when it reached the owner's queue, empty if it never did. answered_by: "owner", the name of the
+ * agent that settled it (the CEO's, usually), or "withdrawn" (replaced or cleared by Boss Man). minutes: raised to closed.
+ */
+export function cardRow(r: { id: string; createdAt: Date; status: string; answer: string | null; answeredAt: Date | null; context: unknown }): CardRow {
+  const c = (r.context && typeof r.context === "object" ? r.context : {}) as {
+    ticketId?: unknown;
+    command?: unknown;
+    settled?: { name?: unknown } | null;
+    ladder?: { rung?: unknown; hops?: Array<{ to?: unknown; at?: unknown } | null> } | null;
+  };
+  const raised = r.createdAt.toISOString();
+  const rawHops = c.ladder?.hops;
+  const hops = Array.isArray(rawHops) ? rawHops : [];
+  const ladder = !!c.ladder && typeof c.ladder === "object";
+  const firstRung = ladder ? (str(hops[0]?.to) ?? str(c.ladder?.rung)) : "owner";
+  const toOwner = ladder ? str(hops.find((h) => h?.to === "owner")?.at) : raised;
+  const settledBy = str(c.settled?.name);
+  const answeredBy = r.status === "withdrawn" ? "withdrawn" : r.status === "answered" ? (settledBy ?? "owner") : null;
+  const minutes = r.answeredAt ? Math.round((r.answeredAt.getTime() - r.createdAt.getTime()) / 6000) / 10 : null;
+  return {
+    card_id: r.id,
+    ticket_id: str(c.ticketId),
+    card: c.command === "" ? "merge" : "check",
+    raised,
+    first_rung: firstRung,
+    rung: ladder ? str(c.ladder?.rung) : "owner",
+    to_owner: toOwner,
+    outcome: r.status,
+    answer: r.status === "answered" ? r.answer : null,
+    answered_by: answeredBy,
+    closed: iso(r.answeredAt),
+    minutes,
+  };
+}
+
 /** A CSV cell, quoted when needed; a leading = + - @ is prefixed so a spreadsheet never reads it as a formula. */
 const cell = (v: Cell) => {
   if (v === null) return "";
@@ -97,13 +146,14 @@ export function registerMergeLineExport(server: Pick<McpServer, "registerTool">,
     {
       description:
         `Read-only export of your company's merge-line timeline (the rows BOS-769 records: approved, check queued/started/ended, hold started/ended, merged, and each server takeover: event "takeover" with the cause in by and the live commit in commit), oldest first. Returns ticket_id, at, event, hold, heldMs, check, passed, by, commit, with, files, note, action, rebuilds and reason for each row, and nothing else (with and files: a train_clash row's clashing ticket ids and files, for a ticket held to land alone or sent back for a clash with main; note: a hold_started row's note, which for hold "turn" names the ticket that HAS the landing turn: the row's own ticket is only waiting behind it; action: a landing_turn row's taken, queued, ended or expired; rebuilds and reason: why a merge was rebuilt after main moved, or why an attempt failed; ci_wait_started and ci_wait_ended: a landing's wait for GitHub CI on its merge copy, with commit, and reason on the end row saying how it ended; ci_covered: a merge-train ticket that landed on the GitHub pass of the ticket in by, behind it, on that ticket's commit). since is an ISO date or time (e.g. 2026-11-08T21:22:00Z); optional until (exclusive), format json (default) or csv, and limit (default ${MERGE_LINE_EXPORT_DEFAULT}, at most ${MERGE_LINE_EXPORT_MAX}). If the answer was cut at the limit it says so; ask again with since set to the last row's at to carry on (rows at that exact moment repeat, so drop them). ` +
-        `what: "check_jobs" exports the whole check line instead, by queue time: every check job (kind pre_review for agents' request_check, merge for the gate) with ticket_id, kind, scope, queued, started, finished, outcome, reused and ran_on ("company runner" or a check worker's name). Queue wait = started - queued; a job never started has started empty. A request_check answered by an earlier pass or by the ticket's job already in line is its own row with reused "passed" or "live" and no start or finish. Since BOS-1923 a job that ran also has busy_at_start (slots busy on its machine when it started, itself not counted), ran ("quick" or "quick+full": whether the full check ran after the quick one) and steps ("name=seconds" pairs in order, kept 14 days), for passed and failed jobs alike. Carry on from the last row's queued.`,
+        `what: "check_jobs" exports the whole check line instead, by queue time: every check job (kind pre_review for agents' request_check, merge for the gate) with ticket_id, kind, scope, queued, started, finished, outcome, reused and ran_on ("company runner" or a check worker's name). Queue wait = started - queued; a job never started has started empty. A request_check answered by an earlier pass or by the ticket's job already in line is its own row with reused "passed" or "live" and no start or finish. Since BOS-1923 a job that ran also has busy_at_start (slots busy on its machine when it started, itself not counted), ran ("quick" or "quick+full": whether the full check ran after the quick one) and steps ("name=seconds" pairs in order, kept 14 days), for passed and failed jobs alike. Carry on from the last row's queued. ` +
+        `what: "cards" exports the merge and check cards instead, by raise time: card_id, ticket_id, card ("merge" or "check"), raised, first_rung and rung (the alert ladder's first and current rung: scrum_master, ceo or owner; a card that went straight to the owner, by design or from before the CEO-first routing, says owner for both), to_owner (when it reached the owner's queue, empty if never), outcome (open, answered, withdrawn), answer, answered_by ("owner", the settling agent's name, or "withdrawn"), closed and minutes (raised to closed). Carry on from the last row's raised.`,
       inputSchema: {
         since: z.string().min(8).max(40),
         until: z.string().min(8).max(40).optional(),
         format: z.enum(["json", "csv"]).optional(),
         limit: z.number().int().min(1).max(MERGE_LINE_EXPORT_MAX).optional(),
-        what: z.enum(["merge_line", "check_jobs"]).optional(),
+        what: z.enum(["merge_line", "check_jobs", "cards"]).optional(),
       },
     },
     async ({ since, until, format, limit, what }) => {
@@ -119,6 +169,19 @@ export function registerMergeLineExport(server: Pick<McpServer, "registerTool">,
           .where(and(eq(activity.companyId, scope.companyId), eq(activity.kind, kind), gte(activity.at, from), to ? lt(activity.at, to) : undefined))
           .orderBy(asc(activity.at), asc(activity.id))
           .limit(max + 1);
+      if (what === "cards") {
+        const found = await db
+          .select({ id: decisions.id, createdAt: decisions.createdAt, status: decisions.status, answer: decisions.answer, answeredAt: decisions.answeredAt, context: decisions.context })
+          .from(decisions)
+          .where(and(eq(decisions.companyId, scope.companyId), sql`${decisions.context}->>'type' = 'check_stuck'`, gte(decisions.createdAt, from), to ? lt(decisions.createdAt, to) : undefined))
+          .orderBy(asc(decisions.createdAt), asc(decisions.id))
+          .limit(max + 1);
+        const cut = found.length > max;
+        const rows = found.slice(0, max).map(cardRow);
+        const note = cut ? `Cut at ${max} rows; carry on with since=${rows[rows.length - 1]?.raised}.` : `${rows.length} rows.`;
+        if (format === "csv") return text(csv(CARD_COLUMNS, rows, note));
+        return text(JSON.stringify({ note, rows }));
+      }
       if (what === "check_jobs") {
         const jobs = await db
           .select({ ticketId: checkJobs.ticketId, kind: checkJobs.kind, scope: checkJobs.scope, state: checkJobs.state, queuedAt: checkJobs.queuedAt, startedAt: checkJobs.startedAt, endedAt: checkJobs.endedAt, workerId: checkJobs.workerId, worker: checkWorkers.name, busyAtStart: checkJobs.busyAtStart, stages: checkJobs.stages, ranFull: checkJobs.ranFull })
