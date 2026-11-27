@@ -9,6 +9,7 @@ import { openPglite } from "../src/db/client.js";
 import { agents, ceoChapters, checkJobs, checkWorkers, decisions, runners, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { READ_ONLY_TOOLS, TRACED_TOOLS } from "../src/mcp-trace.js";
+import { expectEveryWriterGuarded } from "./secret-guard-walk.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
 afterEach(async () => {
@@ -856,6 +857,7 @@ describe("owner chat", () => {
     const client = await c.mcp(start.runId);
     const names = (await client.listTools()).tools.map((t) => t.name).sort();
     await client.close();
+    expectEveryWriterGuarded(names);
     // A new tool cannot be added silently: it is either listed as a change (in TRACED_TOOLS, with a case
     // in changeTrace) or named as read-only. The two sets must not overlap, so a read can't be counted as a change.
     const readOnly = names.filter((n) => READ_ONLY_TOOLS.has(n));

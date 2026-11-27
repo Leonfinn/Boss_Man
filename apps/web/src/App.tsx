@@ -419,7 +419,7 @@ function Signed({ onLogout, username, initialPreferences }: { onLogout: () => vo
         onLogout={() => void api("/api/logout", { method: "POST" }).finally(onLogout)}
       />
       <SearchPalette companyId={companyId} go={go} />
-      <Shortcuts go={go} hasProjects={(current?.projects?.length ?? 0) > 0} singleLetterKeys={prefs.singleLetterKeys} onTurnKeysOn={() => void save({ singleLetterKeys: true })} />
+      <Shortcuts go={go} hasProjects={(current?.projects?.length ?? 0) > 0} singleLetterKeys={prefs.singleLetterKeys} onTurnKeysOn={() => void save({ singleLetterKeys: true })} keyboardTipSeen={prefs.keyboardTipSeen} onTipSeen={() => void save({ keyboardTipSeen: true }).catch(() => {})} />
       <main>
         <UpdateBanner m={maintenance.data} />
         <HoldBanner />

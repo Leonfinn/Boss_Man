@@ -7,6 +7,7 @@ import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, lt, ne, or, sql,
 import { featureHorizon, demandScore, IMPORTANCE_LABEL, IMPORTANCE_POINTS, portalShows, PORTAL_STATUSES, portalTitle, portalVerdict, priorityScore, suggestFeatures, untrusted, type FeatureStatus, type Horizon, type Importance, type NoteSource } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { scheduleGoalCheck } from "./goal-check.js";
+import { commitIsLive, goLiveWaitOf } from "./go-live-wait.js";
 import { featureForecasts } from "./feature-forecast.js";
 import { agents, companies, deploys, deployTargets, feedbackCustomers, feedbackNotes, feedbackSettings, featureAreas, featureDrivers, features, insights, milestones, objectives, portalConfirmedAddresses, tickets } from "../db/schema.js";
 
@@ -28,6 +29,34 @@ const DEFAULTS: Omit<FeedbackSettings, never> = { demandWeight: 3, ceoTriage: fa
 
 /** A note that counts: unconfirmed portal posts (BOS-1388) are hidden from everyone and score nothing. */
 const counted = isNull(feedbackNotes.confirmTokenHash);
+
+/**
+ * BOS-2686: the plan and design tickets we already use ("Plan (…)", "Design (…)", and the owner's plan-first tickets).
+ * They shape the work but deliver nothing, so they neither count as delivery nor hold a feature open.
+ */
+const planningTicket = (t: { title: string; planFirst: boolean }) => t.planFirst || /^(plan|design)\s*[(:]/i.test(t.title.trim());
+
+/**
+ * BOS-2686: whether a ticket is delivery work for its feature. Delivery is what the feature promised: a ticket on it
+ * from before it first went live (features.liveBaselineAt). A ticket added after that is a follow-up, and plan and
+ * design tickets are never delivery. With no baseline (an unreleased feature) every ticket is delivery.
+ */
+export function isDeliveryTicket(t: { createdAt: Date; title: string; planFirst: boolean }, liveBaselineAt: Date | null | undefined): boolean {
+  if (planningTicket(t)) return false;
+  return !liveBaselineAt || t.createdAt.getTime() <= liveBaselineAt.getTime();
+}
+
+/**
+ * BOS-2686: when a feature first went live, from its tickets' recorded go-live: the earliest liveAt or liveMarkedAt of
+ * a delivery ticket, or null when none says. A baseline already stored on the feature is never moved.
+ */
+export function liveBaselineOf(rows: Array<{ createdAt: Date; title: string; planFirst: boolean; liveAt: Date | null; liveMarkedAt: Date | null }>): Date | null {
+  const stamps = rows
+    .filter((t) => isDeliveryTicket(t, null))
+    .map((t) => t.liveAt ?? t.liveMarkedAt)
+    .filter((d): d is Date => !!d);
+  return stamps.length ? new Date(Math.min(...stamps.map((d) => d.getTime()))) : null;
+}
 
 type FeaturePatch = {
   title?: string;
@@ -69,7 +98,13 @@ export type PortalConfirm = { email: string; hours: number };
 
 export function feedbackService(
   db: Db,
-  deps: { now?: () => Date; onNote?: (note: typeof feedbackNotes.$inferSelect) => unknown; onReleased?: (feature: typeof features.$inferSelect) => unknown } = {},
+  deps: {
+    now?: () => Date;
+    onNote?: (note: typeof feedbackNotes.$inferSelect) => unknown;
+    onReleased?: (feature: typeof features.$inferSelect) => unknown;
+    /** BOS-2686: the commit this server runs, used when nothing is recorded yet (a fresh install). */
+    liveCommit?: () => string | null;
+  } = {},
 ) {
   const now = deps.now ?? (() => new Date());
 
@@ -628,53 +663,102 @@ export function feedbackService(
     },
 
     /**
-     * Moves one feature along with its tasks, called whenever a task of it starts, finishes,
-     * reopens or is added. In progress once work starts; released once every task is done and
-     * at least one was completed, and, when the company has a production deploy target, once a
-     * deploy of one of its tasks to it has succeeded; back to in progress if a released
-     * feature's task reopens. Declined is never touched, and a manual status stands until the
-     * next task event.
+     * BOS-2686: whether one of a feature's tickets is live. Its merge commit decides: live when the server runs it
+     * (BOS-1021's rule, with the same fallback: a fresh server counts as the commit this process was built from), or
+     * when a production deploy of it succeeded, or when a company that puts its own work live marked it live. A
+     * ticket with no merge commit has nothing to deploy, so it is live once it is done (and not cancelled).
+     */
+    async ticketLive(t: typeof tickets.$inferSelect, feature: typeof features.$inferSelect): Promise<boolean> {
+      if (!t.mergeCommit) return t.systemState === "done" && t.outcome !== "cancelled";
+      if (!(await goLiveWaitOf(db, t))) return true;
+      if (t.liveMarkedAt) return true;
+      // The company's own deploy settled it: a go-live recorded on the ticket, or a production deploy that shipped it.
+      if (t.liveAt) return true;
+      const [shipped] = await db
+        .select({ id: deploys.id })
+        .from(deploys)
+        .innerJoin(deployTargets, eq(deployTargets.id, deploys.targetId))
+        .where(and(eq(deploys.ticketId, t.id), eq(deploys.status, "succeeded"), eq(deployTargets.isProduction, true)))
+        .limit(1);
+      if (shipped) return true;
+      // BOS-1021's server rule: the merge is in the commit the server runs (a fresh install counts as its own commit).
+      return commitIsLive(db, feature.companyId, t.mergeCommit, "server", { serverFallback: deps.liveCommit?.() ?? process.env.BOSSMAN_COMMIT ?? null });
+    },
+
+    /**
+     * Moves one feature along with its tickets, called whenever a ticket of it starts, finishes, reopens, is added or
+     * goes live. One ordered rule table (BOS-2686):
+     *   1. declined: unchanged.
+     *   2. every delivery ticket is done and live: released.
+     *   3. released earlier, and a delivery ticket is open: in progress.
+     *   4. a delivery ticket is in progress or in review: in progress (from idea, considering or planned).
+     *   5. otherwise: unchanged.
+     * A delivery ticket is one on the feature from before it first went live (features.liveBaselineAt); a ticket added
+     * after that is a follow-up, and plan/design tickets are not delivery work, so neither holds the feature nor
+     * reopens it. Once a ticket of it is live the first time, the feature is live and that is baselineAt from then on.
      */
     async syncFeature(featureId: string | null | undefined) {
       if (!featureId) return null;
       const [f] = await db.select().from(features).where(eq(features.id, featureId));
       if (!f || f.status === "declined") return null;
-      const [r] = await db
-        .select({
-          open: sql<number>`count(*) filter (where ${tickets.parentTicketId} is null and ${tickets.systemState} <> 'done')`.mapWith(Number),
-          active: sql<number>`count(*) filter (where ${tickets.systemState} in ('in_progress', 'review'))`.mapWith(Number),
-          completed: sql<number>`count(*) filter (where ${tickets.parentTicketId} is null and ${tickets.systemState} = 'done' and ${tickets.outcome} is distinct from 'cancelled')`.mapWith(Number),
-        })
-        .from(tickets)
-        .where(eq(tickets.featureId, featureId));
-      let released = r!.open === 0 && r!.completed > 0;
-      if (released) {
-        const [prod] = await db.select({ id: deployTargets.id }).from(deployTargets).where(and(eq(deployTargets.companyId, f.companyId), eq(deployTargets.isProduction, true))).limit(1);
-        if (prod) {
-          // shortcut: any succeeded production deploy of one of its tasks releases it, not one covering every task; upgrade if per-task coverage matters.
-          const [shipped] = await db
-            .select({ id: deploys.id })
-            .from(deploys)
-            .innerJoin(deployTargets, eq(deployTargets.id, deploys.targetId))
-            .innerJoin(tickets, eq(tickets.id, deploys.ticketId))
-            .where(and(eq(tickets.featureId, featureId), eq(deploys.status, "succeeded"), eq(deployTargets.isProduction, true)))
-            .limit(1);
-          released = !!shipped;
+      const rows = await db.select().from(tickets).where(and(eq(tickets.featureId, featureId), isNull(tickets.parentTicketId)));
+      const delivery = rows.filter((t) => isDeliveryTicket(t, f.liveBaselineAt));
+      const live = new Map<string, boolean>();
+      const isLive = async (t: (typeof tickets.$inferSelect)) => {
+        if (!live.has(t.id)) live.set(t.id, await this.ticketLive(t, f));
+        return live.get(t.id)!;
+      };
+      // Rule 2: every delivery ticket is done and live (a feature with no delivery ticket is never released this way).
+      let released = delivery.length > 0;
+      for (const t of delivery) {
+        if (t.systemState !== "done" || t.outcome === "cancelled" || !(await isLive(t))) {
+          released = false;
+          break;
         }
       }
-      const started = r!.active > 0 || r!.completed > 0;
-      const next: FeatureStatus | null = released ? "released" : f.status === "released" ? (r!.open > 0 ? "in_progress" : null) : started && ["idea", "considering", "planned"].includes(f.status) ? "in_progress" : null;
+      // The feature is live once a delivery ticket is: from then on, a ticket added to it is a follow-up (rule 3).
+      let baseline = f.liveBaselineAt;
+      if (!baseline) {
+        for (const t of delivery) if (await isLive(t)) baseline = t.liveAt ?? t.liveMarkedAt ?? now();
+        baseline ??= liveBaselineOf(rows);
+      }
+      // Rule 3: a follow-up never reopens a released feature; only a delivery ticket still open does (and it would
+      // have to be dated before the feature went live). Rule 4: delivery work in progress or in review.
+      const active = delivery.some((t) => t.systemState === "in_progress" || t.systemState === "review");
+      const next: FeatureStatus | null = released
+        ? "released"
+        : f.status === "released"
+          ? active
+            ? "in_progress"
+            : null
+          : active && ["idea", "considering", "planned"].includes(f.status)
+            ? "in_progress"
+            : null;
+      if (baseline) await db.update(features).set({ liveBaselineAt: baseline }).where(and(eq(features.id, f.id), isNull(features.liveBaselineAt)));
       if (!next || next === f.status) return null;
       const [u] = await db
         .update(features)
-        .set({ status: next, updatedAt: now(), releasedAt: next === "released" ? now() : null })
+        // Released stamps when; back to in progress (a delivery ticket reopened) it is no longer released.
+        .set({ status: next, updatedAt: now(), ...(next === "released" ? { releasedAt: now() } : next === "in_progress" ? { releasedAt: null } : {}) })
         .where(and(eq(features.id, f.id), eq(features.status, f.status)))
         .returning();
-      if (u && next === "released") {
+      if (u && next === "released" && f.status !== "released") {
         await scheduleGoalCheck(db, u, now());
         await deps.onReleased?.(u);
       }
       return u ?? null;
+    },
+
+    /**
+     * BOS-2686: works out, again, every feature these tickets deliver, once they are live. Called from the go-live
+     * paths (the server running a merge, the CEO marking a merge live), because the rule table's answer can change
+     * without a ticket moving.
+     */
+    async syncFeaturesOf(ticketIds: Array<string | null | undefined>) {
+      const ids = [...new Set(ticketIds.filter((id): id is string => !!id))];
+      if (!ids.length) return;
+      const rows = await db.select({ featureId: tickets.featureId }).from(tickets).where(inArray(tickets.id, ids));
+      for (const featureId of new Set(rows.map((r) => r.featureId).filter((id): id is string => !!id))) await this.syncFeature(featureId);
     },
 
     /** A ticket's description from a feature: what it is and what people asked for, strongest first. */

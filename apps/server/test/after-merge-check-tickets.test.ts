@@ -448,9 +448,12 @@ describe("BOS-2643: a watch of a day or more is opened as its own check ticket",
     const [inReview] = await c.db.insert(tickets).values({ ...base, title: "Review-time", acceptanceCriteria: [WATCH.text] }).returning();
     for (const t of [noCode!, merged!, aCheck!, inReview!]) expect(await openLongWatchChecks(c.db, c.work, t.id, { byAgentId: null })).toEqual([]);
     // The same call on a code ticket opens one, and a second call opens nothing more.
-    const [build] = await c.db.insert(tickets).values({ ...base, title: "Build", acceptanceCriteria: [WATCH] }).returning();
+    const [feat] = await c.db.insert(features).values({ companyId: c.co.company.id, title: "Banner waits for merges", status: "in_progress" }).returning();
+    const [build] = await c.db.insert(tickets).values({ ...base, title: "Build", featureId: feat!.id, acceptanceCriteria: [WATCH] }).returning();
     expect(await openLongWatchChecks(c.db, c.work, build!.id, { byAgentId: null })).toHaveLength(1);
     expect(await openLongWatchChecks(c.db, c.work, build!.id, { byAgentId: null })).toEqual([]);
-    expect(await checksOf(c, build!.id)).toHaveLength(1);
+    const [check] = await checksOf(c, build!.id);
+    // BOS-2682: the check is a watch of live work, not new work on the feature, so it never joins the feature.
+    expect(check!.featureId).toBeNull();
   });
 });

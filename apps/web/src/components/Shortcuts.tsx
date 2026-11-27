@@ -2,7 +2,9 @@
 // BOS-2330: j/k move between cards and Enter opens one, on screens that mark their cards (Board, Decisions).
 // Mounted once in App.tsx beside the search box. Ctrl/Cmd+K itself stays the search box's own listener;
 // this only lists it.
+// BOS-2690 (BOS-2671 3e): a one-time tip for people already using the keyboard, until this login has seen it.
 import { useEffect, useRef, useState } from "react";
+import { useMediaQuery } from "../hooks";
 import { G_WINDOW_MS, HELP_KEY, JUMPS, JUMP_PREFIX, SHOW_SHORTCUTS_EVENT, cardActionFor, screenKeys } from "../shortcut-list";
 
 /** The event that opens the list from outside the menu (BOS-2689), fired by Settings → Account's "Show all keyboard shortcuts". */
@@ -12,6 +14,9 @@ export const OPEN_SHORTCUTS_EVENT = "bossman:open-shortcuts";
 export { G_WINDOW_MS, JUMPS, screenKeys };
 
 const isMac = () => typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+
+/** True on a touch screen with no mouse or trackpad (design 3a): the keys need a keyboard. Unknown counts as having a mouse. */
+const noFinePointer = () => typeof window !== "undefined" && typeof window.matchMedia === "function" && !window.matchMedia("(any-pointer: fine)").matches;
 
 /** True when a key press belongs to something else: a text box, or another open dialog (search box, lightbox). */
 function busyElsewhere(target: EventTarget | null): boolean {
@@ -63,15 +68,33 @@ function openCard(): boolean {
  * singleLetterKeys (BOS-2689): with it off, "?", the g-sequences, g 1 to g 6 and the j/k/Enter card keys do
  * nothing, while Ctrl/Cmd+K and Escape keep working. The list still opens from the menu button and says so.
  * onTurnKeysOn: the list's "Turn them on", saved per login.
+ * keyboardTipSeen / onTipSeen (BOS-2690): the one-time tip. Until this login has seen it, the first Tab
+ * outside a text box or Ctrl K shows it; it doesn't take focus, never shows at 640 px or under or with the
+ * keys off, and any of its four ways to close (Show shortcuts, Got it, Escape, "?") stores it as seen.
+ * initialTip: draw the tip on the first render, for the rendering test.
  */
-export function Shortcuts({ go, hasProjects, singleLetterKeys = true, onTurnKeysOn, initialOpen = false }: { go: (to: string) => void; hasProjects: boolean; singleLetterKeys?: boolean; onTurnKeysOn?: () => void; /** Open on the first draw: for the rendering test, which reads the markup. */ initialOpen?: boolean }) {
+export function Shortcuts({ go, hasProjects, singleLetterKeys = true, onTurnKeysOn, keyboardTipSeen = true, onTipSeen, initialOpen = false, initialTip = false, noMouse }: { go: (to: string) => void; hasProjects: boolean; singleLetterKeys?: boolean; onTurnKeysOn?: () => void; keyboardTipSeen?: boolean; onTipSeen?: () => void; /** For the rendering test, which has no window when it builds the markup: forces the "These need a keyboard." line on or off. */ noMouse?: boolean; /** Open on the first draw: for the rendering test, which reads the markup. */ initialOpen?: boolean; /** Draw the tip on the first draw: for the rendering test. */ initialTip?: boolean }) {
   const [open, setOpen] = useState(initialOpen);
+  const [tip, setTip] = useState(initialTip);
+  // A phone (640 px or under) never sees the tip: the button isn't there either.
+  const phone = useMediaQuery("(max-width: 640px)");
   const gAt = useRef(0);
   const back = useRef<HTMLElement | null>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
-  // The listener is added once; it reads the latest props through this ref.
-  const latest = useRef({ go, hasProjects, open, singleLetterKeys });
-  latest.current = { go, hasProjects, open, singleLetterKeys };
+  // The key listener is added once; it reads the latest props and the tip's state through these refs.
+  const latest = useRef({ go, hasProjects, open, singleLetterKeys, keyboardTipSeen, phone, onTipSeen });
+  latest.current = { go, hasProjects, open, singleLetterKeys, keyboardTipSeen, phone, onTipSeen };
+  const tipRef = useRef(false);
+  tipRef.current = tip;
+
+  // Closing the tip stores it as seen on the login (BOS-2690), so it never comes back after a reload or in
+  // another browser, and hides it now. Without onTipSeen (no provider) it still hides for this visit.
+  const closeTip = () => {
+    setTip(false);
+    latest.current.onTipSeen?.();
+  };
+  const closeTipRef = useRef(closeTip);
+  closeTipRef.current = closeTip;
 
   const close = () => {
     setOpen(false);
@@ -82,8 +105,27 @@ export function Shortcuts({ go, hasProjects, singleLetterKeys = true, onTurnKeys
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || e.ctrlKey || e.altKey || e.metaKey || e.isComposing) return;
+      if (e.defaultPrevented || e.altKey || e.metaKey || e.isComposing) return;
+      // Ctrl/Cmd+K is the search box's own key; it counts as using the keyboard, so the tip may show. This
+      // listener is added before the search box's, so the tip can show before that opens over it.
+      if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === "k") {
+        if (!latest.current.keyboardTipSeen && latest.current.singleLetterKeys && !latest.current.phone && !latest.current.open) setTip(true);
+        return;
+      }
+      if (e.ctrlKey) return;
       if (latest.current.open) return; // the dialog's own handler deals with Escape
+      // The tip answers Escape as one of its ways to close (and stores it as seen); it never takes focus, so
+      // this is the only key it acts on before the browser's own Escape is left alone.
+      if (e.key === "Escape" && tipRef.current) {
+        e.preventDefault();
+        closeTipRef.current();
+        return;
+      }
+      // A Tab outside a text box means someone is moving around by keyboard (BOS-2690): offer the tip once.
+      if (e.key === "Tab" && !e.shiftKey && !busyElsewhere(e.target)) {
+        if (!latest.current.keyboardTipSeen && latest.current.singleLetterKeys && !latest.current.phone) setTip(true);
+        return;
+      }
       if (busyElsewhere(e.target)) {
         gAt.current = 0;
         return;
@@ -93,6 +135,8 @@ export function Shortcuts({ go, hasProjects, singleLetterKeys = true, onTurnKeys
         // Single-letter keys off (BOS-2689): "?" does nothing; the menu button still opens the list.
         if (!latest.current.singleLetterKeys) return;
         e.preventDefault();
+        // Pressing "?" counts as seeing the tip: it opens the list instead (BOS-2690).
+        if (tipRef.current) closeTipRef.current();
         back.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
         setOpen(true);
         return;
@@ -159,10 +203,37 @@ export function Shortcuts({ go, hasProjects, singleLetterKeys = true, onTurnKeys
     return () => window.removeEventListener(OPEN_SHORTCUTS_EVENT, onOpen);
   }, []);
 
-  if (!open) return null;
+  if (!open && !tip) return null;
   const mod = isMac() ? "⌘" : "Ctrl";
   const here = screenKeys(typeof window === "undefined" ? "" : window.location.hash);
+  // The one-time tip (BOS-2690, BOS-2671 3e): a small panel at the bottom left, read out but never focused.
+  // "Show shortcuts" opens the list and stores it as seen. It is only drawn while the list is closed, and never
+  // on a phone (the component doesn't draw it at 640 px or under).
+  const tipPanel = !open && tip && !phone ? (
+    <div className="shortcuts-tip" role="status">
+      <p className="shortcuts-tip-text">Boss Man has keyboard shortcuts. Press ? any time to see them.</p>
+      <div className="shortcuts-tip-actions">
+        <button
+          type="button"
+          className="btn"
+          onClick={() => {
+            closeTip();
+            back.current = document.querySelector<HTMLElement>(".shortcuts-button") ?? null;
+            setOpen(true);
+          }}
+        >
+          Show shortcuts
+        </button>
+        <button type="button" className="linkish" onClick={closeTip}>
+          Got it
+        </button>
+      </div>
+    </div>
+  ) : null;
+  if (!open) return tipPanel;
   return (
+    <>
+    {tipPanel}
     <div className="search-back" onMouseDown={(e) => e.target === e.currentTarget && close()}>
       <div
         className="search-palette shortcuts-palette"
@@ -173,6 +244,25 @@ export function Shortcuts({ go, hasProjects, singleLetterKeys = true, onTurnKeys
           if (e.key === "Escape" || e.key === "?") {
             e.preventDefault();
             close();
+            return;
+          }
+          // Keep Tab inside the open dialog (aria-modal): wrap from the last control to the first and back.
+          if (e.key === "Tab") {
+            const items = Array.from(e.currentTarget.querySelectorAll<HTMLElement>("button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex='-1'])"));
+            if (items.length === 0) {
+              e.preventDefault();
+              return;
+            }
+            const first = items[0]!;
+            const last = items[items.length - 1]!;
+            const at = document.activeElement;
+            if (e.shiftKey && (at === first || !e.currentTarget.contains(at))) {
+              e.preventDefault();
+              last.focus();
+            } else if (!e.shiftKey && (at === last || !e.currentTarget.contains(at))) {
+              e.preventDefault();
+              first.focus();
+            }
           }
         }}
       >
@@ -227,6 +317,7 @@ export function Shortcuts({ go, hasProjects, singleLetterKeys = true, onTurnKeys
           </dl>
         </div>
         <p className="muted shortcuts-note">
+          {(noMouse ?? noFinePointer()) && <>These need a keyboard. </>}
           Shortcuts don't work while you're typing in a box.
           {singleLetterKeys && onTurnKeysOn && (
             <>
@@ -239,5 +330,6 @@ export function Shortcuts({ go, hasProjects, singleLetterKeys = true, onTurnKeys
         </p>
       </div>
     </div>
+    </>
   );
 }

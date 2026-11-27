@@ -364,7 +364,9 @@ describe("skills library (R71)", () => {
     await asWorker.close();
     const asCeo = await c.mcp(runId, c.ceo.id);
     expect(textOf(await asCeo.callTool({ name: "skills", arguments: { action: "give", skill: "triage", agent: "engineer" } }))).toBe("Engineer has the triage skill from their next run.");
-    expect(JSON.parse(textOf(await asCeo.callTool({ name: "skills", arguments: { action: "list" } })))).toEqual([{ name: "triage", description: "Sorts bug reports.", agents: ["Engineer"] }]);
+    // The library also carries Boss Man's built-in skills (BOS-2631); this checks the one added here.
+    const listed = JSON.parse(textOf(await asCeo.callTool({ name: "skills", arguments: { action: "list" } }))) as Array<{ name: string }>;
+    expect(listed.filter((s) => s.name === "triage")).toEqual([{ name: "triage", description: "Sorts bug reports.", agents: ["Engineer"] }]);
     expect(await asCeo.callTool({ name: "skills", arguments: { action: "give", skill: "nope", agent: "Engineer" } })).toMatchObject({ isError: true });
     await asCeo.callTool({ name: "skills", arguments: { action: "take", skill: "triage", agent: "Engineer" } });
     await asCeo.close();
@@ -430,7 +432,7 @@ describe("skills library (R71)", () => {
     );
     const whole = await c.req("POST", base, { from: "link", url: "https://github.com/acme/multi" });
     expect(whole.json()).toEqual([expect.objectContaining({ name: "polish" })]);
-    const [skill] = (await c.req("GET", base)).json();
+    const skill = (await c.req("GET", base)).json().find((s: { name: string }) => s.name === "polish");
     const files = (await c.req("GET", `${base}/${skill.id}`)).json().files;
     expect(files.map((f: { path: string; text: string }) => [f.path, f.text])).toEqual([
       ["SKILL.md", multi[".claude/skills/polish/SKILL.md"]],
@@ -451,7 +453,8 @@ describe("skills library (R71)", () => {
     const base = `/api/companies/${c.company.id}/skills`;
     const packs = `/api/companies/${c.company.id}/skill-packs`;
     await c.req("POST", base, { from: "link", url: "https://github.com/acme/kit/tree/main/skills" });
-    expect((await c.req("GET", base)).json().map((s: { name: string; pack: string }) => [s.name, s.pack])).toEqual([
+    // The library also carries Boss Man's built-in skills (BOS-2631); these checks are the acme/kit pack alone.
+    expect((await c.req("GET", base)).json().filter((s: { pack: string }) => s.pack === "acme/kit").map((s: { name: string; pack: string }) => [s.name, s.pack])).toEqual([
       ["release-notes", "acme/kit"],
       ["triage", "acme/kit"],
     ]);
@@ -459,7 +462,7 @@ describe("skills library (R71)", () => {
 
     // Given to an agent in one go.
     expect((await c.req("PUT", `${packs}/agents`, { pack: "acme/kit", agentIds: [c.worker.id] })).statusCode).toBe(200);
-    expect((await c.req("GET", base)).json().every((s: { agents: Array<{ id: string }> }) => s.agents.length === 1 && s.agents[0]!.id === c.worker.id)).toBe(true);
+    expect((await c.req("GET", base)).json().filter((s: { pack: string }) => s.pack === "acme/kit").every((s: { agents: Array<{ id: string }> }) => s.agents.length === 1 && s.agents[0]!.id === c.worker.id)).toBe(true);
 
     // Updated in one go: a changed skill and a new one.
     const before = commit;
@@ -469,12 +472,13 @@ describe("skills library (R71)", () => {
     await nameSecurityReviewer(c.db, c.worker.id);
     // The changed skill becomes a proposal; nothing in the library moves.
     expect((await c.req("POST", `${packs}/refresh`, { pack: "acme/kit" })).json()).toEqual({ proposed: ["triage"], unchanged: 1, problems: [] });
-    expect((await c.req("GET", base)).json().map((s: { name: string; sourceRef: string }) => [s.name, s.sourceRef])).toEqual([["release-notes", before], ["triage", before]]);
+    expect((await c.req("GET", base)).json().filter((s: { pack: string }) => s.pack === "acme/kit").map((s: { name: string; sourceRef: string }) => [s.name, s.sourceRef])).toEqual([["release-notes", before], ["triage", before]]);
     commit = before;
     delete files["skills/deploy/SKILL.md"];
 
     expect((await c.req("DELETE", `${packs}?pack=${encodeURIComponent("acme/kit")}`)).statusCode).toBe(204);
-    expect((await c.req("GET", base)).json()).toEqual([]);
+    // Only the pack left; the built-in skills (BOS-2631) stay in the library.
+    expect((await c.req("GET", base)).json().filter((s: { pack: string }) => s.pack === "acme/kit")).toEqual([]);
   });
 
   it("lets the CEO give a whole pack by its name", async () => {
@@ -486,7 +490,7 @@ describe("skills library (R71)", () => {
     expect(textOf(await asCeo.callTool({ name: "skills", arguments: { action: "give", skill: "acme/kit", agent: "Engineer" } }))).toBe("Engineer has the acme/kit skill from their next run.");
     await asCeo.close();
     const all = (await c.req("GET", `/api/companies/${c.company.id}/skills`)).json();
-    expect(all.map((s: { name: string; agents: unknown[] }) => [s.name, s.agents.length])).toEqual([["release-notes", 1], ["triage", 1]]);
+    expect(all.filter((s: { pack: string }) => s.pack === "acme/kit").map((s: { name: string; agents: unknown[] }) => [s.name, s.agents.length])).toEqual([["release-notes", 1], ["triage", 1]]);
   });
 
   it("finds skills in other companies and copies one in, files and add-ons but not holders", async () => {

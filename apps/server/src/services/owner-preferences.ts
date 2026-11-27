@@ -21,7 +21,7 @@ export function ownerPreferencesService(db: Db) {
     if (!row) return OwnerPreferences.parse({});
     // A row written by an older version may be missing a newer field; its default fills the gap. Shortcuts saved
     // as bare ids by an earlier build read back as a shortcut with no name, never dropped.
-    return OwnerPreferences.parse({ singleLetterKeys: row.singleLetterKeys, pinnedPages: asSaved(row.pinnedPages) });
+    return OwnerPreferences.parse({ singleLetterKeys: row.singleLetterKeys, pinnedPages: asSaved(row.pinnedPages), keyboardTipSeen: row.keyboardTipSeen });
   }
 
   /** Change only what the page sent, and return all of it, so the page can show what was saved. Throws a plain
@@ -33,10 +33,11 @@ export function ownerPreferencesService(db: Db) {
       if (problem) throw new ShortcutSaveError(problem);
     }
     const merged = OwnerPreferences.parse({ ...(await get(ownerId)), ...body });
+    const values = { ownerId, singleLetterKeys: merged.singleLetterKeys, pinnedPages: merged.pinnedPages, keyboardTipSeen: merged.keyboardTipSeen };
     await db
       .insert(ownerPreferences)
-      .values({ ownerId, singleLetterKeys: merged.singleLetterKeys, pinnedPages: merged.pinnedPages })
-      .onConflictDoUpdate({ target: ownerPreferences.ownerId, set: { singleLetterKeys: merged.singleLetterKeys, pinnedPages: merged.pinnedPages, updatedAt: new Date() } });
+      .values(values)
+      .onConflictDoUpdate({ target: ownerPreferences.ownerId, set: { ...values, updatedAt: new Date() } });
     return merged;
   }
 

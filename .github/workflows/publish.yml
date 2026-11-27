@@ -201,7 +201,8 @@ jobs:
           for f in digests/*; do sources="$sources $PRIMARY/$NAME@$(cat "$f")"; done
           # shellcheck disable=SC2086  # one argument per source
           docker buildx imagetools create -t "$PRIMARY/$NAME:$TAG" $sources
-          digest="$(docker buildx imagetools inspect "$PRIMARY/$NAME:$TAG" --format '{{json .Manifest}}' | jq -r .digest)"
+          # Through the script: a just-written tag can read as "not found" for a few seconds (BOS-2768).
+          digest="$(scripts/publish-images.sh digest "$PRIMARY/$NAME:$TAG")"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - name: Copy it to the other registries by digest (fails if a digest differs)
         env:

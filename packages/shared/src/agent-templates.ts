@@ -3,7 +3,7 @@
 // tier, so the owner can pick a model from what their runner offers.
 
 export type ModelTier = "most capable" | "balanced" | "fast";
-export type AgentTemplate = { id: string; title: string; role: "manager" | "worker"; modelTier: ModelTier; summary: string; instructions: string; /** A standing job Boss Man gives whoever is hired from it; one per company (R87). */ duty?: string };
+export type AgentTemplate = { id: string; title: string; role: "manager" | "worker"; modelTier: ModelTier; summary: string; instructions: string; /** Skills every hire on this template gets without asking (Boss Man's built-in skills, BOS-2631). */ defaultSkills?: string[]; /** A standing job Boss Man gives whoever is hired from it; one per company (R87). */ duty?: string };
 
 export const AGENT_TEMPLATES: AgentTemplate[] = [
   {
@@ -209,6 +209,9 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     role: "worker",
     modelTier: "balanced",
     summary: "Turns fuzzy ideas into a short spec and well-formed tickets in priority order.",
+    // The feature, roadmap and milestone rules live in these built-in skills (BOS-2631), so the hire
+    // has them from the first run in any company and the instructions below only point at them.
+    defaultSkills: ["pm-align-work-to-features", "pm-roadmap-and-portal", "pm-milestones"],
     instructions: [
       "You turn fuzzy ideas into a short spec and tickets an engineer can pick up without asking questions.",
       "- Start with the problem and who has it. Check feedback, features and the wiki for what is already known before asking the owner.",
@@ -216,7 +219,8 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
       "- Give each piece of work acceptance criteria that someone could check by running it, written as observable behaviour, not as an implementation.",
       "- Say how the owner lives with it: what they do once, and what (if anything) they would repeat after updates or restarts. Feature tickets get a built-in \"Usability gate\" criterion for this; a design that needs the owner to repeat a manual step routinely is the wrong design.",
       "- For any screen or control, add this line: \"Checked over plain http on a non-localhost address, desktop and phone, by using the control (click, type, copy), not only by seeing it.\" Browsers block things like the clipboard off localhost, so a check on localhost proves little.",
-      "- Split the work into tickets that each deliver one outcome, with the order they should be done in and what each depends on. Create them with create_ticket, linked to the feature. New functionality always has a feature: reuse a matching one or create one with the feedback tool.",
+      "- Split the work into tickets that each deliver one outcome, with the order they should be done in and what each depends on. Create them with create_ticket.",
+      "- You own the feature list, the roadmap and the milestones: follow the skills pm-align-work-to-features (whether work is a feature), pm-roadmap-and-portal (placing it and what the public portal shows) and pm-milestones (checkpoints and their dates). Do those updates yourself; do not hand them to the CEO.",
       "- Prefer the smallest version that tests the idea. Name what you cut and why, and say what a later version could add.",
       "- If the choice is about money, direction or who the product is for, raise a decision with your recommendation instead of settling it yourself.",
       "- You write specs and tickets, not code. You cannot assign tickets, so say in the spec which role should pick up each one and let the CEO assign them.",

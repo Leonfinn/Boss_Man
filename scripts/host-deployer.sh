@@ -85,7 +85,7 @@ INFRA='^(docker-compose[^/]*\.ya?ml$|deploy/|scripts/(deploy|rebuild-live|update
 NOT_INFRA='^deploy/(penpot|ntfy|ntfy-bluegreen)\.yml$'
 # Same rule as needs_runner in scripts/deploy.sh (scripts/host-deployer.test.sh keeps them equal) and RUNNER_CODE_PATHS in
 # packages/shared/src/go-live.ts: what the runner, launcher and netguard images COPY in, read from their Dockerfiles (BOS-1648).
-RUNNER_PATHS='^(apps/runner/Dockerfile$|apps/runner/package\.json$|apps/runner/src/|apps/runner/claude-pack/|apps/launcher/Dockerfile$|apps/launcher/package\.json$|apps/launcher/tsconfig\.json$|apps/launcher/tsconfig\.build\.json$|apps/launcher/src/|apps/netguard/Dockerfile$|apps/netguard/netguard\.sh$|packages/shared/package\.json$|packages/shared/src/|scripts/check-slot\.sh$|scripts/scan-added-lines\.mjs$|scripts/scan-allow\.txt$|package\.json$|pnpm-workspace\.yaml$|pnpm-lock\.yaml$|tsconfig\.base\.json$|NOTICE$)'
+RUNNER_PATHS='^(apps/runner/Dockerfile$|apps/runner/package\.json$|apps/runner/src/|apps/runner/claude-pack/|apps/launcher/Dockerfile$|apps/launcher/package\.json$|apps/launcher/tsconfig\.json$|apps/launcher/tsconfig\.build\.json$|apps/launcher/src/|apps/netguard/Dockerfile$|apps/netguard/netguard\.sh$|packages/shared/package\.json$|packages/shared/src/|packages/shared/src/secret-rules\.mjs$|scripts/check-slot\.sh$|scripts/scan-added-lines\.mjs$|scripts/scan-allow\.txt$|package\.json$|pnpm-workspace\.yaml$|pnpm-lock\.yaml$|tsconfig\.base\.json$|NOTICE$)'
 
 # Git as root must not run hooks from a checkout that agents' commits land in; deploy.sh inherits this.
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null GIT_TERMINAL_PROMPT=0
@@ -853,6 +853,7 @@ host_extra_facts() {
   # which. A running container that is failing its health check counts as unhealthy too.
   # Only fields `docker ps` really has are asked for here (`ExitCode` is not one of them, so it comes from inspect).
   local checks="" csep="" total=0 notrun=0 unhealthy=0 maxrestart=0 line r
+  local stg_unhealthy=0 stg_names="" stg_sep=""
   local stopping="" ssep2="" seen_ids="" unh_names="" unh_sep="" unh_why="" why_sep="" unh_where="" where_sep=""
   # BOS-2481: a container that is still inside its health-check start period (a runner just swapped onto a new image)
   # is settling, not unhealthy. Docker's own "(health: starting)" already covers the normal case; this also covers a
@@ -893,6 +894,14 @@ host_extra_facts() {
     [[ $3 && $3 != - ]] && where+="project $3"
     [[ $4 && $4 != - ]] && where+="${where:+, }stack $4"
     [[ $5 && $5 != - ]] && where+="${where:+, }company $5"
+    # BOS-2712: a container of the staging stack (label boss-man.stack=staging) is a separate lane with its own smoke
+    # checks. Its runner waits for a staging server that is often stopped or reset, so it is listed apart and never
+    # counted as a fault of this host. Production runners and the host's own stack carry no such label.
+    if [[ $4 == staging ]]; then
+      stg_unhealthy=$((stg_unhealthy + 1))
+      stg_names+="$stg_sep$2"; stg_sep="; "
+      return 0
+    fi
     unhealthy=$((unhealthy + 1))
     unh_names+="$unh_sep$2"; unh_sep="; "
     unh_where+="$where_sep$2${where:+ ($where)}"; where_sep="; "
@@ -980,7 +989,7 @@ host_extra_facts() {
       stopping+="$ssep2{\"name\": $(jstr "$cname"), \"status\": $(jstr "$cstate_str"), \"exit\": $(jstr "$cexit_s"), \"since\": $(jstr "$csince")}"; ssep2=", "
     done <"$listing"
     rm -f "$listing" 2>/dev/null || true
-    checks+="$csep\"container_status\": {\"total\": $total, \"notRunning\": $notrun, \"unhealthy\": $unhealthy, \"unhealthyNames\": $(jstr "${unh_names:0:450}"), \"unhealthyWhere\": $(jstr "${unh_where:0:450}"), \"unhealthyReason\": $(jstr "${unh_why:0:450}"), \"stopped\": [$stopping]}"; csep=", "
+    checks+="$csep\"container_status\": {\"total\": $total, \"notRunning\": $notrun, \"unhealthy\": $unhealthy, \"unhealthyNames\": $(jstr "${unh_names:0:450}"), \"unhealthyWhere\": $(jstr "${unh_where:0:450}"), \"unhealthyReason\": $(jstr "${unh_why:0:450}"), \"stagingUnhealthy\": $stg_unhealthy, \"stagingUnhealthyNames\": $(jstr "${stg_names:0:450}"), \"stopped\": [$stopping]}"; csep=", "
     maxrestart=0
     while read -r r; do [[ $r =~ ^[0-9]+$ ]] && ((r > maxrestart)) && maxrestart=$r; done < <(dk ps -aq --filter label=com.docker.compose.project | xargs -r docker inspect -f '{{.RestartCount}}' 2>/dev/null || true)
     checks+="$csep\"restart_counts\": {\"max\": $maxrestart}"; csep=", "

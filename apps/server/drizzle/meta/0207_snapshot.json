@@ -1,5 +1,5 @@
 {
-  "id": "f23fbe4a-63c5-4d78-8d00-732dc420c27f",
+  "id": "ee318b15-41c3-4a91-9bc9-78d914f0274b",
   "prevId": "e2be94d4-b0df-40f0-8fb9-1b86fdf4a6e7",
   "version": "7",
   "dialect": "postgresql",
@@ -14127,7 +14127,8 @@
         "written",
         "link",
         "upload",
-        "retro"
+        "retro",
+        "builtin"
       ]
     },
     "public.system_state": {

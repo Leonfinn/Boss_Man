@@ -51,11 +51,11 @@ afterAll(async () => {
 const scratch = process.env.BOSSMAN_SCRATCH;
 const shotPath = async (name: string) => (scratch ? (await import("node:path")).join(scratch, `single-letter-keys-${name}.png`) : null);
 
-const save = async () => ({ singleLetterKeys: true, pinnedPages: [] });
+const save = async () => ({ singleLetterKeys: true, pinnedPages: [], keyboardTipSeen: false });
 
 const account = (singleLetterKeys: boolean) =>
   renderToStaticMarkup(
-    <PreferencesContext.Provider value={{ prefs: { singleLetterKeys, pinnedPages: [] }, save }}>
+    <PreferencesContext.Provider value={{ prefs: { singleLetterKeys, pinnedPages: [], keyboardTipSeen: true }, save }}>
       <main className="app-main" style={{ padding: "32px 40px", display: "flex", flexDirection: "column", gap: 24 }}>
         <KeyboardShortcuts companyId="c1" />
       </main>
@@ -66,6 +66,14 @@ const account = (singleLetterKeys: boolean) =>
 const list = (singleLetterKeys: boolean) =>
   renderToStaticMarkup(
     <Shortcuts go={() => {}} hasProjects singleLetterKeys={singleLetterKeys} onTurnKeysOn={() => {}} initialOpen />,
+  );
+
+// The one-time keyboard tip (BOS-2690), drawn beside the menu for the layout check (BOS-2769 moved it clear of
+// the menu's pinned bottom row). The real tip only opens on a Tab or Ctrl K; the rendering test asks for it on
+// the first draw instead.
+const tip = () =>
+  renderToStaticMarkup(
+    <Shortcuts go={() => {}} hasProjects keyboardTipSeen={false} onTipSeen={() => {}} initialTip />,
   );
 
 const html = (body: string) => `<!doctype html><html><head><meta charset="utf-8"><style>${css}</style></head><body><div class="app">${body}</div></body></html>`;
@@ -187,4 +195,47 @@ describe.skipIf(!browser)("single-letter-key switch and the list's off notice (B
       await page.close();
     }
   });
+});
+
+const readTip = () => {
+  const panel = document.querySelector(".shortcuts-tip") as HTMLElement | null;
+  const text = panel?.querySelector(".shortcuts-tip-text") as HTMLElement | null;
+  const show = panel?.querySelector("button") as HTMLButtonElement | null;
+  const gotIt = [...(panel?.querySelectorAll("button") ?? [])].find((b) => b.textContent === "Got it") as HTMLButtonElement | undefined;
+  const r = panel?.getBoundingClientRect();
+  const w = document.documentElement.clientWidth;
+  const h = document.documentElement.clientHeight;
+  return {
+    hasPanel: !!panel,
+    role: panel?.getAttribute("role") ?? null,
+    tipText: text?.innerText ?? null,
+    showText: show?.innerText ?? null,
+    gotItText: gotIt?.innerText ?? null,
+    // Beside the menu (BOS-2769: clear of the 240 px column), inside the window, and all of it visible.
+    beside: !!r && r.left >= 240 && r.bottom <= h && r.top >= 0,
+    inside: !!r && r.left >= 0 && r.right <= w + 0.5,
+  };
+};
+
+describe.skipIf(!browser)("the one-time keyboard tip (BOS-2690)", () => {
+  for (const d of devices.filter((x) => !x.isMobile)) {
+    it(`${d.name}: the tip sits beside the menu, inside the window, with both ways to close`, async () => {
+      const page = await browser!.newPage({ viewport: d.viewport, deviceScaleFactor: d.deviceScaleFactor, hasTouch: d.hasTouch, isMobile: d.isMobile });
+      try {
+        await page.setContent(html(tip()), { waitUntil: "load" });
+        const got = await page.evaluate(readTip);
+        expect(got.hasPanel).toBe(true);
+        expect(got.role).toBe("status");
+        expect(got.tipText).toBe("Boss Man has keyboard shortcuts. Press ? any time to see them.");
+        expect(got.showText).toBe("Show shortcuts");
+        expect(got.gotItText).toBe("Got it");
+        expect(got.beside).toBe(true);
+        expect(got.inside).toBe(true);
+        const path = await shotPath(`${d.name}-tip`);
+        if (path) await page.screenshot({ path });
+      } finally {
+        await page.close();
+      }
+    });
+  }
 });

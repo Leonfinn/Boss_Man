@@ -537,6 +537,8 @@ export async function buildApp(opts: AppOptions) {
       });
     },
     onReleased: (f) => notes.notify({ companyId: f.companyId, level: "note", title: `Released: ${f.title}`, body: "Every ticket delivering it is done.", link: `#/features/${f.companyId}/${f.id}` }),
+    // BOS-2686: a merge is live once the server runs it; a fresh server has nothing recorded yet, so it is its own commit.
+    liveCommit: () => process.env.BOSSMAN_COMMIT || null,
   });
   // The scheduler is made below; the chat only needs it once a message is sent.
   const trace = chatTraceService();
@@ -1184,14 +1186,20 @@ export async function buildApp(opts: AppOptions) {
     card: async (dedupeKey) => (await db.select({ status: decisions.status, createdAt: decisions.createdAt, answer: decisions.answer }).from(decisions).where(eq(decisions.dedupeKey, dedupeKey)).limit(1))[0] ?? null,
     ticketFor: async (key) => {
       const [t] = await db
-        .select({ title: tickets.title, number: tickets.number, prefix: companies.ticketPrefix })
+        .select({ id: tickets.id, title: tickets.title, number: tickets.number, prefix: companies.ticketPrefix, agentId: tickets.assigneeAgentId, agent: agents.name })
         .from(tickets)
         .innerJoin(companies, eq(companies.id, tickets.companyId))
+        .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
         .where(and(ne(tickets.systemState, "done"), or(sql`position(${key} in ${tickets.title}) > 0`, sql`position(${key} in coalesce(${tickets.body}, '')) > 0`)))
         .orderBy(desc(tickets.createdAt))
         .limit(1);
       const ref = t ? ticketRef(t.prefix, t.number) : null;
-      return t && ref ? { ref, title: t.title } : null;
+      if (!t || !ref) return null;
+      // BOS-2737: the assignee and their first work run on it, so the panel's actionClaim line says who is on it, from facts.
+      const [run] = t.agentId
+        ? await db.select({ at: runsTable.startedAt }).from(runsTable).where(and(eq(runsTable.ticketId, t.id), eq(runsTable.agentId, t.agentId), sql`${runsTable.purpose} is distinct from 'chat'`)).orderBy(asc(runsTable.startedAt)).limit(1)
+        : [];
+      return { ref, title: t.title, agent: t.agent ?? null, ...(run ? { startedAt: run.at.toISOString() } : {}) };
     },
     raise: async (input) => {
       const r = await alerts.raise(input as Parameters<typeof alerts.raise>[0]);
@@ -1220,6 +1228,8 @@ export async function buildApp(opts: AppOptions) {
     // BOS-1602: train seats count only slots that can run a merge check.
     checkCapacity: (companyId) => checks.mergeCapacity(companyId),
     alert: (input) => alerts.raise(input as Parameters<typeof alerts.raise>[0]),
+    // BOS-2686: when a merge goes live, the features its ticket delivers get their release rule worked out again.
+    onLive: (ticketId) => feedback.syncFeaturesOf([ticketId]),
   });
   review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
   // The main-CI watcher (BOS-1072): a ticket for each distinct failing step of GitHub CI on main.
@@ -3041,5 +3051,5 @@ export async function buildApp(opts: AppOptions) {
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
   /** BOS-2159: removes login rows past their expiry (they are refused already; this stops the table growing). Returns how many. */
   const sweepExpiredSessions = async () => (await db.delete(sessions).where(lte(sessions.expiresAt, new Date())).returning({ h: sessions.tokenHash })).length;
-  return { app, webhooks, sweepExpiredSessions, mailer, weeklySummary, launcher: launch, githubWatch, memory, serverHealth, dailyBackup, hostWarnings, checks, releaseLog, mainCi, secretScan, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, planning: roadmapPlanning, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, ticketMeaningEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
+  return { app, webhooks, sweepExpiredSessions, mailer, weeklySummary, launcher: launch, githubWatch, memory, serverHealth, dailyBackup, hostWarnings, checks, releaseLog, mainCi, secretScan, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, planning: roadmapPlanning, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, ticketMeaningEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer, syncFeatures: (ids: Array<string | null | undefined>) => feedback.syncFeaturesOf(ids) };
 }

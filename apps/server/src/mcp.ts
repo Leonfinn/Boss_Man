@@ -68,6 +68,7 @@ import type { alertLadder } from "./services/alert-ladder.js";
 import type { retroService } from "./services/retro.js";
 import { sizingGuideText } from "./services/sizing.js";
 import { getHold, WRAP_UP } from "./services/maintenance.js";
+import { ownerTextReceiptRefusal } from "./services/host-fact-gate.js";
 import { ownerFactAnswered, ownerFactHeldLive, recordHeadLine, type GitTokenProbe, ownerSetupFacts, usesOwnerSetupToken } from "./services/owner-record.js";
 import { cleanSummary, SUMMARY_MAX } from "./services/phone-approve.js";
 import { getStandingRules, STANDING_RULES_MAX, StandingRulesError } from "./services/standing-rules.js";
@@ -79,6 +80,7 @@ import { registerAgentAdminTools } from "./mcp-agent-admin.js";
 import { buildPaServer } from "./mcp-pa.js";
 import { registerRetro, registerWatchdog } from "./mcp-watchdog.js";
 import { traceCalls } from "./mcp-trace.js";
+import { guardSecrets } from "./mcp-secret-guard.js";
 import { registerBoard, registerListMyWork, registerNotes, registerRequestNote, registerRoadmap } from "./mcp-board.js";
 import { registerDecisionTools } from "./mcp-decisions.js";
 import { registerMergeLineExport } from "./mcp-merge-line.js";
@@ -246,7 +248,8 @@ function restrictTo(server: McpServer, only: ReadonlySet<string>) {
 }
 
 function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, only?: ReadonlySet<string>, retroAgent = false, withServerStatus = true) {
-  const server = new McpServer({ name: "bossman", version: "0.1.0" });
+  // BOS-2731: an agent's text for the wiki, tickets, replies and cards is refused if it holds a secret. Wrapped first so every registrar below is covered.
+  const server = guardSecrets(new McpServer({ name: "bossman", version: "0.1.0" }));
   if (only) restrictTo(server, only);
   if (only === SCRUM_MASTER_TOOLS) {
     registerBoard(server, db, scope);
@@ -374,6 +377,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       if (urgentHold) return fail(urgentHold);
       const factHold = await ownerFactHeldLive(db, scope.companyId, gitTokenProbe, [body]); // BOS-1596, R34
       if (factHold) return fail(factHold);
+      const receiptHold = ownerTextReceiptRefusal(body); // BOS-2741 (R2)
+      if (receiptHold) return fail(receiptHold);
       // Any agent's owner-ask is held, not posted, until a card covers it (BOS-901 for the CEO, BOS-1576 for everyone):
       // a hint after posting reaches only the writer, so the ask never got to the owner. notAnAsk lets a status reply through.
       // R53 (BOS-2084): a reply that names another ticket's open owner card is held for every agent, notAnAsk or not.
@@ -473,6 +478,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         criterion: criterionArg,
         // What choosing each option means for that criterion (BOS-1155): pass, fail or none. Required with criterion.
         optionVerdicts: z.record(z.string().max(200), z.enum(["pass", "fail", "none"])).optional(),
+        // BOS-2742: options the owner can only press with a screenshot attached on the card.
+        needsAttachment: z.array(z.string().min(1).max(200)).max(6).optional().describe("Options (their exact text) the owner may only press with a screenshot or file attached, e.g. [\"Done, screenshot of the result attached\"]. The card then shows a paste/attach area, refuses the option with nothing attached, and your wake lists the image ids to open with open_attachment. An option whose words promise one (\"attached\", \"I'll attach\", \"screenshot\") is treated the same without this; pass it anyway when the ask is for a file or picture worded otherwise."),
         // BOS-1161: the condition that makes this card moot, so Boss Man closes it by itself and records why. Each key is an
         // alternative (any one closes it); only conditions Boss Man can check are accepted. Without it the card is only flagged "may be out of date".
         clearsWhen: z.object({
@@ -483,7 +490,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         }).strict().optional(),
       },
     },
-    async ({ replaces: givenReplaces, ownerOnly, ownerOnlyWhy, question, options, recommended, blocksTicketId, alsoBlocks, holdsMerge, triedFirst, ownerMustDo, steps, stillNeeded, goLive, rollback, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, why, minutes, criterion, optionVerdicts, clearsWhen }) => {
+    async ({ replaces: givenReplaces, ownerOnly, ownerOnlyWhy, question, options, recommended, blocksTicketId, alsoBlocks, holdsMerge, triedFirst, ownerMustDo, steps, stillNeeded, goLive, rollback, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, why, minutes, criterion, optionVerdicts, needsAttachment, clearsWhen }) => {
       // R38: a go-live card states its undo with its source, and (below) waits for its ticket's preview proof.
       if (goLive) {
         const bad = rollbackRefusal(rollback);
@@ -516,6 +523,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         clearWhen = made.clearWhen;
       }
       if (!options.includes(recommended)) return fail("The recommended answer must be one of the options.");
+      const notAnOption = needsAttachment?.filter((o) => !options.includes(o)) ?? [];
+      if (notAnOption.length) return fail(`needsAttachment names ${notAnOption.map((o) => `"${o}"`).join(", ")}, which ${notAnOption.length === 1 ? "is not one of the options" : "are not among the options"}: give each option's exact text.`);
       // BOS-1596: owner-facing text the record contradicts (an installed check worker when none ever connected) is held with the live value.
       const factHold = await ownerFactHeldLive(db, scope.companyId, gitTokenProbe, [question, ...options, ...(steps ?? [])]);
       if (factHold) return fail(factHold);
@@ -541,6 +550,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         const filledAs = new Map(options.map((o, i) => [o, ask.options![i]!]));
         recommended = filledAs.get(recommended) ?? recommended;
         if (optionVerdicts) optionVerdicts = Object.fromEntries(Object.entries(optionVerdicts).map(([k, v]) => [filledAs.get(k) ?? k, v]));
+        if (needsAttachment) needsAttachment = needsAttachment.map((o) => filledAs.get(o) ?? o);
         options = ask.options;
       }
       question = ask.question ?? question;
@@ -609,7 +619,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       }
       let d: { id: string; droppedLinks?: DroppedOrderLink[]; withCeo?: boolean };
       try {
-        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question: [recordLine, question, notLiveLine].filter(Boolean).join("\n\n"), recordSays: !!recordAnswer, options, recommended, blocksTicketId, ...(alsoIds.length ? { alsoBlocksTicketIds: alsoIds } : {}), holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, ...(steps?.length && stepSources ? { stepSources } : {}), ...(steps?.length && ask.opening ? { opening: ask.opening } : {}), stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(goLive ? { goLive: true, releasesCommit: releasedCommitOf(question, ...(steps ?? [])) } : {}), ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
+        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question: [recordLine, question, notLiveLine].filter(Boolean).join("\n\n"), recordSays: !!recordAnswer, options, recommended, blocksTicketId, ...(alsoIds.length ? { alsoBlocksTicketIds: alsoIds } : {}), holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, ...(steps?.length && stepSources ? { stepSources } : {}), ...(steps?.length && ask.opening ? { opening: ask.opening } : {}), stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, ...(needsAttachment?.length ? { attachOptions: needsAttachment } : {}), doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(goLive ? { goLive: true, releasesCommit: releasedCommitOf(question, ...(steps ?? [])) } : {}), ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
       } catch (err) {
         if (err instanceof WorkError || err instanceof AnswerError) return fail(err.message);
         throw err;
@@ -1660,7 +1670,7 @@ const CHAT_WORKER_RUN_TOOLS: ReadonlySet<string> = new Set(["ticket_reply", "sch
 function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, withRunTools: boolean, workerTools = false) {
   const { work, planning, feedback, notes, wiki, skills, skillProposals, review, agents: team, images, ticketChat } = services;
   // Wrapped before any tool registers, or the registrars below keep the plain one (BOS-758).
-  const server = traceCalls(new McpServer({ name: "bossman", version: "0.1.0" }), db, scope.runId, scope.companyId);
+  const server = traceCalls(guardSecrets(new McpServer({ name: "bossman", version: "0.1.0" })), db, scope.runId, scope.companyId);
   // BOS-1300: an ordinary agent's chat also gets the ticket tools its runs have for its own tickets: reply, and book or clear a check.
   // Each of those already limits itself to the caller's company and (checks, moves) to the caller's own tickets.
   if (workerTools) {
@@ -1769,7 +1779,7 @@ function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHoo
   server.registerTool(
     "create_feature",
     {
-      description: "Add a feature to the company's feature requests (it starts as an idea, and goes on the feedback portal by default unless it reads as security work). Give a title and a description: the problem, who it's for, what done looks like, what's out of scope and the risk. Pass objectiveId or milestoneId from board when it serves one. If it should be held off the portal for a reason other than security, pass keepOffPortal true and a short keepOffReason: the owner is asked whether to keep it off or publish it. Pass the returned id as featureId to create_ticket to deliver it.",
+      description: "Add a feature to the company's feature requests (it starts as an idea, and goes on the feedback portal by default unless it reads as security work). Give a title and a description: the problem, who it's for, what done looks like, what's out of scope and the risk. Pass objectiveId or milestoneId from board when it serves one. If it should be held off the portal for a reason other than security, pass keepOffPortal true and a short keepOffReason: the owner is asked whether to keep it off or publish it. Pass the returned id as featureId to create_ticket to deliver it. A released feature is baselined: an enhancement to it is a new feature (this tool), not another ticket on the old one; only a bug fix that restores what it promised joins it, with update_ticket exceptionReason.",
       inputSchema: { title: z.string().min(1).max(200), description: z.string().max(10_000).optional(), objectiveId: z.string().uuid().optional(), milestoneId: z.string().uuid().optional(), keepOffPortal: z.boolean().optional(), keepOffReason: z.string().trim().max(500).optional() },
     },
     async (input) => {

@@ -17,9 +17,10 @@ printf '#!/usr/bin/env bash\nexit 3\n' >"$t/bad.test.sh"; chmod +x "$t/bad.test.
 rc=0; out=$(scripts/test-shell.sh "$t/bad.test.sh" 2>&1) || rc=$?
 [ "$rc" = 3 ] || fail "a failing test should pass its exit code on, got $rc"
 case "$out" in *"test-shell: FAILED $t/bad.test.sh (exit 3)"*) ;; *) fail "the failing test is not named: $out" ;; esac
-# On GitHub the failure also becomes an annotation with the test's last output lines.
+# On GitHub the failure also becomes an annotation with the test's last output lines, filed under the test's path (BOS-2758:
+# the merge gate reads the path to tell a one-off in a test the branch doesn't touch from the branch's own failure).
 printf '#!/usr/bin/env bash\necho "boom detail"\nexit 4\n' >"$t/ann.test.sh"; chmod +x "$t/ann.test.sh"
 rc=0; out=$(GITHUB_ACTIONS=true scripts/test-shell.sh "$t/ann.test.sh" 2>&1) || rc=$?
 [ "$rc" = 4 ] || fail "annotated failing test should exit 4, got $rc"
-case "$out" in *"::error title=test-shell FAILED $t/ann.test.sh (exit 4)::"*"boom detail"*) ;; *) fail "no annotation with the output: $out" ;; esac
+case "$out" in *"::error file=$t/ann.test.sh,title=test-shell FAILED $t/ann.test.sh (exit 4)::"*"boom detail"*) ;; *) fail "no annotation with the test's path and output: $out" ;; esac
 echo "test-shell.test.sh: ok"

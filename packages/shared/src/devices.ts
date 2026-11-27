@@ -88,6 +88,9 @@ export const OwnerPreferences = z.object({
    * list, plus the owner's own name for it if they gave one. Empty until they pin one. A page this build no
    * longer has stays in the list (it is never dropped silently); `shortcutEntries` marks it as gone. */
   pinnedPages: z.array(SavedShortcut).max(SHORTCUTS_MAX).default([]),
+  /** BOS-2690 (BOS-2671 3e): the one-time tip for people already using the keyboard has been closed or
+   * opened once, so it never shows again on this login, in this or any other browser. */
+  keyboardTipSeen: z.boolean().default(false),
 });
 export type OwnerPreferences = z.infer<typeof OwnerPreferences>;
 
@@ -100,5 +103,6 @@ export const OwnerPreferencesPatch = z.object({
   // No max() here: the service checks the whole list (cap, duplicates, unknown pages, names) and throws a plain
   // reason the page shows, rather than zod's generic "Too big" message.
   pinnedPages: z.array(SavedShortcut).optional(),
+  keyboardTipSeen: z.boolean().optional(),
 });
 export type OwnerPreferencesPatch = z.infer<typeof OwnerPreferencesPatch>;

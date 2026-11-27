@@ -17,7 +17,7 @@ import { ownerPreferencesService } from "../src/services/owner-preferences.js";
 import { issueRunToken } from "../src/mcp.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
-const migrationPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../drizzle/0207_shortcut_entries.sql");
+const migrationPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../drizzle/0210_shortcut_entries.sql");
 
 let t: TestApp;
 let cookie: string;
@@ -38,12 +38,12 @@ describe("the shortcut list is saved on the server (BOS-2669)", () => {
     // Save on one server.
     const saved = await req("PATCH", { pinnedPages: [{ id: "updates" }, { id: "agents", name: "My team" }] });
     expect(saved.statusCode).toBe(200);
-    expect(saved.json()).toEqual({ singleLetterKeys: true, pinnedPages: [{ id: "updates" }, { id: "agents", name: "My team" }] });
+    expect(saved.json()).toEqual({ singleLetterKeys: true, keyboardTipSeen: false, pinnedPages: [{ id: "updates" }, { id: "agents", name: "My team" }] });
 
     // A fresh server over the same database (a restart) reads the same list back.
     const fresh = await buildApp({ db: t.db, master: { version: 1, key: randomBytes(32) }, secureCookies: false });
     const again = await fresh.app.inject({ method: "GET", url: "/api/preferences", headers: { cookie } });
-    expect(again.json()).toEqual({ singleLetterKeys: true, pinnedPages: [{ id: "updates" }, { id: "agents", name: "My team" }] });
+    expect(again.json()).toEqual({ singleLetterKeys: true, keyboardTipSeen: false, pinnedPages: [{ id: "updates" }, { id: "agents", name: "My team" }] });
     await fresh.app.close();
   });
 
@@ -51,8 +51,8 @@ describe("the shortcut list is saved on the server (BOS-2669)", () => {
     // The single-letter-key switch is the other value in this store; both are kept side by side.
     await req("PATCH", { singleLetterKeys: false });
     const saved = await req("PATCH", { pinnedPages: [{ id: "updates" }] });
-    expect(saved.json()).toEqual({ singleLetterKeys: false, pinnedPages: [{ id: "updates" }] });
-    expect((await req("GET")).json()).toEqual({ singleLetterKeys: false, pinnedPages: [{ id: "updates" }] });
+    expect(saved.json()).toEqual({ singleLetterKeys: false, keyboardTipSeen: false, pinnedPages: [{ id: "updates" }] });
+    expect((await req("GET")).json()).toEqual({ singleLetterKeys: false, keyboardTipSeen: false, pinnedPages: [{ id: "updates" }] });
     expect(await t.db.select().from(ownerPreferences).where(eq(ownerPreferences.ownerId, ownerId))).toHaveLength(1);
   });
 });
@@ -73,7 +73,7 @@ describe("saving the shortcut list gives a plain reason (BOS-2669)", () => {
     await fails({ pinnedPages: [{ id: "no-such-page" }] }, /isn't in the list of pages/);
     await fails({ pinnedPages: [{ id: "updates", name: "x".repeat(41) }] }, /at most 40 characters/);
     // And the good save before them is still the one saved.
-    expect((await req("GET")).json()).toEqual({ singleLetterKeys: true, pinnedPages: [{ id: "updates" }, { id: "agents" }] });
+    expect((await req("GET")).json()).toEqual({ singleLetterKeys: true, keyboardTipSeen: false, pinnedPages: [{ id: "updates" }, { id: "agents" }] });
   });
 
   it("refuses a save with no owner sign-in", async () => {

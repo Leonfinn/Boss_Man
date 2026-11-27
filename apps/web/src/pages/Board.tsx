@@ -749,7 +749,8 @@ function TicketCard({ sameAs, waiters, t, mine, merging, who, name, prefix, tier
       {t.looksStuck && (
         <span className="state-line stuck-line" data-testid="board-looks-stuck-note">
           <span className="ico" aria-hidden="true">⚠</span>
-          <span>No movement for {stuckFor(t.looksStuck.idleMs)}. The Scrum Master has been told.</span>
+          {/* BOS-2737: who acts on it is the server's actionClaim line; an older server sends none, so nothing is claimed. */}
+          <span>No movement for {stuckFor(t.looksStuck.idleMs)}.{t.looksStuck.claim ? ` ${t.looksStuck.claim}` : ""}</span>
         </span>
       )}
       {t.wipExempt && t.wipExempt !== "live" && !isLiveCheckWait(t) && (

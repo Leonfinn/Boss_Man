@@ -377,25 +377,24 @@ export function answerHoldsAsFact(ctx: { settled?: unknown; plan?: boolean; owne
 /** How far back a company-wide look for an answered question goes (BOS-1591). */
 export const ANSWERED_LOOKBACK_MS = 30 * 86_400_000;
 
-const askWords = (s: string) =>
-  new Set(
-    s
-      .toLowerCase()
-      .replace(/[^a-z0-9\s]/g, " ")
-      .split(/\s+/)
-      .filter((w) => w.length > 2),
-  );
+/**
+ * The ask itself, without the record line a card may carry at its head (BOS-2739): two raises of one question are the
+ * same ask whether or not Boss Man's record answered it when they were raised, so the repeat check compares this.
+ */
+export function askedQuestion(s: string): string {
+  const i = s.indexOf("\n\n");
+  if (i < 0) return s;
+  return s.slice(0, i).startsWith("Boss Man's record says:") ? s.slice(i + 2) : s;
+}
 
-/** True when two asks are close enough to be the same one repeated (BOS-123). */
+/**
+ * True when two asks are the same one repeated (BOS-123): the same words, however they are cased, spaced or
+ * punctuated. Word overlap is deliberately not enough (BOS-2739): it made "do after another card" and "do before
+ * another card" one ask, so a later, different card closed itself as a repeat.
+ */
 export function similarQuestion(a: string, b: string): boolean {
-  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
-  if (norm(a) === norm(b)) return true;
-  const x = askWords(a);
-  const y = askWords(b);
-  if (!x.size || !y.size) return false;
-  let shared = 0;
-  for (const w of x) if (y.has(w)) shared++;
-  return shared / Math.min(x.size, y.size) >= 0.6;
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  return norm(askedQuestion(a)) === norm(askedQuestion(b));
 }
 
 /**

@@ -19,7 +19,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, agents, checkJobs, checkResults, decisions, reviewRequests, settings, ticketDependencies, ticketMessages, tickets, wakes } from "../src/db/schema.js";
 import { createLeader } from "../src/leader.js";
-import { CANT_RERUN_EXIT, FLAKE_RETRY_KIND, GATE_RERUN_MARK } from "../src/services/ci-flake.js";
+import { CANT_RERUN_EXIT, FLAKE_RETRY_KIND, GATE_RERUN_MARK, TOUCHED_EXIT } from "../src/services/ci-flake.js";
 import { landingTurns } from "../src/services/landing-turn.js";
 import { MERGE_LINE_KIND } from "../src/services/merge-line.js";
 import { holdView } from "../src/services/review-holds.js";
@@ -1389,14 +1389,14 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
         return open;
       };
       /** CI red on the merge commit with one annotation on FILE until GitHub was asked to re-run the failed jobs; then `after`. */
-      const flaky = async (opts: { after?: "green" | "red"; changed?: string[] } = {}) => {
+      const flaky = async (opts: { after?: "green" | "red"; changed?: string[]; note?: Record<string, unknown> } = {}) => {
         const c = (ctx = await setup(opts.changed ? { changed: opts.changed } : {}));
         await serverMode(c);
         // The owner's token has no Checks permission, but the repo is public: the annotations are read without the token.
         c.gh.state.publicRepo = true;
         c.gh.state.ci = (sha) => (sha !== MERGE ? green() : c.gh.state.failedReruns.length && opts.after !== "red" ? green() : red([job("check", "success", 1), { ...job("check (server)", "failure", 4, "Run tests"), html_url: "https://github.com/leon/site/actions/runs/9/job/4" }]));
         c.gh.state.annotations.set(4, [
-          { annotation_level: "failure", path: FILE, start_line: 42, title: "fence > blocks a write", message: "AssertionError: expected 0 to be 1" },
+          opts.note ?? { annotation_level: "failure", path: FILE, start_line: 42, title: "fence > blocks a write", message: "AssertionError: expected 0 to be 1" },
           { annotation_level: "failure", path: ".github", message: "Process completed with exit code 1." },
         ]);
         return c;
@@ -1466,6 +1466,51 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
         expect((await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id))).filter(isRerun)).toEqual([]);
         expect(c.gh.state.failedReruns).toEqual([]);
         expect((await authorWake(c))!.note).toContain(`Boss Man didn't ask GitHub for a retry: the branch changes ${FILE}`);
+      });
+
+      // BOS-2758: a shell test fails on GitHub. scripts/test-shell.sh files its annotation under the test's path (file=), so the
+      // failure names the test, and the gate treats it like a vitest file: re-run when the branch doesn't touch it.
+      describe("a failed shell test (BOS-2758)", () => {
+        const SH = "scripts/backup-thing.test.sh";
+        // The annotation scripts/test-shell.sh writes on GitHub since BOS-2758 (file=…,title=…).
+        const SH_NOTE = { annotation_level: "failure", path: SH, start_line: 1, title: `test-shell FAILED ${SH} (exit 1)`, message: "FAIL: second run changed the archives" };
+
+        it("the branch doesn't touch it: re-run at the gate through the shell-test runner, then GitHub's one retry, and it merges", async () => {
+          const c = await flaky({ changed: ["README.md"], note: SH_NOTE });
+          const res = approveAndWait(c.req, c.ticket.id);
+          await finish(c, (j) => !isRerun(j), { state: "passed", exitCode: 0 });
+          const rerun = await finish(c, isRerun, { state: "passed", exitCode: 0, logTail: `boss-man re-run: ${SH}: passed (scripts/test-shell.sh)\nboss-man re-run: passed` });
+          expect((await res).json()).toMatchObject({ outcome: "merged" });
+          expect(rerun.command).toContain(`rerun_sh '${SH}'`);
+          expect(c.gh.state.failedReruns).toEqual([`${API}/actions/runs/9/rerun-failed-jobs`]);
+          expect(await retryRows(c)).toEqual([expect.objectContaining({ sha: MERGE, passed: true, detail: SH })]);
+          expect(await c.db.select().from(tickets).where(eq(tickets.title, `Flaky on GitHub: ${SH}`))).toHaveLength(1);
+          expect(await authorWake(c)).toBeUndefined();
+        });
+
+        it("the repo's rule says the branch touches it (exit 79): sent back, no GitHub retry, nothing recorded", async () => {
+          const c = await flaky({ changed: ["scripts/backup-thing.sh"], note: SH_NOTE });
+          const res = approveAndWait(c.req, c.ticket.id);
+          await finish(c, isRerun, { state: "failed", exitCode: TOUCHED_EXIT, logTail: `boss-man re-run: ${SH}: the branch changes what it tests (scripts/shell-tests-for-changes.sh)` });
+          expect((await res).json()).toMatchObject({ outcome: "verify_failed" });
+          expect(c.gh.state.failedReruns).toEqual([]);
+          expect(await retryRows(c)).toEqual([]);
+          expect((await authorWake(c))!.note).toContain(`Boss Man didn't ask GitHub for a retry: the branch changes what ${SH} tests`);
+        });
+
+        it("the branch changes the test itself: sent back at once, no gate re-run queued", async () => {
+          const c = await flaky({ changed: [SH], note: SH_NOTE });
+          expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "verify_failed" });
+          expect((await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id))).filter(isRerun)).toEqual([]);
+          expect((await authorWake(c))!.note).toContain(`Boss Man didn't ask GitHub for a retry: the branch changes ${SH}`);
+        });
+
+        it("the annotation test-shell wrote before BOS-2758 (no file=, so GitHub filed it under .github) names no test: sent back as before", async () => {
+          const c = await flaky({ changed: ["README.md"], note: { annotation_level: "failure", path: ".github", title: `test-shell FAILED ${SH} (exit 1)`, message: "FAIL: second run changed the archives" } });
+          expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "verify_failed" });
+          expect((await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id))).filter(isRerun)).toEqual([]);
+          expect((await authorWake(c))!.note).toContain("doesn't name a test file");
+        });
       });
 
       it("a file with 3 recorded retries this week gets no more: sent back, no gate re-run", async () => {
