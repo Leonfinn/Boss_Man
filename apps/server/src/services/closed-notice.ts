@@ -26,6 +26,8 @@ export type ClosedNotice = {
   commit?: string;
   /** The card to follow instead (why "newer"). */
   newer?: { decisionId: string; label: string };
+  /** BOS-2783: steps of a by-hand update are still to do (on another card), so the feed never says "You can stop". */
+  stepsLeft?: true;
 };
 
 /** The backup file a hand-apply card's database step writes (self-deploy.ts), with the folder the host reported. */
@@ -48,25 +50,36 @@ export function atWords(at: Date) {
 
 const READ_ONLY = "Its steps are kept below to read; there is nothing left to press.";
 
-/** The notice for a card whose update went live by itself. */
-export function liveNotice(a: { commit: string; liveAt: Date; steps?: string[]; now: Date }): ClosedNotice {
+/**
+ * The notice for a card whose update went live by itself. `left` (BOS-2783, a by-hand update): what is still to do
+ * outside the server, or that nothing is, from the host's evidence; it replaces "You don't need to finish these steps",
+ * and `stepsLeft` marks that some are, so the feed doesn't say "You can stop".
+ */
+export function liveNotice(a: { commit: string; liveAt: Date; steps?: string[]; now: Date; left?: { text: string; stepsLeft: boolean } }): ClosedNotice {
+  const rest = a.left ? a.left.text : "You don't need to finish these steps.";
   return {
     why: "live",
     commit: a.commit,
-    text: `This update is already live (commit ${short(a.commit)}, at ${atWords(a.liveAt)}). You don't need to finish these steps. Anything you already ran is safe. ${leftBehind(a.steps)} ${READ_ONLY}`,
+    text: `This update is already live (commit ${short(a.commit)}, at ${atWords(a.liveAt)}). ${rest} Anything you already ran is safe. ${leftBehind(a.steps)} ${READ_ONLY}`,
     at: a.now.toISOString(),
     until: new Date(a.now.getTime() + NOTICE_MS).toISOString(),
+    ...(a.left?.stepsLeft ? { stepsLeft: true } : {}),
   };
 }
 
-/** The notice for a card a newer one covers. */
-export function newerNotice(a: { newerId: string; label: string; steps?: string[]; now: Date }): ClosedNotice {
+/**
+ * The notice for a card a newer one covers. `left` (BOS-2783): this card's server part is already live, so the newer
+ * card brings in its code but not its steps on the machine; the sentence says which of those are still to do.
+ */
+export function newerNotice(a: { newerId: string; label: string; steps?: string[]; now: Date; left?: { text: string; stepsLeft: boolean } }): ClosedNotice {
+  const rest = a.left ? `This card's server part is already live. ${a.left.text}` : "It brings in everything this one did, so follow that card instead. You don't need to finish these steps.";
   return {
     why: "newer",
     newer: { decisionId: a.newerId, label: a.label },
-    text: `A newer update card covers this one: "${a.label}". It brings in everything this one did, so follow that card instead. You don't need to finish these steps. Anything you already ran is safe. ${leftBehind(a.steps)} ${READ_ONLY}`,
+    text: `A newer update card covers this one: "${a.label}". ${rest} Anything you already ran is safe. ${leftBehind(a.steps)} ${READ_ONLY}`,
     at: a.now.toISOString(),
     until: new Date(a.now.getTime() + NOTICE_MS).toISOString(),
+    ...(a.left?.stepsLeft ? { stepsLeft: true } : {}),
   };
 }
 
@@ -242,7 +255,7 @@ export async function leaveClosedNotice(db: Db, id: string, notice: ClosedNotice
   // One key merged in place, so nothing else written to the context meanwhile is lost.
   await db.update(decisions).set({ context: sql`${decisions.context} || jsonb_build_object('closedNotice', ${JSON.stringify(notice)}::jsonb)` }).where(eq(decisions.id, id));
   if (!engagedRecently(row, now)) return false;
-  const title = deps.title ?? (notice.why === "live" ? "You can stop: that update is already live" : notice.why === "switched-back" ? "You can stop: that change was switched back off" : notice.why === "replaced" ? "You can stop: that update was replaced by a newer one" : "You can stop: a newer update card covers that one");
+  const title = deps.title ?? (notice.stepsLeft ? "Part of that update is still to do" : notice.why === "live" ? "You can stop: that update is already live" : notice.why === "switched-back" ? "You can stop: that change was switched back off" : notice.why === "replaced" ? "You can stop: that update was replaced by a newer one" : "You can stop: a newer update card covers that one");
   await deps.notify({ companyId: row.companyId, level: "flag", title, body: deps.title ? `"${row.question.split("\n")[0]!.slice(0, 120)}": ${notice.text}` : notice.text, link: "#/decisions" });
   return true;
 }
