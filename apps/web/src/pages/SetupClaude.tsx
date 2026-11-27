@@ -46,7 +46,7 @@ export function ClaudeStep({ company, onChanged, onTokenSaved }: { company: Comp
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       {connected ? (
         <p role="status">
-          <span className="tag green">Connected</span> Claude is set up from <strong>{connected.secretName}</strong>. To change it, use Settings → Credentials.
+          <span className="tag green">Connected</span> Claude is set up from <strong>{connected.secretName}</strong>. To change it, use Settings → Secrets.
         </p>
       ) : (
         <form onSubmit={save} style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 640 }}>

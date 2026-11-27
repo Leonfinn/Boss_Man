@@ -21,8 +21,8 @@ const KIND_NOUN = (kind: string): string => (kind === "claude_oauth_token" ? "Cl
 /** Why to paste it in, by kind: the two places the owner saved a token from. */
 const WHERE = (kind: string): string =>
   kind === "claude_oauth_token"
-    ? "Settings → Credentials → Add, choose Claude setup-token"
-    : "Settings → Credentials → Add, choose Git token (GitHub or Gitea)";
+    ? "Settings → Secrets → Add, choose Claude setup-token"
+    : "Settings → Secrets → Add, choose Git token (GitHub or Gitea)";
 
 export type TokenExpiryDeps = {
   now: () => Date;

@@ -17,7 +17,7 @@ export const SEND_BACK = "Send it back anyway";
 export const STOP_WORK = "Stop work on it";
 
 /** Where the owner makes a new Claude token and pastes it in (BOS-2825); the one place the card sends them. */
-export const CLAUDE_TOKEN_PLACE = "Settings → Credentials → Add, choose Claude setup-token";
+export const CLAUDE_TOKEN_PLACE = "Settings → Secrets → Add, choose Claude setup-token";
 
 /**
  * A refused Claude token's own words (BOS-2825): what Claude said, then the two steps that fix it. Kept apart from

@@ -85,7 +85,7 @@ describe("token end dates (BOS-2825)", () => {
     expect((cards[0]!.context as { ladder?: { kind?: string } }).ladder?.kind).toBe("token_expiry");
     expect(cards[0]!.question).toContain("App Co Claude token");
     expect(cards[0]!.question).toContain("Claude setup-token");
-    expect(cards[0]!.question).toContain("Settings → Credentials → Add, choose Claude setup-token");
+    expect(cards[0]!.question).toContain("Settings → Secrets → Add, choose Claude setup-token");
     expect(cards[0]!.question).toContain("claude setup-token");
     expect(clearWhenOf(cards[0]!.context)).toEqual([{ kind: "secretReplaced", secretId, version: 1 }]);
     // A second pass the same day, and the next day, raises nothing more while it is open.
@@ -137,7 +137,7 @@ describe("the expiry card's words", () => {
     const text = expiryQuestion({ id: "s", name: "App Co git token", kind: "generic", version: 1, expiresAt: "2026-12-01" }, now);
     expect(text).toContain("git token **App Co git token** ends 1 Dec 2026 (in 4 days)");
     expect(text).toContain("on GitHub, make a fine-grained token");
-    expect(text).toContain("Settings → Credentials → Add, choose Git token (GitHub or Gitea)");
+    expect(text).toContain("Settings → Secrets → Add, choose Git token (GitHub or Gitea)");
     expect(text).toContain("closes by itself");
   });
 

@@ -120,7 +120,7 @@ describe("a refused Claude token (BOS-2825)", () => {
     const raised = await guardRuns(["App Co Claude: invalid api key: authentication failed", "App Co Claude: invalid api key: authentication failed", "App Co Claude: invalid api key: authentication failed"], CLAUDE);
     expect(raised).toHaveLength(1);
     const q = String(raised[0]!.question);
-    expect(q).toContain("Claude refused the account's token: make a new one and paste it in Settings → Credentials → Add, choose Claude setup-token");
+    expect(q).toContain("Claude refused the account's token: make a new one and paste it in Settings → Secrets → Add, choose Claude setup-token");
     expect(q).toContain("isn't a usage limit and waiting won't clear it");
     expect(q).not.toContain("usage limit or auth error");
     expect(raised[0]!.cause).toMatchObject({ account: { auth: true, fundingSourceId: "fs-claude" } });
