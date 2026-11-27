@@ -220,6 +220,9 @@ if [[ $1 == ps && $2 == -a && $3 == --filter && $4 == label=com.docker.compose.p
   # BOS-2680: FAKE_RUNNERS=1 adds the launcher's runners. The staging runner's image was built by Compose, so it
   # carries the service label runner-app-co and a project (columns 8 and 9: stack and company; `-` is an empty label).
   [[ -n ${FAKE_RUNNERS:-} ]] && printf 'rs1\tboss-man-staging-runner-staging-co\trunning\tUp 4 hours (unhealthy)\t4 hours ago\tstagingproj\trunner-app-co\tstaging\tstaging-co\n'
+  # BOS-2781: a stopped staging container (and a restarting one, already in the unhealthy list) must not count as not running.
+  [[ -n ${FAKE_RUNNERS:-} ]] && printf 'rs4\tstaging-db-1\texited\tExited (1) 3 hours ago\t3 hours ago\tstagingproj\tdb\tstaging\t-\n'
+  [[ -n ${FAKE_RUNNERS:-} ]] && printf 'rs5\tstaging-cache-1\trestarting\tRestarting (1) 2 seconds ago\t3 hours ago\tstagingproj\tcache\tstaging\t-\n'
   exit 0
 fi
 # BOS-2680: the launcher's runners by label. A production runner has no compose labels, no stack and a company.
@@ -304,11 +307,16 @@ FAKE_RUNNERS=1 FAKE_STATUS="Up 2 hours" "$T/fd/hd.sh" >"$T/out" 2>&1 || fail "ho
 node -e '
 const c=require(process.argv[1]).checks.container_status;
 const bad=m=>{console.error(m, JSON.stringify(c));process.exit(1)};
-if(c.unhealthyNames!=="bm-cache-1; boss-man-staging-runner-staging-co; boss-man-runner-prod-co")bad("names");
+if(c.unhealthyNames!=="bm-cache-1; boss-man-runner-prod-co")bad("names (the staging runner must not count)");
 if(/runner-app-co/.test(c.unhealthyNames+c.unhealthyWhere+c.unhealthyReason))bad("the inherited service label must not be used");
-if(!c.unhealthyWhere.includes("boss-man-staging-runner-staging-co (project stagingproj, stack staging, company staging-co); boss-man-runner-prod-co (company prod-co)"))bad("where");
+if(!c.stagingUnhealthyNames.startsWith("boss-man-staging-runner-staging-co"))bad("staging runner must be listed apart");
+if(!c.unhealthyWhere.includes("boss-man-runner-prod-co (company prod-co)")||/staging/.test(c.unhealthyWhere))bad("where");
 if(!c.unhealthyReason.includes("boss-man-runner-prod-co (exit 1, 3 failed in a row: cannot stat <path>)"))bad("reason");
-if(c.total!==10)bad("total should count the three launcher runners once each (7 + 3)");
+if(c.total!==12)bad("total should count the three launcher runners once each and the two staging extras (7 + 3 + 2)");
+// BOS-2781: stopped staging containers are listed apart; production counts stay as before.
+if(c.stagingStopped!==1||c.stagingStoppedNames!=="staging-db-1")bad("stopped staging container must be listed apart (a restarting one is only in the unhealthy list)");
+if(c.stagingUnhealthy!==2||c.stagingUnhealthyNames!=="boss-man-staging-runner-staging-co; staging-cache-1")bad("restarting staging container is staging-unhealthy");
+if(c.notRunning!==3||c.stopped.some(s=>/staging/.test(s.name)))bad("staging containers must not count as not running");
 ' "$D/outbox/host.json" || fail "runner naming wrong: $(cat "$D/outbox/host.json")"
 # Past the start period it counts again.
 FAKE_STATUS="Up 5 minutes (unhealthy)" FAKE_STARTED_AGO=300 "$T/fd/hd.sh" >"$T/out" 2>&1 || fail "host-deployer (after start period) exited non-zero"

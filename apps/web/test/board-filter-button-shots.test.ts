@@ -203,6 +203,8 @@ describe.skipIf(!can)("Board Filter button (BOS-1194)", () => {
       const page = await seeded(size, { feature: "any", working: true });
       try {
         // Every card is a non-working one in the fixture, so the columns empty and say why.
+        // Wait for the board data to arrive and the columns to empty (a fixed sleep is too short on a slow runner).
+        await page.getByText("No tasks match your filters.").first().waitFor({ timeout: 15_000 });
         expect(await page.getByText("No tasks match your filters.").count()).toBeGreaterThan(0);
         expect(await page.getByRole("button", { name: "Clear filters" }).count()).toBeGreaterThan(0);
         await saveShot(`bos1194-${size.name}-nomatch.png`, page);

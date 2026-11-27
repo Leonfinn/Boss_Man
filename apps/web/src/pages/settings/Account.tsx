@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api } from "../../api";
+import { KeyboardShortcuts } from "./KeyboardShortcuts";
 import { Section, useAction } from "./shared";
 
 const MIN_LENGTH = 12;
@@ -7,7 +8,7 @@ const MIN_LENGTH = 12;
 const devices = (n: number) => (n === 0 ? "No other device was signed in." : `${n} other device${n === 1 ? "" : "s"} signed out.`);
 
 /** The owner's account (BOS-2159): change the password, and sign out every other login. This device stays signed in. */
-export function Account() {
+export function Account({ companyId }: { companyId?: string }) {
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
   const [again, setAgain] = useState("");
@@ -64,6 +65,7 @@ export function Account() {
         </div>
         {others.view}
       </Section>
+      <KeyboardShortcuts companyId={companyId} />
     </>
   );
 }

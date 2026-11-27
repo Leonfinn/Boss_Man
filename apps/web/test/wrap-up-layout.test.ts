@@ -57,6 +57,7 @@ function answer(p: string, mode: string): unknown {
   if (p === "/api/bluegreen") return { enabled: false };
   if (p === "/api/kill-switch") return { paused: false };
   if (p === "/api/maintenance") return maintenance(mode);
+  if (p === "/api/release-watch") return { active: false };
   if (p === "/api/runner-report") return { live: [{ slug: "app-co", name: "Boss Man Co", registered: true, connected: true, at: now(), imageVersion: "v1.2", fault: null }], update: { at: now(), title: "Runners updated", body: "All 1 runner is on the new image.", state: "ok", todo: null } };
   if (p === "/api/self-deploy") return selfDeploy;
   if (p === "/api/self-deploy/history") return [

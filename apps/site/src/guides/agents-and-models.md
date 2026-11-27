@@ -27,7 +27,7 @@ Through OpenRouter, Claude Code can be pointed at models that are not Claude. Bo
 3. Paste the value and save. Boss Man encrypts it and never shows it again.
 4. Add a funding source under **Settings > Funding** for it, so Boss Man can track what each agent spends.
 
-For a Claude plan, run `claude setup-token` on your own computer and paste the token it prints.
+For a Claude plan, run `claude setup-token` on your own computer and paste the token it prints. [Connect a Claude account](/guides/connect-a-claude-account) walks through it step by step, and helps you choose between a plan and an API key. For limits and where to see spend, see [What agents cost](/guides/what-agents-cost).
 
 ![How a run picks an account and when work pauses: an API key just runs; a Claude plan is chosen in your order; at the hold level routine work waits, chats and reviews carry on, and your extra-usage setting decides whether urgent or all work carries on past the limit using credit.](/img/which-account-and-hold.svg =1160x640 narrow=/img/which-account-and-hold-narrow.svg:360x1190 "Which account a run uses, and what waits when a plan is nearly used up.")
 

@@ -8,7 +8,7 @@
 // it, links it here and wakes the assignee on a reason no update or wrap-up holds; the words on screen say who is on it
 // only once their run has started (pickupWords), and the CEO is woken again after 15 minutes with no run.
 import { and, asc, desc, eq, gte, isNull, lte, ne, or, sql } from "drizzle-orm";
-import { ticketRef } from "@boss-man/shared";
+import { actionClaim, ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, ownerHolds, runs, settings, tickets } from "../db/schema.js";
 import { atWords } from "./closed-notice.js";
@@ -99,20 +99,22 @@ export async function pickupOf(db: Db, h: OwnerHold): Promise<Pickup> {
   return { ticketId: h.ticketId, ref: ticketRef(t.prefix, t.number) ?? h.ticketId.slice(0, 8), agent: t.agent ?? null, startedAt: run?.at ?? null, wokenAt: h.wokenAt };
 }
 
-const hhmm = (d: Date) => `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")} UTC`;
-
 /**
- * BOS-2609: one sentence on who is diagnosing the failure. It never says "being looked into" unless a run has started
- * on the linked ticket; otherwise it names who was woken and when, or that nobody is assigned. `live` is for screens
- * read now (the Updates panel); a card keeps its words once raised, so it gets the form that stays true (ticket and
- * agent, no claim that work is under way).
+ * BOS-2609: one sentence on who is diagnosing the failure, worded by actionClaim (BOS-2737, R60): it says work is under
+ * way only once a run has started on the linked ticket; otherwise it names who was woken and when, or that nobody has
+ * picked it up. With no assignee, `wokenAt` is the CEO's wake. `live` is for screens read now (the Updates panel); a
+ * card keeps its words once raised, so it gets the form that stays true (ticket and agent, no claim of work under way).
  */
 export function pickupWords(p: Pickup, live = true): string {
-  const woken = p.wokenAt ? ` woken at ${hhmm(p.wokenAt)}` : "";
-  if (!p.ticketId || !p.agent) return `Not picked up yet: nobody is assigned to diagnose it${p.wokenAt ? `; the CEO was${woken}` : ""}.`;
-  if (!live) return `The diagnosis is ${p.ref}, assigned to ${p.agent}.`;
-  if (p.startedAt) return `Being looked into by ${p.agent} on ${p.ref} (started ${hhmm(p.startedAt)}).`;
-  return `Not picked up yet: ${p.agent}${woken || " assigned"} (${p.ref}).`;
+  // wokenAt is the assignee's wake when the ticket has one, else the CEO's.
+  const ticket = p.ticketId && p.ref ? { ref: p.ref, agent: p.agent, wokenAt: p.agent ? p.wokenAt : null } : null;
+  return actionClaim({
+    who: "The CEO",
+    raisedAt: p.agent ? null : p.wokenAt,
+    ticket,
+    run: p.agent && p.startedAt ? { agent: p.agent, startedAt: p.startedAt } : null,
+    live,
+  }).text;
 }
 
 /** A successful update of this subject ends its hold: the failure is behind us. */

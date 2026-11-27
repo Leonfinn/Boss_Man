@@ -9,7 +9,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 import { DEFAULT_REVIEW_POLICY } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
@@ -96,9 +96,10 @@ describe("a workflow retro cannot put a skill into the library on its own", () =
     const ceo = await c.mcp(c.ceo.id);
     const answered = await tool(ceo, "decisions", { action: "answer", id: change!.decisionId, answer: "Apply", note: "Adds a reviewed skill for the engineers." });
     expect(isError(answered)).toBe(false);
-    // SAFE: nothing is in the library and no agent holds it, because the owner has not decided.
-    expect(await c.db.select().from(skills).where(eq(skills.companyId, c.company.id))).toHaveLength(0);
-    expect(await c.db.select().from(agentSkills)).toHaveLength(0);
+    // SAFE: the proposed skill is not in the library and no agent holds it, because the owner has not
+    // decided. (Boss Man's own built-in skills are in the library from the start; they're not the proposal.)
+    expect(await c.db.select().from(skills).where(and(eq(skills.companyId, c.company.id), ne(skills.source, "builtin")))).toHaveLength(0);
+    expect(await c.db.select().from(agentSkills).innerJoin(skills, eq(agentSkills.skillId, skills.id)).where(ne(skills.source, "builtin"))).toHaveLength(0);
     // SAFE: the skill is in the proposal flow, waiting for a review and the owner.
     const proposals = await c.db.select().from(skillProposals);
     expect(proposals).toHaveLength(1);
@@ -129,7 +130,7 @@ describe("a workflow retro cannot put a skill into the library on its own", () =
     const p = await c.svc.propose({ companyId: c.company.id, byAgentId: c.ceo.id, source: "draft", files: [{ path: "SKILL.md", content: b64(md("Steps.")) }], why: "Notes are messy", agentIds: [c.eng.id] });
     await c.svc.recordVerdict(c.company.id, c.reviewer.id, p.id, { bundleHash: p.bundleHash, verdict: "recommend", summary: "Fine." });
     await c.svc.decide(c.company.id, p.id, SKILL_ADD, "leon");
-    const [installed] = await c.db.select().from(skills).where(eq(skills.companyId, c.company.id));
+    const [installed] = await c.db.select().from(skills).where(and(eq(skills.companyId, c.company.id), ne(skills.source, "builtin")));
     expect(installed).toBeTruthy();
     const before = await c.db.select().from(activity);
     // The owner edits the skill in place. This is the attack: new bytes, no review.

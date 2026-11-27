@@ -85,7 +85,9 @@ p { margin: 0; }
 
 /* ---------- Layout ---------- */
 .app { min-height: 100vh; display: flex; flex-wrap: wrap; }
-.app > nav { flex: 1 1 232px; max-width: 100%; }
+/* One width for the expanded menu on every screen (BOS-2745); 240px is what it measured on Chat, where the footer's Settings label fits. */
+:root { --side-width: 240px; }
+.app > nav { flex: 1 1 var(--side-width); max-width: 100%; }
 .app > main { flex: 999 1 560px; min-width: 0; padding: 32px 40px 56px; display: flex; flex-direction: column; gap: 24px; }
 /* Pages that fill the window (Chat, BOS-270) pin the shell to the window height, so the panel can
    take what the heading leaves. The menu sits beside the page on a desktop and above it on a phone;
@@ -99,6 +101,8 @@ p { margin: 0; }
 @media (min-width: 641px) {
   .app:has(> main > .chat-page > .messenger) { flex-wrap: nowrap; }
   .app:has(> main > .chat-page > .messenger) > nav { flex: 0 0 auto; height: auto; align-self: auto; }
+  /* The expanded menu takes its width from --side-width here too, so Chat and every other page match (BOS-2745). */
+  .app:not(.side-collapsed):has(> main > .chat-page > .messenger) > nav { flex: 0 0 var(--side-width); }
 }
 /* A phone (below the 641px where the menu becomes a bar above the page) stacks the menu above the
    chat: the bar keeps its full width and natural height, and the page takes what is left of the
@@ -883,7 +887,7 @@ button.preset-card { cursor: pointer; }
 }
 @media (max-width: 899px) {
   /* "‹ Settings" at the top takes the page back to the menu (the menu is the phone's opening screen). */
-  .set-back { display: inline-flex; }
+  .set-back { display: flex; }
   /* A page shows only that back link, not the whole menu above it (BOS-1224); the bare #/settings menu is outside .set-layout. */
   .set-layout .set-nav { display: none; }
   /* The menu is the phone's opening screen: each row carries its hint and a chevron. */
@@ -1577,7 +1581,7 @@ p.dash-line { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0;
   /* From just above the phone bar the menu keeps its own column beside the page, so it never wraps onto a full-width row that the full-height rule would then stretch over the whole screen. */
   .app { flex-wrap: nowrap; }
   /* A phone browser's toolbar showing makes 100dvh shorter than the window, leaving a blank strip under a menu that only fills 100dvh. So the menu fills the window with 100vh instead and scrolls its own contents inside that: it always reaches the bottom edge, and Notifications can still be scrolled into view from behind the toolbar. */
-  .app > nav.side { flex: 0 0 232px; position: sticky; top: 0; align-self: flex-start; height: 100vh; min-height: 0; overflow-y: auto; }
+  .app > nav.side { flex: 0 0 var(--side-width); position: sticky; top: 0; align-self: flex-start; height: 100vh; min-height: 0; overflow-y: auto; }
   .app > main { flex: 1 1 0; }
   /* The icon-only strip (BOS-290): the page keeps the width the labels gave up. */
   .app.side-collapsed > nav.side { flex: 0 0 64px; padding-left: 8px; padding-right: 8px; overflow-x: hidden; }
@@ -1606,7 +1610,7 @@ p.dash-line { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0;
 }
 /* A narrow screen's expanded menu opens over the page instead of pushing it (BOS-290). */
 @media (min-width: 641px) and (max-width: 1180px) {
-  .app:not(.side-collapsed) > nav.side { position: fixed; z-index: 30; left: 0; top: 0; bottom: 0; width: 232px; box-shadow: 8px 0 24px rgb(0 0 0 / 0.4); }
+  .app:not(.side-collapsed) > nav.side { position: fixed; z-index: 30; left: 0; top: 0; bottom: 0; width: var(--side-width); box-shadow: 8px 0 24px rgb(0 0 0 / 0.4); }
   .app:not(.side-collapsed) > main { padding-left: 64px; }
 }
 .related { display: flex; flex-direction: column; gap: 8px; }
@@ -1985,7 +1989,24 @@ details.pushes[open] > summary { margin-bottom: 8px; }
 .shortcuts-list kbd { font-family: var(--mono); font-size: 12px; padding: 1px 6px; border: 1px solid var(--line-strong); border-radius: 4px; }
 .shortcuts-note { margin: 0; padding: 4px 16px 12px; font-size: 13px; }
 .shortcuts-section { margin: 0; padding: 8px 16px 0; font-size: 14px; border-top: 1px solid var(--line); }
+/* BOS-2689: the list says single-letter keys are off, and offers "Turn them on". */
+.shortcuts-off { margin: 0; padding: 8px 16px; font-size: 14px; border-bottom: 1px solid var(--line); }
 .shortcuts-section.first { border-top: 0; }
+/* BOS-2690: the one-time keyboard tip, bottom left. Never focused (it's read out as a status), never on a
+   phone (the component doesn't draw it at 640 px or under), and above the page like the search box's backdrop.
+   BOS-2769: clear of the menu's pinned bottom row (Settings, keyboard, Log out), which sits in the sidebar's
+   last 60 px: the 44 px row of buttons (.side-pinned) plus the sidebar's bottom padding (24 px, or 10 px on a
+   short window). Keep this in step with those two if the footer changes. From just above the phone bar the tip
+   starts beside the menu's column, so on a short window it never covers that row; with the menu folded to its
+   64 px strip it only has to clear that strip. */
+.shortcuts-tip { position: fixed; z-index: 90; left: 16px; bottom: calc(60px + 16px); max-width: min(360px, calc(100vw - 32px)); display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; background: var(--card); color: var(--ink); border: 1px solid var(--line-strong); border-radius: 12px; box-shadow: 0 10px 30px rgb(0 0 0 / 0.35); }
+@media (min-width: 641px) {
+  .shortcuts-tip { left: calc(var(--side-width) + 16px); }
+  .app.side-collapsed .shortcuts-tip { left: calc(64px + 16px); }
+}
+.shortcuts-tip-text { margin: 0; font-size: 14px; }
+.shortcuts-tip-actions { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.shortcuts-tip-actions .btn { min-height: 40px; }
 /* BOS-2330: the card j/k moved to. Inside the outline, as a lane's scroll box would clip one drawn outside. */
 [data-shortcut-card]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .search-snippet { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2009,3 +2030,53 @@ details.pushes[open] > summary { margin-bottom: 8px; }
 .chat-find p { flex: 1 0 100%; margin: 0; font-size: 13px; }
 .find-hit { background: #ffe58a; color: inherit; border-radius: 2px; }
 .find-hit.current { background: #ffb020; outline: 2px solid var(--badge); }
+
+/* ---------- Custom shortcuts (BOS-2669 ticket 2) ---------- */
+/* The chip beside a page's title: the title shrinks to its words so the chip sits on its line, and wraps under on a phone. */
+.page-head h1:has(+ .pin-chip) { display: inline-block; margin-right: 12px; vertical-align: middle; }
+.pin-chip { display: inline-flex; align-items: center; gap: 6px; vertical-align: middle; min-height: 32px; padding: 4px 12px; border-radius: 999px; border: 1px solid var(--line-strong); background: var(--card); color: var(--ink); font-size: 13px; cursor: pointer; }
+.pin-chip:hover { border-color: var(--link); }
+.pin-chip[aria-pressed="true"] { background: var(--raise); color: var(--head); font-weight: 600; }
+@media (max-width: 640px) { .pin-chip { min-height: 44px; } }
+/* The menu's Shortcuts section: the heading is small, rows are the menu's own rows. */
+.side .side-shortcuts-title { margin: 0; padding: 0 10px 4px; font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--side-muted); }
+.side a.nav.just-added { outline: 2px solid var(--badge); outline-offset: -2px; }
+.side a.nav.gone svg { color: var(--amber-ink); }
+/* The icon strip exists only above a phone's width: a phone's sheet always shows the heading and Edit. */
+@media (min-width: 641px) { .side.collapsed .side-shortcuts-head, .side.collapsed .side-shortcuts-title { display: none; } }
+.side .side-shortcuts-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-right: 6px; }
+.side .side-shortcuts-edit { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; padding: 2px 8px; border: 0; border-radius: 6px; background: none; color: var(--side-muted); font-size: 12px; cursor: pointer; }
+.side .side-shortcuts-edit:hover { color: var(--side-text); background: var(--side-raised); }
+@media (max-width: 640px) { .side .side-shortcuts-edit { min-height: 44px; padding: 4px 12px; font-size: 14px; } }
+/* The Edit shortcuts dialog (BOS-2669 ticket 3): about 520 px on a computer, a full-screen sheet on a phone. */
+.shortcut-edit-backdrop { position: fixed; inset: 0; z-index: 80; display: flex; align-items: center; justify-content: center; background: rgb(0 0 0 / 0.55); padding: 12px; }
+.shortcut-edit { display: flex; flex-direction: column; width: 520px; max-width: 100%; max-height: min(90vh, 720px); background: var(--card); color: var(--ink); border: 1px solid var(--line-strong); border-radius: 12px; box-shadow: 0 10px 30px rgb(0 0 0 / 0.35); }
+.shortcut-edit-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 16px 16px 4px; }
+.shortcut-edit-head h2 { margin: 0; font-size: 18px; }
+.shortcut-edit-count { font-size: 13px; color: var(--muted); }
+.shortcut-edit-hint { margin: 0; padding: 0 16px 8px; font-size: 13px; color: var(--muted); }
+.shortcut-edit-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; margin: 0; padding: 0 16px; list-style: none; }
+.shortcut-edit-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid var(--line); }
+.shortcut-edit-handle { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 28px; min-height: 40px; color: var(--muted); cursor: grab; touch-action: none; user-select: none; }
+.shortcut-edit-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.shortcut-edit-name { width: 100%; min-height: 40px; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--field); color: var(--ink); font: inherit; font-size: 14px; }
+.shortcut-edit-dest { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.shortcut-edit-actions { flex: none; display: flex; gap: 4px; }
+.shortcut-edit-btn { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; padding: 0; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--card); color: var(--ink); cursor: pointer; }
+.shortcut-edit-btn:hover:not(:disabled) { border-color: var(--link); }
+.shortcut-edit-empty, .shortcut-edit-error { margin: 0; padding: 8px 16px; font-size: 14px; }
+.shortcut-edit-error { color: var(--red-ink, #f0a0a0); }
+.shortcut-edit-foot { flex: none; display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
+@media (max-width: 640px) {
+  .shortcut-edit-backdrop { padding: 0; align-items: stretch; }
+  .shortcut-edit { width: 100%; max-height: none; height: 100dvh; border-radius: 0; border: 0; }
+  .shortcut-edit-btn { width: 44px; height: 44px; }
+  .shortcut-edit-actions { gap: 2px; }
+  .shortcut-edit-foot .btn { flex: 1; min-height: 44px; }
+}
+@media (pointer: coarse) { .shortcut-edit-btn { width: 44px; height: 44px; } }
+.side.collapsed .nav-groups .side-shortcuts + section { border-top: 1px solid var(--line); padding-top: 8px; }
+/* The toast after a press: bottom centre, above everything but the menu sheet, with room for Undo. */
+.pin-toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 60; display: flex; align-items: center; gap: 14px; max-width: min(520px, calc(100vw - 24px)); padding: 10px 16px; border-radius: 10px; background: var(--raise); color: var(--head); border: 1px solid var(--line-strong); box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4); font-size: 14px; }
+.pin-toast-undo { flex: none; min-height: 36px; padding: 4px 12px; border: 0; border-radius: 8px; background: none; color: var(--link); font: inherit; font-weight: 600; text-decoration: underline; cursor: pointer; }
+@media (max-width: 640px) { .pin-toast-undo { min-height: 44px; } }

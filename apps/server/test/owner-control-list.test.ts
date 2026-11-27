@@ -82,6 +82,10 @@ describe("R7: a card names a button that doesn't exist", () => {
  */
 const FILE_SCREEN: Record<string, OwnerScreen> = {
   "App.tsx": "Any screen",
+  // BOS-2669: the Add to shortcuts chip (26 pages), its toast and the gone-page screen.
+  "pinned-pages.tsx": "Any screen",
+  // BOS-2669 ticket 3: the Edit shortcuts dialog, opened from the menu on any screen.
+  "shortcuts-editor.tsx": "Any screen",
   "components/ImageAttach.tsx": "Any screen",
   // The Dashboard's "Company paused" notice has a Resume button: the same "Resume" the stop-all banner lists.
   "components/DashboardPanels.tsx": "Any screen",
@@ -167,12 +171,15 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "pages/settings/Runner.tsx": "Server and runner",
   "pages/settings/System.tsx": "Server and runner",
   "pages/settings/CheckWorkers.tsx": "Server and runner",
+  "pages/settings/ReleaseNotice.tsx": "Server and runner",
   "pages/settings/SlotSplit.tsx": "Server and runner",
   "pages/settings/Team.tsx": "Team and CEO",
   "pages/settings/ThisHost.tsx": "Server and runner",
   "pages/settings/Tools.tsx": "Tools and deploys",
   "pages/settings/Transfer.tsx": "Import and export",
   "pages/settings/Account.tsx": "Account",
+  // The single-letter-key switch on Settings → Account (BOS-2689, BOS-2671 part 3d).
+  "pages/settings/KeyboardShortcuts.tsx": "Account",
   "pages/settings/Watchdog.tsx": "Watchdog",
   "pages/settings/shared.tsx": "Any screen",
   "pages/Setup.tsx": "Setup",
@@ -198,6 +205,8 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   // The Runs page's emergency stop, its own component in Runs.tsx (BOS-837).
   "pages/Runs.tsx>EndAllRuns": "Runs",
   // Settings' pages (Settings.tsx SETTINGS_GROUPS): each panel the Settings page shows, by the page that shows it (BOS-1019).
+  // BOS-2669: the Add to shortcuts chip beside every Settings page's title; its words are listed under "Any screen".
+  "pages/Settings.tsx>AddToShortcuts": "Any screen",
   "pages/Settings.tsx>StopAllWork": "Server and runner",
   "pages/Settings.tsx>ServerHealth": "Server and runner",
   "pages/Settings.tsx>ServerPanel": "Server and runner",

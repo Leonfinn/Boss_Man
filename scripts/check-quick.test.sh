@@ -10,7 +10,7 @@ t="$(mktemp -d)"; holder=""; trap '[ -z "$holder" ] || kill "$holder" 2>/dev/nul
 fail() { echo "FAIL: $*"; exit 1; }
 
 repo="$t/repo"; mkdir -p "$repo/scripts" "$t/bin"
-cp "$here/check-quick.sh" "$here/check-all.sh" "$here/check-slot.sh" "$here/check-guards.sh" "$here/install-packages.sh" "$here/test-shell.sh" "$repo/scripts/"
+cp "$here/check-quick.sh" "$here/check-all.sh" "$here/check-slot.sh" "$here/check-guards.sh" "$here/install-packages.sh" "$here/test-shell.sh" "$here/shell-tests-for-changes.sh" "$repo/scripts/"
 cat >"$repo/scripts/check-shell.sh" <<'S'
 #!/usr/bin/env bash
 echo "check-shell" >>"$LOG"
@@ -77,6 +77,11 @@ logged "pnpm --filter @boss-man/web exec vitest related --run src/a.ts" "web"
 logged "pnpm --filter @boss-man/web build" "web"
 notlogged "@boss-man/server" "web"
 notlogged "check-shell" "web"
+# BOS-2732: every branch checks its added proof files, and a failure names the step.
+logged "node scripts/check-proof-files.mjs origin/main" "proof files step"
+grep -q "^PASS  no added proof files" "$t/out" || fail "proof files PASS line: $(cat "$t/out")"
+run 1 "proof files finding" env FAIL_ON=check-proof-files
+grep -q "^FAIL  no added proof files" "$t/out" || fail "proof files FAIL line: $(cat "$t/out")"
 # BOS-1727: the list guards run first, each only for the files it reads, and a failure names the file and the line to add.
 logged "pnpm --filter @boss-man/web exec vitest run test/screen-inventory.test.ts" "guard: screen inventory for a web change"
 notlogged "test/owner-control-list.test.ts" "guard: owner controls not for a change outside pages and components"
@@ -711,7 +716,7 @@ grep -q "refused: real code conflicts too" "$t/out" || fail "real clash: refusal
 
 # BOS-2484: the report-only squeeze. A fresh repo with a stub scripts/squeeze-test.sh that logs its file and answers by name.
 repo="$t/sq"; mkdir -p "$repo/scripts"
-cp "$here/check-quick.sh" "$here/check-all.sh" "$here/check-slot.sh" "$here/check-guards.sh" "$here/install-packages.sh" "$here/test-shell.sh" "$here/squeeze-skip.txt" "$repo/scripts/"
+cp "$here/check-quick.sh" "$here/check-all.sh" "$here/check-slot.sh" "$here/check-guards.sh" "$here/install-packages.sh" "$here/test-shell.sh" "$here/shell-tests-for-changes.sh" "$here/squeeze-skip.txt" "$repo/scripts/"
 cp "$t/repo/scripts/check-shell.sh" "$repo/scripts/"
 cat >"$repo/scripts/squeeze-test.sh" <<'S'
 #!/usr/bin/env bash

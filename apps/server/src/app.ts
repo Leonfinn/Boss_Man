@@ -31,13 +31,14 @@ import { watchCiTokenGrant } from "./services/ci-identity-card.js";
 import { AnswerError, clearOwnerTodo, decisionsService, setDecisionSettledListener, setOwnerTodoFacts } from "./services/decisions.js";
 import { githubWatchService, WATCH_TOKEN_ENV } from "./services/github-watch.js";
 import { markOwnerOpened, recentClosedNotices } from "./services/closed-notice.js";
-import { getHold, holdBlocksStarts, maintenanceService, runnerCardHold } from "./services/maintenance.js";
+import { getHold, holdBlocksStarts, maintenanceService } from "./services/maintenance.js";
 import { runnerBusy, runnerChecks, serverWaitChecks, updateWaitCountsRun, workerChecks } from "./services/runner-busy.js";
 import { activeWaits, runnerHoldWait } from "./services/update-waits.js";
 import { runnerWatchService } from "./services/runner-watch.js";
 import { runnerReportService } from "./services/runner-report.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
 import { serverStatusService } from "./services/server-status.js";
+import { WRAP_LINE } from "./services/watch-triggers.js";
 import { failuresForStatus } from "./services/merge-failures.js";
 import { raiseCostAlert } from "./services/cost-check.js";
 import { addonsService, mergeHostAddons, unknownAddons } from "./services/addons.js";
@@ -49,12 +50,14 @@ import { serverHealthService, type ServerHealth, type ServerHealthDeps } from ".
 import { createPermissionLog } from "./services/permission-log.js";
 import { permissionStore } from "./services/permission-store.js";
 import { selfDeployService } from "./services/self-deploy.js";
+import { releaseWatchService } from "./services/release-watch.js";
 import { deployWaitService } from "./services/deploy-wait.js";
 import { readUpdateChain } from "./services/update-chain.js";
 import { hostFactsService, OWNER_FACTS } from "./services/host-facts.js";
 import { gitTokenActionsProbe } from "./services/owner-record.js";
 import { netguardAllowReport } from "./services/netguard-allow.js";
 import { deviceProfilesService } from "./services/device-profiles.js";
+import { ownerPreferencesService } from "./services/owner-preferences.js";
 import { releaseLogService } from "./services/release-log.js";
 import { ownerSetupFacts } from "./services/owner-setup-check.js";
 import { closeStallAlertForRun, sweepService, type SweepLimits } from "./services/sweeps.js";
@@ -120,7 +123,7 @@ import { meaningBriefLines, ticketMeaningEmbedLoop } from "./services/ticket-mea
 import { SecondOpinionSettings, secondOpinionService } from "./services/second-opinion.js";
 import { wikiService } from "./services/wiki.js";
 import { UPDATE_ALERT_REASON, DEFAULT_LIMITS, OWNER_OVERRIDE_PRIORITY, schedulerService, type Limits } from "./services/scheduler.js";
-import { memoryLine, readRunnerAgents } from "./services/check-limit.js";
+import { checksRunHere, memoryLine, readRunnerAgents } from "./services/check-limit.js";
 import { exportCompany } from "./services/company-export.js";
 import { applyPackage, ImportError, previewPackage, readPackage } from "./services/company-import.js";
 import { mcpRoutes } from "./mcp.js";
@@ -153,7 +156,7 @@ import { spendReportRoutes } from "./routes/spend-report.js";
 import { featureRoutes } from "./routes/features.js";
 import { DateStr, companyExists, objectiveRoutes, roadmapRoutes } from "./routes/roadmap.js";
 import { searchRoutes } from "./routes/search.js";
-import { deviceRoutes, notificationRoutes, notificationSettingsRoutes, ntfySetupSaver, phoneApproveRoutes } from "./routes/devices-notifications.js";
+import { deviceRoutes, notificationRoutes, notificationSettingsRoutes, ntfySetupSaver, phoneApproveRoutes, preferenceRoutes } from "./routes/devices-notifications.js";
 import { agentRunsRoutes } from "./routes/agents-runs.js";
 import { ticketRecordRoutes } from "./routes/ticket-record.js";
 import { createMemorySampler, readRssAndPeak } from "./services/memory-sampler.js";
@@ -175,7 +178,8 @@ const OWNER_TZ = timeZoneOr(process.env.TZ);
 /** Set on the blue/green colours only (deploy/truenas-bluegreen.yml); null on a single server. */
 const colour = () => (process.env.BOSSMAN_COLOUR === "blue" || process.env.BOSSMAN_COLOUR === "green" ? process.env.BOSSMAN_COLOUR : null);
 const STARTED_AT = new Date().toISOString();
-const SERVER_VERSION = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
+// BOS-2799: an image install is told its release by the updater (BOSSMAN_VERSION); package.json stays 0.0.0 until the package is stamped.
+const SERVER_VERSION = process.env.BOSSMAN_VERSION?.trim() || (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
 
 export type AppOptions = {
   db: Db;
@@ -421,9 +425,13 @@ export async function buildApp(opts: AppOptions) {
   const checks = checkDispatcher(db, {
     // BOS-1471: while a runner drain is under way (image update or setting change) no new check goes to a runner about to be swapped.
     // BOS-2108: which wait it is, so the dispatcher stops only what that wait's WAIT_RULES row blocks (a worker keeps its quick checks).
+    // BOS-2786: a wrap-up (the owner's or Boss Man's own) is its own row, which blocks every runner check as its message to
+    // agents says ("no new checks either"); it used to be read through runnerCardHold, which leaves a wrap-up out, so merge
+    // and quick checks kept starting during one.
     drainPending: async () => {
-      const h = runnerCardHold(await getHold(db));
-      return h && holdBlocksStarts(h, opts.now?.() ?? new Date()) ? runnerHoldWait(h) : null;
+      const h = await getHold(db);
+      if (!h || !holdBlocksStarts(h, opts.now?.() ?? new Date())) return null;
+      return h.kind === "wrapup" ? "wrapup" : runnerHoldWait(h);
     },
     scanList: () => privateDetails.forRunner(),
     scanListWarning,
@@ -475,6 +483,7 @@ export async function buildApp(opts: AppOptions) {
   // BOS-2336: Boss Man's own owner cards (raiseOwnerTodo) are checked against this host's reported facts before they go out.
   setOwnerTodoFacts(() => ownerSetupFacts(hostFacts));
   const deviceProfiles = deviceProfilesService(db);
+  const ownerPreferences = ownerPreferencesService(db);
   const selfDeploy = selfDeployService(db, { dir: opts.deployerDir, notify: (n) => notes.notify(n), releaseLog, hosts: () => hostFacts.hosts(), deployerScript: () => hostFacts.deployerScript(), facts: async () => Object.fromEntries(Object.entries((await hostFacts.sync()).facts).map(([k, f]) => [k, f.value])), log: (m) => app.log.warn(m),
     // BOS-1648: the CEO is woken once when Boss Man can't tell whether a runner update is needed.
     wake: (agentId, input) => scheduler.notify(agentId, input),
@@ -534,6 +543,8 @@ export async function buildApp(opts: AppOptions) {
       });
     },
     onReleased: (f) => notes.notify({ companyId: f.companyId, level: "note", title: `Released: ${f.title}`, body: "Every ticket delivering it is done.", link: `#/features/${f.companyId}/${f.id}` }),
+    // BOS-2686: a merge is live once the server runs it; a fresh server has nothing recorded yet, so it is its own commit.
+    liveCommit: () => process.env.BOSSMAN_COMMIT || null,
   });
   // The scheduler is made below; the chat only needs it once a message is sent.
   const trace = chatTraceService();
@@ -564,6 +575,8 @@ export async function buildApp(opts: AppOptions) {
     limits: opts.limits,
     workspaceRoot: opts.workspaceRoot,
     now: opts.now,
+    // BOS-2780: runsSvc is built further down; this only runs when a held Ready ticket ends an idle run.
+    cancelRun: (runId, reason) => runsSvc.cancel(runId, undefined, reason),
     quietHours: async () => (await notes.getSettings()).quietHours,
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     tickOnWake: opts.tickOnWake,
@@ -597,6 +610,8 @@ export async function buildApp(opts: AppOptions) {
     updateChain: (tied) => readUpdateChain(db, { wait: () => deployWait.get(), trialUntil: () => selfDeploy.trialUntil(), facts: () => selfDeploy.chainFacts() }, tied),
     tick: () => scheduler.tick(),
     notify: (n) => notes.notify(n),
+    // BOS-2755: a runner update's end wakes the tickets watching for one.
+    wake: (agentId, input) => scheduler.notify(agentId, input),
     // BOS-1377: the per-run Stop (runsSvc is built further down; this only runs when the owner answers a card).
     cancelRun: (runId) => runsSvc.cancel(runId, undefined, undefined),
     tellRunning: async (text) => {
@@ -693,6 +708,7 @@ export async function buildApp(opts: AppOptions) {
     netguardAllow,
     runLimits: (id) => scheduler.runLimits(id),
     mergeFailures: (id) => failuresForStatus(db, id),
+    holdRecords: async () => (await maintenance.history(5)).map((r) => ({ startedAt: r.startedAt.toISOString(), kind: r.kind, endedAt: r.endedAt?.toISOString() ?? null, endTitle: r.endTitle, wrapUpLines: r.events.filter((e) => e.text === "Wrap-up asked" || WRAP_LINE.test(e.text)).map((e) => `${e.at}: ${e.text}`) })),
     mergeTrain: (id) => mergeTrainStatus(db, id, undefined, (ticketId) => review.seatPhase(ticketId)),
     // BOS-2119: read when server_status is asked, after `review` below is built.
     landingTurns: (id) => review.landingTurnStatus(id),
@@ -1168,6 +1184,7 @@ export async function buildApp(opts: AppOptions) {
       return r;
     },
     composeCmd: () => hostFacts.value("compose.cmd"),
+    imageInstall: () => process.env.BOSSMAN_IMAGE_INSTALL === "1",
     log: (m) => app.log.warn(m),
   });
   // BOS-2674: a host warning seen in 2 reports in a row tells the CEO; the panel reads what is being done about each one.
@@ -1179,14 +1196,20 @@ export async function buildApp(opts: AppOptions) {
     card: async (dedupeKey) => (await db.select({ status: decisions.status, createdAt: decisions.createdAt, answer: decisions.answer }).from(decisions).where(eq(decisions.dedupeKey, dedupeKey)).limit(1))[0] ?? null,
     ticketFor: async (key) => {
       const [t] = await db
-        .select({ title: tickets.title, number: tickets.number, prefix: companies.ticketPrefix })
+        .select({ id: tickets.id, title: tickets.title, number: tickets.number, prefix: companies.ticketPrefix, agentId: tickets.assigneeAgentId, agent: agents.name })
         .from(tickets)
         .innerJoin(companies, eq(companies.id, tickets.companyId))
+        .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
         .where(and(ne(tickets.systemState, "done"), or(sql`position(${key} in ${tickets.title}) > 0`, sql`position(${key} in coalesce(${tickets.body}, '')) > 0`)))
         .orderBy(desc(tickets.createdAt))
         .limit(1);
       const ref = t ? ticketRef(t.prefix, t.number) : null;
-      return t && ref ? { ref, title: t.title } : null;
+      if (!t || !ref) return null;
+      // BOS-2737: the assignee and their first work run on it, so the panel's actionClaim line says who is on it, from facts.
+      const [run] = t.agentId
+        ? await db.select({ at: runsTable.startedAt }).from(runsTable).where(and(eq(runsTable.ticketId, t.id), eq(runsTable.agentId, t.agentId), sql`${runsTable.purpose} is distinct from 'chat'`)).orderBy(asc(runsTable.startedAt)).limit(1)
+        : [];
+      return { ref, title: t.title, agent: t.agent ?? null, ...(run ? { startedAt: run.at.toISOString() } : {}) };
     },
     raise: async (input) => {
       const r = await alerts.raise(input as Parameters<typeof alerts.raise>[0]);
@@ -1215,6 +1238,8 @@ export async function buildApp(opts: AppOptions) {
     // BOS-1602: train seats count only slots that can run a merge check.
     checkCapacity: (companyId) => checks.mergeCapacity(companyId),
     alert: (input) => alerts.raise(input as Parameters<typeof alerts.raise>[0]),
+    // BOS-2686: when a merge goes live, the features its ticket delivers get their release rule worked out again.
+    onLive: (ticketId) => feedback.syncFeaturesOf([ticketId]),
   });
   review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
   // The main-CI watcher (BOS-1072): a ticket for each distinct failing step of GitHub CI on main.
@@ -1295,6 +1320,8 @@ export async function buildApp(opts: AppOptions) {
       const h = await getHold(db);
       return !!h && h.kind !== "wrapup";
     },
+    // BOS-2786: a wrap-up holds new checks too (drainPending above), so a waiting merge names it, not "a slot".
+    wrapUpOn: async () => (await getHold(db))?.kind === "wrapup",
     launcherOn: () => launch.enabled,
     // BOS-2359: the landing turns and the usual GitHub wait, for the holder's line and the estimates.
     landingTurns: (companyId) => review.landingTurnStatus(companyId),
@@ -1535,6 +1562,11 @@ export async function buildApp(opts: AppOptions) {
   // Runners may come back later than 60 s after an update, so tickets skipped for want of one are retried every 2 minutes for 30 minutes.
   const stopPreflightRecover = ciPreflight.recoverRepeatedly({ firstMs: 60_000, everyMs: 120_000, forMs: 30 * 60_000 });
   app.addHook("onClose", async () => stopPreflightRecover());
+  // BOS-2663: an install from the published images looks for a newer release at least daily and tells the owner once per version.
+  // Without the three BOSSMAN_ values the updater hands each server colour (a source install), the service is off and offers nothing.
+  const releaseWatch = releaseWatchService(db, { fetch: opts.fetch, now: opts.now, notify: (n) => notes.notify(n), hasNtfy: async () => !!(await notes.getSettings()).ntfy, isLeader: () => leader.isLeader(), log: (m) => app.log.warn(m) });
+  const stopReleaseWatch = releaseWatch.start();
+  app.addHook("onClose", async () => stopReleaseWatch());
   // BOS-1749: bossman-ci/* branches the gate's own cleanup missed (a restart mid-check, a refused delete) are deleted from GitHub.
   // First sweep 5 minutes after start (so old leftovers go without anyone asking), then every 30 minutes; branches under 6 hours old stay.
   const sweepCi = () => void review.sweepCiBranches().catch(() => undefined);
@@ -1757,6 +1789,9 @@ export async function buildApp(opts: AppOptions) {
     // Device profiles (BOS-641): the owner's browsers report their measured screens.
     deviceRoutes(owner, { deviceProfiles, currentOwnerId });
 
+    // The owner's per-login preferences (BOS-2689, shared with BOS-2669): they follow the login.
+    preferenceRoutes(owner, { ownerPreferences, currentOwnerId });
+
     // Companies: creating one always creates its CEO (R18).
     const CompanyInput = z.object({
       name: z.string().trim().min(1).max(80),
@@ -1960,7 +1995,7 @@ export async function buildApp(opts: AppOptions) {
       const [r] = await db.select().from(runnersTable).where(eq(runnersTable.companyId, id));
       const launcher = await launch.status(id);
       // BOS-1498: what this company's runner is given and why, for the wizard's runner step.
-      const memory = launcher ? memoryLine(await launch.checks(), launcher.slug) : null;
+      const memory = launcher ? memoryLine(await launch.checks(), launcher.slug, await checksRunHere(db, await checkWorkersSvc.list(), id)) : null;
       if (!r) return { registered: false, launcher, memoryLine: memory };
       const report = await runnerReport.companyPanel(id);
       // One entry per safety feature for Settings' cards (DR-049 point 1): proven, or the owner chose to run without it on this platform.
@@ -2779,7 +2814,7 @@ export async function buildApp(opts: AppOptions) {
     });
 
     // Scheduling and kill switches, the runner update hold, self-deploy, restart and deploy targets (R30, R14, R15).
-    serverAdminRoutes(owner, { db, scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun: (runId) => runsSvc.cancel(runId), activeWaits: () => currentUpdateWaits() });
+    serverAdminRoutes(owner, { db, scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun: (runId) => runsSvc.cancel(runId), activeWaits: () => currentUpdateWaits(), releaseWatch });
 
     // The decision queue (R20), ranked, with what each row holds up.
     owner.get("/api/decisions", async () => decisionsSvc.queue());
@@ -2834,7 +2869,9 @@ export async function buildApp(opts: AppOptions) {
         .object({
           answer: z.string().trim().min(1).max(OWNER_MESSAGE_MAX),
           assigneeAgentId: Uuid.optional(),
-          note: z.string().trim().max(2000).optional(),
+          // BOS-2798: a note can carry pasted command output, which the raiser's wake gets whole; 2000 refused most logs.
+          // What reads it for a short field (a lesson, a change reason) caps or checks it there.
+          note: z.string().trim().max(20_000).optional(),
           reasonLink: z.string().trim().max(400).optional(),
           custom: z.boolean().optional(),
           alwaysScope: z.enum(["agent", "company"]).optional(),
@@ -3028,5 +3065,5 @@ export async function buildApp(opts: AppOptions) {
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
   /** BOS-2159: removes login rows past their expiry (they are refused already; this stops the table growing). Returns how many. */
   const sweepExpiredSessions = async () => (await db.delete(sessions).where(lte(sessions.expiresAt, new Date())).returning({ h: sessions.tokenHash })).length;
-  return { app, webhooks, sweepExpiredSessions, mailer, weeklySummary, launcher: launch, githubWatch, memory, serverHealth, dailyBackup, hostWarnings, checks, releaseLog, mainCi, secretScan, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, planning: roadmapPlanning, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, ticketMeaningEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
+  return { app, webhooks, sweepExpiredSessions, mailer, weeklySummary, launcher: launch, githubWatch, memory, serverHealth, dailyBackup, hostWarnings, checks, releaseLog, mainCi, secretScan, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, planning: roadmapPlanning, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, ticketMeaningEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer, syncFeatures: (ids: Array<string | null | undefined>) => feedback.syncFeaturesOf(ids) };
 }

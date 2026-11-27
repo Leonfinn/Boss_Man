@@ -2,7 +2,7 @@ import { Fragment, useState } from "react";
 import { api } from "../../api";
 import { usePoll } from "../../hooks";
 import { when } from "../Runs";
-import { isFailingCheck, NORMALLY_EMPTY_FACTS, OWNER_FACT_LABELS, STOPPED_CONTAINERS_KEY, problemText, stoppedContainerNames, warningAdvice, type HostFactsView } from "../../host-facts-display";
+import { isFailingCheck, NORMALLY_EMPTY_FACTS, OWNER_FACT_LABELS, STOPPED_CONTAINERS_KEY, problemText, stagingFaultLine, stoppedContainerNames, warningAdvice, type HostFactsView } from "../../host-facts-display";
 import { Section, useAction } from "./shared";
 
 type Health = { role: "leader" | "standby" | "single"; version: string; commit: string; colour: "blue" | "green" | null; startedAt: string };
@@ -95,6 +95,7 @@ export function ThisHost() {
   // code-host read failed comes with the probe result. Both are plain text the host wrote, shown as text only.
   const stopped = stoppedContainerNames(d.facts[STOPPED_CONTAINERS_KEY]?.value ?? "");
   const probeWhy = d.facts["repo.probeWhy"]?.value?.trim() ?? "";
+  const stagingLine = stagingFaultLine(d); // BOS-2781: a quiet info line, never a warning
   const problemTexts = [...problems.missing, ...problems.failing].map((k) => ({ key: k, text: problemText(k, d, stopped, probeWhy) }));
   const toggle = () => {
     const next = !open;
@@ -120,6 +121,11 @@ export function ThisHost() {
       {d.deployerScript && d.deployerScript.state !== "none" && (
         <p data-testid="deployer-script" style={{ fontSize: 14 }}>
           <strong>Deployer script:</strong> {deployerScriptLine(d.deployerScript)}
+        </p>
+      )}
+      {stagingLine && (
+        <p className="muted" data-testid="staging-faults" style={{ fontSize: 14 }}>
+          {stagingLine}
         </p>
       )}
       {keys.length > 0 && (

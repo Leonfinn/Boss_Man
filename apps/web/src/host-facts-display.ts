@@ -1,6 +1,7 @@
 // "This host" panel wording (BOS-986): when a fact is missing or a check is failing, say in plain words what it is,
 // what needs it and where it is entered or fixed, rather than the raw dotted name. The raw keys stay in the folded
 // list; this is what the "Worth a look" line says, and the tests keep it in step with the facts the deployer reports.
+import { actionClaim } from "@boss-man/shared";
 
 export type HostFactsView = {
   hostName: string | null;
@@ -45,6 +46,25 @@ export const NORMALLY_EMPTY_FACTS: ReadonlySet<string> = new Set(["repo.probeWhy
 
 /** The service names of unhealthy or restarting containers, "; "-joined (BOS-2481; the host writes it). */
 export const UNHEALTHY_CONTAINERS_KEY = "check.container_status.unhealthyNames";
+
+/** BOS-2781: staging-stack containers that are unhealthy or stopped, "; "-joined. They never count as a host warning. */
+export const STAGING_UNHEALTHY_KEY = "check.container_status.stagingUnhealthyNames";
+export const STAGING_STOPPED_KEY = "check.container_status.stagingStoppedNames";
+
+/**
+ * BOS-2781: the one quiet info line for faults in the staging stack, or null when there are none. Not a warning: it is
+ * not counted in the folded header and raises nothing.
+ */
+export function stagingFaultLine(d: HostFactsView): string | null {
+  const list = (k: string) => (d.facts[k]?.value ?? "").split("; ").map((s) => s.trim()).filter(Boolean);
+  const unh = list(STAGING_UNHEALTHY_KEY);
+  const stp = list(STAGING_STOPPED_KEY);
+  if (!unh.length && !stp.length) return null;
+  const bits: string[] = [];
+  if (unh.length) bits.push(`${unh.length} container${unh.length === 1 ? "" : "s"} unhealthy (${unh.join(", ")})`);
+  if (stp.length) bits.push(`${stp.length} container${stp.length === 1 ? "" : "s"} stopped (${stp.join(", ")})`);
+  return `Staging: ${bits.join("; ")}. This doesn't affect your live Boss Man.`;
+}
 
 /** The flattened value of the named stopped containers (the server writes it; see host-facts.ts). */
 export const STOPPED_CONTAINERS_KEY = "check.container_status.stopped.names";
@@ -104,13 +124,27 @@ export function failingCheckText(key: string, d: HostFactsView, names: string[],
 
 /** What Boss Man knows about itself that decides whether a warning matters (the server works it out, BOS-2674). */
 export type HostImpact = { runnersTotal: number; runnersConnected: number; runsGoing: number };
-/** What Boss Man is doing about one warning: watching it, or the CEO has been told (the server's host-warnings.ts). */
-export type WarningHandling = { state: "watching" | "ceo_told" | "ceo_answered"; reports: number; since: string; alertedAt?: string; answer?: string; ticket?: { ref: string; title: string } };
+/** What Boss Man is doing about one warning: watching it, or the CEO was alerted (the server's host-warnings.ts). */
+export type WarningHandling = {
+  state: "watching" | "ceo_told" | "ceo_answered";
+  reports: number;
+  since: string;
+  alertedAt?: string;
+  answer?: string;
+  /** `agent`: the ticket's assignee (null when unassigned); `startedAt`: their first work run on it. Both absent from an older server. */
+  ticket?: { ref: string; title: string; agent?: string | null; startedAt?: string };
+};
 
-/** "at 15:30 UTC" from an ISO time, or "" when there is none. */
-function atTime(iso: string | undefined): string {
-  const t = iso ? new Date(iso) : null;
-  return t && Number.isFinite(t.getTime()) ? ` (at ${t.toISOString().slice(11, 16)} UTC)` : "";
+/** Who acts on a warning that has a card or a ticket, from actionClaim (BOS-2737): never a fixed "looking into it". */
+function warningClaim(h: WarningHandling): string {
+  const t = h.ticket;
+  return actionClaim({
+    who: "The CEO",
+    raisedAt: h.state === "watching" ? null : (h.alertedAt ?? true),
+    ticket: t ? { ref: t.ref, agent: t.agent ?? null } : null,
+    run: t?.agent && t.startedAt ? { agent: t.agent, startedAt: t.startedAt } : null,
+    answered: h.state === "ceo_answered" ? { note: h.answer ?? null } : null,
+  }).text;
 }
 
 /** The three plain lines under every warning: does it matter, what Boss Man is doing, whether the owner needs to act. */
@@ -134,11 +168,11 @@ export function warningAdvice(key: string, impact: HostImpact | undefined, handl
   }
   if (key in OWNER_FACT_HELP) return { matters, doing: "Nothing to do on Boss Man's side: only you can give this fact.", needs: `Yes: ${OWNER_FACT_HELP[key]!.where}.` };
   const doing = handling?.ticket
-    ? `Ticket ${handling.ticket.ref} is open for it: ${handling.ticket.title}.${handling.state !== "watching" ? ` The CEO has been alerted${atTime(handling.alertedAt)}.` : ""}`
+    ? `Ticket ${handling.ticket.ref}: ${handling.ticket.title}. ${warningClaim(handling)}`
     : handling?.state === "ceo_answered"
-      ? `The CEO answered the alert${handling.answer ? `: "${handling.answer.length > 200 ? `${handling.answer.slice(0, 200)}…` : handling.answer}"` : "."} There is no ticket for it yet.`
+      ? `${warningClaim(handling)} There is no ticket for it yet.`
     : handling?.state === "ceo_told"
-      ? `The CEO has been alerted${atTime(handling.alertedAt)}. There is no answer yet and no ticket for it. If nobody answers within 30 minutes you are told.`
+      ? `${warningClaim(handling)} There is no ticket for it yet. If nobody answers within 30 minutes you are told.`
       :`Boss Man is watching it. If the next host report (in ${reportedGap}) still shows it, the CEO is told straight away.`;
   return { matters, doing, needs: "No. Boss Man will ask you with a card if that changes." };
 }

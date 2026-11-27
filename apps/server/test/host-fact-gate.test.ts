@@ -2,7 +2,7 @@
 // never a "pass" in the note or an owner card answer. These tests pin the gate's pure helpers.
 import { describe, expect, it } from "vitest";
 import type { Criterion } from "@boss-man/shared";
-import { CARD_CITE_REFUSAL, citedOpenCard, hostFactRefusal, namesOutsideService, noCriteriaOutsideServiceRefusal, outsideServiceEvidenceRefusal, ownLine, ownSiteHosts, pageShotRefusal, uncitedCardPasses } from "../src/services/host-fact-gate.js";
+import { CARD_CITE_REFUSAL, citedOpenCard, hostFactRefusal, namesOutsideService, noCriteriaOutsideServiceRefusal, outsideServiceEvidenceRefusal, ownerTextReceiptRefusal, ownLine, ownSiteHosts, pageShotRefusal, uncitedCardPasses } from "../src/services/host-fact-gate.js";
 import type { HostFact } from "../src/services/host-facts.js";
 
 const after = (text: string): Criterion => ({ text, after: "merge" });
@@ -200,6 +200,17 @@ describe("outsideServiceEvidenceRefusal", () => {
     expect(outsideServiceEvidenceRefusal([SITEMAP], [], LIVE, '1 pass: "accepted (pending, 0 errors)" https://bossman.website/sitemap.xml', ["bossman.website"])).toContain("That's a receipt");
     expect(outsideServiceEvidenceRefusal([SITEMAP], [], LIVE, '1 pass: "Success, last read 21 Nov, 7 discovered"', ["bossman.website"])).toBeNull();
   });
+  it("refuses \"0 errors\" or \"no errors\" with no read date (BOS-2740)", () => {
+    for (const reading of ['"Sitemap shows 0 errors"', '"Sitemap read, no errors"', '"Success, zero errors, 7 discovered"']) {
+      const out = outsideServiceEvidenceRefusal([SITEMAP], [], LIVE, `1 pass: ${reading} https://search.google.com/x`);
+      expect(out, reading).toContain("with no read date is not a reading");
+    }
+    // with a read date it is accepted
+    expect(outsideServiceEvidenceRefusal([SITEMAP], [], LIVE, '1 pass: "Success, last read 26 Nov, 0 errors, 7 discovered"')).toBeNull();
+    expect(outsideServiceEvidenceRefusal([SITEMAP], [], LIVE, '1 pass: "Success, lastDownloaded 2026-11-26, no errors"')).toBeNull();
+    // a field name is not a date
+    expect(outsideServiceEvidenceRefusal([SITEMAP], [], LIVE, '1 pass: "lastDownloaded set, 0 errors"')).toContain("with no read date");
+  });
   it("checks before-merge criteria too, each on its own line", () => {
     const two = [SITEMAP, "Bing lists the sitemap"];
     expect(outsideServiceEvidenceRefusal(two, [], LIVE, '1 pass: "Sitemap read, 12 pages discovered"; 2 pass')).toContain('"Bing lists the sitemap"');
@@ -331,5 +342,41 @@ describe("namesOutsideService (BOS-2639)", () => {
     expect(namesOutsideService("The panel loads and the page shows the roadmap")).toBe(false);
     expect(namesOutsideService("The build writes an npmrc file")).toBe(false);
     expect(namesOutsideService("a bingo card")).toBe(false);
+  });
+});
+
+// BOS-2741 (R2): the receipt check on owner-facing text. The 26 Nov report was a ticket reply, not a done move.
+describe("ownerTextReceiptRefusal (BOS-2741)", () => {
+  it.each([
+    "The sitemap is submitted to Google, pending, no errors.",
+    "Google Search Console accepted the sitemap.",
+    "Bing replied 204 for the sitemap.",
+    "Google: sitemap sent. Pending, 0 errors.",
+  ])("holds %s and names the rewrite", (t) => {
+    expect(ownerTextReceiptRefusal(t)).toContain("what the owner's screen shows");
+  });
+
+  it.each([
+    "Pushed to GitHub. Quick check queued.",
+    "GitHub CI pending.",
+    "GitHub CI is queued.",
+    "Merge pending, branch on GitHub.",
+    "Branch on GitHub; quick check queued.",
+    "Sent to Slack and ntfy; the push was sent.",
+  ])("lets routine engineering text through: %s", (t) => {
+    expect(ownerTextReceiptRefusal(t)).toBeNull();
+  });
+
+  it("passes a reading with a date, and text that names no outside service", () => {
+    expect(ownerTextReceiptRefusal("Search Console shows Last read 26 Nov, 7 discovered, 0 errors.")).toBeNull();
+    expect(ownerTextReceiptRefusal("Google shows Couldn't fetch for the sitemap.")).toBeNull();
+    expect(ownerTextReceiptRefusal("The job is pending review and has 0 errors.")).toBeNull();
+    expect(ownerTextReceiptRefusal("Pending review.\n\nDetails: pushed the fix.")).toBeNull();
+    expect(ownerTextReceiptRefusal("Google has not read it yet (no Last read date).")).toBeNull();
+  });
+
+  it("lets a Blocked note say it is waiting, but still refuses 0 errors with no date", () => {
+    expect(ownerTextReceiptRefusal("Sitemap submitted to Google, pending; re-check 28 Nov.", { allowReceipt: true })).toBeNull();
+    expect(ownerTextReceiptRefusal("Google sitemap pending, 0 errors.", { allowReceipt: true })).not.toBeNull();
   });
 });

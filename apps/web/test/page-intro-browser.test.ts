@@ -31,6 +31,8 @@ const lvl = { planApprover: "ceo", reviewer: "ceo", ownerSignoff: false };
 const api = urlStub({
   "/api/setup": { needsSetup: false },
   "/api/me": { username: "owner" },
+  // The per-login preferences read at sign-in (BOS-2689).
+  "/api/preferences": { singleLetterKeys: true, pinnedPages: [], keyboardTipSeen: true },
   "/api/setup-progress": { dismissed: true },
   "/api/companies": [company],
   "/api/notifications": { items: [], unread: 0 },
@@ -49,6 +51,7 @@ const api = urlStub({
   "/api/maintenance": { on: false, last: null },
   "/api/maintenance/history": { holds: [] },
   "/api/runner-report": { live: [], update: null },
+  "/api/release-watch": { active: false },
   "/api/companies/c1/agents": [agent],
   "/api/companies/c1/projects": [],
   // Settings → Team and CEO lists the chapters (an array) beside the approvals setting.

@@ -151,6 +151,7 @@ ENV BOSSMAN_CHECK_SLOT=/usr/local/lib/bossman/check-slot.sh
 # added lines before the branch's own check command starts, so a branch can't remove or weaken it. The owner's list is
 # handed to it in a private file the branch never sees. Same rule as above: a new copy goes live with "Build and update runners".
 COPY --chmod=0755 scripts/scan-added-lines.mjs /usr/local/lib/bossman/scan-added-lines.mjs
+COPY --chmod=0644 packages/shared/src/secret-rules.mjs /usr/local/lib/bossman/secret-rules.mjs
 COPY --chmod=0644 scripts/scan-allow.txt /usr/local/lib/bossman/scan-allow.txt
 ENV BOSSMAN_SCAN_SCRIPT=/usr/local/lib/bossman/scan-added-lines.mjs
 

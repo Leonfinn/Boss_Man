@@ -1,6 +1,7 @@
 // Skills (R71): the company's library of Agent Skills, and who has each. A skill is added from
 // a GitHub link (pinned to a commit), written here, or uploaded as a folder, files or a zip.
 import { harnessLabel, harnessLoadsSkills, RUNNER_ADDONS } from "@boss-man/shared";
+import { AddToShortcuts } from "../pinned-pages";
 import { NoCompany } from "../components/NoCompany";
 import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
 import { unzipSync } from "fflate";
@@ -20,12 +21,12 @@ import { DraftTextarea } from "../components/DraftTextarea";
 import { Section, useAction } from "./settings/shared";
 
 type SkillInstructions = { path: string | null; body: string | null; empty: boolean; unreadable: boolean };
-type SkillRow = { id: string; name: string; description: string; source: "written" | "link" | "upload"; sourceUrl: string | null; sourceRef: string | null; pack: string | null; packUrl: string | null; sizeBytes: number; fileCount: number; hasInstructions?: boolean; instructionsPath?: string | null; instructionsUnreadable?: boolean; addedByOwner?: boolean; updatedAt: string; agents: Array<{ id: string; name: string }> };
+type SkillRow = { id: string; name: string; description: string; source: "written" | "link" | "upload" | "retro" | "builtin"; sourceUrl: string | null; sourceRef: string | null; pack: string | null; packUrl: string | null; sizeBytes: number; fileCount: number; hasInstructions?: boolean; instructionsPath?: string | null; instructionsUnreadable?: boolean; addedByOwner?: boolean; updatedAt: string; agents: Array<{ id: string; name: string }> };
 type SkillDetail = Omit<SkillRow, "fileCount"> & { files: Array<{ path: string; size: number; sha256?: string; text: string | null }>; requiresAddons: string[] | null; instructions?: SkillInstructions };
 type Upload = { path: string; content: string };
 type Elsewhere = { id: string; name: string; description: string; companyName: string; requiresAddons: string[] | null; fileCount: number; hasScripts: boolean };
 
-const SOURCE: Record<SkillRow["source"], string> = { link: "From a link", written: "Written here", upload: "Uploaded" };
+const SOURCE: Record<SkillRow["source"], string> = { link: "From a link", written: "Written here", upload: "Uploaded", retro: "From a workflow retro", builtin: "Built in to Boss Man" };
 const kb = (n: number) => (n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`);
 const stripFrontmatter = (md: string) => md.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
 
@@ -244,9 +245,10 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
   const body = instructions ? instructions.body ?? "" : stripFrontmatter(md).trim();
   const unreadable = instructions?.unreadable ?? false;
   const noInstructions = instructions ? instructions.empty && !instructions.unreadable : !body;
-  // Only a skill that is just its SKILL.md can be edited here; a linked one follows its source.
+  // Only a skill that is just its SKILL.md can be edited here; a linked one follows its source, and a
+  // built-in one is fixed text Boss Man ships (BOS-2631), so neither is edited in place.
   // A SKILL.md that isn't text is never opened as an empty editor, so a save can't wipe it.
-  const editable = s.source !== "link" && s.files.length === 1 && !!mainPath && !unreadable;
+  const editable = s.source !== "link" && s.source !== "builtin" && s.files.length === 1 && !!mainPath && !unreadable;
   const save = (confirmed = false) =>
     void run(async () => {
       if (!editing) return "Nothing to save.";
@@ -316,16 +318,18 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
               Check for updates
             </button>
           )}
-          <button
-            type="button"
-            className="btn"
-            onClick={() => {
-              if (!window.confirm(`Delete ${s.name}? Agents that have it lose it.`)) return;
-              void api(`/api/companies/${company.id}/skills/${id}`, { method: "DELETE" }).then(() => (onChanged(), onClose()), (err: Error) => setNote({ ok: false, text: err.message }));
-            }}
-          >
-            Delete
-          </button>
+          {s.source !== "builtin" && (
+            <button
+              type="button"
+              className="btn"
+              onClick={() => {
+                if (!window.confirm(`Delete ${s.name}? Agents that have it lose it.`)) return;
+                void api(`/api/companies/${company.id}/skills/${id}`, { method: "DELETE" }).then(() => (onChanged(), onClose()), (err: Error) => setNote({ ok: false, text: err.message }));
+              }}
+            >
+              Delete
+            </button>
+          )}
         </div>
       </header>
 
@@ -780,6 +784,7 @@ export function Skills({ company, skillId }: { company: Company | undefined; ski
         <div>
           <p className="label">{company.name}</p>
           <h1>Skills</h1>
+          <AddToShortcuts page="skills" />
           <p className="sub">Reusable instructions your agents load when they're relevant, in the Agent Skills format (a SKILL.md and any files it needs). Give each agent the skills its work calls for.</p>
         </div>
         <button type="button" className="btn primary" onClick={() => (setAdding(true), setPicked(null))}>

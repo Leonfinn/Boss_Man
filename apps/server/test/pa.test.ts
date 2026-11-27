@@ -9,6 +9,7 @@ import { openPglite } from "../src/db/client.js";
 import { agentChanges, agents, ownerChatMessages, paAnswers, runners, runs, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { JUDGEMENT } from "../src/services/pa.js";
+import { expectEveryWriterGuarded } from "./secret-guard-walk.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
 const clients: Client[] = [];
@@ -88,7 +89,9 @@ describe("the CEO's PA (R87)", () => {
   it("has read tools and the two PA tools, and no way to write", async () => {
     const c = await setup();
     const { client } = await c.ask("What's open?");
-    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(["board", "decisions", "list_my_work", "open_attachment", "pa_escalate", "pa_reply", "tickets", "whats_new", "wiki"]);
+    const paTools = (await client.listTools()).tools.map((t) => t.name).sort();
+    expect(paTools).toEqual(["board", "decisions", "list_my_work", "open_attachment", "pa_escalate", "pa_reply", "tickets", "whats_new", "wiki"]);
+    expectEveryWriterGuarded(paTools);
     for (const name of ["create_ticket", "set_ticket_state", "raise_decision", "notify_owner", "deploy", "nudge", "propose_hire", "update_instructions", "link_tickets", "pa_verdict"]) {
       expect(await refused(client.callTool({ name, arguments: {} })), name).toBe(true);
     }

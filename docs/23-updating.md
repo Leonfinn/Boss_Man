@@ -32,7 +32,7 @@ You need:
 
 Every way of updating the server takes a database backup first. Database changes apply by themselves during the update. Each one is written so the previous code still runs against the new schema, which is why a code rollback works. The rules are in [docs/10-migrations.md](10-migrations.md).
 
-- With the host deployer: approve the "Deploy <commit>?" card on Decisions. Settings → Server and runner → Updates shows the same offer under **Review and deploy**, or **Check for updates now** when there is none yet. Setting it up is in [docs/30-in-app-updates.md](30-in-app-updates.md).
+- With the host deployer: approve the "Deploy <commit>?" card on Decisions. Settings → Server and runner → Updates shows the same offer under **Review and deploy**, or **Check for updates now** when there is none yet. Setting it up is in [docs/30-in-app-updates.md](30-in-app-updates.md). To reach that page in one click, open it and press **Add to shortcuts** beside its title: it then shows in the Shortcuts section at the top of the menu.
 - Single server, by hand: run `scripts/deploy.sh` from the checkout. It backs up, pulls, rebuilds, restarts, waits for the server to report healthy, and offers to update the runners if their code changed. Success is the line `The server is healthy.` Useful options:
   - `--dry-run` shows the steps without running anything.
   - `--force` rebuilds even when there is nothing new.
@@ -220,6 +220,22 @@ To see what changed, use these 3 sources:
 - the [Breaking changes](#breaking-changes) list on this page, for anything you need to do by hand
 
 Boss Man's fuller release notes (what went live on its own server and when) are kept in a private wiki that only its maintainers can read.
+
+## How you are told about a new release (installs from the ready-made images)
+
+An install from the published images (docs/35) looks at its own GitHub repository's releases by itself, at least once a day (and a few minutes after each start). You do not have to open anything. It only counts a release that carries the signed `release.json`, and a beta install (a version such as `0.1.0-beta.2`) also sees newer pre-releases; a stable install does not.
+
+- When there is a new version you get one note in your notifications feed, once per version: the version, a few plain words from its release notes, and a link to them. **Settings → Server and runner → Updates** shows the same line.
+- Your phone is told only if you turned it on: in the same panel tick **Also send it to my phone**. It needs ntfy set up (docs/31), and is off until you tick it.
+- If GitHub cannot be reached, the panel says "Couldn't check for a new release just now" and the install tries again within the hour. Nothing is sent to you for that.
+- To turn it off, untick **Tell me about new releases** in the same panel. Nothing is checked or sent while it is off.
+- An install built from source (the usual `git clone` install) never shows this: it is not offered image releases, and updates through the host deployer (docs/30).
+
+The release list comes from the repository the install was set up with, so it works for a fork too. To read it from another address (an internal mirror), set `BOSSMAN_RELEASE_API` on the server.
+
+An image install made before this feature existed starts watching only after its next update made by the updater, because that is when the updater gives it the settings it checks with.
+
+Installing the release is still done as described in docs/35; this note only tells you it exists.
 
 ## Common problems
 

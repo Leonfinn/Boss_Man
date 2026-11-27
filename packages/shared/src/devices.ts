@@ -7,6 +7,7 @@
 // Only screen facts are kept: no personal data. A profile is whatever one signed-in browser
 // reported, so it works on any install with no host-specific values.
 import { z } from "zod";
+import { SavedShortcut, SHORTCUTS_MAX } from "./shortcut-shape.js";
 
 /** The screen units a layout test needs. `vh` is the largest viewport on a phone (toolbar hidden),
  * `dvh` is the viewport as it is now, `svh` is the smallest, `lvh` is the largest; `visual` is the
@@ -70,3 +71,38 @@ export function isRenderableProfile(p: Pick<DeviceReport, "readings">): boolean 
   const flat = p.readings.some((r) => r.units.vh === r.units.dvh);
   return scrolled || flat;
 }
+
+/**
+ * The owner's per-login preferences (BOS-2689, and BOS-2669 reuses them): settings that follow the login
+ * to every browser rather than living in one. One row per login on the server, so they survive a reload, a
+ * server restart and a new browser. Today it holds the single-letter-key switch (BOS-2671 part 3d).
+ *
+ * Every field defaults to what someone who never changed anything gets, so the answer is the same whether
+ * or not a row has ever been saved, and an older row missing a newer field reads that field's default.
+ */
+export const OwnerPreferences = z.object({
+  /** "Use single-letter keys" (BOS-2671 3d): off turns off "?", the g-sequences, g 1 to g 6 and the j/k/Enter
+   * card keys. Ctrl/Cmd+K, Escape and normal Tab/Enter stay. On for everyone until they turn it off. */
+  singleLetterKeys: z.boolean().default(true),
+  /** BOS-2669 part 3: the menu shortcuts the owner pinned, in their order. Each is a page id from the shared
+   * list, plus the owner's own name for it if they gave one. Empty until they pin one. A page this build no
+   * longer has stays in the list (it is never dropped silently); `shortcutEntries` marks it as gone. */
+  pinnedPages: z.array(SavedShortcut).max(SHORTCUTS_MAX).default([]),
+  /** BOS-2690 (BOS-2671 3e): the one-time tip for people already using the keyboard has been closed or
+   * opened once, so it never shows again on this login, in this or any other browser. */
+  keyboardTipSeen: z.boolean().default(false),
+});
+export type OwnerPreferences = z.infer<typeof OwnerPreferences>;
+
+/** What a page asks to change: any of the fields, and nothing else. Each checks its own rules when sent, and a
+ * field left out keeps its saved value (so a pin save must not turn the keys back on). The whole shortcut list is
+ * sent each time, so saving replaces it; the service checks it against the shared list and gives the owner a plain
+ * reason when it can't be saved. */
+export const OwnerPreferencesPatch = z.object({
+  singleLetterKeys: z.boolean().optional(),
+  // No max() here: the service checks the whole list (cap, duplicates, unknown pages, names) and throws a plain
+  // reason the page shows, rather than zod's generic "Too big" message.
+  pinnedPages: z.array(SavedShortcut).optional(),
+  keyboardTipSeen: z.boolean().optional(),
+});
+export type OwnerPreferencesPatch = z.infer<typeof OwnerPreferencesPatch>;

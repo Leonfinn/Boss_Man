@@ -26,6 +26,8 @@ const unset = { set: false, hint: null, secretName: null };
 const api = urlStub({
   "/api/setup": { needsSetup: false },
   "/api/me": { username: "owner" },
+  // The per-login preferences read at sign-in (BOS-2689).
+  "/api/preferences": { singleLetterKeys: true, pinnedPages: [], keyboardTipSeen: true },
   "/api/setup-progress": { dismissed: true },
   "/api/companies": [company],
   "/api/notifications": { items: [], unread: 0 },
@@ -45,6 +47,7 @@ const api = urlStub({
   "/api/maintenance": { on: false, last: null },
   "/api/maintenance/history": { holds: [] },
   "/api/runner-report": { live: [], update: null },
+  "/api/release-watch": { active: false },
   "/api/self-deploy": { enabled: true, status: null, available: null },
   "/api/run-limits": { instance: 8, company: 4, background: 2, defaults: { instance: 8, company: 4, background: 2 } },
   "/api/settings/check-queue": { mode: "legacy", slots: 1, maxSlots: 4, defaultSlots: 1, runnersTooOld: [] },

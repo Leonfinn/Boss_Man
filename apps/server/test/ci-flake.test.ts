@@ -2,9 +2,10 @@
 // which names are safe to put in a shell command, the ordered decision table, and the gate's re-run command, run here with a
 // real `sh` in a made-up repo whose pnpm and vitest are stubs.
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import {
   CANT_RERUN_EXIT,
@@ -23,6 +24,7 @@ import {
   SLOW_RETRIES_PER_WEEK,
   slowJobs,
   slowRetryCounts,
+  TOUCHED_EXIT,
   type FlakeFacts,
   type SlowEvidence,
   type SlowJob,
@@ -69,6 +71,17 @@ describe("namedTestFiles", () => {
     expect(namedTestFiles([{ job: "check", paths: ["$(id).test.ts"] }]).unsafe).toEqual(["$(id).test.ts"]);
     for (const good of ["apps/server/test/a.test.ts", "packages/@scope/x.spec.tsx", "a_b-c.test.mjs"]) expect(SAFE_TEST_PATH.test(good), good).toBe(true);
   });
+
+  it("BOS-2758: a shell test (*.test.sh) is a test file too; hostile shell names and other .sh files are not", () => {
+    expect(namedTestFiles([{ job: "check (images)", paths: ["scripts/backup-thing.test.sh"] }])).toEqual({ files: ["scripts/backup-thing.test.sh"], unnamed: [], unsafe: [] });
+    expect(SAFE_TEST_PATH.test("deploy/x-y_z.test.sh")).toBe(true);
+    for (const bad of ["$(id).test.sh", "a b.test.sh", "../x.test.sh", "x;rm.test.sh", "x.spec.sh"]) {
+      expect(SAFE_TEST_PATH.test(bad), bad).toBe(false);
+      expect(namedTestFiles([{ job: "check", paths: [bad] }]).unnamed, bad).toEqual(["check"]);
+    }
+    // A plain script is not a test: a failure on it names no test file.
+    expect(namedTestFiles([{ job: "check", paths: ["scripts/deploy.sh"] }]).unnamed).toEqual(["check"]);
+  });
 });
 
 describe("flakeDecision: the ordered table, first refusal wins", () => {
@@ -100,6 +113,13 @@ describe("flakeDecision: the ordered table, first refusal wins", () => {
     const d = flakeDecision(facts(over as Partial<FlakeFacts>));
     expect(d.act).toBe("bounce");
     expect(d.act === "bounce" && d.why).toMatch(why);
+  });
+
+  it("BOS-2758: a failed shell test the branch doesn't change is re-run like a vitest file; one it changes bounces", () => {
+    const named = { files: ["scripts/backup-thing.test.sh"], unnamed: [], unsafe: [] };
+    expect(flakeDecision(facts({ named, changed: ["README.md"] }))).toEqual({ act: "rerun_at_gate", files: ["scripts/backup-thing.test.sh"] });
+    expect(flakeDecision(facts({ named, changed: ["scripts/backup-thing.test.sh"] }))).toMatchObject({ act: "bounce", why: expect.stringMatching(/the branch changes scripts\/backup-thing\.test\.sh/) });
+    expect(flakeDecision(facts({ named, recent: new Map([["scripts/backup-thing.test.sh", RETRIES_PER_WEEK]]) }))).toMatchObject({ act: "bounce", why: expect.stringMatching(/no more retries/) });
   });
 
   it("billing outranks everything after it (order holds)", () => {
@@ -326,5 +346,89 @@ describe("gateRerunCommand, run by a real sh", () => {
     const r = sh(dir, ["test/root.test.ts"]);
     expect(r.code).toBe(0);
     expect(r.out).toContain(`vitest ran in ${dir} on test/root.test.ts`);
+  });
+
+  // BOS-2758: a shell test, re-run with the repo's real scripts/test-shell.sh and scripts/shell-tests-for-changes.sh (copied
+  // from this checkout) in a made-up git repo whose HEAD is a two-parent merge commit, as the gate builds it.
+  describe("a shell test (BOS-2758)", () => {
+    const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+    const SH = "scripts/thing.test.sh";
+    // TMPDIR as a check job has it (its own folder): test-shell.sh makes its output file there.
+    const gitEnv = { PATH: process.env.PATH ?? "", HOME: root, TMPDIR: root, GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com" };
+    const git = (dir: string, ...args: string[]) => {
+      const r = spawnSync("git", args, { cwd: dir, env: gitEnv, encoding: "utf8" });
+      if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
+      return r.stdout.trim();
+    };
+    const put = (dir: string, f: string, text: string) => {
+      mkdirSync(path.dirname(path.join(dir, f)), { recursive: true });
+      writeFileSync(path.join(dir, f), text);
+      chmodSync(path.join(dir, f), 0o755);
+    };
+    /**
+     * Main has scripts/thing.test.sh, which runs scripts/thing.sh beside it (`thing` is its body). The branch changes `branch`
+     * (README.md: nothing the test reads; scripts/thing.sh: its subject). HEAD is the merge commit: main first, then the branch.
+     */
+    const shellRepo = (o: { thing: string; branch: "README.md" | "scripts/thing.sh"; tools?: boolean }) => {
+      const dir = path.join(root, `shrepo${n++}`);
+      mkdirSync(dir);
+      git(dir, "init", "-q");
+      if (o.tools !== false) for (const s of ["test-shell.sh", "shell-tests-for-changes.sh"]) put(dir, `scripts/${s}`, readFileSync(path.join(repoRoot, "scripts", s), "utf8"));
+      put(dir, SH, '#!/usr/bin/env bash\nhere="$(cd "$(dirname "$0")" && pwd)"\n"$here/thing.sh"\n');
+      put(dir, "scripts/thing.sh", `#!/usr/bin/env bash\n${o.thing}\n`);
+      put(dir, "README.md", "readme\n");
+      git(dir, "add", "-A");
+      git(dir, "commit", "-q", "-m", "main");
+      const main = git(dir, "rev-parse", "HEAD");
+      put(dir, o.branch, o.branch === "README.md" ? "readme, reworded\n" : `#!/usr/bin/env bash\n${o.thing}\n# changed\n`);
+      git(dir, "commit", "-q", "-am", "branch");
+      const branch = git(dir, "rev-parse", "HEAD");
+      const merge = git(dir, "commit-tree", `${branch}^{tree}`, "-p", main, "-p", branch, "-m", "merge");
+      git(dir, "checkout", "-q", "--detach", merge);
+      return dir;
+    };
+    const run = (dir: string, files: string[]) => {
+      const r = spawnSync("sh", ["-c", gateRerunCommand(files)], { cwd: dir, env: { ...gitEnv, PATH: `${bin}:${gitEnv.PATH}` }, encoding: "utf8" });
+      return { code: r.status, out: `${r.stdout}${r.stderr}` };
+    };
+
+    it("the branch doesn't touch it and it passes: 0, through scripts/test-shell.sh, with no lockfile needed", () => {
+      const r = run(shellRepo({ thing: "echo thing ok", branch: "README.md" }), [SH]);
+      expect(r.out).toContain(`boss-man re-run: ${SH} (scripts/test-shell.sh)`);
+      expect(r.out).toContain("thing ok");
+      expect(r.out).toContain(`boss-man re-run: ${SH}: passed (scripts/test-shell.sh)`);
+      expect(r.code).toBe(0);
+    });
+
+    it("the branch doesn't touch it and it fails again: exit 1, a real failure", () => {
+      const r = run(shellRepo({ thing: "echo second run changed the archives; exit 1", branch: "README.md" }), [SH]);
+      expect(r.code).toBe(1);
+      expect(r.out).toContain(`test-shell: FAILED ${SH} (exit 1)`);
+    });
+
+    it("the branch changes a file the test runs (check-quick's rule): exit 79 before anything runs", () => {
+      const r = run(shellRepo({ thing: "echo SHOULD-NOT-RUN", branch: "scripts/thing.sh" }), [SH]);
+      expect(r.code).toBe(TOUCHED_EXIT);
+      expect(r.out).toContain(`boss-man re-run: ${SH}: the branch changes what it tests`);
+      expect(r.out).not.toContain("SHOULD-NOT-RUN");
+    });
+
+    it.each([
+      ["the test only skips here", { thing: 'echo "thing.test.sh: SKIP (set CADDY to run it)"', branch: "README.md" as const }, /skipped here/],
+      ["the repo has no scripts/test-shell.sh and scripts/shell-tests-for-changes.sh", { thing: "echo ok", branch: "README.md" as const, tools: false }, /no scripts\/test-shell\.sh and scripts\/shell-tests-for-changes\.sh/],
+    ])("can't re-run (exit 78) when %s: never read as a pass", (_name, o, said) => {
+      const r = run(shellRepo(o), [SH]);
+      expect(r.code).toBe(CANT_RERUN_EXIT);
+      expect(r.out).toMatch(said);
+    });
+
+    it("a vitest file and a shell test in one failure: each runs its own way", () => {
+      const cmd = gateRerunCommand(["apps/server/test/a.test.ts", SH]);
+      expect(cmd).toContain("rerun 'apps/server/test/a.test.ts'");
+      expect(cmd).toContain(`rerun_sh '${SH}'`);
+      // vitest still needs the lockfile's install.
+      expect(cmd).toContain('cant "no pnpm-lock.yaml or package-lock.json"');
+      expect(gateRerunCommand([SH])).not.toContain("no pnpm-lock.yaml or package-lock.json");
+    });
   });
 });

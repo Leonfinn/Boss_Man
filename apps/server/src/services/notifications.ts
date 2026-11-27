@@ -154,7 +154,7 @@ export const ROUTINE_PRIORITY = 3;
  * whatever the owner's push levels say: it is not urgent, and the owner should see it when they next look, not be
  * buzzed for it.
  */
-export type NotifyInput = { companyId: string | null; agentId?: string | null; level: NotifyLevel; /** Which alert kind this is for the owner's Slack, Discord and webhook destinations (BOS-2199). Unset: a card's own type decides, and anything else goes to none. */ kind?: AlertKind; title: string; body?: string | null; link: string; decisionId?: string | null; noPush?: boolean; /** Why the card is urgent (BOS-1097): a live-fix deploy or the CEO's urgent mark. Set, it goes to the phone whatever the setting; the text is shown on the Notifications page. */ urgentReason?: string };
+export type NotifyInput = { companyId: string | null; agentId?: string | null; level: NotifyLevel; /** Which alert kind this is for the owner's Slack, Discord and webhook destinations (BOS-2199). Unset: a card's own type decides, and anything else goes to none. */ kind?: AlertKind; title: string; body?: string | null; link: string; decisionId?: string | null; noPush?: boolean; /** The owner turned on a phone push for exactly this kind of note (BOS-2663): it goes to the phone at normal priority whatever the push setting, with this as the reason shown. */ phoneOptIn?: string; /** Why the card is urgent (BOS-1097): a live-fix deploy or the CEO's urgent mark. Set, it goes to the phone whatever the setting; the text is shown on the Notifications page. */ urgentReason?: string };
 
 /** What the CEO sets to mark an owner card urgent (BOS-1097): decisions escalate with urgent true; stored on the card's context. */
 export type UrgentPush = { by: string; at: string; why: string };
@@ -289,7 +289,7 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
     const urgent = input.level === "page" || !!input.urgentReason;
     const flagsToPhone = s.pushLevels?.includes("flag") ?? false;
     const routineToPhone = wantsEveryPush(s) && (level === "page" || level === "ask");
-    const toPhone = s.ntfy && !input.noPush && (urgent ? level === "page" || level === "ask" : routineToPhone || (level === "flag" && flagsToPhone));
+    const toPhone = s.ntfy && !input.noPush && (input.phoneOptIn ? !urgent : urgent ? level === "page" || level === "ask" : routineToPhone || (level === "flag" && flagsToPhone));
     if (toPhone) {
       // BOS-1097: re-read the card just before sending. One answered, withdrawn or no longer the owner's
       // (back with the CEO) while we were busy sends nothing.
@@ -297,7 +297,7 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
         deps.log?.(`phone push skipped: card ${row.decisionId} is settled or no longer the owner's`);
         return row;
       }
-      const pushReason = input.level === "page" ? (input.urgentReason ?? "A page: Boss Man marked it urgent") : urgent ? input.urgentReason! : routineToPhone ? "You chose to send all decisions to your phone" : "You chose to send flags to your phone";
+      const pushReason = input.phoneOptIn ? input.phoneOptIn : input.level === "page" ? (input.urgentReason ?? "A page: Boss Man marked it urgent") : urgent ? input.urgentReason! : routineToPhone ? "You chose to send all decisions to your phone" : "You chose to send flags to your phone";
       const { actions, approve } = row.decisionId ? await decisionButtons(s, row.decisionId, row.link) : { actions: [], approve: null };
       try {
         await push(s, { ...row, actions, urgent, sequenceId: row.id, ...(approve ? { body: approve.message, plain: true } : {}) });

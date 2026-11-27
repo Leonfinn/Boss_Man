@@ -208,7 +208,8 @@ describe("self-deploy closes leave a notice (BOS-739)", () => {
     expect(closed.status).toBe("withdrawn");
     const notice = (closed.context as { closedNotice?: { why: string; commit: string; text: string } }).closedNotice;
     expect(notice).toMatchObject({ why: "live", commit: B });
-    expect(notice!.text).toContain("You don't need to finish these steps.");
+    // BOS-2783: a hand card says what of its steps outside the server is left, from the host's evidence; here nothing is.
+    expect(notice!.text).toContain("Nothing else is left to do: the host runs the current deployer script.");
     // And the owner's Decisions page can read it back.
     expect((await c.req("GET", "/api/decisions/closed-notices")).json()).toMatchObject([{ id: card!.id, notice: { why: "live" } }]);
   });

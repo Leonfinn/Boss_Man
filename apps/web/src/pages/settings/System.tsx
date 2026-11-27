@@ -13,8 +13,23 @@ import { DraftTextarea } from "../../components/DraftTextarea";
 import { SaveButton } from "../../components/SaveButton";
 import { Section, useAction } from "./shared";
 import { CheckWorkers, type CheckWorkerView } from "./CheckWorkers";
+import { ReleaseNotice } from "./ReleaseNotice";
 import { DEFAULT_POLICY, policyLine, policyValid, SlotSplitFields, type SlotPolicy } from "./SlotSplit";
 import { LiveState, RUNNER_QUEUED_REPLY, atTime, historyTag, historyWaitingOn, historyWhat, inAbout, runnerProgress, updateStatus, type RunnerProgress, type DeployWaitView, type HistoryRow, type MaintenanceView, type Report, type SelfDeployView, type UpdateStatus, type WrapUpRun, type WrapUpStatus } from "./updates";
+
+/**
+ * BOS-2701: why "Build and update runners" can't take a press now, or null when it can. The server queues a press at
+ * every stage of an update, including the minute after a deploy when the host's offer is gone; it refuses only when the
+ * deployer never reported or is late. Then the button is disabled with this one line, and nothing on the panel says "press".
+ * Kept here, not in updates.tsx, because App.tsx loads updates.tsx on first load and this belongs to the lazy Settings page.
+ */
+export function runnerPressBlocked(v: SelfDeployView): string | null {
+  const d = v.deployer;
+  if (v.available || (d?.reportedAt && !d.late)) return null;
+  return d?.reportedAt
+    ? `Build and update runners is ready again once the host deployer reports; it last reported ${when(d.reportedAt)}.`
+    : "Build and update runners is ready once the host deployer has reported for the first time.";
+}
 
 /** The company's workspace disk cap (R54, BOS-274): over it, the owner hears once a day; nothing is stopped. */
 export function WorkspaceDisk({ company, onChanged }: { company: Company; onChanged: () => void }) {
@@ -188,7 +203,7 @@ function WaitingChanges({ commits }: { commits: { subject?: string }[] | undefin
  * host's frozen text and never disagree with the BLUE/GREEN rows (the trial comes from the same colour probe).
  * Pure, so a layout test can render it on its own.
  */
-export function TrialLines({ trial, wait, now, queue, cancelled, held, failureHolds, wrapNamesRunner }: { trial?: { endsAt: string } | null; wait?: { until: string; target?: string } | null; now: number; queue?: { startsAt: string | null; why: string } | null; cancelled?: { why: string } | null; held?: { commit: string } | null; failureHolds?: { subject: string; words: string }[]; /** BOS-2672: the wrap-up line above already names the runner update and its time, so it isn't said twice. */ wrapNamesRunner?: boolean }) {
+export function TrialLines({ trial, wait, now, queue, cancelled, held, failureHolds, wrapNamesRunner, pressBlocked }: { trial?: { endsAt: string } | null; wait?: { until: string; target?: string } | null; now: number; queue?: { startsAt: string | null; why: string } | null; cancelled?: { why: string } | null; held?: { commit: string } | null; failureHolds?: { subject: string; words: string }[]; /** BOS-2672: the wrap-up line above already names the runner update and its time, so it isn't said twice. */ wrapNamesRunner?: boolean; /** BOS-2701: the button can't take a press now, so the trial line doesn't invite one. */ pressBlocked?: boolean }) {
   const trialOver = wrapNamesRunner || (trial ? Date.parse(trial.endsAt) <= now : false);
   if (wrapNamesRunner) queue = null;
   const waitOver = wait ? Date.parse(wait.until) <= now : false;
@@ -204,7 +219,9 @@ export function TrialLines({ trial, wait, now, queue, cancelled, held, failureHo
         <p className="muted" role="status" data-testid="runner-trial" style={{ fontSize: 14 }}>
           {queue
             ? `Runners will update at ${atTime(trial.endsAt)} (${inAbout(trial.endsAt, now)}), when this server update's trial ends. You don't need to press again.`
-            : `The server update is in its trial until ${atTime(trial.endsAt)} (${inAbout(trial.endsAt, now)}). Press Build and update runners to queue the runner update; it then starts by itself when the trial ends.`}
+            : pressBlocked
+              ? `The server update is in its trial until ${atTime(trial.endsAt)} (${inAbout(trial.endsAt, now)}).`
+              : `The server update is in its trial until ${atTime(trial.endsAt)} (${inAbout(trial.endsAt, now)}). Press Build and update runners to queue the runner update; it then starts by itself when the trial ends.`}
         </p>
       )}
       {queue && !(trial && !trialOver) && (
@@ -249,6 +266,7 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
     // BOS-1486: with no host deployer there is no Build and update runners button, but a hand-built image still needs the drain.
     return (
       <Section id="deploy-h" title="Updates">
+        <ReleaseNotice />
         <p className="muted" style={{ fontSize: 14 }}>
           Building the image from here needs the host deployer, and this install doesn't have one, so there is no Build and update runners button. Build the image on the host with scripts/update-runner.sh, then use the button below. To get in-app updates, set up the host deployer (<a href="https://github.com/Leonfinn/Boss_Man/blob/main/docs/30-in-app-updates.md" target="_blank" rel="noreferrer">how to set it up</a>).
         </p>
@@ -275,6 +293,8 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
   const wrap = maint.data && maint.data.on && ((maint.data as WrapUpStatus).wrapAsked || maint.data.kind === "wrapup") ? (maint.data as WrapUpStatus) : null;
   const busy = act.busy || !v;
   const idle = !!v && !v.pending && s?.result !== "running";
+  // BOS-2701: the server queues every press except while the deployer never reported or is late; then say so and disable.
+  const runnersBlocked = v ? runnerPressBlocked(v) : null;
 
   const deployLatest = () =>
     act.run(async () => {
@@ -348,6 +368,7 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
 
   return (
     <Section id="deploy-h" title="Updates">
+      <ReleaseNotice />
       {/* One status box in every state, at the same height while loading (BOS-1238). */}
       <div className={`upd-status ${st.tone}`} role={st.alert ? "alert" : "status"} aria-live={st.alert ? "assertive" : "polite"} data-testid="update-status" data-state={st.tag}>
         <span className={`tag ${st.tone}`} data-testid="update-tag">{st.tag}</span>
@@ -360,7 +381,7 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
           )}
           {st.more && <p className="muted" style={{ fontSize: 14 }}>{st.more}</p>}
           {st.next && <p style={{ fontSize: 14 }} data-testid="update-next">{st.next}</p>}
-          {v && <TrialLines trial={v.trial ?? null} wait={v.deployWait ?? null} now={now} queue={v.runnerQueue ?? null} cancelled={v.queueCancelled ?? null} held={v.heldDeploy ?? null} failureHolds={v.failureHolds ?? []} wrapNamesRunner={!!wrap?.wrapTie?.runner} />}
+          {v && <TrialLines trial={v.trial ?? null} wait={v.deployWait ?? null} now={now} queue={v.runnerQueue ?? null} cancelled={v.queueCancelled ?? null} held={v.heldDeploy ?? null} failureHolds={v.failureHolds ?? []} wrapNamesRunner={!!wrap?.wrapTie?.runner} pressBlocked={!!runnersBlocked} />}
           {st.raw && (
             <details>
               <summary className="muted" style={{ fontSize: 13 }}>What the host said</summary>
@@ -405,7 +426,7 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
             <button
               type="button"
               className="btn"
-              disabled={act.busy || !idle}
+              disabled={act.busy || !idle || !!runnersBlocked}
               title="Builds a new runner image from the deployed code (for example new tools in apps/runner/Dockerfile), checks it, then swaps each runner when its company is idle."
               onClick={() =>
                 act.run(async () => {
@@ -447,6 +468,11 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
               Restart the server…
             </button>
           </div>
+          {runnersBlocked && (
+            <p className="muted" data-testid="runners-not-ready" style={{ fontSize: 13, margin: "6px 0 0" }}>
+              {runnersBlocked}
+            </p>
+          )}
           {wrap && (
             <div>
               <button type="button" className="btn" disabled={act.busy} onClick={() => void act.run(async () => { await api("/api/maintenance/cancel-wrap", { method: "POST", body: {} }); maint.reload(); return "Wrap-up cancelled: runs already told still end by themselves; an update keeps waiting for them."; })}>
@@ -538,7 +564,7 @@ export function WrapUpRuns({ s, busy, onStop }: { s: WrapUpStatus; busy: boolean
             <li key={run.runId} style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "baseline" }}>
               <strong title={run.agent ?? undefined}>{run.agent ? run.agent.split(/\s+[-–]\s+/)[0] : "An agent"}</strong>
               <span className="muted">
-                {run.ticket ? `${run.ticket}${run.ticketTitle ? `: ${run.ticketTitle}` : ""}` : "no ticket"} · asked to wrap up {run.sinceWrapUpMinutes} min ago
+                {run.ticket ? `${run.ticket}${run.ticketTitle ? `: ${run.ticketTitle}` : ""}` : "no ticket"} · {run.askAt ? `Boss Man asks it to finish at ${atTime(run.askAt)}` : `asked to wrap up ${run.sinceWrapUpMinutes} min ago`}
                 {step ? ` · running ${step.title} for ${step.sinceMinutes} min` : ""}
               </span>
               {onCard ? (

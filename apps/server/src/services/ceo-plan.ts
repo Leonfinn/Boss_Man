@@ -1,5 +1,6 @@
 // The CEO's plan on a ticket (BOS-1509, T13): how it is shown, and what a move away from it says and does.
 // Pure helpers only; set_ticket_state does the writes and the CEO wake.
+import { actionClaim } from "@boss-man/shared";
 
 type PlanFields = { ceoPlan: string | null; ceoPlanDeadline: Date | null };
 
@@ -36,9 +37,14 @@ export const REVIEW_BLOCKED_REFUSAL =
 export const IN_PROGRESS_BLOCKED_WARNING =
   "Heads up: this ticket has already been through review. If its work is finished and it only waits for another ticket's merge, move it back to review instead: it waits there as \"Passed, held\" and merges by itself once that ticket merges. In Blocked it is out of the merge line.";
 
-/** The mover's reply line, when they left an unexpired plan; says the CEO was told unless the mover is the CEO. */
-export function planMoveWarning(plan: string, from: string, to: string, ceoTold: boolean): string {
-  return `\n\nHeads up: the CEO set a plan for this ticket that has not expired yet, and ${from} -> ${to} leaves it. ${plan} ${ceoTold ? "The CEO has been told." : "You are the CEO, so nobody else was told."}`;
+/**
+ * The mover's reply line, when they left an unexpired plan. Who acts on it comes from actionClaim (BOS-2737): the time
+ * the CEO's wake was actually sent, or that nobody was alerted. It used to say "The CEO has been told" whenever the
+ * mover wasn't the CEO, even when no wake went out (no CEO, or no wake hook).
+ */
+export function planMoveWarning(plan: string, from: string, to: string, byCeo: boolean, ceoWokenAt: Date | null): string {
+  const who = byCeo ? "You are the CEO, so nobody else was told." : actionClaim({ who: "The CEO", raisedAt: ceoWokenAt, live: false }).text;
+  return `\n\nHeads up: the CEO set a plan for this ticket that has not expired yet, and ${from} -> ${to} leaves it. ${plan} ${who}`;
 }
 
 /** The note that wakes the CEO. */

@@ -26,20 +26,24 @@ On a setup that is not in the first list, Boss Man still refuses to run agents u
 
 ## 1. Get the files
 
-Open the release page of the Boss Man repository on GitHub, pick the version you want (the newest *Pre-release* is the beta), and download these into an empty folder:
+Open the [release page of the Boss Man repository](https://github.com/Leonfinn/Boss_Man/releases) on GitHub, pick the version you want (the newest *Pre-release* is the beta), and download these into an empty folder:
 
 - `docker-compose.images.yml`
 - `images.env`
 
 Both are made and signed by the release. `images.env` holds the registry and the exact digest of every image; do not edit the digests.
 
-Optional: check the signature before you trust them. This needs [cosign](https://docs.sigstore.dev/cosign/installation/) and is the only step that does. Download `images.env.sigstore.json` and `docker-compose.images.yml.sigstore.json` from the same release page, then run, for each file:
+Optional: check the signature before you trust them. This needs [cosign](https://docs.sigstore.dev/cosign/installation/) and is the only step that does. Download `images.env.sigstore.json` and `docker-compose.images.yml.sigstore.json` from the same release page into the same folder, then run these two commands there, one for each file:
 
 ```
-cosign verify-blob --bundle images.env.sigstore.json --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity https://github.com/<owner>/<repo>/.github/workflows/release.yml@refs/heads/main images.env
+cosign verify-blob --bundle images.env.sigstore.json --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity https://github.com/Leonfinn/Boss_Man/.github/workflows/release.yml@refs/heads/main images.env
 ```
 
-Replace `<owner>/<repo>` with the repository you downloaded from, and repeat with `docker-compose.images.yml`.
+```
+cosign verify-blob --bundle docker-compose.images.yml.sigstore.json --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity https://github.com/Leonfinn/Boss_Man/.github/workflows/release.yml@refs/heads/main docker-compose.images.yml
+```
+
+Each prints `Verified OK` when the file is the one the release signed.
 
 ## 2. Pick a registry
 
@@ -63,7 +67,7 @@ Run these in the folder with the two files.
 1. Make the keys. This runs once and is safe to run again: it never replaces a file that exists.
 
    ```
-   docker compose --env-file images.env run --rm setup
+   docker compose --env-file images.env -f docker-compose.images.yml run --rm setup
    ```
 
    It writes the master key into a Docker volume called `config` and the database password into a second one called `db-secret` (in a project named `boss-man`, they are `boss-man_config` and `boss-man_db-secret`). The database container gets only `db-secret`, so it never sees the master key. **Back up both volumes.** Without `master.key`, the secrets Boss Man stores cannot be read again, and without the database password the server cannot reach its database.
@@ -71,10 +75,10 @@ Run these in the folder with the two files.
 2. Start Boss Man. Compose starts only the database, a small proxy and the updater; the updater then downloads the server, launcher, runner and network-guard images by their digests and makes the server and the launcher itself, so the first start takes a few minutes longer than later ones:
 
    ```
-   docker compose --env-file images.env up -d
+   docker compose --env-file images.env -f docker-compose.images.yml up -d
    ```
 
-3. Open `http://<this machine>:3100` and create the owner account. By default Boss Man listens only on the machine itself (`127.0.0.1`). To reach it from another computer, add `BOSSMAN_BIND=0.0.0.0` to `images.env` and run step 3 again, and keep the port off the internet. Logging in over plain `http://` on your home network also needs `BOSSMAN_INSECURE_COOKIES=1` in `images.env`; without it, login needs HTTPS.
+3. Open `http://<this machine>:3100` and create the owner account. By default Boss Man listens only on the machine itself (`127.0.0.1`). To reach it from another computer, add `BOSSMAN_BIND=0.0.0.0` to `images.env` and run the start command in step 2 again, and keep the port off the internet. Logging in over plain `http://` on your home network also needs `BOSSMAN_INSECURE_COOKIES=1` in `images.env`; without it, login needs HTTPS.
 
 Company data (workspaces, agent sessions) lives in Docker volumes created by Boss Man's launcher, not in a folder you choose. List them with `docker volume ls`.
 
@@ -94,13 +98,13 @@ Until this change compose itself started the server and the launcher. An install
 2. In the old folder stop and remove the old containers, keeping volumes (never add `-v`):
 
    ```
-   docker compose --env-file images.env down
+   docker compose --env-file images.env -f docker-compose.images.yml down
    ```
 
 3. In the new folder start the new stack. The updater finds no server and no launcher, makes both from the release the new `images.env` pins (no backup or soak, nothing is serving), and the existing database, keys and company data are used as they are:
 
    ```
-   docker compose --env-file images.env up -d
+   docker compose --env-file images.env -f docker-compose.images.yml up -d
    ```
 
 Runners keep their company data (it is in volumes); the new launcher picks them up by label and starts new ones as before.
@@ -109,9 +113,65 @@ Runners keep their company data (it is in volumes); the new launcher picks them 
 
 Back up `config` (the master key) and `db-secret` (the database password) after the first install, and keep the copies somewhere other than this machine. They are small. Keep them together with the database volume's backup: if you lose only `db-secret`, `setup` would make a new password, which the existing database refuses, and the server could not start. If that happens, restore `db-secret` from your backup. Without a backup the database password cannot be recovered, and the database volume would have to be recreated, which loses its data.
 
+### Daily database backup, copy-off and restore (BOS-2817)
+
+Compose runs a small `backup` service (the database's own image). Every 15 minutes it checks the newest `daily-*.sql.gz` file in the `backups` volume and, when that is over 24 hours old, makes a new one. It keeps the newest 14 (`BOSSMAN_BACKUP_KEEP` in `images.env` changes that), writes the time to Settings → Server, and so the "backup overdue" card closes by itself once the first backup exists (within about 15 minutes of the first start). The updater's own pre-update dumps (`bossman-*.sql.gz`, the last 3) live in the same volume and are never deleted by it. The files stay on this machine, so a disk that fails takes them too: copy them off.
+
+An install made before this service existed gets it by downloading the new `docker-compose.images.yml` from the release page and running the start command again (section 3, step 2). Nothing else changes.
+
+These commands use the default project name `boss-man`, so the volumes are `boss-man_config`, `boss-man_db-secret` and `boss-man_backups`. If you set `COMPOSE_PROJECT_NAME`, use that name instead. Run them in the folder with the two files. Not yet confirmed on a real host.
+
+**Copy the two key volumes to a file** (the one-off tool image is the database image, which is already on this machine; if you changed `BOSSMAN_DB_IMAGE`, use that name):
+
+```
+docker run --rm -v boss-man_config:/from/config:ro -v boss-man_db-secret:/from/db-secret:ro -v "$PWD":/to pgvector/pgvector:0.8.7-pg17-bookworm tar czf /to/boss-man-keys.tgz -C /from .
+```
+
+**Copy the database backups to a folder** (needs the stack running):
+
+```
+docker compose --env-file images.env -f docker-compose.images.yml cp backup:/backups/. ./boss-man-backups
+```
+
+Move `boss-man-keys.tgz` and the `boss-man-backups` folder to another machine or an external disk. `boss-man-keys.tgz` holds the master key and the database password, so keep it as private as a password manager export. Keep the keys file together with the database backups from the same time.
+
+**Restore onto a fresh install.** Install as in sections 1 and 2 on the new machine, but do not run step 5 (start) yet, and put your two copies in the folder. Then, one at a time:
+
+1. Make the volumes with a new key (the next step replaces it):
+
+   ```
+   docker compose --env-file images.env -f docker-compose.images.yml run --rm setup
+   ```
+
+2. Put your saved keys over them:
+
+   ```
+   docker run --rm -v boss-man_config:/to/config -v boss-man_db-secret:/to/db-secret -v "$PWD":/from:ro pgvector/pgvector:0.8.7-pg17-bookworm tar xzpf /from/boss-man-keys.tgz -C /to
+   ```
+
+3. Start only the database. It makes its empty database with the restored password:
+
+   ```
+   docker compose --env-file images.env -f docker-compose.images.yml up -d db
+   ```
+
+4. Load the newest database file (replace the file name with yours from `boss-man-backups`):
+
+   ```
+   gunzip -c boss-man-backups/daily-2026-01-01-0300.sql.gz | docker compose --env-file images.env -f docker-compose.images.yml exec -T db psql -U bossman -d bossman
+   ```
+
+5. Start everything. The updater makes the server from the release `images.env` pins and migrates the restored data. Use the same release as the backup, or a newer one:
+
+   ```
+   docker compose --env-file images.env -f docker-compose.images.yml up -d
+   ```
+
+Then sign in with your old owner account. If step 4 says a table already exists, the database was not empty: stop, then follow "Start again from nothing" below and repeat from step 1.
+
 ### Settings
 
-Add any of these to `images.env`, then run step 3 again.
+Add any of these to `images.env`, then run the start command again (section 3, step 2).
 
 | Setting | What it does |
 |---|---|
@@ -128,27 +188,27 @@ The Boss Man runner image does not contain Claude Code. It is not ours to hand o
 
 ### Plain Linux
 
-Install Docker Engine from Docker's own instructions, then follow steps 1 to 4. Nothing else is needed. Check the kernel with `uname -r` (5.19 or newer).
+Install Docker Engine from Docker's own instructions, then follow sections 1 to 3. Nothing else is needed. Check the kernel with `uname -r` (5.19 or newer).
 
 ### Proxmox (a virtual machine)
 
-Create a **virtual machine**, not an LXC container (LXC is not supported). Give it at least 4 GB of RAM and a 64-bit Linux with a kernel 5.19 or newer, install Docker Engine inside it, and follow steps 1 to 4 inside the VM. Take a Proxmox snapshot of the VM after setup; the `config` volume lives inside the VM's disk, so the snapshot covers it. This section has not been run on a real Proxmox host yet.
+Create a **virtual machine**, not an LXC container (LXC is not supported). Give it at least 4 GB of RAM and a 64-bit Linux with a kernel 5.19 or newer, install Docker Engine inside it, and follow sections 1 to 3 inside the VM. Take a Proxmox snapshot of the VM after setup; the `config` volume lives inside the VM's disk, so the snapshot covers it. This section has not been run on a real Proxmox host yet.
 
 ### TrueNAS SCALE
 
-Use the machine's shell, in a **dataset-backed folder** for the two downloaded files, and follow steps 1 to 4. The compose file does not assume TrueNAS: it uses Docker volumes, which TrueNAS's Docker keeps in its own storage pool. TrueNAS SCALE versions differ in how they run Docker and Compose, so check `docker compose version` works first. For backups, snapshots and the self-update helper, the fuller worked example is [docs/06-install-truenas.md](06-install-truenas.md), which builds on the NAS. This section has not been run on a real TrueNAS machine for the image install.
+Use the machine's shell, in a **dataset-backed folder** for the two downloaded files, and follow sections 1 to 3. The compose file does not assume TrueNAS: it uses Docker volumes, which TrueNAS's Docker keeps in its own storage pool. TrueNAS SCALE versions differ in how they run Docker and Compose, so check `docker compose version` works first. For backups, snapshots and the self-update helper, the fuller worked example is [docs/06-install-truenas.md](06-install-truenas.md), which builds on the NAS. This section has not been run on a real TrueNAS machine for the image install.
 
 ### Docker Desktop (macOS, Windows) — preview
 
-Follow steps 1 to 4 in a terminal. The launcher finds where Docker keeps its data volume inside Docker Desktop's own virtual machine, so no shared folders are needed. This has not been tried yet.
+Follow sections 1 to 3 in a terminal. The launcher finds where Docker keeps its data volume inside Docker Desktop's own virtual machine, so no shared folders are needed. This has not been tried yet.
 
 ## If something goes wrong
 
 - **`required variable BOSSMAN_REGISTRY is missing`**: you left out `--env-file images.env`.
 - **The server cannot read `master.key`** or the database says its password file is missing: run step 1 first.
 - **A pull is refused or "denied"**: the package may be private, or you hit Docker Hub's limit (section 2). Run `docker login` for that registry.
-- **Start again from nothing** (this deletes everything, including your company data and keys): `docker compose --env-file images.env down -v`, then `docker rm -f launcher server-blue server-green updater` (the updater made those, so compose does not know them). Do not do this if you want to keep anything.
-- **Go back to the build install**: stop this one with `docker compose --env-file images.env down` (without `-v`, so the volumes stay) and follow [docs/00-first-time-install.md](00-first-time-install.md) in a different folder. The two installs do not share data.
+- **Start again from nothing** (this deletes everything, including your company data and keys): `docker compose --env-file images.env -f docker-compose.images.yml down -v`, then `docker rm -f launcher server-blue server-green updater` (the updater made those, so compose does not know them). Do not do this if you want to keep anything.
+- **Go back to the build install**: stop this one with `docker compose --env-file images.env -f docker-compose.images.yml down` (without `-v`, so the volumes stay) and follow [docs/00-first-time-install.md](00-first-time-install.md) in a different folder. The two installs do not share data.
 
 ## What the install changes on your machine
 
@@ -156,7 +216,7 @@ Only Docker objects: containers, networks and volumes whose names start with `bo
 
 ## Blue/green updates (the only way this install runs, since BOS-1227)
 
-Compose holds the database, a small Caddy `proxy` that owns the host ports and the name `server`, the `updater` and the one-shot `setup`. The updater makes `server-blue` (and later `server-green`) and the `launcher` itself, from the release `images.env` pins, and takes over from there. The updater swaps the server's two colours through the Docker API: it checks the signed release, backs up the database (the last 3 dumps stay in the `backups` volume), migrates while the old colour serves, starts the idle colour, hands over, moves the `server-live` alias on the private `front` network (the proxy dials it, so no file or reload is involved), watches for 15 minutes and switches back by itself if the new colour fails, then stops the old colour and keeps it as the standby. Going back to the standby's release needs no download; any other older release is refused. The updater replaces itself last, through a hand-over (`updater-next` must report in within 60 seconds, else it is removed and "Updater update failed" is recorded). Migrations must be expand-only so the old release runs on the new schema (docs/10-migrations.md). The first server and the launcher are made at the updater's first start with no backup and no soak. This has been tested against a fake Docker API only; **not yet confirmed on a real host** (the real-Docker proof runs in staging). The launcher is replaced one at a time: the new one is created, the old one stopped, the new one started and waited for; if it never becomes healthy it is removed and the old one starts again. Never delete the `backups` or `updater-state` volumes or remove the standby colour. Because compose no longer owns a server or launcher, `docker compose up -d` cannot bring an older one back; the updater, if compose starts it from an older digest than the release it recorded, moves itself forward again. `docker compose --env-file images.env down -v` (section "Start again from nothing") still deletes the volumes, and with them the updater's records.
+Compose holds the database, the daily `backup` service, a small Caddy `proxy` that owns the host ports and the name `server`, the `updater` and the one-shot `setup`. The updater makes `server-blue` (and later `server-green`) and the `launcher` itself, from the release `images.env` pins, and takes over from there. The updater swaps the server's two colours through the Docker API: it checks the signed release, backs up the database (the last 3 dumps stay in the `backups` volume), migrates while the old colour serves, starts the idle colour, hands over, moves the `server-live` alias on the private `front` network (the proxy dials it, so no file or reload is involved), watches for 15 minutes and switches back by itself if the new colour fails, then stops the old colour and keeps it as the standby. Going back to the standby's release needs no download; any other older release is refused. The updater replaces itself last, through a hand-over (`updater-next` must report in within 60 seconds, else it is removed and "Updater update failed" is recorded). Migrations must be expand-only so the old release runs on the new schema (docs/10-migrations.md). The first server and the launcher are made at the updater's first start with no backup and no soak. This has been tested against a fake Docker API only; **not yet confirmed on a real host** (the real-Docker proof runs in staging). The launcher is replaced one at a time: the new one is created, the old one stopped, the new one started and waited for; if it never becomes healthy it is removed and the old one starts again. Never delete the `backups` or `updater-state` volumes or remove the standby colour. Because compose no longer owns a server or launcher, `docker compose up -d` cannot bring an older one back; the updater, if compose starts it from an older digest than the release it recorded, moves itself forward again. `docker compose --env-file images.env -f docker-compose.images.yml down -v` (section "Start again from nothing") still deletes the volumes, and with them the updater's records.
 
 ## How the install is tested
 

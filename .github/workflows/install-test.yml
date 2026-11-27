@@ -146,6 +146,9 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write # attaches a file to the release and edits its title and notes; nothing else
+    outputs:
+      version: ${{ steps.join.outputs.version }}
+      result: ${{ steps.join.outputs.result }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -154,6 +157,7 @@ jobs:
           pattern: install-result-*
           path: results
       - name: Join, attach to the release, mark a failure
+        id: join
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           NEEDS_RESULT: ${{ needs.install.result }}
@@ -174,6 +178,9 @@ jobs:
                 machines: ($m | map({arch, result, minutes})) }' "${files[@]}" > install-result.json
           cat install-result.json
           result="$(jq -r .result install-result.json)"
+          # The site job below reads these and the saved file (a failed result is republished as failed, BOS-2787).
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "result=$result" >> "$GITHUB_OUTPUT"
           if [ "$result" = skipped ]; then echo "::notice::Nothing to install in v$version; no result attached."; exit 0; fi
           gh release upload "v$version" install-result.json --clobber --repo "$GITHUB_REPOSITORY"
           body="$(gh release view "v$version" --repo "$GITHUB_REPOSITORY" --json body --jq .body | grep -v '^Install test' || true)"
@@ -186,3 +193,59 @@ jobs:
             echo "::error::Install test failed for v$version; the release is marked."
             exit 1
           fi
+      - name: Keep the joined result for the site job
+        if: ${{ always() && steps.join.outputs.result != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-result-joined
+          path: install-result.json
+          retention-days: 7
+          if-no-files-found: error
+
+  # BOS-2787: republishes the website from the release's own commit with that release's result, pass or fail, so the install
+  # guide's "Last tested" line is never stale and nobody has to run scripts/publish-site.sh by hand. It runs after a failed
+  # result too (the guide then says the test failed). The publish settings are in the "site" environment (Settings >
+  # Environments > site): variables SITE_URL and CF_PAGES_PROJECT, secrets CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID
+  # (docs/18-website.md). Only main may use the environment (Deployment branches and tags: main only), and the secrets are
+  # environment secrets, not repository ones, so no other branch's workflow can read the token. Not set up (a fork with no
+  # website): a warning and a "Website NOT republished" line in the release notes, nothing published. A failed publish fails
+  # this job and adds "Website republish FAILED" to the release notes; the old page stays live. The Release Manager reads
+  # those lines on its "Release log: record" wake (CHANGELOG.md step 6); a workflow cannot message Boss Man itself.
+  site:
+    needs: record
+    if: ${{ always() && (needs.record.result == 'success' || needs.record.result == 'failure') && (needs.record.outputs.result == 'pass' || needs.record.outputs.result == 'fail') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: site
+    permissions:
+      contents: write # only to add a "republish FAILED" line to the release notes
+    concurrency:
+      group: republish-site
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.record.outputs.version }}
+      SITE_URL: ${{ vars.SITE_URL }}
+      CF_PAGES_PROJECT: ${{ vars.CF_PAGES_PROJECT }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: v${{ needs.record.outputs.version }}
+          fetch-depth: 0 # the sitemap dates need the history
+      - uses: actions/download-artifact@v4
+        with:
+          name: install-result-joined
+          path: ${{ runner.temp }}/joined
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v6
+      - run: pnpm install --frozen-lockfile --filter @boss-man/site...
+      - name: Republish the site with this result
+        env:
+          # The Cloudflare secrets are on this step only, so checkout, setup and pnpm install never see them.
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          INSTALL_RESULT_FILE: ${{ runner.temp }}/joined/install-result.json
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: scripts/republish-site-after-install.sh

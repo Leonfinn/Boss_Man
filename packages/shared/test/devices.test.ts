@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DeviceReport, isRenderableProfile, tallestReading, type DeviceMeasures } from "../src/devices.js";
+import { DeviceReport, isRenderableProfile, OwnerPreferences, OwnerPreferencesPatch, tallestReading, type DeviceMeasures } from "../src/devices.js";
 
 // Device profiles (BOS-641): the shape a browser reports, and the two rules a layout test reads.
 
@@ -40,5 +40,23 @@ describe("isRenderableProfile", () => {
 
   it("is false when no reading was after a scroll and the units disagree (a half report to trust nothing from)", () => {
     expect(isRenderableProfile({ readings: [reading({ units: { vh: 900, dvh: 800, svh: 800, lvh: 900, visual: 800 } })] })).toBe(false);
+  });
+});
+
+describe("OwnerPreferences (BOS-2689, shared with BOS-2669)", () => {
+  it("reads an empty answer as every default: single-letter keys on, no pinned pages, the keyboard tip not seen", () => {
+    expect(OwnerPreferences.parse({})).toEqual({ singleLetterKeys: true, pinnedPages: [], keyboardTipSeen: false });
+  });
+
+  it("a change names only what it changes, so a pin save doesn't turn the keys back on and vice versa", () => {
+    expect(OwnerPreferencesPatch.parse({ pinnedPages: [{ id: "updates" }] })).toEqual({ pinnedPages: [{ id: "updates" }] });
+    expect(OwnerPreferencesPatch.parse({ singleLetterKeys: false })).toEqual({ singleLetterKeys: false });
+    expect(OwnerPreferencesPatch.parse({ keyboardTipSeen: true })).toEqual({ keyboardTipSeen: true });
+  });
+
+  it("refuses a key switch that isn't a yes or no; the shortcut list's cap is checked with a plain reason", () => {
+    expect(OwnerPreferencesPatch.safeParse({ singleLetterKeys: "off" }).success).toBe(false);
+    // The list itself still has a cap when read back (the stored shape), so a bad row can never be drawn as valid.
+    expect(OwnerPreferences.safeParse({ pinnedPages: [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }, { id: "e" }, { id: "f" }, { id: "g" }] }).success).toBe(false);
   });
 });

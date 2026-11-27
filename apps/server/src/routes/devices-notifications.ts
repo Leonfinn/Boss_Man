@@ -10,12 +10,21 @@ import { z } from "zod";
 import type { deviceProfilesService } from "../services/device-profiles.js";
 import type { hostFactsService } from "../services/host-facts.js";
 import { NotifySettings, NtfyTopic, NtfyUrl, type notificationsService } from "../services/notifications.js";
+import type { ownerPreferencesService } from "../services/owner-preferences.js";
+import { ShortcutSaveError } from "../services/owner-preferences.js";
 import type { phoneApproveService } from "../services/phone-approve.js";
 import type { phoneLoginService } from "../services/phone-login.js";
 import type { secretsService } from "../services/secrets.js";
 
 const Uuid = z.string().uuid();
 const IdParam = z.object({ id: Uuid });
+
+/** Behind requireOwner the cookie is a live session, so this is the owner; anything else can't be reached. */
+async function requireOwnerId(currentOwnerId: (req: FastifyRequest) => Promise<string | null>, req: FastifyRequest): Promise<string> {
+  const ownerId = await currentOwnerId(req);
+  if (!ownerId) throw Object.assign(new Error("not_signed_in"), { statusCode: 401 });
+  return ownerId;
+}
 
 // Phone Approve (BOS-243 rules 3, 4, 8): an ntfy http action posts {"token": "..."} here, with no
 // session. JSON in and out, never a page; request logging is off and the body is never logged or
@@ -100,6 +109,29 @@ export function deviceRoutes(
     if (!ownerId) return reply.code(401).send({ error: "not_signed_in" });
     const { id } = IdParam.parse(req.params);
     return (await deviceProfiles.remove(ownerId, id)) ? { ok: true } : reply.code(404).send({ error: "not_found" });
+  });
+}
+
+// The owner's per-login preferences (BOS-2689, shared with BOS-2669): they follow the login, so a new
+// browser or a restart shows the same choice. Registers on the caller's owner scope (requireOwner).
+export function preferenceRoutes(
+  owner: FastifyInstance,
+  deps: {
+    ownerPreferences: ReturnType<typeof ownerPreferencesService>;
+    /** The signed-in owner's id, for rows kept per owner. Only valid behind requireOwner. */
+    currentOwnerId: (req: FastifyRequest) => Promise<string | null>;
+  },
+) {
+  const { ownerPreferences, currentOwnerId } = deps;
+  owner.get("/api/preferences", async (req) => ownerPreferences.get(await requireOwnerId(currentOwnerId, req)));
+  owner.patch("/api/preferences", async (req, reply) => {
+    try {
+      return await ownerPreferences.update(await requireOwnerId(currentOwnerId, req), req.body);
+    } catch (err) {
+      // A shortcut list that can't be saved comes back with the plain reason the page shows, not a generic error.
+      if (err instanceof ShortcutSaveError) return reply.code(400).send({ error: "invalid_request", message: err.message });
+      throw err;
+    }
   });
 }
 

@@ -25,6 +25,31 @@ describe("BOS-1498: agentsAtOnce and memoryLine", () => {
   });
 });
 
+describe("BOS-2802: memoryLine leads with how many agents the machine can run", () => {
+  const why = "6 GB: 6 agents at once and 1 check would need 11 GB; this 8 GB machine keeps 2 GB for the server and database.";
+  const small = lc({ slots: 1, memoryBytes: 6 * GB, agents: 6, ceilingBytes: 6 * GB, why, runners: [{ slug: "a", slots: 1, memoryBytes: 6 * GB }] });
+  it("with checks: agents alone, agents plus a check, what a check is, and what to lower", () => {
+    expect(memoryLine(small, "a", true)).toBe(
+      "This machine can run 4 agents at once, or 1 agent plus 1 check. (A check is an automated test run of code changes before they merge; only code projects need one.) Agents at once is set to 6: lower it to 1 to keep room for a check.",
+    );
+  });
+  it("without checks: agents only, no mention of a check, and what to lower", () => {
+    expect(memoryLine(small, "a", false)).toBe("This machine can run 4 agents at once. Agents at once is set to 6: lower it to 4.");
+    expect(memoryLine({ ...small, agents: 3 }, "a", false)).toBe("This machine can run 4 agents at once.");
+    // The owner's 6.7 GB machine: 4.7 GB for the runner, so 2 agents and no checks counted.
+    const owners = lc({ agents: 6, ceilingBytes: 4.7 * GB, memoryBytes: 4.7 * GB, why, runners: [] });
+    expect(memoryLine(owners, undefined, false)).toBe("This machine can run 2 agents at once. Agents at once is set to 6: lower it to 2.");
+  });
+  it("says nothing to lower when the settings fit, and when no check fits at all", () => {
+    const big = lc({ agents: 6, ceilingBytes: 30 * GB, why, runners: [{ slug: "a", slots: 3, memoryBytes: 22 * GB }] });
+    expect(memoryLine({ ...big, memoryBytes: 22 * GB }, "a", true)).toMatch(/^This machine can run 28 agents at once, or 25 agents plus 1 check\. \(A check is .*\)$/);
+    expect(memoryLine(lc({ agents: 1, ceilingBytes: 4 * GB, memoryBytes: 4 * GB, why, runners: [] }), undefined, true)).toMatch(/^This machine can run 2 agents at once, with no room for a check beside them\./);
+  });
+  it("falls back to the launcher's own line when it did not send the machine's limit", () => {
+    expect(memoryLine(lc({ agents: 6, why, runners: [] }), undefined, true)).toBe(why);
+  });
+});
+
 describe("limitReason", () => {
   it("has no reason when the limit is the setting", () => expect(limitReason(3, lc())).toBeNull());
   it("keeps the launcher's own reason", () => expect(limitReason(3, lc({ slots: 2, reason: "Not enough free memory." }))).toBe("Not enough free memory."));
