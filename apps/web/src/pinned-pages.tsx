@@ -8,8 +8,9 @@ import { Pin } from "lucide-react";
 import { PINNABLE_PAGES, SHORTCUTS_MAX, shortcutEntries, type SavedShortcut, type ShortcutEntry } from "@boss-man/shared";
 import { usePreferences } from "./preferences";
 import { NotFoundBlock } from "./components/NotFoundBlock";
+import { ShortcutsEditor } from "./shortcuts-editor";
 
-type Toast = { id: number; text: string; undo?: SavedShortcut[] };
+type Toast = { id: number; text: string; undo?: SavedShortcut[]; edit?: boolean };
 
 type Pinned = {
   saved: SavedShortcut[];
@@ -19,6 +20,8 @@ type Pinned = {
   /** Add the page, or take it out if it is already there. */
   toggle: (id: string) => Promise<void>;
   remove: (id: string) => Promise<void>;
+  /** Opens the Edit shortcuts dialog. */
+  openEditor: () => void;
 };
 
 const Ctx = createContext<Pinned | null>(null);
@@ -37,9 +40,9 @@ export function PinnedProvider({ companyId, children }: { companyId: string | un
   const seq = useRef(0);
   const timers = useRef<number[]>([]);
   useEffect(() => () => timers.current.forEach((t) => window.clearTimeout(t)), []);
-  const say = useCallback((text: string, undo?: SavedShortcut[]) => {
+  const say = useCallback((text: string, undo?: SavedShortcut[], edit?: boolean) => {
     const id = ++seq.current;
-    setToast({ id, text, undo });
+    setToast({ id, text, undo, edit });
     timers.current.push(window.setTimeout(() => setToast((t) => (t?.id === id ? null : t)), TOAST_MS));
   }, []);
   const failed = useCallback(() => say("Couldn't save your shortcuts. Check the connection and try again."), [say]);
@@ -67,7 +70,7 @@ export function PinnedProvider({ companyId, children }: { companyId: string | un
         return;
       }
       if (before.length >= SHORTCUTS_MAX) {
-        say(`You have ${SHORTCUTS_MAX} shortcuts, the most there's room for. Remove one first: press In shortcuts on its page.`);
+        say(`You have ${SHORTCUTS_MAX} shortcuts, the most there's room for. Remove one in Edit shortcuts first.`, undefined, true);
         return;
       }
       const next = [...before, { id }];
@@ -94,15 +97,45 @@ export function PinnedProvider({ companyId, children }: { companyId: string | un
     await write(to);
   };
 
+  // The Edit shortcuts dialog (ticket 3). Its Save writes the whole list at once and, if the server refuses, keeps
+  // the dialog open with its own message instead of a toast.
+  const [editing, setEditing] = useState(false);
+  const openEditor = useCallback(() => {
+    setToast(null);
+    setEditing(true);
+  }, []);
+  const closeEditor = useCallback(() => {
+    setEditing(false);
+    // Focus goes back to the Edit button (or, when the last shortcut is gone and the button with it, the menu).
+    window.setTimeout(() => (document.querySelector<HTMLElement>("[data-edit-shortcuts]") ?? document.querySelector<HTMLElement>("nav.side a"))?.focus(), 0);
+  }, []);
+  const saveFromEditor = useCallback(
+    async (list: SavedShortcut[]) => {
+      try {
+        await save({ pinnedPages: list });
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [save],
+  );
+
   return (
-    <Ctx.Provider value={{ saved, entries: shortcutEntries(saved, companyId), justAdded, toggle, remove }}>
+    <Ctx.Provider value={{ saved, entries: shortcutEntries(saved, companyId), justAdded, toggle, remove, openEditor }}>
       {children}
+      {editing && <ShortcutsEditor saved={saved} companyId={companyId} onSave={saveFromEditor} onClose={closeEditor} />}
       {toast && (
         <div className="pin-toast" role="status" aria-live="polite">
           <span>{toast.text}</span>
           {toast.undo && (
             <button type="button" className="pin-toast-undo" onClick={() => void undo(toast.undo!)}>
               Undo
+            </button>
+          )}
+          {toast.edit && (
+            <button type="button" className="pin-toast-undo" onClick={openEditor}>
+              Edit shortcuts
             </button>
           )}
         </div>

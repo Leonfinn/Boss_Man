@@ -6,7 +6,7 @@ import type { Company, Decision } from "../api";
 import { useMediaQuery } from "../hooks";
 import { usePinned } from "../pinned-pages";
 import { SHORTCUT_ICONS } from "../shortcut-icons";
-import { CircleHelp, TriangleAlert } from "lucide-react";
+import { CircleHelp, Pencil, TriangleAlert } from "lucide-react";
 import { Activity, BookOpen, ChevronDown, ChevronRight, ChevronsLeft, ChevronsRight, FolderGit2, Bell, GitMerge, Gavel, Handshake, Keyboard, LayoutDashboard, ListChecks, LogOut, Map, Menu as MenuIcon, MessageCircle, MessageSquare, Puzzle, Settings, ShieldCheck, Sparkles, Star, Users, Workflow as WorkflowIcon, type LucideIcon } from "lucide-react";
 import { art } from "../brand";
 import { SearchButton } from "./SearchPalette";
@@ -313,7 +313,15 @@ export function Sidebar(props: {
         <div className="nav-scroll">
         {shortcutRows.length > 0 && (
           <section className="side-shortcuts" aria-label="Shortcuts">
-            <p className="side-shortcuts-title">Shortcuts</p>
+            <div className="side-shortcuts-head">
+              <p className="side-shortcuts-title">Shortcuts</p>
+              {pinned && (
+                <button type="button" className="side-shortcuts-edit" data-edit-shortcuts aria-label="Edit shortcuts" onClick={() => pinned.openEditor()}>
+                  <Pencil size={13} strokeWidth={1.75} aria-hidden="true" />
+                  <span>Edit</span>
+                </button>
+              )}
+            </div>
             <ul>
               {shortcutRows.map((e) => {
                 const Icon = e.gone ? TriangleAlert : (SHORTCUT_ICONS[e.icon] ?? CircleHelp);
