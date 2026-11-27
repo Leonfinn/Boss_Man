@@ -1792,7 +1792,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       // unwoken for about a day); and a ready hold nobody released is asked about again after an hour, then raised as a
       // card after two.
       const holdWakes = held ? 0 : await step("hold wakes", () => wakeReadyHolds(db, t, (input) => opts.wake(input)), 0);
-      if (!held) await step("hold chase", () => chaseReadyHolds(db, t, { wake: (input) => opts.wake(input), alert: (input) => opts.alert(input) }), undefined);
+      if (!held) await step("hold chase", () => chaseReadyHolds(db, t, { wake: (input) => opts.wake(input), alert: opts.alert }), undefined);
       const goalChecks = await raiseDueGoalChecks(db, t);
       await opts.expireSkills?.();
       await opts.endUnconfirmedCancels(t);
