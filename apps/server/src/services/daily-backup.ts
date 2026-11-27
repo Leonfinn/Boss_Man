@@ -62,7 +62,7 @@ export type DailyBackupDeps = {
   raise: (input: Record<string, unknown>) => Promise<{ id: string } | null | undefined | unknown>;
   /** The host's filled compose prefix (`cd <checkout> && docker compose -f …`, DR-052), or null when the host hasn't reported one. */
   composeCmd?: () => Promise<string | null>;
-  /** True on an install from ready-made images (BOSSMAN_IMAGE_INSTALL=1, set by docker-compose.images.yml): the steps then name its files. */
+  /** True on an install from ready-made images (BOSSMAN_IMAGE_INSTALL=1, set by the updater for each server it makes): the steps then name its files. */
   imageInstall?: () => boolean;
   log?: (m: string) => void;
 };

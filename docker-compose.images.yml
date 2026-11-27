@@ -229,7 +229,6 @@ services:
         BOSSMAN_DATABASE_PASSWORD_FILE=/run/db/db_password
         BOSSMAN_MASTER_KEY_FILE=/run/config/master.key
         BOSSMAN_LAUNCHER=1
-        BOSSMAN_IMAGE_INSTALL=1
         BOSSMAN_DRAIN_MINUTES=${BOSSMAN_DRAIN_MINUTES:-30}
         BOSSMAN_LAUNCHER_URL=http://launcher:3105
         BOSSMAN_LAUNCHER_KEY_FILE=/run/launcher/key
