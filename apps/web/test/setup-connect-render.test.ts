@@ -88,14 +88,17 @@ describe.skipIf(!can)("setup connect step, real page (BOS-2815)", () => {
       } finally {
         await page.close();
       }
-    });
+      // Every step here waits for its own line or field to draw, so the limit is only the longest wait; it is raised
+      // because GitHub's machines are 2.5 to 5 times slower (and a squeeze run took about 100 s for the file).
+    }, 90_000);
 
     it(`${p.name}: a saved key shows connected, and step 7 says to go back until something is saved`, async () => {
       const page = await browser!.newPage({ viewport: { width: p.width, height: p.height }, deviceScaleFactor: p.ratio, hasTouch: p.touch, isMobile: p.touch });
       try {
         await stubApi(page, base(3, { "/api/companies/c1/grants": [{ id: "g1", envName: "ANTHROPIC_API_KEY", secretId: "s1", secretName: "App Co Anthropic API key", hint: "••••abcd", deployTargetId: null, agentIds: [] }] }));
         await page.goto(`${server!.resolvedUrls.local[0]}#setup`, { waitUntil: "networkidle" });
-        const status = page.getByRole("status").first();
+        // Wait for the line itself, not for any first status region: a "Loading…" one can come first and turn over.
+        const status = page.getByRole("status").filter({ hasText: "Your agents can run on" });
         await status.waitFor({ timeout: 15_000 });
         expect(await status.textContent()).toContain("Connected");
         expect(await status.textContent()).toContain("Anthropic API key");
@@ -124,6 +127,6 @@ describe.skipIf(!can)("setup connect step, real page (BOS-2815)", () => {
       } finally {
         await p7.close();
       }
-    });
+    }, 90_000); // two pages, each waited on by its own line; see the first test's note
   }
 });
