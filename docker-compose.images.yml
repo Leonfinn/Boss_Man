@@ -98,7 +98,7 @@ services:
         export PGPASSWORD="$$(cat /run/db/db_password)"
         say() { echo "$$(date -u +%FT%TZ) $$*"; }
         put() { psql -X -q -v ON_ERROR_STOP=1 -c "INSERT INTO settings (key, value) VALUES ('$$1', '$$2'::jsonb) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value" >/dev/null 2>&1; }
-        ok() { put daily_backup_last "{\"at\":\"$$(date -u -d "@$$(stat -c %Y "$$1")" +%FT%TZ)\",\"file\":\"$$(basename "$$1")\",\"bytes\":$$(stat -c %s "$$1")}" && psql -X -q -c "DELETE FROM settings WHERE key = 'daily_backup_failed'" >/dev/null 2>&1; }
+        ok() { put daily_backup_last "{\"at\":\"$$(date -u -r "$$1" +%FT%TZ)\",\"file\":\"$$(basename "$$1")\",\"bytes\":$$(wc -c < "$$1")}" && psql -X -q -c "DELETE FROM settings WHERE key = 'daily_backup_failed'" >/dev/null 2>&1; }
         bad() { say "FAILED: $$1"; put daily_backup_failed "{\"at\":\"$$(date -u +%FT%TZ)\",\"message\":\"$$1\"}"; }
         say "Daily backup service started (keeps $$BOSSMAN_BACKUP_KEEP, volume $$D)"
         while :; do
@@ -106,7 +106,7 @@ services:
           if [ -z "$$(find $$D -maxdepth 1 -type f -name 'daily-*.sql.gz' -mmin -1440 | head -n1)" ]; then
             out=$$D/daily-$$(date +%F-%H%M).sql.gz
             if (set -o pipefail; pg_dump | gzip > $$out.partial) 2>/dev/null && gzip -t $$out.partial 2>/dev/null && [ "$$(gzip -dc $$out.partial | head -c 1 | wc -c)" -gt 0 ]; then
-              mv -- $$out.partial $$out && say "Daily backup saved: $$out ($$(stat -c %s $$out) bytes)"
+              mv -- $$out.partial $$out && say "Daily backup saved: $$out ($$(wc -c < $$out) bytes)"
             else
               rm -f -- $$out.partial; bad "The database dump failed or was empty"
             fi

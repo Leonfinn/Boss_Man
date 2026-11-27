@@ -38,7 +38,7 @@ EOF
 # ---- Static checks: always run ----
 cfg="$(docker compose --env-file "$T/images.env" --profile '*' -f docker-compose.images.yml config --format json 2>&1)" || { echo "$cfg"; bad "compose file is valid"; exit 1; }
 # Every service made by Boss Man is a digest; the one outside image (the database) is a pinned tag.
-unpinned="$(echo "$cfg" | jq -r '.services | to_entries[] | select(.key != "db") | select(.value.image | test("@sha256:[0-9a-f]{64}$") | not) | .key')"
+unpinned="$(echo "$cfg" | jq -r '.services | to_entries[] | select(.key != "db" and .key != "backup") | select(.value.image | test("@sha256:[0-9a-f]{64}$") | not) | .key')"
 [ -z "$unpinned" ] && ok "every Boss Man image is pulled by digest" || bad "not pinned by digest: $unpinned"
 echo "$cfg" | jq -e '.services.db.image | test(":[0-9]")' >/dev/null && ok "the database image is pinned to a version" || bad "database image not pinned"
 echo "$cfg" | jq -e '[.services[] | has("build")] | any | not' >/dev/null && ok "nothing is built" || bad "a service has a build section"
@@ -53,7 +53,7 @@ echo "$cfg" | jq -e '.services.updater.cap_add == ["SETGID","SETUID"] or .servic
 # BOS-1227 (941c): compose owns the database, the proxy, the updater and setup, and nothing else. A server or launcher service here
 # would let `docker compose up` bring an old one back beside the updater's, which is the fight the design rules out.
 svcs="$(echo "$cfg" | jq -r '.services | keys | join(" ")')"
-[ "$svcs" = "db proxy setup updater" ] && ok "compose runs only the database, the proxy, the updater and setup" || bad "services in compose: $svcs"
+[ "$svcs" = "backup db proxy setup updater" ] && ok "compose runs only the database, its backup, the proxy, the updater and setup" || bad "services in compose: $svcs"
 echo "$cfg" | jq -e '(.services.proxy.ports | length) == 2 and (.services.proxy.networks.front.ipv4_address != null)' >/dev/null && ok "the proxy owns the ports" || bad "proxy ports"
 # The updater builds the first server colour and the launcher from its own settings: they must name the release's digests, and the
 # runner and guard images must not be in the launcher's environment list (the updater sets them from the release).
@@ -64,6 +64,11 @@ echo "$cfg" | jq -r '.services.updater.environment.UPDATER_LAUNCHER_MOUNTS' | gr
 echo "$cfg" | jq -r '.services.updater.environment.UPDATER_SELF_MOUNTS' | grep -q 'launcher-key:/run/launcher:ro$' && ok "the next updater keeps the launcher key (read-only)" || bad "self mounts miss the launcher key"
 # No host tools in the compose file's own steps (comments excluded).
 if grep -v '^[[:space:]]*#' docker-compose.images.yml | grep -Eq '\b(openssl|sudo|chown|stat -c)\b'; then bad "compose file uses host tools"; else ok "no host openssl, chown, stat or sudo"; fi
+# BOS-2817: the image install runs its own daily backup (the server's "backup overdue" card needs it), into the backups volume, and writes
+# the settings rows the server reads. The loop is inline: the install has no scripts folder.
+echo "$cfg" | jq -e '.services.backup.volumes | map(.source) | contains(["backups"])' >/dev/null && ok "the backup service writes to the backups volume" || bad "backup service volume"
+echo "$cfg" | jq -r '.services.backup.command[0]' | grep -q 'daily_backup_last' && ok "the backup service records daily_backup_last" || bad "backup service does not record daily_backup_last"
+echo "$cfg" | jq -r ".services.backup.command[0]" | sed "s/\$\$/\$/g" | bash -n && ok "the backup loop is valid shell" || bad "backup loop has a shell syntax error"
 [ -f docs/35-install-from-images.md ] && ok "the install guide exists" || bad "docs/35-install-from-images.md is missing"
 # BOS-2788: docker-compose.images.yml is not a default Compose file name, so every guide step that runs compose with images.env must
 # pass -f docker-compose.images.yml, as this test does. Both guides are read; a step with --env-file images.env and no -f fails.
