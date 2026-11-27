@@ -108,7 +108,7 @@ export function searchAddress(p: { q: string; kind?: SearchKind | ""; since?: Se
   return `search?${qs}`;
 }
 
-export function SearchPalette({ companyId, go }: { companyId: string | undefined; go: (to: string) => void }) {
+export function SearchPalette({ companyId, go, prefix }: { companyId: string | undefined; go: (to: string) => void; prefix?: string | null }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
   const [results, setResults] = useState<SearchResults | null>(null);
@@ -239,7 +239,7 @@ export function SearchPalette({ companyId, go }: { companyId: string | undefined
         </div>
         <div id="search-results" role="listbox" aria-label="Results" className="search-results">
           {!companyId && <p className="muted">Pick a company first.</p>}
-          {companyId && term.length < SEARCH_MIN && <p className="muted">Type at least {SEARCH_MIN} letters, or a ticket number like BOS-12.</p>}
+          {companyId && term.length < SEARCH_MIN && <p className="muted">Type at least {SEARCH_MIN} letters, or a ticket number like {prefix || "T"}-12.</p>}
           {showRecent && (
             <section aria-label="Recent searches">
               <h3>

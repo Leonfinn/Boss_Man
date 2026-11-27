@@ -233,6 +233,19 @@ describe("Blocked on an open card is freed when the card is answered (BOS-1209)"
     for (const id of [withCard.id, withDate.id, merged.id, live.id]) expect((await c.row(id)).systemState).toBe("blocked");
   });
 
+  it("BOS-2871: an unassigned stranded ticket is freed and the rest of the pass still runs", async () => {
+    const c = await setup();
+    const old = new Date(Date.now() - 3_600_000);
+    const stranded = await c.ticket({ assigneeAgentId: null });
+    await c.put(stranded.id, { systemState: "blocked", stateChangedAt: old, assigneeAgentId: null });
+    // On the old code the name lookup compared the uuid column with "" and the whole pass rejected.
+    const pass = await c.sweeps.run();
+    expect(pass.failedSteps).toEqual([]);
+    const r = await c.row(stranded.id);
+    expect(r.systemState).toBe("ready");
+    expect(r.stateNote).toBe("Ready: nothing is holding it any more. It has no assignee yet.");
+  });
+
   it("refuses a note that names a colleague with only a date behind it, and accepts it once their ticket is linked (R36)", async () => {
     const c = await setup();
     const other = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Brian - Release Manager" })).json();

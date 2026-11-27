@@ -1138,6 +1138,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           // triage, so a note must not talk one into publishing it. Only the owner can tick it on in the app (BOS-991).
           // The guard also runs when this call rewrites the public text of a feature that is already on the portal
           // (BOS-1420), judged on the feature as it would be left, since visitors see that text too.
+          let tickRefused = false;
           if (portalVisibleIn === true || input.publicSummary !== undefined || input.publicTitle !== undefined) {
             const target = await feedback.feature(input.featureId, scope.companyId);
             const facts = await feedback.portalFacts(scope.companyId, target.areaId, target.driverScores as Record<string, number | null>);
@@ -1159,7 +1160,16 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
                 keepOffPortal: input.keepOffPortal ?? target.keepOffPortal,
                 hasPublicSummary: !!publicSummary?.trim(),
               });
-              if (verdict.reason === "security") return fail("This feature reads as security work, so it stays off the feedback portal. Only the owner can put it there, in the Features page.");
+              if (verdict.reason === "security") {
+                const refusal = "This feature reads as security work, so it stays off the feedback portal. Only the owner can put it there, in the Features page.";
+                // Text visitors would see at once (the feature is already on the portal and this call rewrites its public
+                // text) is refused whole, saving nothing. A refused tick alone drops only the tick (BOS-2850).
+                const publicTextShownNow = target.portalVisible && !target.keepOffPortal && (input.publicSummary !== undefined || input.publicTitle !== undefined);
+                if (publicTextShownNow || portalVisibleIn !== true) return fail(refusal);
+                delete (changes as { portalVisible?: boolean }).portalVisible;
+                tickRefused = true;
+                if (!Object.keys(changes).length) return fail(refusal);
+              }
             }
           }
           const f = await feedback.updateFeature(input.featureId, changes, scope.companyId);
@@ -1171,10 +1181,11 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
             input.status !== undefined ? `status ${input.status}` : null,
             input.publicSummary !== undefined ? (input.publicSummary ? "wrote its public summary" : "cleared its public summary") : null,
             input.publicTitle !== undefined ? (input.publicTitle ? "wrote its public title" : "cleared its public title") : null,
-            portalVisibleIn !== undefined ? (portalVisibleIn ? "put it on the feedback portal" : "took it off the feedback portal") : null,
+            portalVisibleIn !== undefined && !tickRefused ? (portalVisibleIn ? "put it on the feedback portal" : "took it off the feedback portal") : null,
             input.keepOffPortal === true ? `kept it off the portal (sensitive${input.keepOffReason ? `: ${input.keepOffReason}` : ""})` : null,
           ].filter(Boolean);
           await record(db, { companyId: scope.companyId, agentId: scope.agentId, kind: "feature_updated", summary: `${me.name} placed "${f.title}" on the roadmap: ${parts.join(", ")}. ${input.reason}` });
+          if (tickRefused) return text(`Updated "${f.title}": ${parts.join(", ")}. The portal tick was refused and portalVisible is unchanged: this feature reads as security work, so it stays off the feedback portal. Only the owner can put it there, in the Features page.`);
           return text(`Updated "${f.title}": ${parts.join(", ")}.`);
         }
         if (input.action === "size") {

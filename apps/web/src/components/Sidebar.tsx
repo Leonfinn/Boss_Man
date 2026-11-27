@@ -177,6 +177,8 @@ export function Sidebar(props: {
   decisions: Decision[];
   /** (BOS-969) What needs the owner now, from the same server figure the Decisions page heading shows. */
   decisionsTally?: { open: number; waiting: number } | null;
+  /** (BOS-2818) Setup still open: its count, for the link at the top of the menu. */
+  setupOpen?: { done: number; total: number } | null;
   /** (BOS-1485) The same tally for every company, for the company switcher. */
   companyTallies?: Record<string, { open: number; waiting: number }>;
   unread: number;
@@ -313,6 +315,11 @@ export function Sidebar(props: {
       </div>
       <div id="nav-groups" className={`nav-groups${menu ? " open" : ""}`}>
         <div className="nav-scroll">
+        {props.setupOpen && !props.collapsed && (
+          <a className="side-setup" href="#/setup">
+            Setup: {props.setupOpen.done} of {props.setupOpen.total}
+          </a>
+        )}
         {shortcutRows.length > 0 && (
           <section className="side-shortcuts" aria-label="Shortcuts">
             <div className="side-shortcuts-head">

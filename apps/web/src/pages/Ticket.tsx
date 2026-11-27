@@ -942,12 +942,15 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             </span>
           </label>
 
-          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14 }}>
-            <input type="checkbox" checked={!!t.urgent} disabled={busy} onChange={(e) => patch({ urgent: e.target.checked })} />
-            <span>
-              Priority 1<span className="muted">: goes first everywhere (runs past the subscription limit, first in the check queue and the merge line, keeps its place after a send-back) and you get one page when it has merged and is ready to put live</span> <code className="mono">quota hold</code>
-            </span>
-          </label>
+          <details className="more-options" open={!!t.urgent || undefined}>
+            <summary>More options</summary>
+            <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14 }}>
+              <input type="checkbox" checked={!!t.urgent} disabled={busy} onChange={(e) => patch({ urgent: e.target.checked })} />
+              <span>
+                Priority 1<span className="muted">: goes first everywhere (runs past the subscription limit, first in the check queue and the merge line, keeps its place after a send-back) and you get one page when it has merged and is ready to put live</span>
+              </span>
+            </label>
+          </details>
 
           {/* Done when to Changes are rows of one Details card (BOS-1195), each with a count on the right;
               Review, the description and the conversation stay their own cards, and so does the live-fix note. */}
@@ -1224,6 +1227,11 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
               </select>
               {open.length > 0 && t.systemState === "review" && <small className="muted" style={{ display: "block" }}>Reviewed by {who}.</small>}
             </dd>
+          </dl>
+          {/* Day-1 pages (BOS-2828): Risk, Size and Watcher sit under a fold, each with its own "?" line. It starts open when a watcher is set. */}
+          <details className="more-options" open={!!t.watcherAgentId || undefined}>
+            <summary>More options</summary>
+          <dl>
             <dt>
               <label htmlFor="t-risk">Risk</label>
               <FieldHelp label="Risk">
@@ -1287,6 +1295,9 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                 </>
               )}
             </dd>
+          </dl>
+          </details>
+          <dl>
             <dt>Check again</dt>
             <dd>
               {mon ? (

@@ -68,10 +68,17 @@ Remember to put an empty line after any line you add outside this comment, so th
 
 <!-- Docs checked up to 688f2bc5a6c5f50810649a7cfa7af9e4bcec5d37 -->
 
+## 27 November 2026
+
+- Pin the pages you open most. Press **Add to shortcuts** beside the title of any page inside Product, Team, Activity or Settings (for example Settings → Server and runner → Updates). The page then appears in a Shortcuts section at the top of the menu, on every device you sign in from. You can have up to 6. Press the button again, or Undo, to take it out. The menu is unchanged until you add one.
+- **Edit** beside Shortcuts lets you rename, reorder or remove them. Nothing changes until you press Save.
+- With the keyboard, press g then 1 to open your first shortcut, g then 2 for the second, and so on up to 6. The numbers follow the order in the menu. Press ? to see which number opens which page.
+
 ## 26 November 2026
 
 **Not in an image yet:** comes with the next weekly image (Tuesdays).
 
+- Keyboard shortcuts are easier to find. On a computer, press the keyboard button at the bottom of the menu, between Settings and Log out (or press ?), to see them, starting with the keys for the page you're on. Hover over a menu item to see its key, for example "Decisions (g then i)". Don't want single-letter keys, for example because you use voice control? Untick "Use single-letter keys" in Settings → Account → Keyboard shortcuts. The choice follows your login to every browser, and Ctrl K for search always works.
 - A new beta release now goes out by itself every Tuesday morning (10:00 UTC), with that week's changes in its notes, as long as the newest code has passed its checks and its images are ready. If there is nothing new or nothing ready, it skips that week. You don't need to press anything.
 - Boss Man is now in beta, no longer alpha. The website, the GitHub README and the contribution and security pages say so. You can install it from the ready-made Docker images on the GitHub releases page, or build it from the source.
 - In the company brief (Wiki → Company brief), the "In flight" list now marks an agent whose run is on a ticket it does not own, review or have a card on: the line ends "(not assigned: woken by …)" with the reason it was started, so a stray run stands out. Runs on an agent's own tickets look as before.
@@ -92,6 +99,7 @@ Remember to put an empty line after any line you add outside this comment, so th
 - Opening a milestone on the Roadmap shows a "What's left" list: every unfinished ticket in it, grouped as Waiting for you, Held up, Needs a look, Running or Being built, with who has it and what it waits on. A ticket held only by one of your cards has an Open card button.
 - Each milestone on the Roadmap has a "CEO manages At risk" button, off by default. Turn it on and, when that milestone turns At risk or Late, the CEO is woken once to plan a remedy. It is not woken again while the status stays the same. A milestone with it off never wakes the CEO. "CEO manages At risk for all" turns it on for every milestone at once, and tells you first that each remedy costs a CEO run.
 - The milestone's "CEO manages At risk" buttons read plainly: "Turn it on" where it said "Take it on", and "Turn it off" where it said "Turning it off".
+- When the CEO manages a milestone that is At risk or Late, the CEO's plan for it now shows on the Roadmap, just under the line that says why the milestone is at risk. The plan goes away by itself once the milestone is back on track.
 - After you answer a card and get its result, later corrections and updates about it also reach your chat, flagged, for 24 hours or until the matter is closed. A "still checking" note stays on the ticket.
 - On the Merge queue page, a change whose own check has passed and that is now waiting for GitHub's tests shows a blue "On GitHub" tag instead of a grey "Waiting", with how long it has been there. Its line says what time its check passed.
 - When a server or runner update fails, Boss Man opens an urgent ticket to find the cause, assigns it to your infrastructure engineer (or the CEO if you have none) and wakes them straight away. The Updates status says "Being looked into" only once their work has started. Until then it says "Not picked up yet" and who was woken when. If nobody starts within 15 minutes, the CEO is woken again. A second failure of the same update is added to the same ticket.

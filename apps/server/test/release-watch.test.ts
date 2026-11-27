@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { openPglite } from "../src/db/client.js";
+import { settings } from "../src/db/schema.js";
 import { compareVersions, releaseWatchService, summarize } from "../src/services/release-watch.js";
 import type { NotifyInput } from "../src/services/notifications.js";
 
@@ -140,5 +141,126 @@ describe("release watch", () => {
     const t = await setup([rel("v0.1.0-beta.3")], { ...IMAGE_ENV, BOSSMAN_VERSION: "0.1.0-beta.3" });
     expect(await t.svc.check()).toMatchObject({ active: true, available: null });
     expect(t.sent).toEqual([]);
+  });
+});
+
+// BOS-2713: the Install button's server half. The updater is a fake that answers on its private address.
+describe("install through the updater", () => {
+  const SERVER_DIGEST = `sha256:${"7".repeat(64)}`;
+  let shared: Awaited<ReturnType<typeof openPglite>>["db"] | undefined;
+  let closeShared: (() => Promise<void>) | undefined;
+  afterAll(async () => {
+    await closeShared?.();
+    shared = undefined;
+  });
+  const LINKED = { ...IMAGE_ENV, BOSSMAN_UPDATER_URL: "http://updater:3106", BOSSMAN_UPDATER_KEY_FILE: "/run/updater/key" };
+
+  async function linkedSetup(env: Record<string, string> = LINKED, opts: { moveStatus?: number; releaseJson?: unknown; releaseStatus?: number; updaterDown?: boolean } = {}) {
+    // One database for the whole block (each PGlite takes about 0.7 CPU-seconds and real memory); the stored watch row is cleared per call.
+    if (!shared) {
+      const o = await openPglite();
+      shared = o.db;
+      closeShared = o.close;
+    }
+    const db = shared;
+    await db.delete(settings);
+    const calls: Array<{ url: string; method: string; auth: string | null; body: unknown }> = [];
+    let status: Record<string, unknown> = { stage: "idle", version: null, error: null, report: null };
+    const svc = releaseWatchService(db, {
+      env,
+      readKey: () => "the-key\n",
+      now: () => new Date("2026-11-26T10:00:00Z"),
+      fetch: (async (url: string, init?: RequestInit) => {
+        const u = String(url);
+        const headers = new Headers(init?.headers);
+        calls.push({ url: u, method: init?.method ?? "GET", auth: headers.get("authorization"), body: init?.body ? JSON.parse(String(init.body)) : undefined });
+        if (u.startsWith("https://api.github.com/")) return new Response(JSON.stringify([rel("v0.1.0-beta.3")]), { status: 200 });
+        if (u.includes("/releases/download/")) return new Response(JSON.stringify(opts.releaseJson ?? { images: [{ name: "boss-man-launcher", digest: `sha256:${"1".repeat(64)}` }, { name: "boss-man-server", digest: SERVER_DIGEST }] }), { status: opts.releaseStatus ?? 200 });
+        if (opts.updaterDown) throw new Error("ECONNREFUSED");
+        if (u.endsWith("/status")) return new Response(JSON.stringify(status), { status: 200 });
+        if (u.endsWith("/move")) return new Response(JSON.stringify(opts.moveStatus === 409 ? { error: "busy" } : opts.moveStatus === 400 ? { error: "bad_request", message: "version is not a release number." } : { accepted: true }), { status: opts.moveStatus ?? 202 });
+        if (u.endsWith("/ack")) return new Response(JSON.stringify(status), { status: 200 });
+        return new Response("{}", { status: 404 });
+      }) as unknown as typeof fetch,
+      notify: async () => undefined,
+      hasNtfy: async () => false,
+    });
+    return { svc, calls, setStatus: (s: Record<string, unknown>) => void (status = s) };
+  }
+
+  it("sends the updater exactly the version on offer and the server digest from release.json, with the key", async () => {
+    const t = await linkedSetup();
+    await t.svc.check();
+    await t.svc.install("0.1.0-beta.3");
+    const move = t.calls.find((c) => c.url.endsWith("/move"))!;
+    expect(move).toMatchObject({ url: "http://updater:3106/move", method: "POST", auth: "Bearer the-key", body: { version: "0.1.0-beta.3", serverDigest: SERVER_DIGEST } });
+    expect(Object.keys(move.body as object).sort()).toEqual(["serverDigest", "version"]);
+    expect(t.calls.find((c) => c.url.includes("/releases/download/"))!.url).toBe("https://github.com/example-org/boss-man/releases/download/v0.1.0-beta.3/release.json");
+  });
+
+  it("refuses a version that is not the one on offer, and does not call the updater", async () => {
+    const t = await linkedSetup();
+    await t.svc.check();
+    await expect(t.svc.install("9.9.9")).rejects.toMatchObject({ status: 409 });
+    await expect(t.svc.install(undefined)).rejects.toMatchObject({ status: 409 });
+    expect(t.calls.some((c) => c.url.endsWith("/move"))).toBe(false);
+  });
+
+  it("an install made before the link existed says so, and never calls anything", async () => {
+    const t = await linkedSetup(IMAGE_ENV);
+    const v = await t.svc.check();
+    expect(v).toMatchObject({ active: true, install: { linked: false, updater: null } });
+    await expect(t.svc.install("0.1.0-beta.3")).rejects.toThrow(/before the Install button existed/);
+    expect(t.calls.filter((c) => !c.url.startsWith("https://api.github.com/"))).toEqual([]);
+  });
+
+  it("a source install offers and does nothing", async () => {
+    const t = await linkedSetup({});
+    await expect(t.svc.install("0.1.0-beta.3")).rejects.toMatchObject({ status: 409 });
+    expect(t.calls).toEqual([]);
+  });
+
+  it("reads plainly when the updater is busy, refuses, or can't be reached; and when release.json is missing or has no server image", async () => {
+    const busy = await linkedSetup(LINKED, { moveStatus: 409 });
+    await busy.svc.check();
+    await expect(busy.svc.install("0.1.0-beta.3")).rejects.toThrow(/already running/);
+    const refused = await linkedSetup(LINKED, { moveStatus: 400 });
+    await refused.svc.check();
+    await expect(refused.svc.install("0.1.0-beta.3")).rejects.toThrow(/not a release number/);
+    const down = await linkedSetup(LINKED, { updaterDown: true });
+    await down.svc.check();
+    await expect(down.svc.install("0.1.0-beta.3")).rejects.toThrow(/did not answer/);
+    const gone = await linkedSetup(LINKED, { releaseStatus: 404 });
+    await gone.svc.check();
+    await expect(gone.svc.install("0.1.0-beta.3")).rejects.toThrow(/Couldn't download/);
+    const noServer = await linkedSetup(LINKED, { releaseJson: { images: [{ name: "boss-man-launcher", digest: `sha256:${"1".repeat(64)}` }] } });
+    await noServer.svc.check();
+    await expect(noServer.svc.install("0.1.0-beta.3")).rejects.toThrow(/does not name a server image/);
+    // Without a usable release.json nothing is sent to the updater at all.
+    expect(gone.calls.some((c) => c.url.endsWith("/move"))).toBe(false);
+    expect(noServer.calls.some((c) => c.url.endsWith("/move"))).toBe(false);
+  });
+
+  it("shows the updater's progress and report in the line, quietly empty when it can't be asked", async () => {
+    const t = await linkedSetup();
+    t.setStatus({ stage: "soaking", version: "0.1.0-beta.3", error: null, report: null });
+    expect(await t.svc.check()).toMatchObject({ install: { linked: true, updater: { stage: "soaking", version: "0.1.0-beta.3" } } });
+    t.setStatus({ stage: "rolled-back", version: "0.1.0-beta.3", error: { code: "colour_unhealthy", message: "It did not start." }, report: { level: "problem", text: "Went back.", acknowledged: false } });
+    expect(await t.svc.status()).toMatchObject({ install: { updater: { stage: "rolled-back", error: { message: "It did not start." }, report: { level: "problem", text: "Went back." } } } });
+    const down = await linkedSetup(LINKED, { updaterDown: true });
+    expect(await down.svc.status()).toMatchObject({ install: { linked: true, updater: null } });
+  });
+
+  it("acknowledge tells the updater, with the key and no body", async () => {
+    const t = await linkedSetup();
+    await t.svc.acknowledge();
+    expect(t.calls.find((c) => c.url.endsWith("/ack"))).toMatchObject({ method: "POST", auth: "Bearer the-key", body: undefined });
+  });
+
+  it("refuses an updater address that is not a plain private http host", async () => {
+    for (const url of ["https://updater:3106", "http://updater:3106/x", "http://user@evil.example/", "ftp://updater"]) {
+      const t = await linkedSetup({ ...LINKED, BOSSMAN_UPDATER_URL: url });
+      expect(await t.svc.status()).toMatchObject({ install: { linked: false } });
+    }
   });
 });
