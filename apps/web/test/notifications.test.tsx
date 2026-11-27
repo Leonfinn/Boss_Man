@@ -31,6 +31,14 @@ describe("notifications", () => {
     expect(screen.queryByRole("button", { name: /Show all/ })).toBeNull();
   });
 
+  // BOS-2853: a chat reply mirrored into the feed can hold a fenced command; the feed shows the command, never the ``` lines.
+  it("shows a fenced command in a mirrored reply without the fence lines", () => {
+    vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
+    render(<Notifications feed={{ items: [notice("Cleared it:\n\n```sh\ndocker rm -f old\n```")], unread: 1 }} onChanged={() => {}} />);
+    expect(screen.queryByText(/```/)).toBeNull();
+    expect(screen.getByText(/docker rm -f old/)).toBeTruthy();
+  });
+
   it("loads the next 50 before the oldest shown on Show older, then hides the button on a short page", async () => {
     const mk = (i: number): Notice => ({ ...notice(`b${i}`), id: `n${i}`, title: `Notice ${i}`, createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, 100 - i)).toISOString() });
     const first = Array.from({ length: 50 }, (_, i) => mk(i));
