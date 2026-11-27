@@ -87,7 +87,7 @@ export type Work = "docs" | "code";
 export function WorkChoice({ work, onWork }: { work: Work; onWork: (w: Work) => void }) {
   return (
     <fieldset className="work-choice" style={{ border: 0, padding: 0, margin: 0, display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(min(240px, 100%), 1fr))" }}>
-      <legend style={{ fontWeight: 600, marginBottom: 8 }}>What will your team work on?</legend>
+      <legend className="sr-only">What will your team work on?</legend>
       {(
         [
           { id: "docs", title: "Documents, research and writing", note: "Most teams" },
