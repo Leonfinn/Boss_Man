@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CONNECT_OPTIONS, FUNDING_PROVIDERS, connectValueProblem, HARNESSES, harnessLoadsSkills, isClaudeModel, modelFitProblem } from "../src/funding.js";
+import { CONNECT_OPTIONS, FUNDING_PROVIDERS, connectValueProblem, connectSetsUpElsewhere, connectSaves, HARNESSES, harnessLoadsSkills, isClaudeModel, modelFitProblem } from "../src/funding.js";
 
 describe("the connect step's list of ways to pay (BOS-2815)", () => {
   it("covers every provider an agent can run on, with a plan and a key by each other where both exist", () => {
@@ -10,6 +10,26 @@ describe("the connect step's list of ways to pay (BOS-2815)", () => {
     // Each provider's plan comes straight before its API key, so neither is set apart.
     const ids = CONNECT_OPTIONS.map((o) => o.id);
     expect(ids).toEqual(["claude-plan", "anthropic-key", "chatgpt-plan", "openai-key", "ollama-plan", "ollama-key", "synthetic", "openrouter", "other"]);
+  });
+
+  it("every plan that needs a command has steps with a link, and the plans with no value say how to sign in", () => {
+    // A plan whose row needs a command on a computer has an install-first link (Rex's must-fix on BOS-2815).
+    for (const o of CONNECT_OPTIONS.filter((x) => x.needs === "command" && x.command)) {
+      expect(o.command!.installUrl, o.id).toMatch(/^https:\/\//);
+      expect(o.command!.run, o.id).toBeTruthy();
+    }
+    // ChatGPT and Ollama Cloud are signed in to in their own tool: install first, with a link, then sign in.
+    for (const id of ["chatgpt-plan", "ollama-plan"]) {
+      const o = CONNECT_OPTIONS.find((x) => x.id === id)!;
+      expect(o.signIn, id).not.toBeNull();
+      expect(o.signIn!.installUrl, id).toMatch(/^https:\/\//);
+      expect(o.signIn!.tool, id).toBeTruthy();
+      // They save no value here, so they are "set up elsewhere", not a box that would fail.
+      expect(connectSaves(o), id).toBe(false);
+      expect(connectSetsUpElsewhere(o), id).toBe(true);
+    }
+    // Every option is either savable here, set up in its own tool, or (only "other") set in Settings → Secrets.
+    for (const o of CONNECT_OPTIONS) expect(connectSaves(o) || connectSetsUpElsewhere(o) || o.id === "other", o.id).toBe(true);
   });
 
   it("tells an owner what to do with a key that doesn't look like the provider's", () => {

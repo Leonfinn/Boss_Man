@@ -88,6 +88,8 @@ export type ConnectOption = {
   steps: { site: string; url: string; checked: string; note: string } | null;
   /** The command path: where the tool is installed from, and the command that prints the value. */
   command: { install: { mac: string; windows: string }; installUrl: string; run: string; makeUrl: string; checked: string; note: string } | null;
+  /** A plan signed in to in its own tool, where the wizard saves nothing: what to do (install, sign in), and where. */
+  signIn: { tool: string; installUrl: string; site: string; url: string; checked: string; note: string } | null;
   /** Where the website explains it. */
   guide: string;
 };
@@ -107,6 +109,7 @@ export const CONNECT_OPTIONS: readonly ConnectOption[] = [
     valueStarts: "sk-ant-oat01-",
     steps: null,
     command: { install: INSTALL, installUrl: "https://code.claude.com/docs/en/setup", run: "claude setup-token", makeUrl: "https://code.claude.com/docs/en/authentication#generate-a-long-lived-token", checked: "27 November 2026", note: "Claude Code's setup and authentication pages; the command has not been run for this wizard." },
+    signIn: null,
     guide: "connect-a-claude-account",
   },
   {
@@ -121,6 +124,7 @@ export const CONNECT_OPTIONS: readonly ConnectOption[] = [
     valueStarts: "sk-ant-api",
     steps: { site: "platform.claude.com: Billing (buy credit), then Spend limits (set a monthly cap), then API keys → Create key", url: "https://platform.claude.com/settings/keys", checked: "27 November 2026", note: "Anthropic's help pages; not yet walked through in a signed-in Console." },
     command: null,
+    signIn: null,
     guide: "connect-a-claude-account",
   },
   {
@@ -135,6 +139,14 @@ export const CONNECT_OPTIONS: readonly ConnectOption[] = [
     valueStarts: null,
     steps: null,
     command: null,
+    signIn: {
+      tool: "Codex",
+      installUrl: "https://github.com/openai/codex",
+      site: "OpenAI's Codex page: install Codex, then run codex login and sign in with the ChatGPT account your plan is on",
+      url: "https://chatgpt.com/codex",
+      checked: "not yet confirmed",
+      note: "Codex's install and login are set up on the computer the runner runs on; nothing is pasted into this page.",
+    },
     guide: "agents-and-models",
   },
   {
@@ -149,13 +161,14 @@ export const CONNECT_OPTIONS: readonly ConnectOption[] = [
     valueStarts: "sk-",
     steps: { site: "platform.openai.com: Billing (add credit and a monthly limit), then API keys → Create new secret key", url: "https://platform.openai.com/api-keys", checked: "not yet confirmed", note: "OpenAI changes this console often; check the page before following it." },
     command: null,
+    signIn: null,
     guide: "agents-and-models",
   },
   {
     id: "ollama-plan",
     name: "Ollama Cloud plan",
     cost: "Fixed monthly",
-    needs: "browser",
+    needs: "command",
     kind: "subscription",
     provider: "ollama",
     secret: null,
@@ -163,6 +176,14 @@ export const CONNECT_OPTIONS: readonly ConnectOption[] = [
     valueStarts: null,
     steps: null,
     command: null,
+    signIn: {
+      tool: "Ollama",
+      installUrl: "https://ollama.com/download",
+      site: "ollama.com: install Ollama, then run ollama signin and sign in with the account your Cloud plan is on",
+      url: "https://ollama.com/download",
+      checked: "not yet confirmed",
+      note: "Ollama's install and sign-in are set up on the computer the runner runs on; nothing is pasted into this page.",
+    },
     guide: "agents-and-models",
   },
   {
@@ -177,6 +198,7 @@ export const CONNECT_OPTIONS: readonly ConnectOption[] = [
     valueStarts: null,
     steps: { site: "ollama.com: Settings → Keys → Create key", url: "https://ollama.com/settings/keys", checked: "not yet confirmed", note: "Ollama's own pages; not yet walked through in a signed-in account." },
     command: null,
+    signIn: null,
     guide: "agents-and-models",
   },
   {
@@ -191,6 +213,7 @@ export const CONNECT_OPTIONS: readonly ConnectOption[] = [
     valueStarts: null,
     steps: { site: "synthetic.new: API keys → Create key", url: "https://synthetic.new/", checked: "not yet confirmed", note: "Synthetic's own pages; not yet walked through in a signed-in account." },
     command: null,
+    signIn: null,
     guide: "agents-and-models",
   },
   {
@@ -205,6 +228,7 @@ export const CONNECT_OPTIONS: readonly ConnectOption[] = [
     valueStarts: null,
     steps: { site: "openrouter.ai: Credits (buy credit and set a limit), then Keys → Create key", url: "https://openrouter.ai/keys", checked: "not yet confirmed", note: "OpenRouter's own pages; not yet walked through in a signed-in account." },
     command: null,
+    signIn: null,
     guide: "agents-and-models",
   },
   {
@@ -219,6 +243,7 @@ export const CONNECT_OPTIONS: readonly ConnectOption[] = [
     valueStarts: null,
     steps: null,
     command: null,
+    signIn: null,
     guide: "agents-and-models",
   },
 ];
@@ -228,6 +253,13 @@ export const CONNECT_ENV_NAMES: readonly string[] = CONNECT_OPTIONS.flatMap((o) 
 
 /** The options whose secret is saved from the connect step. */
 export const connectSaves = (o: ConnectOption): o is ConnectOption & { secret: NonNullable<ConnectOption["secret"]> } => o.secret !== null;
+
+/**
+ * An option with no value to paste, whose steps are already there, is not connected from this page: it is signed in
+ * to in its own tool, and Boss Man is set up for it under Settings (BOS-2815). Only "Other API provider" is left,
+ * whose keys are several values.
+ */
+export const connectSetsUpElsewhere = (o: ConnectOption): boolean => !connectSaves(o) && (o.signIn !== null || o.steps !== null);
 
 /** A listed secret kind must be one the server stores, or its save must be refused before anything is written. */
 for (const o of CONNECT_OPTIONS) if (o.secret && !SECRET_KINDS.includes(o.secret.kind)) throw new Error(`${o.id} names a secret kind the server doesn't have: ${o.secret.kind}`);
