@@ -27,10 +27,12 @@ const MAKE = (t: TokenExpiryCandidate): string =>
       : "on GitHub, make a fine-grained token for the company's repos with Contents, Pull requests and Workflows read and write, plus Actions read and write";
 
 /**
- * Where to paste it: the Rotate box on this same secret (Settings → Secrets → its name → Rotate), not Add, which
- * would make a new secret and leave this one and its reminder card behind (BOS-2825).
+ * Where to paste it: the Rotate box on this same secret's row of Settings → Secrets, not Add, which would make a
+ * new secret and leave this one and its reminder card behind (BOS-2825). The secret is a row on that page, not a
+ * page of its own, so it is named in words after the path (the Settings-path guard checks the path part).
  */
-const WHERE = (t: TokenExpiryCandidate): string => `Settings → Secrets → ${t.name} → Rotate, with the new value`;
+const WHERE = (t: TokenExpiryCandidate): string =>
+  `Settings → Secrets, find ${t.name} and paste the new value in its Rotate box`;
 
 export type TokenExpiryDeps = {
   now: () => Date;
