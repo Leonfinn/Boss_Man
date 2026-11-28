@@ -12,10 +12,11 @@ import { when } from "../Runs";
 import { DraftTextarea } from "../../components/DraftTextarea";
 import { SaveButton } from "../../components/SaveButton";
 import { Section, useAction } from "./shared";
+import { GuideLink } from "../../guide-links";
 import { CheckWorkers, type CheckWorkerView } from "./CheckWorkers";
 import { ReleaseNotice } from "./ReleaseNotice";
 import { DEFAULT_POLICY, policyLine, policyValid, SlotSplitFields, type SlotPolicy } from "./SlotSplit";
-import { LiveState, RUNNER_QUEUED_REPLY, atTime, historyTag, historyWaitingOn, historyWhat, inAbout, runnerProgress, updateStatus, type RunnerProgress, type DeployWaitView, type HistoryRow, type MaintenanceView, type Report, type SelfDeployView, type UpdateStatus, type WrapUpRun, type WrapUpStatus } from "./updates";
+import { LiveState, RUNNER_APPROVED_REPLY, RUNNER_QUEUED_REPLY, atTime, historyTag, historyWaitingOn, historyWhat, inAbout, runnerProgress, updateStatus, type RunnerProgress, type DeployWaitView, type HistoryRow, type MaintenanceView, type Report, type SelfDeployView, type UpdateStatus, type WrapUpRun, type WrapUpStatus } from "./updates";
 
 /**
  * BOS-2701: why "Build and update runners" can't take a press now, or null when it can. The server queues a press at
@@ -46,7 +47,7 @@ export function WorkspaceDisk({ company, onChanged }: { company: Company; onChan
       </p>
       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
         <label htmlFor="disk-cap">
-          Most disk to use (GB) <code className="mono">workspace disk cap</code>
+          Most disk to use (GB)
         </label>
         <input id="disk-cap" type="number" min={1} max={100000} step={1} placeholder="20" value={gb} onChange={(e) => setGb(e.target.value)} style={{ width: 100 }} />
         <SaveButton
@@ -390,6 +391,9 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
           )}
         </div>
       </div>
+      <p style={{ margin: 0 }}>
+        <GuideLink slug="how-updates-work">What happens in an update?</GuideLink>
+      </p>
       {(st.primary || st.normal.length > 0) && (
         <div className="upd-main">
           {st.primary && (
@@ -430,16 +434,15 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
               title="Builds a new runner image from the deployed code (for example new tools in apps/runner/Dockerfile), checks it, then swaps each runner when its company is idle."
               onClick={() =>
                 act.run(async () => {
-                  const r = await api<{ queued?: boolean; message?: string; note?: string | null }>("/api/self-deploy/update-runners", { method: "POST", body: {} });
+                  const r = await api<{ queued?: boolean; approved?: boolean; message?: string; note?: string | null }>("/api/self-deploy/update-runners", { method: "POST", body: {} });
+                  // BOS-2859: the press is the approval, so the page stays here and the status box above shows how it goes.
+                  view.reload();
+                  maint.reload();
                   // BOS-1086: a press that cannot run yet is queued, not refused; the status box says when it starts.
-                  if (r?.queued) {
-                    view.reload();
-                    // BOS-2672: the status box above says when it starts; repeating the time here put it on screen twice.
-                    return r.note ? `${RUNNER_QUEUED_REPLY} ${r.note}` : RUNNER_QUEUED_REPLY;
-                  }
-                  // BOS-1644: Boss Man could not confirm a fix is live and went ahead; say why instead of moving on silently.
-                  if (r?.note) return `${r.note} Its card is in Decisions.`;
-                  go("decisions");
+                  // BOS-2672: the status box above says when it starts; repeating the time here put it on screen twice.
+                  // BOS-1644: when Boss Man could not confirm a fix is live and went ahead, the note says why.
+                  const said = r?.queued ? RUNNER_QUEUED_REPLY : r?.approved === false ? `${r.message ?? "The runner update could not start."} Its card is in Decisions.` : RUNNER_APPROVED_REPLY;
+                  return r?.note ? `${said} ${r.note}` : said;
                 })
               }
             >

@@ -2,6 +2,7 @@
 // else looked for one. This asks the install's own GitHub release list (the repo the updater was set up with, handed to the server
 // as BOSSMAN_RELEASE_REPO), at least once a day, and tells the owner once per new version: a feed note, and the phone only when the
 // owner turned that on. A source install has none of the three env values, so it is never offered an image release.
+import { readFileSync } from "node:fs";
 import { eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { settings } from "../db/schema.js";
@@ -59,9 +60,22 @@ type Stored = {
 };
 const EMPTY: Stored = { enabled: true, ntfy: false, checkedAt: null, couldntCheck: false, latest: null, notified: null };
 
+/** What the updater says it is doing (its GET /status, trimmed to what the owner reads). */
+export type UpdaterProgress = { stage: string; version: string | null; error: { code: string; message: string } | null; report: { level: "info" | "problem"; text: string; acknowledged: boolean } | null };
+
+/** BOS-2713: whether this server can ask the updater to install, and what the updater is doing. */
+export type InstallView = { linked: boolean; updater: UpdaterProgress | null };
+
 export type ReleaseWatchView =
   | { active: false }
-  | { active: true; current: string; channel: "beta" | "stable"; enabled: boolean; ntfy: boolean; checkedAt: string | null; couldntCheck: boolean; available: FoundRelease | null };
+  | { active: true; current: string; channel: "beta" | "stable"; enabled: boolean; ntfy: boolean; checkedAt: string | null; couldntCheck: boolean; available: FoundRelease | null; install: InstallView };
+
+/** A refusal with a plain sentence for the owner, and the HTTP status the route sends. */
+export class InstallError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
 
 export type ReleaseWatchDeps = {
   env?: Record<string, string | undefined>;
@@ -73,6 +87,8 @@ export type ReleaseWatchDeps = {
   /** Only the server in charge checks (two colours run during an update). */
   isLeader?: () => boolean;
   log?: (msg: string) => void;
+  /** Reads the updater's key file. Tests stand in for it. */
+  readKey?: (file: string) => string;
 };
 
 /** The first plain sentence or two of a release's notes, with Markdown marks and links removed. */
@@ -102,6 +118,59 @@ export function releaseWatchService(db: Db, deps: ReleaseWatchDeps) {
   const active = env.BOSSMAN_IMAGE_INSTALL === "1" && REPO_RE.test(repo) && VERSION_RE.test(current);
   // A beta install (its own version has a pre-release part) sees pre-releases; a stable one sees stable releases only.
   const channel: "beta" | "stable" = current.includes("-") ? "beta" : "stable";
+  // BOS-2713: the updater's private address and the file holding its key, set by the updater for each colour it makes. A colour made
+  // before this change has neither, and the Updates line says to install that one by hand.
+  const updaterUrl = (env.BOSSMAN_UPDATER_URL?.trim() ?? "").replace(/\/$/, "");
+  const updaterKeyFile = env.BOSSMAN_UPDATER_KEY_FILE?.trim() ?? "";
+  const linked = active && /^http:\/\/[A-Za-z0-9._-]+(:[0-9]+)?$/.test(updaterUrl) && updaterKeyFile !== "";
+  // Where a release's signed files are downloaded from (the same host the updater uses); another host stands in for it in tests.
+  const downloadBase = (env.BOSSMAN_RELEASE_DOWNLOAD?.trim() || "https://github.com").replace(/\/$/, "");
+  const readKey = deps.readKey ?? ((f: string) => readFileSync(f, "utf8"));
+
+  /** One call to the updater. Throws InstallError with a plain sentence when it cannot be reached or refuses. */
+  async function callUpdater(method: "GET" | "POST", path: string, body?: unknown): Promise<{ status: number; json: Record<string, unknown> }> {
+    let key: string;
+    try {
+      key = readKey(updaterKeyFile).trim();
+    } catch {
+      throw new InstallError("This server cannot read the updater's key, so it cannot ask it to install. Install the release by hand (see the guide \"Install a release by hand (older image installs)\" in the Boss Man guides).", 409);
+    }
+    let res: Response;
+    try {
+      res = await doFetch(`${updaterUrl}${path}`, {
+        method,
+        headers: { authorization: `Bearer ${key}`, ...(body !== undefined ? { "content-type": "application/json" } : {}) },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+        signal: AbortSignal.timeout(8_000),
+      });
+    } catch {
+      throw new InstallError("The updater did not answer. It may be restarting; try again in a minute.", 502);
+    }
+    const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    return { status: res.status, json };
+  }
+
+  function progressOf(j: Record<string, unknown>): UpdaterProgress {
+    const rep = j.report as { level?: unknown; text?: unknown; acknowledged?: unknown } | null | undefined;
+    const err = j.error as { code?: unknown; message?: unknown } | null | undefined;
+    return {
+      stage: typeof j.stage === "string" ? j.stage : "idle",
+      version: typeof j.version === "string" ? j.version : null,
+      error: err && typeof err.message === "string" ? { code: String(err.code ?? ""), message: err.message } : null,
+      report: rep && typeof rep.text === "string" ? { level: rep.level === "problem" ? "problem" : "info", text: rep.text, acknowledged: rep.acknowledged === true } : null,
+    };
+  }
+
+  /** What the updater is doing now, or null when it can't be asked (quietly: a swap takes it away for a moment). */
+  async function updaterProgress(): Promise<UpdaterProgress | null> {
+    if (!linked) return null;
+    try {
+      const r = await callUpdater("GET", "/status");
+      return r.status === 200 ? progressOf(r.json) : null;
+    } catch {
+      return null;
+    }
+  }
 
   async function load(): Promise<Stored> {
     const [row] = await db.select().from(settings).where(eq(settings.key, KEY));
@@ -164,16 +233,61 @@ export function releaseWatchService(db: Db, deps: ReleaseWatchDeps) {
     return view(s);
   }
 
-  function view(s: Stored): ReleaseWatchView {
+  async function view(s: Stored): Promise<ReleaseWatchView> {
     if (!active) return { active: false };
     // A stored "latest" the install has since caught up with (an update ran) is not offered.
     const available = s.latest && compareVersions(s.latest.version, current) > 0 ? s.latest : null;
-    return { active: true, current, channel, enabled: s.enabled, ntfy: s.ntfy, checkedAt: s.checkedAt, couldntCheck: s.couldntCheck, available };
+    return { active: true, current, channel, enabled: s.enabled, ntfy: s.ntfy, checkedAt: s.checkedAt, couldntCheck: s.couldntCheck, available, install: { linked, updater: await updaterProgress() } };
   }
 
-  /** What the Updates panel shows. Reads the stored result only; it never calls GitHub. */
+  /** What the Updates panel shows. Reads the stored result (and asks the updater how it is doing); it never calls GitHub. */
   async function status(): Promise<ReleaseWatchView> {
     return active ? view(await load()) : { active: false };
+  }
+
+  /** The digest of the server image in a release's release.json. The updater checks the signature and this digest again itself. */
+  async function serverDigestOf(version: string): Promise<string> {
+    let text: string;
+    try {
+      const res = await doFetch(`${downloadBase}/${repo}/releases/download/v${version}/release.json`, { headers: { "user-agent": "boss-man-release-watch" }, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+      if (res.status !== 200) throw new Error(String(res.status));
+      text = await res.text();
+      if (text.length > 256 * 1024) throw new Error("too large");
+    } catch {
+      throw new InstallError("Couldn't download the release's file from GitHub just now. Nothing was changed; try again in a few minutes.", 502);
+    }
+    try {
+      const images = (JSON.parse(text) as { images?: Array<{ name?: unknown; digest?: unknown }> }).images;
+      const d = images?.find((i) => i?.name === "boss-man-server")?.digest;
+      if (typeof d === "string" && /^sha256:[0-9a-f]{64}$/.test(d)) return d;
+    } catch {
+      /* falls through to the refusal below */
+    }
+    throw new InstallError("This release's file does not name a server image, so it was not installed.", 502);
+  }
+
+  /** BOS-2713: the Install button. Tells the updater to move to the release on offer; the updater checks the signature and does the work. */
+  async function install(version: unknown): Promise<ReleaseWatchView> {
+    if (!active) throw new InstallError("This install does not take releases from the published images.", 409);
+    if (!linked) throw new InstallError("This server was made before the Install button existed, so it cannot reach the updater. Install this release by hand (see the guide \"Install a release by hand (older image installs)\" in the Boss Man guides); the server made by that update will have the button.", 409);
+    const s = await load();
+    const rel = s.latest && compareVersions(s.latest.version, current) > 0 ? s.latest : null;
+    if (!rel || rel.version !== version) throw new InstallError("That release is not the one on offer any more. Reload the page.", 409);
+    const serverDigest = await serverDigestOf(rel.version);
+    const r = await callUpdater("POST", "/move", { version: rel.version, serverDigest });
+    if (r.status === 409) throw new InstallError("An update is already running. Its progress is shown here.", 409);
+    if (r.status !== 202) throw new InstallError(typeof r.json.message === "string" ? r.json.message : "The updater refused the request. Nothing was changed.", 502);
+    deps.log?.(`release install: asked the updater to move to ${rel.version}`);
+    return view(s);
+  }
+
+  /** Clears the updater's finished report (it stays until someone says they've read it). */
+  async function acknowledge(): Promise<ReleaseWatchView> {
+    if (!active) return { active: false };
+    if (!linked) throw new InstallError("This server cannot reach the updater.", 409);
+    const r = await callUpdater("POST", "/ack");
+    if (r.status !== 200) throw new InstallError("The updater did not take that. Try again.", 502);
+    return view(await load());
   }
 
   /** The owner's two switches. */
@@ -208,5 +322,5 @@ export function releaseWatchService(db: Db, deps: ReleaseWatchDeps) {
     };
   }
 
-  return { active, channel, check, status, setOptions, start, due };
+  return { active, channel, check, status, setOptions, start, due, install, acknowledge };
 }

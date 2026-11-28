@@ -172,6 +172,8 @@ export function wrapUpBannerText(m: { runs: number; checks?: number; wrapSince?:
 
 /** BOS-2672: the reply to a Build and update runners press that was queued. The status box says when it starts, once. */
 export const RUNNER_QUEUED_REPLY = "Runner update queued; the status above says when it starts.";
+/** BOS-2859: the reply to a press that went ahead now. The press is the approval (no card); the status box shows its progress. */
+export const RUNNER_APPROVED_REPLY = "Runner update started; the status above shows how it goes.";
 
 /** What a "Waiting" row in Recent updates waits on, in plain words (BOS-2056). Null when the row is not waiting. */
 export function historyWaitingOn(r: HistoryRow, wait: DeployWaitView | null, maint: MaintenanceView | null, queued: boolean): string | null {

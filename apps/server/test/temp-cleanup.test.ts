@@ -273,8 +273,15 @@ describe("deletes in the agent's own working copy go to the CEO first (BOS-120)"
   it("keeps path tricks with the owner even on a run with a checkout", async () => {
     for (const c of ["rm -rf ../other", "rm -rf .git", "cd src && rm -rf x", "rm -rf /home/node/x", "rm -rf $HOME/x", "rm -rf dist; cp -r src /tmp/x",
       // Security Reviewer, round 2: writes through a link at /tmp/lnk beside a working-copy delete. Only a /tmp delete clears a /tmp write.
-      "rm -rf dist && git worktree add -b x /tmp/lnk", "mkdir -p /tmp/lnk/sub; rm -rf dist", "echo x >/tmp/lnk; rm -rf dist", "rm -rf dist && mkdir -p /tmp/lnk", "rm -rf dist && echo x >/tmp/lnk"]) {
+      "rm -rf dist && git worktree add -b x /tmp/lnk", "mkdir -p /tmp/lnk/sub; rm -rf dist", "rm -rf dist && mkdir -p /tmp/lnk"]) {
       expect((await ctx.ask(c, ctx.dev.id, { ticketId: ctx.ticket.id })).d, c).toMatchObject({ tier: "owner" });
+    }
+  });
+
+  it("refuses an echo-redirect write beside a working-copy delete to the agent, with no card (BOS-2856)", async () => {
+    // These used to reach the owner; a shell file write is now refused first (never an allow), so no card is raised.
+    for (const c of ["echo x >/tmp/lnk; rm -rf dist", "rm -rf dist && echo x >/tmp/lnk"]) {
+      expect((await ctx.ask(c, ctx.dev.id, { ticketId: ctx.ticket.id })).d, c).toBeUndefined();
     }
   });
 });

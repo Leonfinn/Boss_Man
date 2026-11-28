@@ -1,6 +1,7 @@
 // Two simplified setup-wizard steps (BOS-1495): "Claude" is one token box that also makes the funding source
 // and points the CEO at it; "The runner" is one status line. The full forms stay in Settings.
 import { useRef, useState, type FormEvent } from "react";
+import { defaultEndsOn } from "@boss-man/shared";
 import { api, type Company } from "../api";
 import { usePoll } from "../hooks";
 import { Credentials } from "./settings/Credentials";
@@ -13,6 +14,8 @@ type Grant = { id: string; envName: string; secretName: string };
 export function ClaudeStep({ company, onChanged, onTokenSaved }: { company: Company; onChanged: () => void; onTokenSaved: () => void }) {
   const grants = usePoll((signal) => api<Grant[]>(`/api/companies/${company.id}/grants`, { signal }), 30_000, `setup-claude-grants-${company.id}`);
   const [value, setValue] = useState("");
+  // A Claude setup-token lasts about a year, so the wizard fills that in (BOS-2825); the owner can change it.
+  const [endsOn, setEndsOn] = useState(() => defaultEndsOn("claude_oauth_token") ?? "");
   const act = useAction();
   // What a half-finished save already made, so a retry carries on instead of making a second secret or source.
   const made = useRef<{ secretId?: string; granted?: boolean; sourceId?: string }>({});
@@ -22,7 +25,7 @@ export function ClaudeStep({ company, onChanged, onTokenSaved }: { company: Comp
     e.preventDefault();
     void act.run(async () => {
       const m = made.current;
-      if (!m.secretId) m.secretId = (await api<{ secret: { id: string } }>("/api/secrets", { method: "POST", body: { name: `${company.name} Claude setup-token`, kind: "claude_oauth_token", value: value.trim() } })).secret.id;
+      if (!m.secretId) m.secretId = (await api<{ secret: { id: string } }>("/api/secrets", { method: "POST", body: { name: `${company.name} Claude setup-token`, kind: "claude_oauth_token", value: value.trim(), ...(endsOn ? { endsOn } : {}) } })).secret.id;
       if (!m.granted) {
         await api(`/api/secrets/${m.secretId}/grants`, { method: "POST", body: { companyId: company.id, envName: CLAUDE_TOKEN_ENV } });
         m.granted = true;
@@ -43,7 +46,7 @@ export function ClaudeStep({ company, onChanged, onTokenSaved }: { company: Comp
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       {connected ? (
         <p role="status">
-          <span className="tag green">Connected</span> Claude is set up from <strong>{connected.secretName}</strong>. To change it, use Settings → Credentials.
+          <span className="tag green">Connected</span> Claude is set up from <strong>{connected.secretName}</strong>. To change it, use Settings → Secrets.
         </p>
       ) : (
         <form onSubmit={save} style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 640 }}>
@@ -58,6 +61,13 @@ export function ClaudeStep({ company, onChanged, onTokenSaved }: { company: Comp
           <p className="muted" style={{ fontSize: 14, margin: 0 }}>
             On your own computer, run <code>claude setup-token</code>, sign in with your Claude Pro or Max account, and paste the code it prints.
           </p>
+          <div className="field" style={{ maxWidth: 260 }}>
+            <label htmlFor="setup-claude-ends">Ends on</label>
+            <input id="setup-claude-ends" type="date" aria-describedby="setup-claude-ends-hint" value={endsOn} onChange={(e) => setEndsOn(e.target.value)} />
+            <p id="setup-claude-ends-hint" className="muted" style={{ fontSize: 13, margin: "4px 0 0" }}>
+              A sign-in code lasts about a year, so this is filled in. A week before it ends you get a card saying how to replace it.
+            </p>
+          </div>
           <button type="submit" className="btn primary" style={{ alignSelf: "flex-start" }} disabled={act.busy || !value.trim()}>
             Save the code
           </button>
@@ -151,7 +161,7 @@ export function RunnerStep({ company, onChanged }: { company: Company; onChanged
           </button>
         ) : (
           <p style={{ margin: 0 }}>
-            To connect it, open <a href={`#/settings/${company.id}/runner`}>Settings → Server and runner → Runner</a> and follow the steps there.
+            This host has no launcher, so the workspace is started by hand. Follow <a href={TROUBLESHOOT} target="_blank" rel="noreferrer">the runner guide</a>.
           </p>
         ))}
       {act.view}

@@ -76,7 +76,7 @@ describe("a brand-new wiki (BOS-1125)", () => {
       return new Response(url.includes("semantic") ? JSON.stringify({ enabled: false }) : "[]", { status: 200 });
     });
     render(<Wiki companies={[company]} companyId={company.id} slug={undefined} go={() => {}} />);
-    expect(await screen.findByText("Only the company brief so far.")).toBeTruthy();
-    expect(await screen.findByText("Our mission.")).toBeTruthy();
+    expect(await screen.findByText("No pages yet.")).toBeTruthy();
+    expect(await screen.findByText("Your agents' reports, research and how-tos will appear here.")).toBeTruthy();
   });
 });

@@ -4,7 +4,7 @@ import { and, desc, eq, gte, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, costEvents, decisions, fundingSources, notifications, runners as runnersTable, runs, tickets, wakes } from "../db/schema.js";
 import { liveRuns, runOriginQuery } from "./runs.js";
-import { cantMoveSql, isWorkingRun } from "./agent-wip.js";
+import { cantMoveSql, isWorkingRun, waitsOnCheckFor } from "./agent-wip.js";
 import { passedReviewTickets } from "./review-kinds.js";
 import { blockedSplit } from "./go-live-note.js";
 import type { LimitInForce } from "./deploy-wait-hold.js";
@@ -131,9 +131,10 @@ export function dashboardService(
       // BOS-1909: "Tasks in progress" is the counted work only (the WIP rule); the three groups that move by themselves are counted apart.
       const [groups] = await db
         .select({
-          counted: sql<number>`(count(*) filter (where ${tickets.systemState} = 'in_progress' and not ${cantMoveSql}))::int`,
+          // BOS-2879: recurring tickets never count; one whose own quick check is queued or running counts as being checked.
+          counted: sql<number>`(count(*) filter (where ${tickets.systemState} = 'in_progress' and not ${tickets.recurring} and not ${cantMoveSql} and not ${waitsOnCheckFor(tickets)}))::int`,
           nextUp: sql<number>`(count(*) filter (where ${tickets.systemState} = 'ready' and ${tickets.nextUpAt} is not null))::int`,
-          beingChecked: sql<number>`(count(*) filter (where ${tickets.systemState} = 'review' and ${tickets.checkHoldAt} is not null))::int`,
+          beingChecked: sql<number>`(count(*) filter (where (${tickets.systemState} = 'review' and ${tickets.checkHoldAt} is not null) or (${tickets.systemState} = 'in_progress' and not ${tickets.recurring} and not ${cantMoveSql} and ${waitsOnCheckFor(tickets)})))::int`,
           mergedInProgress: sql<number>`(count(*) filter (where ${tickets.systemState} = 'in_progress' and ${tickets.mergedAt} is not null))::int`,
         })
         .from(tickets)

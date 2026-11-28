@@ -10,9 +10,29 @@ afterEach(() => {
 });
 
 const company: Company = { id: "c1", name: "App Co", mission: null, paused: false, agents: [] };
-const tpl = (id: string, title: string) => ({ id, title, role: "worker", modelTier: "standard", summary: "", instructions: `${title} instructions` });
+const tpl = (id: string, title: string, worksOn: "any" | "code" = "code") => ({ id, title, role: "worker", modelTier: "standard", summary: "", worksOn, instructions: `${title} instructions` });
 
 describe("hire form", () => {
+  // (BOS-2824) Most owners' work is not software, so roles that suit any work are listed first, apart from the code ones.
+  it("groups the roles into any kind of work and code", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const body = url.includes("agent-templates") ? { templates: [tpl("engineer", "Engineer"), tpl("writer", "Writer", "any"), tpl("researcher", "Researcher", "any")] } : url.includes("/models") ? { runner: {}, api: [] } : [];
+        return new Response(JSON.stringify(body), { status: 200 });
+      }),
+    );
+    render(<Agents company={company} onChanged={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: /hire/i }));
+    const anyHead = await screen.findByText("For any kind of work");
+    const codeHead = screen.getByText("For code");
+    const order = [...anyHead.parentElement!.ownerDocument.querySelectorAll(".muted, .template strong")].map((e) => e.textContent);
+    expect(order.indexOf("For any kind of work")).toBeLessThan(order.indexOf("Writer"));
+    expect(order.indexOf("Writer")).toBeLessThan(order.indexOf("For code"));
+    expect(order.indexOf("For code")).toBeLessThan(order.indexOf("Engineer"));
+    expect(codeHead).toBeTruthy();
+  });
+
   it("swaps the default name with the template but keeps a typed one", async () => {
     vi.stubGlobal(
       "fetch",

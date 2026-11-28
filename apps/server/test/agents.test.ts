@@ -6,6 +6,7 @@ import { AGENT_TEMPLATES } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { ceoChapters, fundingSources, runs, tickets, wakes } from "../src/db/schema.js";
+import { teamCostLine } from "../src/services/agents.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -149,5 +150,16 @@ describe("the Agents tab (R62)", () => {
     const retired = ((await c.req("GET", `/api/agents/${eng.id}/history`)).json() as Array<{ c: { id: string; field: string } }>).find((h) => h.c.field === "retired")!;
     expect((await c.req("POST", `/api/agent-changes/${retired.c.id}/undo`)).json()).toMatchObject({ retiredAt: null });
     expect((await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]).toMatchObject({ assigneeAgentId: eng.id, watcherAgentId: eng.id });
+  });
+});
+
+describe("team plan cost line (BOS-2824)", () => {
+  it("says in plain words whether the hires cost anything extra", () => {
+    expect(teamCostLine(["subscription", "subscription"], ["Claude Max", "Claude Max"])).toBe("On your Claude Max: no extra cost");
+    expect(teamCostLine(["api_payg", "api_payg"], ["My API key", "My API key"])).toBe("Pay as you go: you pay for the time they work, on My API key");
+    expect(teamCostLine(["api_payg", "usage_credits"], ["Key one", "Credits"])).toBe("Pay as you go: you pay for the time they work");
+    expect(teamCostLine(["subscription", "api_payg"], ["Claude Max", "OpenAI key"])).toBe("On your Claude Max, no extra cost; OpenAI key is pay as you go, so you pay for the time they work");
+    expect(teamCostLine(["subscription", "api_payg", "api_credit"], ["Claude Max", "Key A", "Key X"])).toBe("On your Claude Max, no extra cost; the rest are pay as you go, so you pay for the time they work");
+    expect(teamCostLine(["subscription", "api_credit"], ["Claude Max", "Credits"])).toBe("On your Claude Max, no extra cost; Credits is pay as you go, so you pay for the time they work");
   });
 });

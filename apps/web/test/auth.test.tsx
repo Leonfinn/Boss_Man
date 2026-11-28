@@ -31,3 +31,21 @@ describe("login", () => {
     await vi.waitFor(() => expect(onDone).toHaveBeenCalledWith("leon"));
   });
 });
+
+describe("first run (BOS-2826)", () => {
+  it("explains the account, hints the password and asks for it twice", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ username: "leon" }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<Auth firstRun={true} onDone={() => {}} />);
+    expect(screen.getByText(/about 15 minutes/)).toBeTruthy();
+    expect(screen.getByText(/every company in this Boss Man/)).toBeTruthy();
+    const box = screen.getByLabelText("Password", { selector: "input" });
+    expect(document.getElementById(box.getAttribute("aria-describedby")!)!.textContent).toBe("At least 12 characters. Write it down: there is no reset email.");
+    fireEvent.change(screen.getByLabelText("Username"), { target: { value: "leon" } });
+    fireEvent.change(box, { target: { value: "correct horse battery" } });
+    fireEvent.change(screen.getByLabelText("Type the password again"), { target: { value: "correct horse batterx" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create owner account" }));
+    expect((await screen.findByRole("alert")).textContent).toBe("The two passwords don't match.");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});

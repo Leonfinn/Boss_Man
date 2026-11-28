@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 340" width="720" height="340" role="img" aria-labelledby="cw-title cw-desc">
+  <title id="cw-title">A repo, a branch and a merge</title>
+  <desc id="cw-desc">The repo holds the main version of the code, drawn as a line along the top. For a task, a branch splits off it: the agent's own copy, drawn as a lower line with the agent's saved changes on it. When the work is reviewed and approved, the branch joins the main version again. That is the merge. With a pull request, Boss Man asks GitHub or Gitea to make the merge instead, and it happens there.</desc>
+  <defs>
+    <style>
+      .d { font-family: "Archivo Variable", "Archivo", "IBM Plex Sans", Arial, sans-serif; font-stretch: 112%; font-weight: 750; }
+      .b { font-family: "IBM Plex Sans", Arial, sans-serif; font-weight: 400; }
+      .bb { font-family: "IBM Plex Sans", Arial, sans-serif; font-weight: 700; }
+    </style>
+    <marker id="cw-ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="16" markerHeight="16" markerUnits="userSpaceOnUse" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#17202c"/></marker>
+  </defs>
+  <rect width="720" height="340" fill="#ffffff"/>
+
+  <text x="20" y="30" class="d" font-size="20" fill="#17202c">The repo</text>
+  <text x="20" y="52" class="b" font-size="15" fill="#3b4656">the main version of the project's code</text>
+
+  <line x1="20" y1="90" x2="690" y2="90" stroke="#17202c" stroke-width="6" stroke-linecap="round" marker-end="url(#cw-ar)"/>
+  <circle cx="80" cy="90" r="10" fill="#17202c"/>
+  <circle cx="620" cy="90" r="12" fill="#c8282f"/>
+
+  <path d="M140 90 C 180 90, 180 200, 230 200 L 470 200 C 530 200, 560 90, 610 90" fill="none" stroke="#c8282f" stroke-width="5" stroke-dasharray="0" marker-end="url(#cw-ar)"/>
+  <circle cx="140" cy="90" r="10" fill="#17202c"/>
+  <circle cx="280" cy="200" r="9" fill="#ffffff" stroke="#c8282f" stroke-width="4"/>
+  <circle cx="350" cy="200" r="9" fill="#ffffff" stroke="#c8282f" stroke-width="4"/>
+  <circle cx="420" cy="200" r="9" fill="#ffffff" stroke="#c8282f" stroke-width="4"/>
+
+  <text x="20" y="240" class="bb" font-size="16" fill="#17202c">Branch</text>
+  <text x="20" y="262" class="b" font-size="15" fill="#3b4656">one task's own copy;</text>
+  <text x="20" y="282" class="b" font-size="15" fill="#3b4656">each dot is a saved change</text>
+
+  <text x="520" y="240" class="bb" font-size="16" fill="#17202c">Merge</text>
+  <text x="520" y="262" class="b" font-size="15" fill="#3b4656">approved work joins</text>
+  <text x="520" y="282" class="b" font-size="15" fill="#3b4656">the main version</text>
+
+  <text x="20" y="318" class="b" font-size="15" fill="#3b4656">With a pull request, Boss Man asks GitHub or Gitea to make the merge, and it happens there.</text>
+</svg>

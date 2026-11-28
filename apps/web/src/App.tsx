@@ -3,7 +3,7 @@ import { api, ApiError, type ActiveRun, type Company, type Decision, type Decisi
 import { art } from "./brand";
 import { companyFigure, Sidebar } from "./components/Sidebar";
 import { State } from "./components/State";
-import { useMediaQuery, usePoll, useRoute } from "./hooks";
+import { HasCodeContext, useMediaQuery, usePoll, useRoute } from "./hooks";
 import { useNewBuild } from "./new-build";
 import { DRAFT_CHANGED, hasAnyDraft } from "./drafts";
 import { setHold, useHold } from "./hold";
@@ -359,6 +359,23 @@ function Signed({ onLogout, username, initialPreferences }: { onLogout: () => vo
     `decisions-tally-${current?.id}`,
   );
   useEffect(() => decisionsTally.reload(), [current?.id]);
+  // (BOS-2818) "Setup: 2 of 5" at the top of the menu while setup is open: not dismissed, not all done.
+  const setupOpen = usePoll(
+    (signal) =>
+      current
+        ? api<{ dismissed: boolean }>("/api/setup-progress", { signal })
+            .then((p) =>
+              p.dismissed
+                ? null
+                : api<{ done: boolean }[]>(`/api/companies/${current.id}/setup-checklist`, { signal }).then((items) =>
+                    !items.length || items.every((i) => i.done) ? null : { done: items.filter((i) => i.done).length, total: items.length },
+                  ),
+            )
+            .catch(() => null)
+        : Promise.resolve(null),
+    60_000,
+    `setup-open-${current?.id}`,
+  );
   // (BOS-1485) The company switcher's figure for every company: the same tally call, once per company.
   const companyIds = (companies.data ?? []).map((c) => c.id);
   const companyTallies = usePoll(
@@ -390,11 +407,16 @@ function Signed({ onLogout, username, initialPreferences }: { onLogout: () => vo
     if (!firstLoad.current || companies.data === null) return;
     firstLoad.current = false;
     if (companies.data.length || page !== "dashboard") return;
-    void api<{ dismissed: boolean }>("/api/setup-progress").then((p) => {
-      if (!p.dismissed) go("setup");
+    void api<{ dismissed: boolean; left?: boolean }>("/api/setup-progress").then((p) => {
+      if (!p.dismissed && !p.left) go("setup");
     }, () => {});
   }, [companies.data, page, go]);
+  // BOS-2819: the same "has a code project" test as the setup wizard (some project has a repo address). Until the
+  // projects load, or if they can't be read, the answer is yes, so a code company never loses a screen.
+  const codeProjects = usePoll((signal) => (companyId ? api<{ repoUrl: string | null }[]>(`/api/companies/${companyId}/projects`, { signal }) : Promise.resolve(null)), 60_000, `has-code-${companyId ?? "none"}`);
+  const hasCode = !Array.isArray(codeProjects.data) || codeProjects.data.some((p) => p.repoUrl);
   return (
+    <HasCodeContext.Provider value={hasCode}>
     <PreferencesContext.Provider value={preferences}>
     <PinnedProvider companyId={companyId}>
     <div className={`app${collapsed ? " side-collapsed" : ""}`}>
@@ -412,16 +434,18 @@ function Signed({ onLogout, username, initialPreferences }: { onLogout: () => vo
         onCreateCompany={createCompany}
         decisions={decisions.data ?? []}
         decisionsTally={decisionsTally.data}
+        setupOpen={setupOpen.data}
         companyTallies={companyTallies.data ?? undefined}
         unread={feed.data?.unread ?? 0}
         feedback={companyFigure(unprocessed.data, current?.id)}
+        hasCode={hasCode}
         mergeWaiting={mergeQueue.data ? inLineOf(mergeQueue.data) : 0}
         mergeStuck={mergeQueue.data?.stuckCount ?? 0}
         notifications={permission}
         onEnableNotifications={() => void Notification.requestPermission().then(setPermission)}
         onLogout={() => void api("/api/logout", { method: "POST" }).finally(onLogout)}
       />
-      <SearchPalette companyId={companyId} go={go} />
+      <SearchPalette companyId={companyId} go={go} prefix={current?.ticketPrefix} />
       <Shortcuts go={go} hasProjects={(current?.projects?.length ?? 0) > 0} singleLetterKeys={prefs.singleLetterKeys} onTurnKeysOn={() => void save({ singleLetterKeys: true })} keyboardTipSeen={prefs.keyboardTipSeen} onTipSeen={() => void save({ keyboardTipSeen: true }).catch(() => {})} />
       <main>
         <UpdateBanner m={maintenance.data} />
@@ -453,7 +477,7 @@ function Signed({ onLogout, username, initialPreferences }: { onLogout: () => vo
         ) : page === "merge-history" ? (
           <MergeHistory companies={list} companyId={companyId} />
         ) : page === "search" ? (
-          <SearchPage companyId={companyId} go={go} />
+          <SearchPage companyId={companyId} go={go} prefix={current?.ticketPrefix} />
         ) : page === "merge-queue" ? (
           <MergeQueue companies={list} companyId={companyId} />
         ) : page === "tickets" && route[1] ? (
@@ -489,6 +513,7 @@ function Signed({ onLogout, username, initialPreferences }: { onLogout: () => vo
     </div>
     </PinnedProvider>
     </PreferencesContext.Provider>
+    </HasCodeContext.Provider>
   );
 }
 

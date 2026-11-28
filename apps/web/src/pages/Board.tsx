@@ -11,7 +11,7 @@ import { RiskHelp, useRiskTiers, type RiskTiers } from "../components/RiskHelp";
 import { State } from "../components/State";
 import { Loader } from "../components/Loader";
 import { statusLineText, type StatusLine } from "./MergeQueue";
-import { hashQuery, usePoll } from "../hooks";
+import { hashQuery, useHasCode, usePoll } from "../hooks";
 import { useWheelToPage } from "../wheel-to-page";
 import { DRAFT_CHANGED, clearDraft, readDraftJson, saveFormDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
@@ -28,6 +28,7 @@ import { ageShort } from "../age";
 import { yourReviewFirst } from "../board-lane-order";
 import { waitingOnThis, waitingWords } from "../board-waiting";
 import { WorkStands } from "../components/WorkStands";
+import { GuideLink } from "../guide-links";
 import { RecurringTag } from "../components/RecurringTag";
 import { HeldBehindFixLine, heldSummary, type MergeLine } from "../components/MergesStuckBanner";
 
@@ -55,7 +56,7 @@ const projectTab = (s: string | undefined) => PROJECT_TABS.find((t) => t.id === 
 const DEFAULT_LABEL: Record<string, string> = { backlog: "Backlog", ready: "Ready", in_progress: "In progress", blocked: "Blocked", review: "Review", done: "Done" };
 /** One line shown in a column with no tasks. */
 const EMPTY_HINT: Record<string, string> = {
-  backlog: "Nothing waiting. Add a task to start.",
+  backlog: "Nothing waiting. Add a task to start, or ask the CEO in Chat to plan the work.",
   ready: "Nothing ready. Move a task here when it can start.",
   in_progress: "Nothing underway right now.",
   blocked: "Nothing is stuck.",
@@ -191,6 +192,7 @@ type FormDraft = { mode: "feature" | "task"; title: string; body: string; risk: 
 
 /** Add form: a new feature (the top-level card) or a new task, optionally part of a feature. */
 function AddForm({ companyId, projectId, initial, agents, features, goals, tiers, hasCeo, onAddTask, onAddFeature, onGrill, onClose }: { companyId: string; projectId: string; initial: Adding; agents: Company["agents"]; features: Feature[]; goals: Tree; tiers: RiskTiers; hasCeo: boolean; onAddTask: (t: NewTicketInput) => Promise<unknown>; onAddFeature: (f: NewFeatureInput) => Promise<unknown>; onGrill: (d: { kind: "task" | "feature"; title: string; description: string | null }) => Promise<unknown>; onClose: () => void }) {
+  const hasCode = useHasCode();
   const blank = { title: "", body: "", risk: "none" as Risk | "none", assignee: "", feature: initial.featureId, plan: hasCeo, goal: { objectiveId: null, milestoneId: null } as GoalLink, criteria: "", after: new Set<number>() };
   const draftKey = (mode: "feature" | "task") => `new-${mode}/${companyId}/${projectId}`;
   // Restoring is worked out once, before the first save, or the save would write the blank form over it.
@@ -356,7 +358,7 @@ function AddForm({ companyId, projectId, initial, agents, features, goals, tiers
           id="nt-body"
           label={isFeature ? "What problem does it solve, and for whom?" : "Description"}
           rows={6}
-          placeholder={isFeature ? "" : "What should be done, and what counts as finished."}
+          placeholder={isFeature ? "" : hasCode ? "What should be done, and what counts as finished." : "What should be done, and what counts as finished. For example: plan this month's client reports."}
           value={form.body}
           onChange={(text) => setForm({ ...form, body: text })}
           onPaste={img.onPaste}
@@ -880,6 +882,21 @@ function TicketCard({ sameAs, waiters, t, mine, merging, who, name, prefix, tier
 export function Board({ companies, projectId, subpage, go, onCompaniesChanged, decisionsOpen }: { companies: Company[]; projectId: string | undefined; subpage?: string; go: (to: string) => void; onCompaniesChanged: () => void; /** The Decisions badge's figure, so the board can say how many open questions hold no task. */ decisionsOpen?: number | null }) {
   // The wheel over the sideways board must scroll the page even when the hand adds a little sideways movement (BOS-1915).
   const boardScrollRef = useWheelToPage();
+  const hasCode = useHasCode();
+  // BOS-2828: columns that run off the right edge say so, until the owner has scrolled to the last one.
+  const [moreRight, setMoreRight] = useState(false);
+  useEffect(() => {
+    const el = document.querySelector<HTMLElement>(".board-scroll");
+    if (!el) return setMoreRight(false);
+    const measure = () => setMoreRight(el.scrollWidth - el.clientWidth - el.scrollLeft > 8);
+    measure();
+    el.addEventListener("scroll", measure, { passive: true });
+    window.addEventListener("resize", measure);
+    return () => {
+      el.removeEventListener("scroll", measure);
+      window.removeEventListener("resize", measure);
+    };
+  });
   const projects = usePoll(
     async (signal) => (await Promise.all(companies.map((c) => api<Project[]>(`/api/companies/${c.id}/projects`, { signal })))).flat(),
     60_000,
@@ -1045,9 +1062,9 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged, d
   const progressCol = cols.find((c) => c.systemState === "in_progress");
   const readyCol = cols.find((c) => c.systemState === "ready");
   const standing = {
-    inProgress: (progressCol?.tickets ?? []).filter((t) => !t.waitingOnOwner && !t.wipExempt && passes(t)).length,
+    inProgress: (progressCol?.tickets ?? []).filter((t) => !t.waitingOnOwner && !t.wipExempt && !t.recurring && !t.ownCheck && passes(t)).length,
     nextUp: (readyCol?.tickets ?? []).filter((t) => t.nextUp && passes(t)).length,
-    beingChecked: lanes.find((l) => l.checking)?.tickets.filter(passes).length ?? 0,
+    beingChecked: (lanes.find((l) => l.checking)?.tickets.filter(passes).length ?? 0) + (progressCol?.tickets ?? []).filter((t) => !t.waitingOnOwner && !t.wipExempt && !t.recurring && t.ownCheck && passes(t)).length,
     watching: lanes.find((l) => l.liveCheck)?.tickets.filter(passes).length ?? 0,
   };
   // BOS-1910: every shown card the watchdog has handed on, in lane order; the strip links to the first.
@@ -1171,7 +1188,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged, d
           <h1>{current?.name ?? "Kanban"}</h1>
           {current?.repoUrl && <p className="sub mono" style={{ fontSize: 13 }}>{current.repoUrl}</p>}
           {/* (BOS-1126 Q10) The watchdog status is a small pill on the line under the project name, not floating mid-heading. */}
-          {current && <p style={{ margin: "6px 0 0" }}><WatchdogHealth companyId={current.companyId} /></p>}
+          {current && <p style={{ margin: "6px 0 0" }}><WatchdogHealth companyId={current.companyId} /> <GuideLink slug="the-watchdog">What's the watchdog?</GuideLink></p>}
         </div>
         {current && (
           <StarButton
@@ -1369,6 +1386,11 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged, d
       </div>
       {selecting && view !== "features" && <BulkBar count={selected.size} agents={company?.agents ?? []} busy={bulkBusy} result={bulkResult} onRun={(a) => void runBulk(a)} onClear={() => { setSelected(new Set()); setBulkResult(null); lastPicked.current = null; }} />}
       {board.data && view !== "features" && <WorkStands counts={standing} targets={standingTargets} stuck={stuckCards.length} stuckTicketId={stuckCards[0]?.id} onShowStuck={() => setFilter({ stuckOnly: true })} />}
+      {board.data && view !== "features" && (
+        <p style={{ margin: "4px 0 0" }}>
+          <GuideLink slug="board-and-decisions">How the board works</GuideLink>
+        </p>
+      )}
       {board.data && view !== "features" && filters.stuckOnly && (
         <p className="stuck-filter-line" role="status" data-testid="stuck-filter-line">
           Showing {stuckCards.length} stuck {stuckCards.length === 1 ? "card" : "cards"} ·{" "}
@@ -1387,6 +1409,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged, d
       )}
       {view === "features" && featureList.length > 0 && !visibleFeatures.length && <p className="muted">No features in the states you have switched on. Switch more states on above.</p>}
       {view === "features" && <FeatureCards features={visibleFeatures} onAddTask={(featureId) => { setNote(null); openForm({ mode: "task", featureId }); }} />}
+      {view !== "features" && moreRight &&<p className="board-more muted" role="note">More columns to the right: scroll sideways →</p>}
       {view !== "features" && (
       <div className="board-scroll" ref={boardScrollRef}>
         <div className="board">
@@ -1417,11 +1440,11 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged, d
                 ) : merging ? (
                   <header className="lane-head">
                     <div className="lane-title">
-                      <h2 id="lane-merging">Approved, merging</h2>
+                      <h2 id="lane-merging">{hasCode ? "Approved, merging" : "Approved"}</h2>
                       <span className="mono">{shown.length}</span>
                     </div>
                     <span className="lane-hint">
-                      Every reviewer approved. Boss Man checks and merges these itself. <a href={`#/merge-queue/${current?.companyId ?? ""}`}>See the merge queue</a>
+                      {hasCode ? <>Every reviewer approved. Boss Man checks and merges these itself. <a href={`#/merge-queue/${current?.companyId ?? ""}`}>See the merge queue</a></> : "Every reviewer approved."}
                     </span>
                   </header>
                 ) : held ? (
@@ -1489,7 +1512,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged, d
                     </button>
                   </p>
                 ) : (
-                  shown.length === 0 && <p className="lane-empty">{merging ? (heldCount > 0 ? `Nothing is merging right now. ${heldCount === 1 ? "1 approved task is" : `${heldCount} approved tasks are`} held, waiting: see "Passed, held" next.` : "Nothing approved is waiting to merge.") : (EMPTY_HINT[col.systemState] ?? "No tasks here.")}</p>
+                  shown.length === 0 && <p className="lane-empty">{merging ? (heldCount > 0 ? `Nothing is merging right now. ${heldCount === 1 ? "1 approved task is" : `${heldCount} approved tasks are`} held, waiting: see "Passed, held" next.` : hasCode ? "Nothing approved is waiting to merge." : "Nothing approved yet.") : (EMPTY_HINT[col.systemState] ?? "No tasks here.")}</p>
                 )}
                 {done ? (
                   <>

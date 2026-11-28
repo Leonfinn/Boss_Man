@@ -106,6 +106,19 @@ describe("release log: the Release Manager is woken when the live commit changes
     expect(rollback!.note).toContain(A.slice(0, 8));
   });
 
+  it("BOS-2891: a version applied from a hand card is recorded as a hand-apply, not the host deployer", async () => {
+    const c = (ctx = await setupApp());
+    const { companyId, rm } = await withReleaseManager(c);
+    await c.releaseLog.note(companyId, A);
+    // A hand card (infra update) for B, in any state: the owner applied it, the deployer's own report still says "deployed".
+    await c.db.insert(decisions).values({ companyId, kind: "approval", question: "Update?", options: ["Done"], recommendedOption: "Done", status: "answered", context: { type: "self_deploy", target: "server", commit: B, fromCommit: A, infra: true, handSteps: ["step"] } });
+    await deployResult(c, { from: A, to: B });
+    await c.selfDeploy.sync();
+    const [w] = await c.db.select().from(wakes).where(eq(wakes.agentId, rm!.id));
+    expect(w!.note).toContain("a hand-apply");
+    expect(w!.note).not.toContain("the host deployer");
+  });
+
   it("does NOT wake for a restart on the same commit", async () => {
     const c = (ctx = await setupApp());
     const { companyId } = await withReleaseManager(c);

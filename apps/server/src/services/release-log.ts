@@ -20,10 +20,11 @@ const LOG_TITLE_PREFIX = "Release log: record ";
 const RELEASES_PROJECT = "Releases";
 
 /** How a new live commit went live, in plain words, for the wake note. */
-export type ReleaseHow = "deployed" | "deployed-bluegreen" | "switched-back" | "rolled-back" | "restarted";
+export type ReleaseHow = "deployed" | "deployed-bluegreen" | "switched-back" | "rolled-back" | "restarted" | "hand-applied";
 
 const HOW_WORDS: Record<ReleaseHow, string> = {
   deployed: "the host deployer",
+  "hand-applied": "a hand-apply (the owner applied it from a hand card)",
   "deployed-bluegreen": "a blue/green switch",
   "switched-back": "a blue/green switch-back",
   "rolled-back": "a rollback",

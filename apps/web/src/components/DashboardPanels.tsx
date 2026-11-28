@@ -9,6 +9,7 @@ import { heldSummary, heldText, inLineOf, pausedSlotsText, pausedSummary, paused
 // R43 (BOS-1716): each count in these panels is written with its one label from the shared list.
 import { figureText } from "@boss-man/shared";
 import { inForceHeadline, inForceReason, type LimitInForce } from "../limit-in-force";
+import { GuideLink } from "../guide-links";
 
 export const NEEDS_YOU_MAX = 5;
 
@@ -52,7 +53,7 @@ const clock = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hou
 const hoursText = (ms: number) => waitedText(Math.max(0, Math.round(ms / 60_000)));
 
 /** The four lines, always in this order: Runner, Merges, Usage limits, Update. */
-export function healthLines(input: { health: HealthData | null | undefined; merges: MergeHealthView | null | undefined; stuck: StuckSummary | null; slow?: SlowSummary | null; running: number; companyId: string; now?: number }): HealthLine[] {
+export function healthLines(input: { health: HealthData | null | undefined; merges: MergeHealthView | null | undefined; stuck: StuckSummary | null; slow?: SlowSummary | null; running: number; companyId: string; now?: number; /** BOS-2819: false for a company with no code project: no Merges line. */ hasCode?: boolean }): HealthLine[] {
   const { health, merges, stuck, slow, running, companyId } = input;
   const now = input.now ?? Date.now();
   const system = `#/settings/${companyId}/updates`;
@@ -104,7 +105,7 @@ export function healthLines(input: { health: HealthData | null | undefined; merg
   if (held && health?.runLimit) update = { key: "update", tone: "warn", symbol: "↑", state: `Agents at once: ${held}`, pill: `Agents ${health.runLimit.inForce} of ${health.runLimit.saved}`, text: `${up?.waiting && up.deadline ? `Server update waits for a quiet machine; you'll be asked at ${clock(up.deadline)}. ` : ""}${inForceReason(health.runLimit)}`, href: `#/settings/${companyId}/updates`, linkText: "the waiting update" };
 
   // BOS-2538: every line carries its own interval, so the heading names none (the Merges line is read every 20 s).
-  return [runner, mergesLine, usage, update].map((l) => ({ ...l, refresh: refreshNote(l.key) }));
+  return [runner, ...(input.hasCode === false ? [] : [mergesLine]), usage, update].map((l) => ({ ...l, refresh: refreshNote(l.key) }));
 }
 
 /** BOS-2538: what each line is called while the first read is still on its way. */
@@ -157,6 +158,11 @@ export function RightNow({ lines, paused, companyId, loading, onResume }: { line
           </li>
         ))}
       </ul>
+      {lines?.some((l) => l.key === "runner" && l.state === "Runner offline") && (
+        <p style={{ margin: "6px 0 0" }}>
+          <GuideLink slug="the-runner">What's the runner?</GuideLink>
+        </p>
+      )}
     </section>
   );
 }

@@ -100,7 +100,7 @@ describe("projects page summary line", () => {
   it("keeps today's line and shows Retry when the figures fail", async () => {
     stub(() => new Response(JSON.stringify({ error: "boom" }), { status: 500, headers: { "content-type": "application/json" } }));
     render(<ProjectsPage companies={[company]} companyId="c1" go={vi.fn()} />);
-    expect(await screen.findByText(/Repo set|No repo/)).toBeTruthy();
+    expect(await screen.findByText(/Repo set|Documents and research/)).toBeTruthy();
     expect(await screen.findByRole("button", { name: "Retry" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
   });

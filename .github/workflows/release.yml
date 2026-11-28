@@ -194,6 +194,21 @@ jobs:
             exit 1
           fi
           echo "$out"
+      - name: Image label gate (BOS-2841; the What's new entries of this release say "In image <version>" in the commit being released)
+        if: ${{ env.RELEASE_SKIP == '' }}
+        env:
+          SHA: ${{ env.RELEASE_SHA }}
+        run: |
+          set -euo pipefail
+          # Labelling happens on main before the run (scripts/changelog-label.sh label), not here: a push made with this
+          # workflow's token starts no CI, so no "Publish images" run would build the labelled commit and the release would
+          # have no image to tag. Here the label is only proven to have reached the commit that is tagged; before any tag.
+          if ! out="$(scripts/changelog-label.sh check "$VERSION" "${RELEASE_PREV_SHA:-}" "$SHA" 2>&1)"; then
+            echo "$out"
+            echo "::error title=Release blocked: What's new is not labelled for this image::$(printf '%s\n' "$out" | tail -n 1 | cut -c1-400)"
+            exit 1
+          fi
+          echo "What's new entries of $VERSION carry their image label at ${SHA:0:12}."
       - name: The version is new, and the commit being released has its images
         if: ${{ env.RELEASE_SKIP == '' }}
         env:

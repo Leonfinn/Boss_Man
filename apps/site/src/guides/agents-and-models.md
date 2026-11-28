@@ -91,6 +91,8 @@ Open **Agents** and choose **Hire**. Pick a role under **Start from**, or **Blan
 
 Choose what pays for it under **Paid from**.
 
+Not sure which roles you need, or what the model and thinking settings mean for cost? See [Hiring your first team](/guides/hiring-your-first-team).
+
 ## Choose a model
 
 The **Model** list starts with **Default**, which uses the agent program's own default. Below that are the models the runner reports for that agent program, and the models your API key offers. Choose **Other…** to type a model name yourself. If the list is empty, choose **Refresh models**.

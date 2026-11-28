@@ -44,6 +44,7 @@ describe("eventWatchPhrase", () => {
     ["On the next real update the card closes by itself", "the next real update"],
     ["On the next real runner update, no agent run is killed", "the next real runner update"],
     ["The next weekly release lists the change", "The next weekly release"],
+    ["After the next failed server update, the card names the commit", "the next failed server update"],
     ["After the next release the website shows the new words", "the next release"],
     ["A real image install shows the note", "A real image install"],
     ["The first real stuck alert wakes the CEO", "The first real stuck"],

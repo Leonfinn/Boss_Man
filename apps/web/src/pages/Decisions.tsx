@@ -4,7 +4,7 @@ import { api, ApiError, type AdvisedDecision, type ClosedNoticeCard, type Compan
 import { art } from "../brand";
 import { copyText, selectText } from "../clipboard";
 import { State } from "../components/State";
-import { hashQuery, usePoll } from "../hooks";
+import { hashQuery, useHasCode, usePoll } from "../hooks";
 import { ageLabel, dayLabel, raisedAgo } from "../age";
 import { clearDraft, readDraft, saveDraft } from "../drafts";
 import { describe, useTranscript } from "../transcript";
@@ -23,6 +23,7 @@ import { buildCsv, download } from "../csv";
 import { Loader } from "../components/Loader";
 import { LoadError } from "../components/LoadError";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
+import { GuideLink } from "../guide-links";
 
 // A card's note and own-word answer are kept in this browser as they are typed (BOS-637): a
 // freeze or a reload must not cost the owner what they wrote. The cards arrive one at a time, so
@@ -628,6 +629,7 @@ function useLinkedCard(): string | null {
 }
 
 export function Decisions({ decisions, companies, loaded, loadError = false, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany, withTeam = [], advised = [], closedNotices = [], tally }: { decisions: Decision[]; companies: Company[]; loaded: boolean; loadError?: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode | ((folded: boolean) => ReactNode); elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void; withTeam?: TeamAlert[]; advised?: AdvisedDecision[]; closedNotices?: ClosedNoticeCard[]; tally?: DecisionTally | null }) {
+  const hasCode = useHasCode();
   const [filter, setFilter] = useState<string | null>(null);
   const [savedProject, setSavedProject] = useState<string | null>(readProjectFilter);
   const pickProject = (v: string | null) => {
@@ -1107,6 +1109,17 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
                       // command block in them showed as raw ``` lines (BOS-550). The steps show once, as blocks, under
                       // "What to do"; the heading is only the first line.
                       <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\n")[0]!} refs={d.refs} /></h2>
+                    ) : d.context?.type === "team_plan" ? (
+                      <>
+                        {/* BOS-2824: the heading, who covers what and the cost line in plain words; each hire is
+                            one row below with its technical details folded, so the card is not read twice. */}
+                        <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\n")[0]!} refs={d.refs} /></h2>
+                        {d.context.covered && <p style={{ whiteSpace: "pre-wrap", margin: 0 }}>Already covered: {d.context.covered}</p>}
+                        {d.context.costLine && <p style={{ margin: 0, fontWeight: 600 }}>{d.context.costLine}</p>}
+                        <p style={{ margin: 0 }}>
+                          <GuideLink slug="hiring-your-first-team">How hiring works</GuideLink>
+                        </p>
+                      </>
                     ) : !x && !rule && d.question.split("\n").length > PREVIEW_LINES + 2 ? (
                       <>
                         <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\n")[0]!} refs={d.refs} /></h2>
@@ -1412,19 +1425,34 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
                             <legend style={{ fontWeight: 600, marginBottom: 4 }}>Who to hire</legend>
                             {d.context.hires.map((h, i) => {
                               const chosen = picks[d.id] ?? d.context!.hires!.map((_, j) => j);
+                              const role = [h.title, h.template].filter(Boolean).join(" · ");
+                              const payg = h.fundingSourceKind === "api_payg" || h.fundingSourceKind === "usage_credits";
                               return (
                                 <label key={i} style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 14 }}>
                                   <input type="checkbox" checked={chosen.includes(i)} onChange={(e) => setPicks((p) => ({ ...p, [d.id]: e.target.checked ? [...chosen, i].sort((a, b) => a - b) : chosen.filter((x) => x !== i) }))} />
-                                  <span>
+                                  <span style={{ flex: 1 }}>
+                                    {/* BOS-2824: name, role and what they will do; the setup is folded underneath. */}
                                     <strong>{h.name}</strong>
-                                    {h.title ? `, ${h.title}` : ""}
-                                    {h.template ? <span className="muted"> ({h.template})</span> : null}: {h.reason}
-                                    {h.skills?.length ? <span className="muted"> Skills: {h.skills.join(", ")}.</span> : null}
+                                    {role ? <span className="muted"> · {role}</span> : null}
+                                    {h.reason ? <span style={{ display: "block" }}>{h.reason}</span> : null}
+                                    {h.fundingSourceKind === "subscription" && h.fundingSourceName ? <span className="muted" style={{ display: "block" }}>On your {h.fundingSourceName}: no extra cost</span> : payg ? <span className="muted" style={{ display: "block" }}>Pay as you go: you pay for the time they work</span> : null}
+                                    {h.skills?.length ? <span className="muted" style={{ display: "block" }}>Gets from the start: {h.skills.join(", ")}</span> : null}
+                                    {(h.harness || h.provider || h.model || h.fundingSourceName) && (
+                                      <details style={{ marginTop: 2 }}>
+                                        <summary className="muted" style={{ cursor: "pointer" }}>Technical details</summary>
+                                        <ul className="plain-list" style={{ margin: "4px 0 0", padding: 0 }}>
+                                          {h.harness && <li>Harness: {harnessLabel(h.harness)}</li>}
+                                          {h.provider && <li>Provider: {providerLabel(h.provider)}</li>}
+                                          {h.model && <li>Model: {h.model}</li>}
+                                          {h.fundingSourceName && <li>Paid from: {h.fundingSourceName}</li>}
+                                        </ul>
+                                      </details>
+                                    )}
                                   </span>
                                 </label>
                               );
                             })}
-                            <small className="muted">A reviewer you hire does code, security, infra or adversarial reviews once you name them in Settings › Reviews.</small>
+                            <small className="muted">A reviewer you hire does {hasCode ? "code, security, infra or adversarial " : ""}reviews once you name them in Settings › Reviews.</small>
                           </fieldset>
                         )}
                         {d.context?.type === "hire" && !!d.context.proposal?.skills?.length && (
@@ -1584,13 +1612,15 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
                                   }
                                 }}>
                                   {!modelEdits[d.id] && d.options.map((o, i) => {
+                                    // (BOS-2824) A team plan's hire button follows the ticks, so it says how many will be hired.
+                                    const shown = d.context?.type === "team_plan" && o === "Hire the ticked ones" ? `Hire the ${(picks[d.id] ?? d.context.hires!.map((_, j) => j)).length} ticked` : o;
                                     const rec = o === eff.option;
                                     const effect = effects.get(o);
                                     const effectId = `effect-${d.id}-${i}`;
                                     const waitsForNote = noteEmpty && noteFor.includes(o);
                                     const button = (
-                                      <button type="button" key={o} className={`btn${rec ? " primary" : ""}`} aria-label={rec ? `${o}, recommended` : undefined} aria-describedby={effect ? effectId : waitsForNote ? `note-first-${d.id}` : undefined} disabled={busy === d.id || waitsForNote || (d.context?.type === "workflow_change" && !notes[d.id]?.trim())} title={waitsForNote ? `${NOTE_FIRST}: the box above` : d.context?.type === "workflow_change" && !notes[d.id]?.trim() ? "Type a reason above to Apply or Skip" : undefined} onClick={() => (d.context?.type === "model_change" && o === "Edit" ? setModelEdits((m) => ({ ...m, [d.id]: true })) : o === "Reassign" && d.context?.type === "stale_blocker" && d.context.blockerTicketId ? void openReassign(d) : pressOption(d, o))}>
-                                        {o}
+                                      <button type="button" key={o} className={`btn${rec ? " primary" : ""}`} aria-label={rec ? `${shown}, recommended` : undefined} aria-describedby={effect ? effectId : waitsForNote ? `note-first-${d.id}` : undefined} disabled={busy === d.id || waitsForNote || (d.context?.type === "workflow_change" && !notes[d.id]?.trim())} title={waitsForNote ? `${NOTE_FIRST}: the box above` : d.context?.type === "workflow_change" && !notes[d.id]?.trim() ? "Type a reason above to Apply or Skip" : undefined} onClick={() => (d.context?.type === "model_change" && o === "Edit" ? setModelEdits((m) => ({ ...m, [d.id]: true })) : o === "Reassign" && d.context?.type === "stale_blocker" && d.context.blockerTicketId ? void openReassign(d) : pressOption(d, o))}>
+                                        {shown}
                                         {rec && !stacked && recTag}
                                       </button>
                                     );

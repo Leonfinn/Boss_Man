@@ -1,5 +1,5 @@
 import { api, usd } from "../api";
-import { usePoll } from "../hooks";
+import { useHasCode, usePoll } from "../hooks";
 import { ago } from "../pages/Dashboard";
 
 type Record_ = {
@@ -24,6 +24,7 @@ function showChanges() {
  */
 export function TicketRecord({ ticketId }: { ticketId: string }) {
   const rec = usePoll((signal) => api<Record_>(`/api/tickets/${ticketId}/record`, { signal }), 60_000, `record-${ticketId}`);
+  const hasCode = useHasCode();
   const r = rec.data;
   if (!r || !r.runs) return rec.error ? <p className="muted" data-testid="ticket-record">What Boss Man recorded: couldn't load.</p> : null;
   const over = r.capMicros != null && r.spendMicros >= r.capMicros;
@@ -41,6 +42,7 @@ export function TicketRecord({ ticketId }: { ticketId: string }) {
         <li data-testid="record-check">
           Last check: {r.lastCheck ? `${r.lastCheck.result === "pass" ? "passed" : "failed"} (${r.lastCheck.scope})${r.lastCheck.at ? `, ${ago(r.lastCheck.at)}` : ""}` : "none yet"}
         </li>
+        {hasCode && (
         <li data-testid="record-files">
           Files changed: {r.filesChanged == null ? "not available" : r.filesChanged}
           {r.filesChanged ? (
@@ -50,6 +52,7 @@ export function TicketRecord({ ticketId }: { ticketId: string }) {
             </>
           ) : null}
         </li>
+        )}
       </ul>
     </section>
   );

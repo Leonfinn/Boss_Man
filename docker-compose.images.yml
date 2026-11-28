@@ -5,8 +5,8 @@
 # registry come from images.env, which is made from a release's signed release.json (scripts/render-image-env.sh) and downloaded
 # with this file from the release page. To use another registry, change BOSSMAN_REGISTRY in images.env.
 #
-#   docker compose --env-file images.env run --rm setup        # once: master key and database password, in a volume
-#   docker compose --env-file images.env up -d
+#   docker compose -f docker-compose.images.yml --env-file images.env run --rm setup        # once: master key and database password, in a volume
+#   docker compose -f docker-compose.images.yml --env-file images.env up -d
 # Then open http://<host>:3100 and create the owner account. Back up the "config" volume: without master.key, stored
 # secrets cannot be read.
 #
@@ -199,6 +199,7 @@ services:
       UPDATER_LAUNCHER_ENV: |
         BOSSMAN_DATA=/data
         BOSSMAN_DATA_HOST=auto
+        BOSSMAN_INSTALL_LABEL=com.bossman.install=${COMPOSE_PROJECT_NAME:-boss-man}
         BOSSMAN_RUNNER_NETWORK=${BOSSMAN_RUNNER_NETWORK:-boss-man_default}
         BOSSMAN_RUNNER_URL=ws://server:3100/api/runner/connect
         BOSSMAN_RUNNER_MEMORY=${BOSSMAN_RUNNER_MEMORY:-}

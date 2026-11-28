@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react";
+import { defaultTokenLifeDays, endsOnDay, type SecretKind } from "@boss-man/shared";
 import { api, type Company } from "../api";
 import { Credentials } from "./settings/Credentials";
 import { usePoll } from "../hooks";
@@ -6,7 +7,7 @@ import { LoadError } from "../components/LoadError";
 import { Loader } from "../components/Loader";
 import { when } from "./Runs";
 
-type Secret = { id: string; name: string; kind: string; hint: string | null; version: number; createdAt: string; updatedAt: string; lastUsedAt?: string | null; unusedIn30Days?: boolean };
+type Secret = { id: string; name: string; kind: string; hint: string | null; version: number; createdAt: string; updatedAt: string; expiresAt: string | null; lastUsedAt?: string | null; unusedIn30Days?: boolean };
 type UseSummary = { total: number; byCompany: { company: string; reads: number }[]; byPurpose: { run: number; deploy: number; merge: number; other: number }; perDay: number[] };
 type AccessLog = { entries: Access[]; summary: UseSummary };
 type Grant = { id: string; envName: string; companyId: string; company: string; deployTargetId: string | null; deployTarget: string | null; agentIds: string[] };
@@ -59,6 +60,9 @@ function Detail({ secret, onChanged }: { secret: Secret; onChanged: () => void }
   const grants = usePoll((signal) => api<Grant[]>(`/api/secrets/${secret.id}/grants`, { signal }), 30_000, `g-${secret.id}`);
   const log = usePoll((signal) => api<AccessLog>(`/api/secrets/${secret.id}/access-log?limit=50`, { signal }), 30_000, `l-${secret.id}`);
   const [value, setValue] = useState("");
+  // A new value starts with no end date: the old date belonged to the token being replaced (BOS-2825). The owner gives
+  // the date of the token they just made, and can clear it for one that never expires.
+  const [endsOn, setEndsOn] = useState("");
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const run = async (fn: () => Promise<string>) => {
     try {
@@ -67,11 +71,13 @@ function Detail({ secret, onChanged }: { secret: Secret; onChanged: () => void }
       setNote({ ok: false, text: (err as Error).message });
     }
   };
+  const canExpire = defaultTokenLifeDays(secret.kind as SecretKind) !== null;
   const rotate = (e: FormEvent) => {
     e.preventDefault();
     void run(async () => {
-      const r = await api<{ warnings?: string[] }>(`/api/secrets/${secret.id}/value`, { method: "PUT", body: { value } });
+      const r = await api<{ warnings?: string[] }>(`/api/secrets/${secret.id}/value`, { method: "PUT", body: { value, endsOn: endsOn || null } });
       setValue("");
+      setEndsOn("");
       onChanged();
       return `Rotated. Every grant uses the new value from the next run.${r.warnings?.length ? ` Note: ${r.warnings.join(" ")}` : ""}`;
     });
@@ -118,6 +124,12 @@ function Detail({ secret, onChanged }: { secret: Secret; onChanged: () => void }
           <label htmlFor={`rotate-${secret.id}`}>Rotate: new value</label>
           <input id={`rotate-${secret.id}`} type="password" autoComplete="off" spellCheck={false} required value={value} onChange={(e) => setValue(e.target.value)} />
         </div>
+        {canExpire && (
+          <div className="field">
+            <label htmlFor={`rotate-ends-${secret.id}`}>Ends on</label>
+            <input id={`rotate-ends-${secret.id}`} type="date" aria-describedby={`rotate-ends-hint-${secret.id}`} value={endsOn} onChange={(e) => setEndsOn(e.target.value)} />
+          </div>
+        )}
         <button className="btn primary" type="submit">
           Rotate
         </button>
@@ -137,6 +149,11 @@ function Detail({ secret, onChanged }: { secret: Secret; onChanged: () => void }
           Delete
         </button>
       </form>
+      {canExpire && (
+        <p id={`rotate-ends-hint-${secret.id}`} className="muted" style={{ fontSize: 13 }}>
+          <strong>Ends on</strong> is the day the new token stops working. Leave it empty for one that never expires. A week before it ends, you get one card saying how to replace it.
+        </p>
+      )}
       {note && (
         <p role={note.ok ? "status" : "alert"} className={note.ok ? "muted" : "error"} style={{ fontSize: 14 }}>
           {note.text}
@@ -209,6 +226,7 @@ export function Secrets({ companies, companyId, onChanged }: { companies: Compan
                 <span className="muted">
                   v{s.version} · updated {when(s.updatedAt)} · {lastUsedText(s.lastUsedAt)}
                 </span>
+                <span className="mono muted">{s.expiresAt ? `ends ${endsOnDay(s.expiresAt)}` : "no end date"}</span>
                 {s.unusedIn30Days && <span className="tag">Not used in 30 days</span>}
               </button>
               {open === s.id && <Detail secret={s} onChanged={list.reload} />}

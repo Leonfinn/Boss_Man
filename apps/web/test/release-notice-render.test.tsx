@@ -56,6 +56,7 @@ const available: Active = {
   ntfy: false,
   checkedAt: "2026-11-26T06:00:00.000Z",
   couldntCheck: false,
+  install: { linked: true, updater: null },
   available: {
     version: "0.9.0-beta.4-with-a-rather-long-build-label",
     url: "https://example.com/releases/0.9.0-beta.4",
@@ -65,9 +66,12 @@ const available: Active = {
   },
 };
 const quiet: Active = { ...available, available: null, couldntCheck: true };
+// BOS-2713: the install is under way; and a roll-back the owner has not read yet.
+const installing: Active = { ...available, install: { linked: true, updater: { stage: "soaking", version: "0.9.0-beta.4-with-a-rather-long-build-label", error: null, report: null } } };
+const rolledBack: Active = { ...available, install: { linked: true, updater: { stage: "rolled-back", version: "0.9.0-beta.4", error: null, report: { level: "problem", text: "The new version did not stay healthy, so Boss Man went back to 0.9.0-beta.3. Nothing was lost.", acknowledged: false } } } };
 
 const page = (v: Active) =>
-  `<!doctype html><html><head><meta charset="utf-8"><style>${css}</style></head><body><main class="main">${renderToStaticMarkup(<ReleaseNoticeBody v={v} busy={false} set={() => {}} />)}</main></body></html>`;
+  `<!doctype html><html><head><meta charset="utf-8"><style>${css}</style></head><body><main class="main">${renderToStaticMarkup(<ReleaseNoticeBody v={v} busy={false} set={() => {}} install={() => {}} dismiss={() => {}} />)}</main></body></html>`;
 
 const read = () => {
   const root = document.querySelector('[data-testid="release-notice"]') as HTMLElement;
@@ -85,6 +89,10 @@ const read = () => {
     linkVisible: !!lr && lr.width > 0 && lr.height > 0,
     href: link?.getAttribute("href") ?? null,
     boxes: root.querySelectorAll("input[type=checkbox]").length,
+    buttons: [...root.querySelectorAll("button")].map((b) => {
+      const r = b.getBoundingClientRect();
+      return { text: b.textContent, visible: r.width > 0 && r.height > 0, fits: r.left >= box.left - 0.5 && r.right <= box.right + 0.5, touchHeight: r.height };
+    }),
   };
 };
 
@@ -108,8 +116,32 @@ describe.skipIf(!browser)("release notice in a real browser (BOS-2663)", () => {
         expect(got.boxes).toBe(2);
         expect(got.inside).toBe(true);
         expect(got.overflow).toBeLessThanOrEqual(1);
+        // BOS-2713: the one Install button is there, whole, and inside the panel.
+        expect(got.buttons).toHaveLength(1);
+        expect(got.buttons[0]).toMatchObject({ visible: true, fits: true });
+        expect(got.buttons[0]!.text).toMatch(/^Install 0\.9\.0-beta\.4/);
         const path = await shotPath(d.name);
         if (path) await p.screenshot({ path, fullPage: true });
+      } finally {
+        await p.close();
+      }
+    });
+
+    it(`${d.name}: while installing there is a progress line and no second Install button; a roll-back reads plainly with "Got it"`, async () => {
+      const p = await browser!.newPage({ viewport: d.viewport, deviceScaleFactor: d.deviceScaleFactor, hasTouch: d.hasTouch, isMobile: d.isMobile });
+      try {
+        await p.setContent(page(installing), { waitUntil: "load" });
+        const a = await p.evaluate(read);
+        expect(a.text).toContain("Watching the new version");
+        expect(a.buttons).toHaveLength(0);
+        expect(a.inside).toBe(true);
+        expect(a.overflow).toBeLessThanOrEqual(1);
+        await p.setContent(page(rolledBack), { waitUntil: "load" });
+        const b = await p.evaluate(read);
+        expect(b.text).toContain("went back to 0.9.0-beta.3");
+        expect(b.buttons.map((x) => x.text)).toEqual(["Install 0.9.0-beta.4-with-a-rather-long-build-label", "Got it"]);
+        expect(b.buttons.every((x) => x.visible && x.fits)).toBe(true);
+        expect(b.overflow).toBeLessThanOrEqual(1);
       } finally {
         await p.close();
       }
