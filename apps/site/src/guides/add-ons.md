@@ -31,7 +31,7 @@ See [Phone notifications](/guides/phone-notifications).
 
 ## Penpot: a design tool for your designer agents
 
-Penpot is an open-source design tool. Boss Man runs it as a separate Compose project, `boss-man-penpot`, on your home network only. Starting it this way (steps 1 to 3) needs a build-from-source install. On an image install, skip to giving agents access below, with a Penpot server you run yourself. Not yet confirmed on a real image install.
+Penpot is an open-source design tool. Boss Man runs it as a separate Compose project, `boss-man-penpot`, on your home network only. Starting it this way (steps 1 to 3) needs a build-from-source install. On an image install, skip to giving agents access below, with a Penpot server you run yourself. Connecting an image install to your own Penpot server is not yet confirmed.
 
 1. In `.env`, set `PENPOT_BIND` to the machine's home network address (never `0.0.0.0`), `PENPOT_PUBLIC_URI` to `http://<that address>:9001`, `PENPOT_SECRET_KEY` (make it with `openssl rand -base64 48`) and `PENPOT_DB_PASSWORD` (make it with `openssl rand -hex 24`).
 2. Start it with `docker compose -p boss-man-penpot --env-file .env -f deploy/penpot.yml --profile penpot up -d`.
