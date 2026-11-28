@@ -86,8 +86,9 @@ INBOX="$D/inbox" OUTBOX="$D/outbox" STATE="$D/state" LOG="$D/deployer.log"
 # invisible in the rendered settings). Compose files and deploy/*.yml/yaml (COMPOSE_FILES) are hand only when this host's
 # rendered settings change in a way the swap can't apply (compose_hand_reason). Dockerfiles and .npmrc are build inputs of the
 # images the deploy builds itself, so they are not on the list. .dockerignore stays on it (BOS-2908): it keeps the host's .env
-# out of every image, so a merged change to it is applied by the owner's hand.
-INFRA='^(scripts/(deploy|rebuild-live|update-runner|host-deployer|install-deployer|daily-backup)\.sh$|\.dockerignore$|\.env|deploy/)' # deploy/ files that are Compose files are taken out again in needs_hand (COMPOSE_FILES)
+# out of every image, so a merged change to it is applied by the owner's hand. So does any *.dockerignore in a folder, such as
+# apps/runner/Dockerfile.dockerignore: Docker lets it replace the top-level one for that build.
+INFRA='^(scripts/(deploy|rebuild-live|update-runner|host-deployer|install-deployer|daily-backup)\.sh$|([^/]*/)*[^/]*\.dockerignore$|\.env|deploy/)' # deploy/ files that are Compose files are taken out again in needs_hand (COMPOSE_FILES)
 COMPOSE_FILES='^(docker-compose[^/]*\.ya?ml$|deploy/([^/]+/)*[^/]*\.ya?ml$)'
 # Under deploy/ but never used by Boss Man's own containers: the Penpot add-on is its own Compose project (docs/15).
 NOT_INFRA='^deploy/(penpot|ntfy|ntfy-bluegreen)\.yml$'

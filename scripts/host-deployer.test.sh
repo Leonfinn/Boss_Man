@@ -490,7 +490,7 @@ infra_re="$(grep -o "^INFRA='[^']*'" "$here/host-deployer.sh" | sed "s/^INFRA='/
 compose_re="$(grep -o "^COMPOSE_FILES='[^']*'" "$here/host-deployer.sh" | sed "s/^COMPOSE_FILES='//; s/'\$//")"
 not_re="$(grep -o "^NOT_INFRA='[^']*'" "$here/host-deployer.sh" | sed "s/^NOT_INFRA='//; s/'\$//")"
 # Hand-only whatever the host's settings say: deploy scripts, .env*, and the files under deploy/ that are not Compose files.
-for p in scripts/deploy.sh scripts/rebuild-live.sh scripts/update-runner.sh scripts/host-deployer.sh scripts/install-deployer.sh scripts/daily-backup.sh .env.example .dockerignore deploy/caddy/Caddyfile deploy/tailscale/serve.json deploy/x.toml deploy/cfg/app.xml deploy/index.html deploy/l; do # daily-backup.sh runs as root in the backup container (BOS-2176)
+for p in scripts/deploy.sh scripts/rebuild-live.sh scripts/update-runner.sh scripts/host-deployer.sh scripts/install-deployer.sh scripts/daily-backup.sh .env.example .dockerignore apps/runner/Dockerfile.dockerignore apps/server/Dockerfile.dockerignore deploy/caddy/Caddyfile deploy/tailscale/serve.json deploy/x.toml deploy/cfg/app.xml deploy/index.html deploy/l; do # daily-backup.sh runs as root in the backup container (BOS-2176)
   if ! echo "$p" | grep -Eq "$infra_re" || echo "$p" | grep -Eq "$compose_re" || echo "$p" | grep -Eq "$not_re"; then fail "$p should count as infra"; fi
 done
 # Compose files are candidates: hand only when the rendered settings say so (BOS-2885). needs_hand takes them out of INFRA's deploy/ clause.
