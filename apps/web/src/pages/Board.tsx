@@ -20,6 +20,7 @@ import { GoalSelect, STATUS_TONE, type GoalLink, type Tree } from "./Features";
 import { StarButton } from "./Agents";
 import { ProjectBudget } from "./ProjectBudget";
 import { WatchdogHealth } from "../components/WatchdogHealth";
+import { QueuedBehindLine } from "../components/QueuedBehindLine";
 import { ArchiveProject, ProjectBrief, ProjectRow } from "./settings/Projects";
 import { Avatar } from "../components/Avatar";
 import { RunLabelLink } from "./Runs";
@@ -755,6 +756,7 @@ function TicketCard({ sameAs, waiters, t, mine, merging, who, name, prefix, tier
           <span>No movement for {stuckFor(t.looksStuck.idleMs)}.{t.looksStuck.claim ? ` ${t.looksStuck.claim}` : ""}</span>
         </span>
       )}
+      {t.systemState === "ready" && <QueuedBehindLine refs={t.queuedBehind} who={first} />}
       {t.wipExempt && t.wipExempt !== "live" && !isLiveCheckWait(t) && (
         <span className={t.wipExempt === "busy" ? "state-line" : "note"} title="This ticket can't move right now, so it doesn't count towards the work-in-progress limit.">
           {t.wipExempt === "busy" ? (
