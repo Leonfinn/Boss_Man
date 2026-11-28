@@ -9,7 +9,10 @@ lead: Find what you see in the list below. Each entry gives the fix and the guid
 
 This page is for you if something in Boss Man is not working and you want the fix without reading every guide.
 
-The commands use `$B`, the install folder from [Guide 2](/guides/install-boss-man), step 1. If you opened a new shell, set it again first, for example `B=/opt/boss-man`. Run every `docker compose` command from `$B/src`.
+**Which install do you have?** The commands differ between the two kinds of install, and each entry says which it is for.
+
+- **Image install** (your folder holds `images.env` and `docker-compose.images.yml`): run every command in that folder. Your settings are in `images.env`, and the start command is `docker compose --env-file images.env -f docker-compose.images.yml up -d`. The updater makes the server itself, as a container called `server-blue` or `server-green`, so `docker compose logs server` does not find it: use `docker logs --tail 100 server-blue` (or `server-green`). This lists every container of the install: `docker ps --filter label=com.bossman.install=boss-man --format '{{.Names}}  {{.Status}}'`. An image install has no `scripts/` folder and no `.env`, so a fix that names them does not apply to it.
+- **Build-from-source install**: the commands use `$B`, the install folder from [Build from source](/guides/install-boss-man#build-from-source), step 1. If you opened a new shell, set it again first, for example `B=/opt/boss-man`. Run every `docker compose` command from `$B/src`.
 
 If your problem is not here, open an issue on GitHub and say which step of which guide you are on.
 
@@ -17,19 +20,27 @@ If your problem is not here, open an issue on GitHub and say which step of which
 
 ### Docker Compose says "Set POSTGRES_PASSWORD in .env", or that a file is missing.
 
-You are not in `$B/src`, or [Guide 2](/guides/install-boss-man) step 3 or 4 is not finished. Run `cd $B/src && ls -a . secrets`. You need `.env`, `secrets/master.key` and `secrets/runner-app-co.token`. Also check `.env` has a `BOSSMAN_DATA` line: without one, Compose gives no error and uses `/srv/boss-man/data` instead.
+On an image install, see [If something goes wrong](/guides/install-boss-man#if-something-goes-wrong) in the install guide instead: the usual cause is running a command outside the folder with `images.env`.
+
+On a build-from-source install: you are not in `$B/src`, or [Guide 2](/guides/install-boss-man) step 3 or 4 is not finished. Run `cd $B/src && ls -a . secrets`. You need `.env`, `secrets/master.key` and `secrets/runner-app-co.token`. Also check `.env` has a `BOSSMAN_DATA` line: without one, Compose gives no error and uses `/srv/boss-man/data` instead.
 
 From: [Guide 2](/guides/install-boss-man).
 
 ### The port is already in use.
 
-Run `ss -tlnp | grep -E ':3100\b'`. If it prints nothing, the port is free. If it prints a line, change `BOSSMAN_HOST_PORT` in `$B/src/.env` to a free port, run `docker compose up -d`, and use the new port in your browser.
+Run `ss -tlnp | grep -E ':3100\b'`. If it prints nothing, the port is free. If it prints a line, pick a free port, such as 3200, and use it in your browser from then on.
+
+- **Image install:** add the port to the end of `images.env` with `printf '\nBOSSMAN_HOST_PORT=3200\n' >> images.env`, then run the start command, `docker compose --env-file images.env -f docker-compose.images.yml up -d`. Not yet confirmed on a real image install.
+- **Build-from-source install:** change `BOSSMAN_HOST_PORT` in `$B/src/.env` to the free port and run `docker compose up -d`.
 
 From: [Guide 2](/guides/install-boss-man).
 
 ### The server does not start, or the page says Boss Man is offline.
 
-Boss Man updates its database by itself when the server starts. Read the server's log with `docker compose logs --tail 100 server`, and check the database is healthy with `docker compose ps`. If the log shows a database update failed, do not edit the database by hand. Keep the log, and restore the backup from before the update (see "An update damaged my data" below).
+Boss Man updates its database by itself when the server starts. If the log shows a database update failed, do not edit the database by hand.
+
+- **Image install:** list the containers with `docker ps --filter label=com.bossman.install=boss-man --format '{{.Names}}  {{.Status}}'`. If `server-blue` or `server-green` is there, read its log with `docker logs --tail 100 server-blue` (or `server-green`). If neither is there, the updater's log says what it is waiting for: `docker compose --env-file images.env -f docker-compose.images.yml logs --tail 30 updater`.
+- **Build-from-source install:** read the server's log with `docker compose logs --tail 100 server`, and check the database is healthy with `docker compose ps`. If a database update failed, keep the log, and restore the backup from before the update (see "An update damaged my data" below).
 
 From: [Guide 10](/guides/updates-and-backups).
 
@@ -37,7 +48,12 @@ From: [Guide 10](/guides/updates-and-backups).
 
 ### The login page reloads, or I cannot log in.
 
-On plain `http://`, Boss Man needs `BOSSMAN_INSECURE_COOKIES=1` in `.env`. Check with `grep BOSSMAN_INSECURE_COOKIES $B/src/.env`. Add the line if it is missing, then run `docker compose up -d`. Open the page with the same address every time, because the login only works on the address you logged in with.
+On plain `http://`, Boss Man needs the setting `BOSSMAN_INSECURE_COOKIES=1`.
+
+- **Image install:** check with `grep BOSSMAN_INSECURE_COOKIES images.env`. If it prints nothing, run [step 6 of the install](/guides/install-boss-man#6-let-other-computers-reach-it), then the start command again.
+- **Build-from-source install:** check with `grep BOSSMAN_INSECURE_COOKIES $B/src/.env`. Add the line to `.env` if it is missing, then run `docker compose up -d`.
+
+On both, open the page with the same address every time, because the login only works on the address you logged in with.
 
 From: [Guide 2](/guides/install-boss-man).
 
@@ -54,8 +70,8 @@ From: [Guide 2](/guides/install-boss-man) and [Guide 9](/guides/add-ons).
 Open **Settings > Server and runner** and find **Runner**.
 
 1. If it says **Not started**, choose **Start runner**. It can take up to a minute.
-2. If an error shows under the runner, Boss Man could not start it. Check that `BOSSMAN_DOCKER_GID` in `.env` matches the output of `stat -c %g /var/run/docker.sock`, then run `docker compose up -d`.
-3. If the runner image was never built, or its safety check failed during the install, run `scripts/update-runner.sh` again, then choose **Start runner**.
+2. If an error shows under the runner, Boss Man could not start it. On an image install, check that `launcher` is in the container list (see the top of this page); if it is missing, read the updater's log as in "The server does not start" above. On a build-from-source install, check that `BOSSMAN_DOCKER_GID` in `.env` matches the output of `stat -c %g /var/run/docker.sock`, then run `docker compose up -d`.
+3. Build-from-source install only: if the runner image was never built, or its safety check failed during the install, run `scripts/update-runner.sh` again, then choose **Start runner**. An image install downloads its runner image with each release, so this step does not apply.
 4. Choose **Reconnect runner** to give the runner a new token and a new container. Work in progress carries on afterwards.
 
 To see what the runner says, run `docker ps -a --filter name=boss-man-runner` and then `docker logs --tail 50 boss-man-runner-<slug>`. The settings page shows the full container name.
@@ -64,11 +80,13 @@ From: [Guide 3](/guides/first-company-and-ticket).
 
 ### The runner's log says `getaddrinfo ENOTFOUND server`.
 
-The runner could not reach the server, usually because the server was restarting. You do not need to do anything. The runner keeps trying, waiting up to 30 seconds between tries. If it never connects, check the server is running with `docker compose ps`.
+The runner could not reach the server, usually because the server was restarting. You do not need to do anything. The runner keeps trying, waiting up to 30 seconds between tries. If it never connects, check the server is running: on an image install with the container list at the top of this page, on a build-from-source install with `docker compose ps`.
 
 From: [Guide 3](/guides/first-company-and-ticket).
 
 ### A runner add-on says Not installed or Not working.
+
+This fix is for a build-from-source install. On an image install, runner add-ons are not available yet: the published runner image has none, and this install cannot build its own (see [Add-ons](/guides/add-ons#runner-add-ons-extra-tools-for-agents)).
 
 Check **Settings > Server and runner > Runner > Add-ons**. For Not installed, tick the add-on there, press **Save add-ons**, then press **Build and update runners** in Settings > Server and runner > Updates. Skills that need an add-on are left out of agents' runs until it says Working.
 
@@ -78,7 +96,7 @@ From: [Guide 9](/guides/add-ons).
 
 ### The runner stops with "Set BOSSMAN_RUNNER_TOKEN_FILE...".
 
-This only happens if you run the runner without the launcher, which the guides do not do. Turn the launcher on (`COMPOSE_PROFILES=launcher` and `BOSSMAN_LAUNCHER=1` in `.env`, as [Guide 2](/guides/install-boss-man) sets), and Boss Man gives each runner its token.
+This only happens if you run the runner without the launcher, which the guides do not do. An image install always has the launcher on, so this is for a build-from-source install. Turn the launcher on (`COMPOSE_PROFILES=launcher` and `BOSSMAN_LAUNCHER=1` in `.env`, as [Guide 2](/guides/install-boss-man) sets), and Boss Man gives each runner its token.
 
 From: [`docs/29-tune-and-troubleshoot.md`](@repo/blob/main/docs/29-tune-and-troubleshoot.md), Troubleshooting.
 
@@ -168,6 +186,8 @@ From: [Guide 7](/guides/reviews-and-merge-queue).
 
 ### The test notification does not reach my phone.
 
+Phone notifications need ntfy and Tailscale, which only a build-from-source install can run so far (see [Phone notifications](/guides/phone-notifications)). On an image install, browser notifications still work.
+
 - If you cannot see **Send a test to my phone**, save the ntfy settings first. The button shows after you save.
 - Check ntfy is running with `docker compose -p boss-man-ntfy ps`.
 - Check Boss Man's server is on the `edge` network that the Tailscale add-on set up. Phone notifications need Tailscale first.
@@ -176,7 +196,7 @@ From: [Guide 8](/guides/phone-notifications).
 
 ### Notifications reach my iPhone late.
 
-This fix is only for iPhones. Android phones do not need it. iPhones need a wake-up sent through ntfy.sh. Add `NTFY_UPSTREAM_BASE_URL=https://ntfy.sh` to `.env` and run the ntfy start command from [Guide 8](/guides/phone-notifications) again. ntfy.sh only receives the message ID, not the text.
+This fix is only for iPhones, on a build-from-source install with ntfy set up. Android phones do not need it. iPhones need a wake-up sent through ntfy.sh. Add `NTFY_UPSTREAM_BASE_URL=https://ntfy.sh` to `.env` and run the ntfy start command from [Guide 8](/guides/phone-notifications) again. ntfy.sh only receives the message ID, not the text.
 
 From: [Guide 8](/guides/phone-notifications).
 
@@ -201,13 +221,21 @@ From: [Guide 8](/guides/phone-notifications).
 
 ## Updates and backups
 
+### An update on an image install did not go in.
+
+The line at the top of **Settings → Server and runner → Updates** says what happened: updated, or went back and why. A failed update goes back to the version you had by itself, and your data stays as it was. The entries below that name `scripts/` or the host deployer are for a build-from-source install. See [How updates work](/guides/how-updates-work#if-an-update-fails).
+
+From: [Guide 10](/guides/updates-and-backups#on-an-image-install).
+
 ### `scripts/deploy.sh` says the server is not healthy.
 
-The script stops and prints the commands to go back. Run `scripts/deploy.sh --rollback` to put the previous code back. This does not touch the database. To see why, run `docker compose logs --tail 100 server`.
+This is for a build-from-source install. The script stops and prints the commands to go back. Run `scripts/deploy.sh --rollback` to put the previous code back. This does not touch the database. To see why, run `docker compose logs --tail 100 server`.
 
 From: [Guide 10](/guides/updates-and-backups).
 
 ### The runner update seems to take a long time.
+
+On an image install there is no separate runner update: a working runner moves to the new release the next time it restarts. The rest of this entry is for a build-from-source install.
 
 Boss Man waits for the current runs and checks to finish, then swaps each company's runner when it is idle. Follow it under **Settings > Server and runner > Updates**. If work is still going after 30 minutes, you get a card that lists it. Choose **Swap as soon as these finish** to let the update finish by itself with nothing more to press. If you do not answer, new work starts again 90 minutes after the update began, and the swap waits for each company to go quiet. If you ran `scripts/update-runner.sh` yourself, nothing moves until you choose **Update runners (finish runs first)** there. With the host deployer set up, that button is under **For a hand-built runner image**. To stop, choose **Cancel the runner update**. To undo a finished update, run `scripts/update-runner.sh --rollback`. To get agents to stop sooner, choose **Ask agents to wrap up** (see [Stopping work](/guides/stopping-work#ask-agents-to-wrap-up)).
 
@@ -215,37 +243,41 @@ From: [Guide 10](/guides/updates-and-backups).
 
 ### An update from the web page does not apply a change.
 
-A server deploy updates the server only, never the runners. To update them, choose **Build and update runners**. The host deployer also will not apply changes to Compose files, `deploy/`, Dockerfiles, `.env` files, `.npmrc`, `.dockerignore` or the deploy scripts (`deploy.sh`, `rebuild-live.sh`, `update-runner.sh`, `host-deployer.sh` and `install-deployer.sh`). Boss Man shows a card for these: choose **Approve** to get a to-do with the steps, then run them on the machine. The add-on files `deploy/penpot.yml`, `deploy/ntfy.yml` and `deploy/ntfy-bluegreen.yml` are the exception: a change to them does not stop a deploy, but Boss Man does not restart Penpot or ntfy either. To apply one, run that add-on's start command again ([Guide 8](/guides/phone-notifications) for ntfy, [Guide 9](/guides/add-ons) for Penpot).
+This is about the host deployer, so it is for a build-from-source install. A server deploy updates the server only, never the runners. To update them, choose **Build and update runners**. The host deployer also will not apply changes to Compose files, `deploy/`, Dockerfiles, `.env` files, `.npmrc`, `.dockerignore` or the deploy scripts (`deploy.sh`, `rebuild-live.sh`, `update-runner.sh`, `host-deployer.sh` and `install-deployer.sh`). Boss Man shows a card for these: choose **Approve** to get a to-do with the steps, then run them on the machine. The add-on files `deploy/penpot.yml`, `deploy/ntfy.yml` and `deploy/ntfy-bluegreen.yml` are the exception: a change to them does not stop a deploy, but Boss Man does not restart Penpot or ntfy either. To apply one, run that add-on's start command again ([Guide 8](/guides/phone-notifications) for ntfy, [Guide 9](/guides/add-ons) for Penpot).
 
 From: [Guide 10](/guides/updates-and-backups).
 
 ### An update damaged my data.
 
-If only the code is wrong, run `scripts/deploy.sh --rollback`, which keeps your data. If the data itself is damaged, follow "Restore the live database" in [Guide 10](/guides/updates-and-backups#restore-the-live-database). Test the backup first with `scripts/restore-test.sh <backup file>`. The last line must start with `OK:`.
+On an image install, a failed update goes back by itself and keeps your data. Tested steps to restore a backup on an image install are not written yet, so do not delete any volume; keep a copy of the backups as [Backups made before each update](/guides/updates-and-backups#backups-made-before-each-update) shows.
+
+On a build-from-source install: if only the code is wrong, run `scripts/deploy.sh --rollback`, which keeps your data. If the data itself is damaged, follow "Restore the live database" in [Guide 10](/guides/updates-and-backups#restore-the-live-database). Test the backup first with `scripts/restore-test.sh <backup file>`. The last line must start with `OK:`.
 
 From: [Guide 10](/guides/updates-and-backups).
 
 ### The restore says the database is "being accessed by other users".
 
-The server is still running. Run `docker compose stop server`, then run the restore step again.
+This is for a build-from-source install. The server is still running. Run `docker compose stop server`, then run the restore step again.
 
 From: [Guide 10](/guides/updates-and-backups).
 
 ### The disk is filling up.
 
-Check with `df -h $B` and `docker system df`. **Settings > Server and runner > Runner** shows the size of the runner's **Workspaces**. Each company has a disk limit, 20 GB by default. Boss Man tells you at most once a day while a company is over it. This is only a warning: nothing is stopped. To raise the limit, open **Settings > Server and runner > Runner**, and under **Workspace disk** set **Most disk to use (GB)** higher. Boss Man also clears the workspaces of tickets that finished more than 7 days ago. Before it clears one, it keeps any uncommitted work as a patch, and the ticket's branch stays. Building runner images also uses space, so check `docker system df` before you remove anything.
+Check with `docker system df`, and with `df -h $B` on a build-from-source install (an image install keeps everything in Docker volumes, so `docker system df` covers it). **Settings > Server and runner > Runner** shows the size of the runner's **Workspaces**. Each company has a disk limit, 20 GB by default. Boss Man tells you at most once a day while a company is over it. This is only a warning: nothing is stopped. To raise the limit, open **Settings > Server and runner > Runner**, and under **Workspace disk** set **Most disk to use (GB)** higher. Boss Man also clears the workspaces of tickets that finished more than 7 days ago. Before it clears one, it keeps any uncommitted work as a patch, and the ticket's branch stays. Building runner images also uses space, so check `docker system df` before you remove anything.
 
 From: [`docs/29-tune-and-troubleshoot.md`](@repo/blob/main/docs/29-tune-and-troubleshoot.md), Troubleshooting.
 
 ### I cannot find my backups.
 
-They are in the install folder, `$B`, next to `src`, unless you set `BOSSMAN_BACKUP_DIR` in `.env`. The start of each file name says which script made it: `bossman-` (before each update), `rebuild-`, `restore-test-` or `penpot-`.
+On an image install they are in the Docker volume `boss-man_backups`, which keeps the newest 3 (see [Backups made before each update](/guides/updates-and-backups#backups-made-before-each-update)).
+
+On a build-from-source install they are in the install folder, `$B`, next to `src`, unless you set `BOSSMAN_BACKUP_DIR` in `.env`. The start of each file name says which script made it: `bossman-` (before each update), `rebuild-`, `restore-test-` or `penpot-`.
 
 From: [Guide 10](/guides/updates-and-backups).
 
 ### Older backups can be read by every user on the machine.
 
-Backups made before Boss Man locked them down may be readable by everyone, and they hold password hashes and logins. List them with:
+This is for a build-from-source install, whose backups are files in the install folder. Backups made before Boss Man locked them down may be readable by everyone, and they hold password hashes and logins. List them with:
 
 ```sh
 find $B -maxdepth 1 -type f \( -name 'bossman-*.sql.gz' -o -name 'rebuild-*.sql.gz' -o -name 'restore-test-*.sql.gz' -o -name 'penpot-*.tar' \) -perm /077 -print
@@ -259,6 +291,6 @@ From: [`docs/29-tune-and-troubleshoot.md`](@repo/blob/main/docs/29-tune-and-trou
 
 ### I cannot make a Penpot account.
 
-Sign-up is off. Add `PENPOT_REGISTRATION=enable` to `.env`, start Penpot again with the command in [Guide 9](/guides/add-ons), and make the accounts. Then delete the line and start Penpot again, so nobody else can sign up.
+This is for a build-from-source install, which is the only one that can start Penpot so far. Sign-up is off. Add `PENPOT_REGISTRATION=enable` to `.env`, start Penpot again with the command in [Guide 9](/guides/add-ons), and make the accounts. Then delete the line and start Penpot again, so nobody else can sign up.
 
 From: [Guide 9](/guides/add-ons).

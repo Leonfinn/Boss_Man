@@ -8,6 +8,8 @@ lead: Boss Man has several ways to stop work. Most of them only stop new work fr
 
 This guide is for you if you want to stop an agent, or every agent, for example before an update or because one agent is doing the wrong thing.
 
+**Image install or build-from-source?** Everything here is a button in Boss Man, so it works the same on both, with one exception: **Ask agents to wrap up** needs the host deployer, which only a build-from-source install has. On an image install you do not need to stop work before an update: the new version starts beside the old one, and working runners move over when they next restart (see [How updates work](/guides/how-updates-work#on-an-image-install)).
+
 ## Which one do I need?
 
 | Situation | Use | What happens to work already running | How to undo it |
@@ -15,7 +17,7 @@ This guide is for you if you want to stop an agent, or every agent, for example 
 | One agent should not start anything new | **Pause** on the **Agents** page | Finishes by itself | **Start** on the same row |
 | One company should not start anything new | **Pause company** in **Settings > Team and CEO** | Finishes by itself | **Resume company** |
 | Nothing should start anywhere, for as long as you say | **Stop all work** in **Settings > Server and runner > Updates** | Finishes by itself | **Resume** on the banner at the top of every page |
-| You want agents to save their work and stop soon, for example before an update | **Ask agents to wrap up** in **Settings > Server and runner > Updates** | Each agent is asked to save and stop | **Cancel wrap-up**, or wait: it lifts by itself |
+| You want agents to save their work and stop soon, for example before an update | **Ask agents to wrap up** in **Settings > Server and runner > Updates** (build-from-source install with the host deployer only) | Each agent is asked to save and stop | **Cancel wrap-up**, or wait: it lifts by itself |
 | One run is doing the wrong thing now | **Stop** on the ticket page, or **Stop run** on the run's page, then confirm | That run ends now. Unsaved work is lost | Nothing to undo. The ticket waits where it stopped |
 | Everything must stop now | **End all running runs** on the **Runs** page | Every run ends now. Unsaved work is lost | Nothing to undo |
 
@@ -68,7 +70,7 @@ Under the status box, a list shows each agent still running, its ticket, and how
 
 The wrap-up lifts by itself. If it was for a server update, it lifts when that update is no longer waiting. If no update was waiting, it lifts after 60 minutes. A runner update you start takes it over. To lift it sooner, choose **Cancel wrap-up**. Agents that ended cleanly are woken again on their tickets.
 
-You only see **Ask agents to wrap up** if the optional host deployer is set up (see [Update from the web page](/guides/updates-and-backups#update-from-the-web-page-optional)). Without it, use **Stop all work** and wait for the **Runs** page to show no runs.
+You only see **Ask agents to wrap up** if the optional host deployer is set up (see [Update from the web page](/guides/updates-and-backups#update-from-the-web-page-optional)), so never on an image install. Without it, use **Stop all work** and wait for the **Runs** page to show no runs.
 
 **Check it worked:** a banner at the top of every page says agents were asked to wrap up, and how many runs it is waiting for. When the list under the status box is empty, every agent has stopped.
 
@@ -95,6 +97,10 @@ It does not stop new runs from starting. Use **Stop all work** first if you want
 ## Example: before a server update
 
 You want to update Boss Man, and three agents are working.
+
+**On an image install** there is nothing to stop first. Choose **Install** in **Settings > Server and runner > Updates**, as [How updates work](/guides/how-updates-work#on-an-image-install) shows. Running agents are not cut off while the new version goes in. If you would still rather have no agents running, use **Stop all work** first, wait for **Runs** to say "No agents are running", install, then choose **Resume** on the banner.
+
+The two cases below are for a build-from-source install.
 
 **With the host deployer** (you update from the web page):
 

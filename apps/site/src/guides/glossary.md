@@ -11,7 +11,7 @@ A term marked **[code only]** comes up only in companies whose agents write code
 
 ## A
 
-- **Add-ons**: Optional extras that Boss Man works without: Tailscale, ntfy, Penpot and runner add-ons. Each one is off until you turn it on. ([Guide 9](/guides/add-ons))
+- **Add-ons**: Optional extras that Boss Man works without: Tailscale, ntfy, Penpot and runner add-ons. Each one is off until you turn it on. Tailscale, ntfy, Penpot's start command and runner add-ons need a build-from-source install for now. ([Guide 9](/guides/add-ons))
 - **Advice on permission cards**: A setting under **Settings > Permissions** that lets Boss Man suggest which button to press on a permission card: **Advise**, **Watch** or **Off**. It never answers a card for you. ([Guide 6](/guides/permissions#advice-on-permission-cards))
 - **After-merge check**: A Done when line ticked **On a real host (checked after merge)**, because it can only be checked on the live system. Reviewers skip it, and the ticket stays open after the merge until it has a pass or fail. ([Guide 7](/guides/reviews-and-merge-queue#after-it-goes-live))
 - **Agent**: An AI worker with a job title (researcher, writer, checker) that works on your tasks. Each agent has instructions and a model, and runs in Claude Code, Codex or OpenCode. ([Guide 1](/guides/how-boss-man-works#companies-and-agents))
@@ -25,7 +25,7 @@ A term marked **[code only]** comes up only in companies whose agents write code
 ## B
 
 - **Backlog**: The board column for tickets that are written but not started. ([Guide 4](/guides/board-and-decisions#the-board-s-columns))
-- **Backups**: Copies of the database that Boss Man makes before every update, kept in the install folder next to `src`. Test one with `scripts/restore-test.sh` before you rely on it. ([Guide 10](/guides/updates-and-backups#where-backups-are-kept))
+- **Backups**: Copies of the database that Boss Man makes before every update. On an image install they are in the Docker volume `boss-man_backups`, newest 3 kept ([Guide 10](/guides/updates-and-backups#backups-made-before-each-update)). On a build-from-source install they are in the install folder next to `src`: test one with `scripts/restore-test.sh` before you rely on it ([Guide 10](/guides/updates-and-backups#where-backups-are-kept)).
 - **Blocked**: The board column for tickets that are only waiting: on another ticket, an open card (plan cards too), a date, or the change going live. Blocked tickets do not count towards the in-progress limits. ([Guide 4](/guides/board-and-decisions#what-blocked-means))
 - **Board**: The project's columns that show where each task is, from Backlog to Done. Open **Projects** and choose a project to see it. ([Tasks and the board](/guides/tasks-and-the-board#the-board-s-columns), and [Guide 4](/guides/board-and-decisions#the-board-s-columns))
 - **Branch**: A separate copy of the code where one task's work happens. Boss Man gives each task in a code project its own branch. **[code only]** ([Code words for owners](/guides/code-words#branch))
@@ -71,7 +71,7 @@ A term marked **[code only]** comes up only in companies whose agents write code
 ## H
 
 - **Hire**: Adding an agent to a company from **Agents > Hire**, starting from a ready-made role or a blank one. The CEO can also propose hires, which come to Decisions. ([Guide 5](/guides/agents-and-models#hire-an-agent))
-- **Host deployer**: An optional root script on your machine, run every minute by cron, that lets you update Boss Man from the web page. It will not apply changes to Compose files, Dockerfiles or the deploy scripts. ([Guide 10](/guides/updates-and-backups#update-from-the-web-page-optional))
+- **Host deployer**: An optional root script on your machine, run every minute by cron, that lets a build-from-source install update from the web page. It will not apply changes to Compose files, Dockerfiles or the deploy scripts. An image install does not use it: its updater installs releases. ([Guide 10](/guides/updates-and-backups#update-from-the-web-page-optional))
 
 ## I
 
@@ -89,7 +89,7 @@ A term marked **[code only]** comes up only in companies whose agents write code
 
 ## M
 
-- **Master key**: The file `secrets/master.key`, which encrypts every secret Boss Man stores. Keep a copy off the machine, because a backup without it cannot restore your secrets. ([Guide 10](/guides/updates-and-backups#keep-the-master-key-safe))
+- **Master key**: The file `master.key`, which encrypts every secret Boss Man stores. On an image install it is in the Docker volume `boss-man_config` ([Guide 10](/guides/updates-and-backups#copy-the-two-keys)); on a build-from-source install it is `secrets/master.key` ([Guide 10](/guides/updates-and-backups#keep-the-master-key-safe)). Keep a copy off the machine, because a backup without it cannot restore your secrets.
 - **Merge**: Finished, approved code joining the main version of the project. **[code only]** ([Guide 7](/guides/reviews-and-merge-queue#the-merge-queue))
 - **Merge queue**: The line of finished code waiting to join the project, shown under **Merge queue** in the sidebar. Work that waits on you is listed first, under **Needs you**. Agents sometimes call it the merge gate or the merge line. **[code only]** ([Guide 7](/guides/reviews-and-merge-queue#the-merge-queue))
 - **Model**: The AI model an agent uses, chosen from the **Model** list. **Default** uses the agent program's own default. ([Guide 5](/guides/agents-and-models#choose-a-model))
@@ -134,7 +134,7 @@ A term marked **[code only]** comes up only in companies whose agents write code
 - **Run**: One working session of an agent on a ticket. Runs are listed under **Activity > Runs** in the sidebar. ([Guide 3](/guides/first-company-and-ticket#a-first-task))
 - **Runner**: Your agents' workspace: the separate, locked-down space your agents work in, one for each company. Start it once and it keeps running. It shows **Connected** under **Settings > Server and runner > Runner** when it is working. ([Your agents' workspace](/guides/the-runner))
 - **Runner add-ons**: Extra tools built into the runner image, such as a browser agents can drive. Turn them on with the tick boxes in Settings > Server and runner > Runner. ([Guide 9](/guides/add-ons#runner-add-ons-extra-tools-for-agents))
-- **Runner update**: Rebuilding the runner image with `scripts/update-runner.sh`, after which Boss Man swaps each company's runner when it is idle. Follow it under **Settings > Server and runner > Updates**. ([Guide 10](/guides/updates-and-backups#update-the-runners), and [How updates work](/guides/how-updates-work))
+- **Runner update**: On a build-from-source install, rebuilding the runner image with `scripts/update-runner.sh`, after which Boss Man swaps each company's runner when it is idle. On an image install the runner image comes with each release, and a runner moves to it when it next restarts. Follow it under **Settings > Server and runner > Updates**. ([Guide 10](/guides/updates-and-backups#update-the-runners), and [How updates work](/guides/how-updates-work))
 
 ## S
 

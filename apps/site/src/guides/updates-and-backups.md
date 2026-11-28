@@ -3,12 +3,46 @@ title: Updating and backups
 description: Update the server and the runners, find your backups, check that one restores, and bring the database back if an update damaged it.
 group: Set it up your way
 order: 10
-lead: Boss Man backs up its database before every update. This guide covers updating the server and the runners, where backups go, and how to restore one.
+lead: Boss Man backs up its database before every update. This guide covers updating the server and the runners, where backups go, and how to restore one. The image install comes first, then the build-from-source install.
 ---
 
 ![What happens when you update: back up first, update, check it is healthy, and the way back if it is not.](/img/update-and-backup.svg =1160x820 narrow=/img/update-and-backup-narrow.svg:360x2380 "An update backs up first, then updates and checks. The way back for code and the way back for data are different.")
 
 For what an update changes, whether work stops and what you press, in plain words, see [How updates work](/guides/how-updates-work). This page has the command-line steps.
+
+**Which install do you have?** If your Boss Man folder holds `images.env` and `docker-compose.images.yml`, you installed from ready-made images: read [On an image install](#on-an-image-install) just below, and skip the rest of the page. If you cloned the code into a `src` folder and built it, everything after that section is for you.
+
+## On an image install
+
+You need no scripts and no source code. Run the commands below in the folder with `images.env`. They assume the project name `boss-man`, which it is unless you set another with `-p` or `COMPOSE_PROJECT_NAME`; if you did, use your name in place of `boss-man`.
+
+### Update
+
+Take a new release from **Settings → Server and runner → Updates**: choose **Install** and the version. The steps, and what you see, are in [How updates work](/guides/how-updates-work#on-an-image-install). The runners update with the release, so there is no separate runner update. **Build and update runners** and `scripts/deploy.sh` do not apply to this install.
+
+### Backups made before each update
+
+Before every update the updater backs up the database into the Docker volume `boss-man_backups`. It keeps the newest 3, named `bossman-YYYYMMDD-HHMMSS.sql.gz`. An image install does not make a daily backup yet.
+
+These copies are on the same machine. To keep one somewhere else, this copies the whole volume into one file, `boss-man-backups.tgz`, in the folder you are in. Not yet confirmed on a real image install.
+
+```sh Run in the folder with images.env
+docker run --rm -v boss-man_backups:/from:ro -v "$PWD":/to pgvector/pgvector:0.8.7-pg17-bookworm tar czf /to/boss-man-backups.tgz -C /from .
+```
+
+Move the file off the machine. Tested steps to restore one of these backups on an image install are not written yet. If an update fails, Boss Man goes back to the version you had by itself, and your data stays as it was.
+
+### Copy the two keys
+
+The master key is in the volume `boss-man_config` and the database password in `boss-man_db-secret`. Without the master key, Boss Man cannot read your stored secrets again. Without the database password, the server cannot reach its database. This copies both into one file, `boss-man-keys.tgz`, in the folder you are in. It is the same command the setup step prints at the end of [step 5 of the install](/guides/install-boss-man#5-make-the-keys).
+
+```sh Run in the folder with images.env
+docker run --rm -v boss-man_config:/from/config:ro -v boss-man_db-secret:/from/db-secret:ro -v "$PWD":/to pgvector/pgvector:0.8.7-pg17-bookworm tar czf /to/boss-man-keys.tgz -C /from .
+```
+
+The file holds your keys. Move it off the machine to somewhere only you can open, then delete it here with `rm boss-man-keys.tgz`.
+
+[Export a company](#export-a-company), at the end of this page, works the same on both installs.
 
 ## Update the server
 
@@ -99,7 +133,7 @@ Run every command as root from `$B/src`. These steps are for a single-server ins
 
 ## Keep the master key safe
 
-`secrets/master.key` encrypts every secret Boss Man stores. Keep a copy off the machine. A database backup without the master key restores everything except your stored secrets.
+`secrets/master.key` encrypts every secret Boss Man stores. Keep a copy off the machine. On an image install the key is in a Docker volume instead: see [Copy the two keys](#copy-the-two-keys). A database backup without the master key restores everything except your stored secrets.
 
 ## Export a company
 
