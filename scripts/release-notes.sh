@@ -33,3 +33,19 @@ else
 fi
 first="$(printf '%s' "${label:0:1}" | tr '[:lower:]' '[:upper:]')"
 printf "%s%s. The images are listed, by digest and architecture, in release.json, which is signed (release.json.sigstore.json).\n" "$first" "${label:1}"
+
+# BOS-2903, design 3.4: one pointer line to the website, so a source install knows this release is nothing new for it and
+# how to see which image has each change. The address is the configured site's (SITE_URL), never a host typed into the
+# repo, the same one scripts/publish-site.sh and the site build use. The words match the website's "Built from source"
+# explainer box (apps/site/scripts/build.mjs), which says "You get each change as soon as it is added. Update your server
+# to pick it up." SITE_URL is not set (a fork has no website): leave the line out rather than guess an address. An address
+# that is not https is left out too, since it could not make a working link.
+site_url="${SITE_URL:-}"; site_url="${site_url%/}"
+case "$site_url" in
+  https://*) ;;
+  "") ;;
+  *) site_url="" ;;
+esac
+if [ -n "$site_url" ]; then
+  printf "\nBuilt from source? You get each change as soon as it is added. Update your server to pick it up. What's new shows which image has each change: %s/whats-new\n" "$site_url"
+fi
