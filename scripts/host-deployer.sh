@@ -1584,6 +1584,8 @@ do_deploy_bluegreen() {
   rm -f "$bout"
   if ((brc == 124 || brc == 137)); then pre_fail "Building $BG_IDLE did not finish within $((BG_BUILD_SECONDS / 60)) minutes, so it was stopped."; return 1; fi
   ((brc == 0)) || { pre_fail "Building $BG_IDLE failed.${bneterr:+ The first attempt failed on a registry or network error ($bneterr) and the retry failed too.}"; return 1; }
+  # BOS-2924: drop build cache older than the keep age (never fails the deploy; skipped if the checkout has no script).
+  [[ ! -f $REPO/scripts/prune-build-cache.sh ]] || (cd "$REPO" && timeout 300 bash scripts/prune-build-cache.sh) >>"$LOG" 2>&1 || true
   mem_sample after-build
   # Expand-only migrations: the live colour keeps working on the new schema.
   BOSSMAN_MIGRATE_TAG="$BG_IDLE" compose run --rm --no-deps migrate >>"$LOG" 2>&1 || { pre_fail "The migration failed (the database rolled it back)."; return 1; }

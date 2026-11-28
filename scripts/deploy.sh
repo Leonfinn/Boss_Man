@@ -155,6 +155,7 @@ rebuild_and_start() {
   require_readable
   step "Building (${svcs[*]})"
   run docker compose build "${svcs[@]}"
+  if ((DRY)); then say "[dry run] bash scripts/prune-build-cache.sh"; else bash scripts/prune-build-cache.sh || true; fi # BOS-2924
   step "Restarting"
   run docker compose up -d --no-deps "${svcs[@]}"
   # With --force and nothing new the image is unchanged, so `up -d` leaves the running server alone: recreate it, or

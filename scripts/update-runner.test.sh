@@ -11,6 +11,7 @@ cat >"$T/bin/docker" <<'FAKE'
 echo "docker $*" >>"$FAKE_LOG"
 case "$*" in
   "run --rm"*) exit "${CANARY_RC:-0}" ;;
+  "builder prune"*) echo "Total: 1GB"; exit "${PRUNE_RC:-0}" ;;
   "image inspect --format"*) echo sha256:oldguard ;;
   "image inspect boss-man-runner:current") [[ ${HAVE_CURRENT:-1} == 1 ]] || exit 1 ;;
   "ps -q"*) [[ ${HAVE_LAUNCHER:-1} == 1 ]] && echo launcher-1 || true ;;
@@ -18,6 +19,7 @@ esac
 FAKE
 chmod +x "$T/bin/docker"
 cp "$here/update-runner.sh" "$T/repo/"
+mkdir -p "$T/repo/scripts"; cp "$here/prune-build-cache.sh" "$T/repo/scripts/"
 export PATH="$T/bin:$PATH" FAKE_LOG="$T/docker.log" BOSSMAN_DEPLOYER="$T/deployer" COMPOSE_PROFILES=launcher
 cd "$T/repo"
 run() { : >"$FAKE_LOG"; rm -f "$T/deployer/inbox/drain.json" "$T/deployer/inbox/drain-cancel.json"; ./update-runner.sh "$@" >"$T/out" 2>&1; }
@@ -34,6 +36,16 @@ logged "recreate-all" && fail "default recreated the runners"
 logged "compose up -d --no-build" && fail "default restarted compose runners"
 logged "docker compose build launcher" || fail "default did not rebuild the launcher"
 logged "compose up -d --no-deps launcher" || fail "default did not recreate the launcher"
+# BOS-2924: the build cache is pruned once, after the runner image build finished and before the canary runs.
+[[ $(grep -c "docker builder prune --force --filter until=168h" "$FAKE_LOG") == 1 ]] || fail "didn't prune the build cache once"
+b=$(grep -n "docker build --pull" "$FAKE_LOG" | head -1 | cut -d: -f1); p=$(grep -n "docker builder prune" "$FAKE_LOG" | head -1 | cut -d: -f1); c=$(grep -n "docker run --rm" "$FAKE_LOG" | head -1 | cut -d: -f1)
+((b < p && p < c)) || fail "the prune was not between the image build and the canary ($b, $p, $c)"
+# A prune that fails changes nothing about the result.
+PRUNE_RC=1 run || fail "a failing build cache prune failed the update"
+logged "docker builder prune" || fail "the failing prune was not tried"
+logged "docker tag boss-man-runner:candidate boss-man-runner:current" || fail "image not promoted after a failing prune"
+logged "docker compose build launcher" || fail "launcher not rebuilt after a failing prune"
+run
 [[ -s $T/deployer/inbox/drain.json ]] || fail "no drain request written"
 node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$T/deployer/inbox/drain.json" || fail "drain.json is not JSON"
 [[ $(find "$T/deployer/inbox" -type f | wc -l) == 1 ]] || fail "temp file left in the inbox"

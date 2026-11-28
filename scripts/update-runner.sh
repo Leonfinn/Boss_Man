@@ -241,6 +241,7 @@ docker build --pull -f apps/runner/Dockerfile \
   --build-arg RUNNER_ADDONS="$addons" \
   -t "$IMAGE:candidate" .
 lap "runner image build"
+bash scripts/prune-build-cache.sh || true # BOS-2924: drop build cache older than the keep age
 
 echo "Running the canary (no network): Codex, OpenCode and each add-on. Claude is proven by its pack installer, not here (DR-050)..."
 if ! docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges:true \

@@ -34,6 +34,7 @@ cat >"$T/w/scripts/update-runner.sh" <<'STUB'
 echo "update-runner.sh $*" >>"$STUB_LOG"
 exit "${STUB_RC:-0}"
 STUB
+cp "$(dirname "$0")/prune-build-cache.sh" "$T/w/scripts/" # the real one: BOS-2924 checks the blue/green swap calls it
 chmod +x "$T"/w/scripts/*.sh
 echo a >"$T/w/apps/server/a"
 git -C "$T/w" add -A; git -C "$T/w" commit -qm base; gpush "$T/w" origin HEAD:main
@@ -763,6 +764,7 @@ if [[ $1 == inspect ]]; then # inspect -f <format> cid<service>: id, start, rest
   r=false; [[ -e $W/running.$s ]] && r=true
   echo "cid$s $(f start 2026-11-07T08:00:00Z) $(f restarts 0) $(f oom false) $r $(f exit 0)"; exit
 fi
+if [[ $1 == builder ]]; then echo "builder $*" >>"$DL"; echo "Total: 1GB"; exit "${FAKE_PRUNE_RC:-0}"; fi # BOS-2924
 [[ $1 == compose ]] || exit 99
 shift; a="$*"; echo "docker $a" >>"$DL"
 role() { cat "$W/role.$1" 2>/dev/null || echo down; }
@@ -875,6 +877,14 @@ bgreq "$b1"; bg --dry-run; has "$T/out" "would run: a blue/green swap"; rm -f "$
 export COMPOSE_FILE="docker-compose.yml:deploy/truenas.yml:deploy/truenas-bluegreen.yml"
 before="$(calls)"
 
+# 14b. BOS-2924: a build cache prune that fails changes nothing about the swap's result.
+reset_world blue "$cur"; P="$(git -C "$T/src" rev-parse HEAD)"
+bgreq "$b1"; FAKE_PRUNE_RC=1 bg
+[[ $(status result) == deployed && $(status to_commit) == "$b1" ]] || fail "a failing prune changed the swap result: $(cat "$D/outbox/status.json")"
+order "$DL" "build green commit=$b1" "builder prune --force --filter until=168h" "migrate tag=green"
+live_is green
+git -C "$T/src" reset -q --hard "$P"
+
 # 15. Happy path: backup, build idle at the commit, migrate, start, smoke, demote, promote, flip, verify.
 reset_world blue "$cur"; P="$(git -C "$T/src" rev-parse HEAD)"
 bgreq "$b1"; bg
@@ -883,6 +893,9 @@ has "$D/outbox/status.json" "green is live"
 has "$D/outbox/status.json" '"soak_seconds": "900"' # the host's own window rides in the status file (BOS-401)
 order "$DL" "pg_dump" "ensure backup service" "build green commit=$b1" "migrate tag=green" "up -d --no-deps --force-recreate server-green" "exec -T server-green" "signal USR1 blue" "signal USR2 green" "validate sees green" "reload now green" "exec -T proxy wget"
 hasnt "$DL" "build blue" # only the idle colour is built
+# BOS-2924: the build cache is pruned once, after the build finished and before the migration.
+order "$DL" "build green commit=$b1" "builder prune --force --filter until=168h" "migrate tag=green"
+[[ $(grep -c "builder prune" "$DL") == 1 ]] || fail "expected one build cache prune in a swap"
 order "$DL" "daily folder ready" "ensure backup service" # BOS-2221: folder exists before the service starts
 [[ $(stat -c %u "$BOSSMAN_BACKUP_DIR/daily") == "$(stat -c %u "$BOSSMAN_BACKUP_DIR")" ]] || fail "daily folder owner differs from the backup folder"
 ls "$BOSSMAN_BACKUP_DIR"/bossman-*.sql.gz >/dev/null 2>&1 || fail "no backup written"
@@ -1021,6 +1034,7 @@ FAKE_BUILD_CODE_ERR=1 BG_BUILD_RETRY_PAUSE=0 bg
 [[ $(status result) == failed ]] || fail "code error: $(cat "$D/outbox/status.json")"
 [[ $(wc -l <"$W/code-attempts") == 1 ]] || fail "code error was retried"
 hasnt "$D/deployer.log" "Trying once more"
+hasnt "$DL" "builder prune" # BOS-2924: no prune after a failed build
 # A proxy that is not running changes nothing.
 reset_world blue "$cur"; rm "$W/running.proxy"; bgreq "$b4"; bg
 has "$D/outbox/status.json" "proxy container is not running"; hasnt "$DL" "pg_dump"

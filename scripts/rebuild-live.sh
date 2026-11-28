@@ -96,6 +96,7 @@ ls -l "$backup"
 
 step "2/5 Build server-$colour"
 BOSSMAN_COMMIT="$commit" docker compose build "server-$colour" || die "the build failed; $colour still runs its old image. Backup: $backup"
+bash scripts/prune-build-cache.sh || true # BOS-2924: drop build cache older than the keep age
 
 step "3/5 Migrate"
 BOSSMAN_MIGRATE_TAG="$colour" docker compose run --rm --no-deps migrate || die "the migration failed; $colour still runs its old image. Backup: $backup"

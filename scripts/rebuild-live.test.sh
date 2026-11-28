@@ -14,6 +14,7 @@ echo "docker $*" >>"$FAKE_LOG"
 case "$*" in
   *"pg_dump"*) echo "-- dump" ;;
   *"compose build"*) exit "${BUILD_RC:-0}" ;;
+  *"builder prune"*) echo "Total: 1GB"; exit "${PRUNE_RC:-0}" ;;
   *"compose logs"*"server-"*) echo "Error: EACCES: permission denied, open /app/host-facts.ts" ;;
   *"kill -s SIGUSR2"*) echo "$(($(cat "$FAKE_DIR/signals" 2>/dev/null || echo 0) + 1))" >"$FAKE_DIR/signals" ;;
   *"exec -T server-"*"api/ready"*)
@@ -28,7 +29,7 @@ FAKE
 chmod +x "$T/bin/docker"
 # The host has no node (TrueNAS): a node on the PATH would hide a script that parses on the host.
 printf '#!/bin/sh\necho "node: command not found" >&2\nexit 127\n' >"$T/bin/node"; chmod +x "$T/bin/node"
-cp "$here/rebuild-live.sh" "$T/repo/scripts/"
+cp "$here/rebuild-live.sh" "$here/prune-build-cache.sh" "$T/repo/scripts/"
 (cd "$T/repo" && git init -q && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m x)
 git -C "$T/repo" rev-parse HEAD >"$T/commit"
 printf '(active) {\n\treverse_proxy server-green:{args[0]} {\n\t}\n}\n' >"$T/deployer/proxy/active.caddy"
@@ -41,6 +42,10 @@ run || fail "a good rebuild failed"
 logged "compose build server-green" || fail "didn't build the live colour"
 logged "compose run --rm --no-deps migrate" || fail "didn't migrate without --no-deps"
 logged "compose up -d --no-deps --force-recreate server-green" || fail "didn't recreate the live colour"
+# BOS-2924: the build cache is pruned once, after the build finished and before the migration starts.
+[[ $(grep -c "builder prune --force --filter until=168h" "$FAKE_LOG") == 1 ]] || fail "didn't prune the build cache once"
+b=$(grep -n "compose build server-green" "$FAKE_LOG" | head -1 | cut -d: -f1); p=$(grep -n "builder prune" "$FAKE_LOG" | head -1 | cut -d: -f1); m=$(grep -n "compose run --rm --no-deps migrate" "$FAKE_LOG" | head -1 | cut -d: -f1)
+((b < p && p < m)) || fail "the prune was not between the build and the migration ($b, $p, $m)"
 # Every logged compose up/run must carry --no-deps, so a rebuild can never recreate the database.
 ! grep -E "compose (up|run) " "$FAKE_LOG" | grep -v -- "--no-deps" | grep -q . || fail "a compose up/run without --no-deps"
 logged "compose kill -s SIGUSR2 server-green" || fail "didn't tell it to take charge"
@@ -58,6 +63,12 @@ run || fail "a rebuild with old backups failed"
 BUILD_RC=1 run && fail "a failed build reported success"
 logged "force-recreate" && fail "restarted after a failed build"
 grep -q "the build failed" "$T/out" || fail "didn't say the build failed"
+logged "builder prune" && fail "pruned the build cache after a failed build (BOS-2924)"
+# BOS-2924: a prune that fails changes nothing about the result: the rebuild still migrates, recreates and confirms the leader.
+PRUNE_RC=1 run || fail "a failing build cache prune failed the rebuild"
+logged "builder prune" || fail "the failing prune was not tried"
+logged "force-recreate server-green" || fail "didn't recreate after a failing prune"
+grep -q "server-green leads at" "$T/out" || fail "no leader confirmed after a failing prune"
 
 # A server that stays on standby fails loudly instead of leaving Boss Man without a leader unnoticed.
 LEADER_AFTER=999 REBUILD_WAIT_SECONDS=1 run && fail "a standby server reported success"
