@@ -1,0 +1,58 @@
+# The feedback portal on a public address for an IMAGE install (BOS-2913): only the Cloudflare tunnel, with nothing from the
+# source code. A release file, signed like docker-compose.images.yml. OFF by default: it is its own Compose project and Boss Man
+# does not start it. It never goes into your docker-compose.images.yml command.
+#
+# Steps (docs/33-public-portal-cloudflare.md, "Image install"): put the lines below in images.env, then start it with
+#   docker compose -p boss-man-portal --env-file images.env -f docker-compose.cloudflared.images.yml --profile portal up -d
+# Stop and remove it (nothing is lost; the tunnel keeps no data):
+#   docker compose -p boss-man-portal --env-file images.env -f docker-compose.cloudflared.images.yml --profile portal down
+#
+# In images.env:
+#   CLOUDFLARE_TUNNEL_TOKEN=<token from the Cloudflare dashboard>   # a secret: edit it in by hand, never paste it anywhere else
+#   BOSSMAN_PORTAL_URL=https://<your portal host name>
+#   BOSSMAN_PORTAL_CLIENT_HEADER=cf-connecting-ip
+#   BOSSMAN_PORTAL_TRUSTED_PROXY=<the install's proxy address: 172.30.0.18 unless you set BOSSMAN_FRONT_PROXY_IP>
+# The last three are read by docker-compose.images.yml, so run its start command again after you add them (the server is then
+# remade with them at the next update, or press Update now on the Updates page).
+# Optional: BOSSMAN_DEFAULT_NETWORK (default boss-man_default: <project>_default, set it if your install uses another project name).
+#
+# How it connects: the tunnel is dialled OUT to Cloudflare, so no router port is opened. It joins the install's own "default"
+# network, where the install's proxy answers to the name "server" (port 3101 is the portal listener: the portal page, its assets
+# and /api/portal only; the owner's app on 3100 is never named). In the Cloudflare dashboard the tunnel's public hostname points
+# at http://server:3101 and nowhere else.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: ${BOSSMAN_LOG_MAX_SIZE:-10m}
+    max-file: "${BOSSMAN_LOG_MAX_FILE:-3}"
+
+services:
+  cloudflared:
+    logging: *logging
+    profiles: ["portal"]
+    image: cloudflare/cloudflared:2026.11.0@sha256:b94b96edf2c9c4360f8879c8580cfaa99077f19c849ec595ca2f711b27d4f344
+    restart: unless-stopped
+    command: ["tunnel", "--no-autoupdate", "--metrics", "127.0.0.1:20241", "run"]
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?Set CLOUDFLARE_TUNNEL_TOKEN in images.env (docs/33-public-portal-cloudflare.md)}
+    # The image is distroless (no shell, curl or wget), so the check is the cloudflared binary itself: healthy only with a live
+    # connection to Cloudflare.
+    healthcheck:
+      test: ["CMD", "cloudflared", "tunnel", "--metrics", "127.0.0.1:20241", "ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks: [boss-man]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    pids_limit: 128
+
+networks:
+  # The install's own network, where its proxy answers as "server" (docker-compose.images.yml). Not created here.
+  boss-man:
+    external: true
+    name: ${BOSSMAN_DEFAULT_NETWORK:-boss-man_default}

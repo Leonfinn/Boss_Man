@@ -62,6 +62,61 @@ To restore over the live Penpot: `down` (without `-v`), remove the `boss-man-pen
 volume (only after the backup is confirmed good), then follow steps 2 to 6 with the real project
 name and `.env`.
 
+## Image install (no source folder)
+
+Status: **not yet confirmed on a real host** (the file passes Compose's own validation; nobody has run these steps on an image install yet, 28 Nov 2026). For an install made from ready-made images ([docs/35](35-install-from-images.md)). The same Penpot file comes with each release as `penpot.yml`, signed like the others (`penpot.yml.sigstore.json` is next to it). Run everything in the folder with `images.env`. It does not need openssl.
+
+1. Download the file of the same release you installed (the same `$V` as in docs/35, section 1):
+
+   ```
+   V=$(curl -fsS https://api.github.com/repos/Leonfinn/Boss_Man/releases | grep -m1 '"tag_name"' | cut -d '"' -f 4) && curl -fsSLO https://github.com/Leonfinn/Boss_Man/releases/download/$V/penpot.yml
+   ```
+
+2. Make the secret key. It prints one line:
+
+   ```
+   docker run --rm busybox sh -c 'head -c 48 /dev/urandom | base64 | tr -d "\n="; echo'
+   ```
+
+3. Make the database password. It prints one line:
+
+   ```
+   docker run --rm busybox sh -c 'head -c 24 /dev/urandom | od -An -tx1 | tr -d " \n"; echo'
+   ```
+
+4. Add four lines to `images.env`: the two lines you made, and this machine's address on your network (never `0.0.0.0`; `192.168.1.20` is an example):
+
+   ```
+   PENPOT_SECRET_KEY=<line from step 2>
+   PENPOT_DB_PASSWORD=<line from step 3>
+   PENPOT_BIND=192.168.1.20
+   PENPOT_PUBLIC_URI=http://192.168.1.20:9001
+   ```
+
+5. Start it, as its own project:
+
+   ```
+   docker compose -p boss-man-penpot --env-file images.env -f penpot.yml --profile penpot up -d
+   ```
+
+Registration and checks are as above, with `--env-file images.env -f penpot.yml` in place of `--env-file .env -f deploy/penpot.yml`.
+
+**A week on.** Nothing to repeat: it restarts with Docker and Boss Man updates do not touch it. To update Penpot, download the new release's `penpot.yml` (step 1) and run step 5 again. Stop it with the step 5 command ending `--profile penpot down` (never add `-v`: it deletes Penpot's data).
+
+**Backup.** `scripts/backup-penpot.sh` is not part of an image install. By hand, in the folder with `images.env`, write the database to a file (keep it somewhere other than this machine, with a private copy of `PENPOT_SECRET_KEY` and `PENPOT_DB_PASSWORD`):
+
+```
+docker compose -p boss-man-penpot --env-file images.env -f penpot.yml exec -T penpot-postgres pg_dump -U penpot penpot | gzip > penpot-db.sql.gz
+```
+
+And the uploaded files (the volume is named `boss-man-penpot_penpot_assets`):
+
+```
+docker run --rm -v boss-man-penpot_penpot_assets:/assets:ro -v "$PWD":/out busybox tar -C /assets -czf /out/penpot-assets.tar.gz .
+```
+
+Both commands are not yet confirmed on a real host and have not been restored; restore into a throwaway copy before you rely on them (the steps above use the same two file names).
+
 ## Agent access
 
 Agents read files and attach PNG exports of boards through the `penpot` skill (`skills/penpot`), using an access token kept as a Boss Man secret. Owner setup steps: [16-penpot-agent-setup.md](16-penpot-agent-setup.md).
