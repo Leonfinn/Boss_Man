@@ -388,7 +388,8 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       const view = h.kind === "wrapup" ? tieView(h.tie, since, { liftsAt: new Date(Date.parse(since) + STANDALONE_WRAPUP_MS).toISOString() }) : tieView(h.tie, since, { swapping: true });
       const runs = (await liveWorkRuns(db, since, h.wrapTold)).length;
       const words = wrapUpWords(view, runs, (iso) => fmtTime(new Date(iso)));
-      await history.event(h.since, wrapTieWords(h.tie));
+      // BOS-2933: a wrap-up pressed during a runner update joins that hold with no tie of its own; it is tied to the swap.
+      await history.event(h.since, h.kind !== "wrapup" && !h.tie ? "Wrap-up tied to: the runner update (swapping)" : wrapTieWords(h.tie));
       await history.event(h.since, `Wrap-up banner said: ${words.banner}`);
     } catch (err) {
       deps.log?.(`wrap-up record failed: ${(err as Error).message}`);

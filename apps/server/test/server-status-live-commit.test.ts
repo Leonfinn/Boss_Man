@@ -9,11 +9,11 @@ const NEW = "9c9e1c8e" + "0".repeat(32);
 let close: (() => Promise<void>) | undefined;
 afterEach(async () => { await close?.(); close = undefined; });
 
-async function status(deploy: { status: unknown; available: unknown }) {
+async function status(deploy: { status: unknown; available: unknown }, hold: unknown = null) {
   const opened = await openPglite();
   close = opened.close;
   const svc = serverStatusService(opened.db, {
-    role: () => "leader", isConnected: () => false, hold: async () => null,
+    role: () => "leader", isConnected: () => false, hold: async () => hold as never,
     errors: { recent: () => [], count: () => 0, untagged: () => 0 } as never,
     deploy: async () => ({ enabled: true, pending: false, ...deploy }),
     commit: OLD, startedAt: new Date(0),
@@ -29,6 +29,17 @@ describe("server_status deploy record", () => {
   it("names the commit of a finished server deploy, with its time", async () => {
     const d = await status({ status: { target: "server", result: "deployed", to_commit: NEW, ended: "2026-11-02T21:48:01Z" }, available: { deployed: NEW, tip: NEW } });
     expect(d).toMatchObject({ liveCommit: "9c9e1c8e", liveSince: "2026-11-02T21:48:01Z" });
+  });
+  // BOS-2933: the host's "waiting for runs to finish, then swaps" text stays after the server did the swap.
+  it("words lastMessage from the runner swap's record when it ended after the host's report", async () => {
+    const host = { target: "runner", result: "ok", message: "Boss Man is waiting for runs to finish, then swaps the runners", ended: "2026-11-27T15:00:00Z" };
+    const swap = { on: false, last: { at: "2026-11-27T15:37:15Z", ok: true, title: "Runners updated", body: "All swapped." } };
+    const d = await status({ status: host, available: null }, swap);
+    expect(d.lastMessage).toBe("Runner update ended: Runners updated. All swapped.");
+    expect(d.lastRunnerSwap).toMatchObject({ ok: true, title: "Runners updated" });
+    // An older swap record leaves the host's text alone.
+    const old = await status({ status: { ...host, ended: "2026-11-28T10:00:00Z" }, available: null }, swap);
+    expect(old.lastMessage).toBe(host.message);
   });
   it("falls back to the server's own commit when the host reports nothing", async () => {
     expect(await status({ status: null, available: null })).toMatchObject({ liveCommit: "fc704d69", liveSince: null });
