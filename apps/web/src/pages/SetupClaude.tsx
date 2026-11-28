@@ -14,7 +14,7 @@ type Grant = { id: string; envName: string; secretName: string; secretId?: strin
 export type ReadyFunding = { secretId: string; optionId: string };
 
 /** What a half-finished save already made, so a retry carries on instead of making a second secret or source. */
-type Made = { secretId?: string; granted?: boolean; sourceId?: string };
+type Made = { secretId?: string; granted?: boolean; sourceId?: string; replaced?: boolean };
 /** The one funding source a company uses to connect an agent, by secret, so two saves don't each make one. */
 export type SourceBySecret = Record<string, string>;
 
@@ -33,13 +33,24 @@ export async function existingConnection(company: Company): Promise<ConnectOptio
  * Saves a value for one listed option as the CEO's funding source, the way the setup token always has
  * (BOS-1495): the secret, its grant, the funding source, then the CEO's link. Returns down to the caller and
  * leaves what was made in `made`, so pressing Save again after a failure carries on rather than duplicating.
- * A company that already holds this option's key gets that secret used again, not a second one.
+ * A company that already holds this option's key gets that secret's value replaced with the one pasted here, so a
+ * new or rotated key actually takes effect (not a second secret, and never a silent reuse of the old value).
  */
 export async function runConnect(o: ConnectOption & { secret: NonNullable<ConnectOption["secret"]> }, company: Company, value: string, made: Made, known: SourceBySecret): Promise<string> {
   const grantBody = { companyId: company.id, envName: o.secret.envName };
-  // One already save grants this option's key: that secret is used again, so changing the value doesn't make a second one.
+  // An already save grants this option's key: that secret is used again, and its value replaced with the new one,
+  // so changing a revoked key works and no second secret is made. The `replaced` flag stops a retry rotating twice.
   if (!made.secretId) made.secretId = known[`env:${o.secret.envName}`];
-  if (!made.secretId) made.secretId = (await api<{ secret: { id: string } }>("/api/secrets", { method: "POST", body: { name: `${company.name} ${o.name}`, kind: o.secret.kind, value: value.trim() } })).secret.id;
+  if (made.secretId) {
+    // That secret is already granted to the company (it's how we found it), so the grant is not made a second time.
+    if (known[`env:${o.secret.envName}`] === made.secretId) made.granted = true;
+    if (!made.replaced) {
+      await api(`/api/secrets/${made.secretId}/value`, { method: "PUT", body: { value: value.trim() } });
+      made.replaced = true;
+    }
+  } else {
+    made.secretId = (await api<{ secret: { id: string } }>("/api/secrets", { method: "POST", body: { name: `${company.name} ${o.name}`, kind: o.secret.kind, value: value.trim() } })).secret.id;
+  }
   if (!made.granted) {
     await api(`/api/secrets/${made.secretId}/grants`, { method: "POST", body: grantBody });
     made.granted = true;

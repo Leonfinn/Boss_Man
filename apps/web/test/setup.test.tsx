@@ -452,7 +452,7 @@ describe("the connect step: one equal list of every way to pay (BOS-2815)", () =
     expect(openAiWrites).toEqual([]);
   });
 
-  it("saving an option reuses the key this company already holds, instead of making a second secret", async () => {
+  it("saving an option over a key this company already holds replaces that key's value, instead of quietly keeping the old one", async () => {
     const writes: Array<{ url: string; method: string; body: unknown }> = [];
     stub({
       writes,
@@ -464,7 +464,44 @@ describe("the connect step: one equal list of every way to pay (BOS-2815)", () =
     fireEvent.change(screen.getByLabelText("Anthropic key"), { target: { value: "sk-ant-api03-made-up" } });
     fireEvent.click(screen.getByText("Save and connect"));
     await screen.findByText(/stored encrypted/);
-    expect(writes.filter((c) => c.method !== "GET").map((c) => `${c.method} ${c.url}`)).toEqual(["POST /api/secrets/s5/grants", "PATCH /api/agents/a1"]);
+    // The pasted value is written onto the secret already held (so a revoked key is actually replaced), then the
+    // existing grant is kept (no second grant) and the CEO re-linked. No second secret is made.
+    const mine = writes.filter((c) => c.method !== "GET");
+    expect(mine.map((c) => `${c.method} ${c.url}`)).toEqual(["PUT /api/secrets/s5/value", "PATCH /api/agents/a1"]);
+    expect(mine[0]!.body).toEqual({ value: "sk-ant-api03-made-up" });
+  });
+
+  it("a retry after a later step fails does not replace the held key's value a second time", async () => {
+    const writes: Array<{ url: string; method: string; body: unknown }> = [];
+    let failCeo = true;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        const method = init?.method ?? "GET";
+        writes.push({ url, method, body: init?.body ? JSON.parse(String(init.body)) : null });
+        if (url === "/api/agents/a1" && method === "PATCH" && failCeo) {
+          failCeo = false;
+          return new Response(JSON.stringify({ error: "The server is busy. Try again." }), { status: 500 });
+        }
+        const body =
+          url === "/api/setup-progress" ? { dismissed: false, step: 3, companyId: "c1" }
+          : url.endsWith("/grants") ? [{ id: "g9", envName: "ANTHROPIC_API_KEY", secretId: "s5", secretName: "App Co Anthropic API key", hint: null, deployTargetId: null, agentIds: [] }]
+          : url === "/api/funding-sources" && method === "GET" ? [{ id: "f5", name: "App Co Anthropic", kind: "api_payg", provider: "anthropic", secretId: "s5" }]
+          : url.endsWith("/setup-checklist") ? [] : [];
+        return new Response(JSON.stringify(body), { status: 200 });
+      }),
+    );
+    render(<Setup companies={[withCeo]} go={() => {}} onChanged={() => {}} />);
+    fireEvent.click(await screen.findByText("Anthropic API key"));
+    fireEvent.change(screen.getByLabelText("Anthropic key"), { target: { value: "sk-ant-api03-made-up" } });
+    fireEvent.click(screen.getByText("Save and connect"));
+    await screen.findByRole("alert");
+    fireEvent.click(screen.getByText("Save and connect"));
+    await screen.findByText(/stored encrypted/);
+    // The value was written once (not rotated again on retry), and the CEO link was tried again and succeeded.
+    const valuePuts = writes.filter((c) => c.method === "PUT" && c.url === "/api/secrets/s5/value");
+    expect(valuePuts).toHaveLength(1);
+    expect(writes.filter((c) => c.method === "PATCH" && c.url === "/api/agents/a1")).toHaveLength(2);
   });
 
   it("the other API provider row sends the owner to Settings > Secrets rather than a box that would fail", async () => {
