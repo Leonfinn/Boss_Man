@@ -3,6 +3,8 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { act } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SelfDeploy, TrialLines } from "../src/pages/Settings";
+import { RUNNER_APPROVED_REPLY } from "../src/pages/settings/updates";
+import { stubFetchByUrl } from "./stub-fetch";
 
 afterEach(() => {
   cleanup();
@@ -85,6 +87,51 @@ describe("Settings → Updates shows the runner trial and rate-limit wait from t
     await screen.findByText(/Runners will update at/);
     expect(screen.getAllByText(/Runners will update at/)).toHaveLength(1);
     // A queued press stays on the Settings page: there is no card to go to.
+    expect(go).not.toHaveBeenCalled();
+  });
+});
+
+// BOS-2859: "I have already approved it by pressing the button". A press that goes ahead now is the approval: the page
+// stays on Updates, says it started, and the status box (reloaded) shows its progress. No jump to Decisions.
+describe("Build and update runners is the approval: no jump to Decisions (BOS-2859)", () => {
+  const routes = (reply: unknown) => {
+    const polls = { selfDeploy: 0 };
+    const fetch = stubFetchByUrl({
+      "/api/self-deploy": () => {
+        polls.selfDeploy += 1;
+        return view({ available: { tip: "aaaaaaa1", deployed: "aaaaaaa1", checkedAt: "2026-11-27T15:00:00.000Z", commits: [] } });
+      },
+      "/api/self-deploy/update-runners": reply,
+      "/api/self-deploy/history*": [],
+      "/api/self-deploy/wait": null,
+      "/api/maintenance": { on: false },
+      "/api/maintenance/history*": [],
+      "/api/runner-report": { live: [], update: null },
+      "/api/release-watch": { active: false },
+    });
+    return { fetch, polls };
+  };
+
+  it("stays on Updates and says the runner update started, reloading the status box", async () => {
+    const { fetch, polls } = routes({ approved: true, decisionId: "11111111-1111-4111-8111-111111111111", note: null });
+    const go = vi.fn();
+    render(<SelfDeploy go={go} />);
+    const button = await screen.findByRole("button", { name: "Build and update runners" });
+    const before = polls.selfDeploy;
+    button.click();
+    expect(await screen.findByText(RUNNER_APPROVED_REPLY)).toBeTruthy();
+    expect(go).not.toHaveBeenCalled();
+    expect(fetch.stub.calls).toContain("POST /api/self-deploy/update-runners");
+    // Read again after the press, so the box moves on to "waiting for the host" / "Building" without waiting for the poll.
+    await vi.waitFor(() => expect(polls.selfDeploy).toBeGreaterThan(before));
+  });
+
+  it("when the approval is refused, says why and that the card is in Decisions, still without leaving the page", async () => {
+    routes({ approved: false, decisionId: "11111111-1111-4111-8111-111111111111", message: "The server deploy has not succeeded, so the runners are not updated.", note: null });
+    const go = vi.fn();
+    render(<SelfDeploy go={go} />);
+    (await screen.findByRole("button", { name: "Build and update runners" })).click();
+    expect(await screen.findByText("The server deploy has not succeeded, so the runners are not updated. Its card is in Decisions.")).toBeTruthy();
     expect(go).not.toHaveBeenCalled();
   });
 });

@@ -104,7 +104,7 @@ From: [Guide 5](/guides/agents-and-models).
 
 ### I gave the CEO a ticket and nothing happens.
 
-Open **Agents** and check the agent is not paused. Then check that **Settings > Server and runner** says the runner is **Connected**. When it works, a run shows under **Runs** in the sidebar within a minute or two.
+Open **Agents** and check the agent is not paused. Then check that **Settings > Server and runner** says the runner is **Connected**. When it works, a run shows under **Activity > Runs** in the sidebar within a minute or two.
 
 From: [Guide 3](/guides/first-company-and-ticket).
 

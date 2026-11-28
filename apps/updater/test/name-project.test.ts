@@ -49,9 +49,9 @@ describe("names from the settings", () => {
     for (const bad of ["Acme", "-acme", "acme dev", "a/b"]) expect(() => swapConfig({ ...CFG, UPDATER_NAME_PROJECT: bad }), bad).toThrow(/UPDATER_NAME_PROJECT/);
   });
 
-  test("the launcher's own settings cannot carry the pack volume or the install label: the updater sets them", () => {
+  test("the launcher's own settings cannot carry the pack volume: the updater sets it; an install label line (BOS-2803 install files) is tolerated", () => {
     expect(() => loadConfig({ ...swapEnv(), UPDATER_LAUNCHER_ENV: "BOSSMAN_CLAUDE_PACK_VOLUME=other" })).toThrow(/pack volume/);
-    expect(() => loadConfig({ ...swapEnv(), UPDATER_LAUNCHER_ENV: "BOSSMAN_INSTALL_LABEL=a=b" })).toThrow(/install label/);
+    expect(() => loadConfig({ ...swapEnv(), UPDATER_LAUNCHER_ENV: "BOSSMAN_INSTALL_LABEL=a=b" })).not.toThrow();
   });
 });
 

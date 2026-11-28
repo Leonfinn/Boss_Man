@@ -195,7 +195,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       for (const l of launcherEnv) {
         if (!/^[A-Z][A-Z0-9_]*=/.test(l)) throw new UpdaterError("config", "UPDATER_LAUNCHER_ENV has a line that is not KEY=value.");
         if (/^BOSSMAN_(RUNNER|NETGUARD)_IMAGE=/.test(l)) throw new UpdaterError("config", "UPDATER_LAUNCHER_ENV must not set the runner or guard image: the updater sets them from the release.");
-        if (/^BOSSMAN_(CLAUDE_PACK_VOLUME|INSTALL_LABEL)=/.test(l)) throw new UpdaterError("config", "UPDATER_LAUNCHER_ENV must not set the pack volume or the install label: the updater sets them from its own settings.");
+        // BOSSMAN_INSTALL_LABEL is allowed here: install files from BOS-2803 carry it, and the updater appends its own (equal) value last.
+        if (/^BOSSMAN_CLAUDE_PACK_VOLUME=/.test(l)) throw new UpdaterError("config", "UPDATER_LAUNCHER_ENV must not set the pack volume: the updater sets it from its own settings.");
       }
       const dg = (name: string) => {
         const v = env[name]?.trim();

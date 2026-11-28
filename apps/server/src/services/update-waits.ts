@@ -111,6 +111,23 @@ export function drainEndsAt(hold: { since: string; deadline?: string; swapWhenDo
 /** A wrap-up with no update behind it lifts by itself after this long. */
 export const STANDALONE_WRAPUP_MS = WAIT_RULES.wrapup.endMin * 60_000;
 
+/**
+ * BOS-2786: a runner update queued behind a server update's trial gets Boss Man's own wrap-up (maintenance.ts autoWrap).
+ * New work and checks are held from the press: a merge check on the company runner takes 18 min at the median and 26 at
+ * the 90th percentile (270 merge checks, 24 to 27 Nov), longer than the whole 15-minute trial, so no shorter lead lets one
+ * that starts in the trial end with it (on 27 Nov four started 09:59 to 10:03, inside 62e77f40's trial). Running agents
+ * are asked to finish this many minutes before the trial ends: a told agent ends within about a minute of reading the
+ * message (15 of 15 runs since 11 Nov), and reads it when the tool call it is in ends, which is minutes for an ordinary
+ * step such as a test file in the quick lane. Until then they keep working.
+ */
+export const AUTO_WRAPUP_TELL_LEAD_MIN = 10;
+/**
+ * BOS-2786: Boss Man's own wrap-up gives up when its runner update is still only queued this long after the trial's end
+ * (something else holds it back, such as a failed update being diagnosed): the host takes a request within a minute or
+ * two, and all work must not stay held for the runner-queued wait's 180 minutes for a press that is not moving.
+ */
+export const AUTO_WRAPUP_QUEUED_GRACE_MIN = 10;
+
 /** Does this wait's hold stop `cls` from starting? Gates call this instead of keeping their own list. */
 export const blocksClass = (kind: WaitKind, cls: WorkClass): boolean => WAIT_RULES[kind].blocks.includes(cls);
 
@@ -195,6 +212,20 @@ export function drainDetail(d: DrainFacts, otherWaits: boolean): string {
   const left = [...(d.runs > 0 ? [`${d.runs} agent run${d.runs === 1 ? "" : "s"}`] : []), ...(d.runnerChecks.length ? [namedChecksText(d.runnerChecks)] : [])];
   const own = left.length ? left.join("; ") : otherWaits ? "nothing left of its own; it now waits only for the waits below" : "nothing left; the swap happens on the next pass";
   return d.workerChecks.length ? `${own}. Not waited for: ${namedChecksText(d.workerChecks)} on a check worker` : own;
+}
+
+/**
+ * BOS-2861: which waits that count running checks are on now, read from the same rows as activeWaits: the runner drain
+ * (not the owner's "stop and update now", which waits for no check, and not a wrap-up or a build, which swap nothing) and
+ * the server update's quiet wait. The Merge queue marks each running check from these (runner-busy.ts updateCheckMarks).
+ */
+export async function checkCountingWaits(db: Db): Promise<{ runner: boolean; server: boolean }> {
+  const rows = await db.select().from(settings);
+  const deploy = rows.find((r) => r.key === DEPLOY_WAIT_KEY)?.value as DeployWaitRow | undefined;
+  const hold = rows.find((r) => r.key === "maintenance")?.value as HoldRow | undefined;
+  const runner = !!hold?.since && hold.kind !== "wrapup" && hold.kind !== "building" && runnerHoldWait(hold) === "runner-drain";
+  const server = !!deploy?.approvedAt && deploy.phase !== "sent" && deploy.phase !== "window" && deploy.phase !== "handover";
+  return { runner, server };
 }
 
 /**

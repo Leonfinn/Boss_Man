@@ -329,8 +329,118 @@ export function longWatchPhrase(text: string): string | null {
   return null;
 }
 
-/** BOS-2643: 0-based indexes of the after-merge criteria that name a watch of a day or more. */
-export const longWatchIndexes = (criteria: readonly Criterion[]): number[] => criteria.flatMap((c, i) => (isAfterMerge(c) && longWatchPhrase(criterionText(c)) ? [i] : []));
+/**
+ * BOS-2797: the one list of future events an after-merge criterion can wait on, which open it as its own check ticket
+ * exactly like a duration (BOS-2663 "after the next beta release", BOS-974 "one real install", BOS-2778/2779 "on the
+ * next real update" each sat open or bounced until split by hand). A single go-live reading ("the live page shows X",
+ * "on the owner's host") is not an event: it is settled once the work is live, so it stays on the build ticket.
+ * "the next release date/number/notes..." names a thing on a page, not an event, so it is left out.
+ */
+const EVENT_WATCH: readonly RegExp[] = [
+  // the next release / beta release / weekly release / real server update / runner rebuild / install
+  /\bthe\s+next\s+(?:(?:real|live|failed|published|public|beta|weekly|nightly|stable|full|routine|official|server|runner|host|image|app|boss\s+man)[\s-]+){0,3}(?:release|update|upgrade|install(?:ation)?|deploy(?:ment)?|rebuild|publish)s?\b(?![\s-]+(?:date|number|name|notes?|tag|version|button|time|card|link|field|list)\b)/i,
+  // one real install, a real image install, another real update (from published images, on x86 and ARM...)
+  /\b(?:one|a|another|two|three)\s+real\s+(?:[a-z0-9-]+\s+){0,2}?(?:install(?:ation)?|update|upgrade|release|deploy(?:ment)?)s?\b/i,
+  // the first real stuck alert, first real update...
+  /\b(?:the\s+)?first\s+real\s+[a-z][a-z-]*\b/i,
+  // on the owner's device / machine / phone (their own hardware, at a time they choose)
+  /\bon\s+(?:the\s+)?owner'?s\s+(?:own\s+)?(?:device|machine|phone|laptop|computer|tablet|browser)s?\b/i,
+];
+
+/** BOS-2797: the phrase that makes a criterion's text wait on a future event, or null (see EVENT_WATCH). */
+export function eventWatchPhrase(text: string): string | null {
+  for (const re of EVENT_WATCH) {
+    const m = re.exec(text);
+    if (m) return m[0].trim();
+  }
+  return null;
+}
+
+/** Words in an event phrase that don't change which event it is ("the next real update" is "the next update"). */
+const EVENT_FILLER = new Set(["the", "a", "an", "one", "another", "real", "live", "published", "public", "official", "full", "routine", "boss", "man", "own"]);
+const EVENT_NOUN: Record<string, string> = { releases: "release", updates: "update", upgrade: "update", upgrades: "update", installs: "install", installation: "install", installations: "install", deploys: "deploy", deployment: "deploy", deployments: "deploy", rebuilds: "rebuild", publishes: "publish" };
+
+/**
+ * BOS-2855: which event a criterion waits on, as a key two criteria share when one reading settles both, or null when
+ * it waits on no event. A duration watch ("over 3 days live") gives null even when it also names an event: each one
+ * starts at its own build's go-live, so two of them are never the same watch. The key is the EVENT_WATCH phrase without
+ * filler words and plurals; "server" is dropped before "update", since an update here is a server update unless it says
+ * runner, host, image or app.
+ */
+export function eventKey(text: string): string | null {
+  if (longWatchPhrase(text)) return null;
+  const phrase = eventWatchPhrase(text);
+  if (!phrase) return null;
+  const words = phrase
+    .toLowerCase()
+    .replace(/['’]/g, "")
+    .split(/[\s-]+/)
+    .filter((w) => w && !EVENT_FILLER.has(w))
+    .map((w) => EVENT_NOUN[w] ?? w);
+  return words.filter((w, i) => !(w === "server" && words[i + 1] === "update")).join(" ");
+}
+
+/**
+ * BOS-2864: wordings of something no agent can read from the runner (it has no Docker daemon, no host logs, no
+ * owner-only panel). An after-merge criterion that matches can never be reported, so it would sit in "Merged, watching"
+ * for ever (8 of 49 on 27 Nov). Kept beside the event list: this is the other kind of criterion that can't finish.
+ */
+const RUNNER_BLIND: readonly RegExp[] = [
+  // docker ps / docker logs / docker compose ps|logs / docker inspect|stats|exec
+  /\bdocker(?:[\s-]+compose)?\s+(?:ps|logs|inspect|stats|exec|images)\b/i,
+  // container logs, "in the container", "inside the container"
+  /\bcontainer(?:'s)?\s+logs?\b/i,
+  /\b(?:in|inside|from)\s+(?:the|a|that|each)\s+(?:[a-z-]+\s+){0,2}container\b/i,
+  // the host's own logs: host logs, journal, journalctl, syslog
+  /\b(?:host(?:'s)?|server(?:'s)?\s+host)\s+(?:own\s+)?(?:logs?|journal)\b/i,
+  /\bjournalctl\b|\bsystemd\s+journal\b|\bsyslog\b/i,
+  // "on the host" with a log or file read
+  /\bon\s+the\s+(?:owner'?s\s+)?host\b[^.;]{0,80}?\b(?:logs?|log\s+file|file|journal|reads?|cat)\b/i,
+  /\b(?:logs?|log\s+file|file|journal)\b[^.;]{0,60}?\bon\s+the\s+(?:owner'?s\s+)?host\b/i,
+  // the owner's screen or panel, a host tool's own UI
+  /\b(?:the\s+)?owner'?s\s+(?:own\s+)?(?:screen|panel|dashboard|display)\b/i,
+  /\b(?:truenas|proxmox|portainer|unraid|synology)(?:'s)?\s+(?:ui|gui|web\s*ui|dashboard|panel|console|app\s+page)\b/i,
+];
+
+/** BOS-2864: the wording that makes a criterion unobservable from the runner, or null (see RUNNER_BLIND). */
+export function runnerBlindPhrase(text: string): string | null {
+  for (const re of RUNNER_BLIND) {
+    const m = re.exec(text);
+    if (m) return m[0].trim();
+  }
+  return null;
+}
+
+/** BOS-2864: tickets created before this moment are never refused at approve for an old runner-blind criterion. */
+export const RUNNER_BLIND_FROM = "2026-11-28T00:00:00Z";
+
+/** BOS-2864: the three ways out, in one sentence the refusals share. */
+export const RUNNER_BLIND_WAYS = `Rewrite it as a test that runs before merge (CI can use a fake Docker), or add a fact clause "(fact: ...)" or a page clause "(page: https://example.com/path shows \\"words\\")" so Boss Man reads the result, or word it so an owner card stands in ("... or names one, with a card raised for it").`;
+
+/**
+ * BOS-2864: the refusal for an after-merge criterion that matches RUNNER_BLIND and says how it will be seen no other
+ * way (no fact clause, no page clause, no card standing in), or null. A criterion checked before merge is not refused.
+ */
+export function runnerBlindRefusal(criteria: ReadonlyArray<Criterion>): string | null {
+  const lines: string[] = [];
+  for (const c of criteria) {
+    if (!isAfterMerge(c)) continue;
+    const text = criterionText(c);
+    const phrase = runnerBlindPhrase(text);
+    if (!phrase || factClauses(text).length || pageClauses(text).length || allowsCardInstead(text)) continue;
+    lines.push(`"${text}" asks for something no agent can read from the runner ("${phrase}").`);
+  }
+  return lines.length ? `${lines.join("\n")}\nThe runner has no Docker, no host logs and no owner-only panel, so this could never be reported and the ticket would sit in "Merged, watching" for ever. Three ways out: ${RUNNER_BLIND_WAYS}` : null;
+}
+
+/** BOS-2864: the line the reviewer's context carries. */
+export const RUNNER_BLIND_REVIEW_LINE = "Refuse a criterion the agent has no way to observe from the runner (docker ps, container or host logs, an owner-only panel) unless it has a fact clause, a page clause or an owner card standing in (BOS-2864).";
+
+/** BOS-2643 + BOS-2797: the phrase that opens an after-merge criterion as its own check ticket (a long watch or a future event), or null. */
+export const watchPhrase = (text: string): string | null => longWatchPhrase(text) ?? eventWatchPhrase(text);
+
+/** BOS-2643: 0-based indexes of the after-merge criteria that name a watch of a day or more, or (BOS-2797) a future event. */
+export const longWatchIndexes = (criteria: readonly Criterion[]): number[] => criteria.flatMap((c, i) => (isAfterMerge(c) && watchPhrase(criterionText(c)) ? [i] : []));
 
 /** Words that mean a check can only be settled once the work is live, not in a review. */
 const LIVE = /\b(after (the )?merg(?:e|ing)|once (it'?s |it is )?(merged|live|deployed|in production)|post-?merge|standby window|live deploy|on a real host|on the (real|production) host|on your (own )?(host|machine|server)|on the (owner'?s )?(host|machine|server))\b/i;

@@ -2,10 +2,11 @@
 //   1. declined: unchanged.
 //   2. every delivery ticket done and live: released.
 //   3. released, and a delivery ticket open: in progress (a follow-up never reopens it).
-//   4. a delivery ticket in progress or review: in progress.
+//   4. a delivery ticket open (in progress, in review, blocked, ready or backlog): in progress.
 //   5. otherwise: unchanged.
-// A delivery ticket is one on the feature from before it first went live; later tickets are follow-ups, and plan and
-// design tickets are not delivery work.
+// A delivery ticket is one on the feature that nobody filed as a follow-up; follow-ups (handed on from another ticket,
+// so they have a parent) and plan/design tickets are not delivery. A ticket created after the feature first went live
+// is still delivery (BOS-2835), so open fix tickets hold it and reopens a manual In progress.
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
@@ -47,7 +48,7 @@ async function setup(opts: { own?: boolean } = {}) {
   const reg = (await req("POST", `/api/companies/${co.company.id}/runner`)).json() as { runnerId: string };
   const feedback = feedbackService(db);
   const feature = async (patch: Record<string, unknown> = {}) => (await db.insert(features).values({ companyId: co.company.id, title: `Feature ${randomUUID().slice(0, 6)}`, status: "planned", ...patch }).returning())[0]!;
-  // A ticket dated as if created at `at`; the feature's baseline is compared with createdAt, so tests say when.
+  // A ticket dated as if created at `at`. A follow-up has a parent (it was handed on from another ticket).
   const ticket = async (patch: Record<string, unknown> = {}, at = new Date("2026-11-01T00:00:00Z")) => (await db.insert(tickets).values({ companyId: co.company.id, projectId: project.id, title: "Backfill features", systemState: "ready", noCode: true, assigneeAgentId: dev.id, createdAt: at, ...patch }).returning())[0]!;
   const row = async (id: string) => (await db.select().from(tickets).where(eq(tickets.id, id)))[0]!;
   const feat = async (id: string) => (await db.select().from(features).where(eq(features.id, id)))[0]!;
@@ -94,21 +95,22 @@ afterEach(async () => {
 });
 
 describe("the rule table's helpers", () => {
-  it("a plan or design ticket is never delivery work, and a ticket after the feature was live is a follow-up", () => {
-    const base = new Date("2026-11-10T00:00:00Z");
-    const early = { createdAt: new Date("2026-11-01T00:00:00Z"), title: "Dark mode", planFirst: false };
-    const late = { createdAt: new Date("2026-11-20T00:00:00Z"), title: "Tidy the copy", planFirst: false };
-    expect(isDeliveryTicket(early, base)).toBe(true);
-    expect(isDeliveryTicket(early, null)).toBe(true);
-    expect(isDeliveryTicket(late, base)).toBe(false);
-    expect(isDeliveryTicket(late, null)).toBe(true);
-    expect(isDeliveryTicket({ ...early, title: "Plan (dark mode)" }, base)).toBe(false);
-    expect(isDeliveryTicket({ ...early, title: "Design: the toggle" }, base)).toBe(false);
-    expect(isDeliveryTicket({ ...early, planFirst: true }, base)).toBe(false);
+  it("a plan, design or follow-up ticket is never delivery work, and a ticket after the feature was live is still delivery", () => {
+    const root = { title: "Dark mode", planFirst: false, parentTicketId: null };
+    // A ticket created after the feature first went live is delivery too (BOS-2835): a fix holds the feature open.
+    expect(isDeliveryTicket({ ...root, title: "Tidy the copy" })).toBe(true);
+    // A follow-up is handed on from another ticket, so it has a parent, whatever its title.
+    expect(isDeliveryTicket({ ...root, parentTicketId: randomUUID() })).toBe(false);
+    expect(isDeliveryTicket({ ...root, title: "Plan (dark mode)" })).toBe(false);
+    expect(isDeliveryTicket({ ...root, title: "Design: the toggle" })).toBe(false);
+    expect(isDeliveryTicket({ ...root, planFirst: true })).toBe(false);
     // The baseline is the earliest go-live among delivery tickets, and plan tickets don't count.
-    expect(liveBaselineOf([{ ...early, liveAt: new Date("2026-11-05T00:00:00Z"), liveMarkedAt: null }, { ...late, liveAt: new Date("2026-11-15T00:00:00Z"), liveMarkedAt: null }])).toEqual(new Date("2026-11-05T00:00:00Z"));
+    const early = { ...root, liveAt: new Date("2026-11-05T00:00:00Z"), liveMarkedAt: null };
+    const late = { ...root, title: "Tidy the copy", liveAt: new Date("2026-11-15T00:00:00Z"), liveMarkedAt: null };
+    expect(liveBaselineOf([early, late])).toEqual(new Date("2026-11-05T00:00:00Z"));
     expect(liveBaselineOf([{ ...early, liveAt: null, liveMarkedAt: new Date("2026-11-06T00:00:00Z") }])).toEqual(new Date("2026-11-06T00:00:00Z"));
-    expect(liveBaselineOf([{ ...early, liveAt: null, liveMarkedAt: null }])).toBeNull();
+    // A follow-up's go-live doesn't set the feature's baseline.
+    expect(liveBaselineOf([{ ...early, liveAt: null, liveMarkedAt: null }, { ...late, parentTicketId: randomUUID(), liveAt: new Date("2026-11-15T00:00:00Z") }])).toBeNull();
   });
 });
 
@@ -152,9 +154,9 @@ describe("syncFeature: the ordered rule table", () => {
     const baseline = (await ctx.feat(f.id)).liveBaselineAt!;
     expect(baseline).not.toBeNull();
     expect(shipped.liveAt ?? shipped.mergedAt).toBeTruthy();
-    // A follow-up: created after it went live, on the feature, and in progress.
+    // A follow-up handed on from the shipped ticket (it has a parent), in progress.
     await ctx.feedback.syncFeature(f.id);
-    const late = await ctx.ticket({ featureId: f.id, systemState: "in_progress", createdAt: new Date(baseline.getTime() + 86_400_000) });
+    const late = await ctx.ticket({ featureId: f.id, systemState: "in_progress", parentTicketId: shipped.id, createdAt: new Date(baseline.getTime() + 86_400_000) });
     expect(await ctx.feedback.syncFeature(f.id)).toBeNull();
     expect((await ctx.feat(f.id)).status).toBe("released");
     expect(late.featureId).toBe(f.id);
@@ -164,13 +166,38 @@ describe("syncFeature: the ordered rule table", () => {
     await serverRuns(NEW);
     const f = await ctx.feature();
     for (let i = 0; i < 26; i++) await merged({ featureId: f.id, systemState: "done" }, new Date(Date.UTC(2026, 10, 1, i)));
-    await merged({ featureId: f.id, systemState: "done" }, new Date(Date.UTC(2026, 10, 2)));
+    const last = await merged({ featureId: f.id, systemState: "done" }, new Date(Date.UTC(2026, 10, 2)));
     expect((await ctx.feedback.syncFeature(f.id))?.status).toBe("released");
     const baseline = (await ctx.feat(f.id)).liveBaselineAt!;
-    // 27 of 28 done; the 28th is a follow-up the team files after it went live, still in Ready.
-    await ctx.ticket({ featureId: f.id, systemState: "ready", createdAt: new Date(baseline.getTime() + 3_600_000) });
+    // 27 of 28 done; the 28th is a follow-up handed on from a shipped ticket, still in Ready.
+    await ctx.ticket({ featureId: f.id, systemState: "ready", parentTicketId: last.id, createdAt: new Date(baseline.getTime() + 3_600_000) });
     expect(await ctx.feedback.syncFeature(f.id)).toBeNull();
     expect((await ctx.feat(f.id)).status).toBe("released");
+  });
+
+  it("BOS-2835: fix tickets filed after a feature went live keep it In progress, release it only once live, and a manual In progress stands", async () => {
+    await serverRuns(NEW);
+    const f = await ctx.feature();
+    // Florence's case: three review tickets done and live, so the feature releases.
+    const reviews = [await merged({ featureId: f.id, systemState: "done" }, new Date(Date.UTC(2026, 10, 1, 9))), await merged({ featureId: f.id, systemState: "done" }, new Date(Date.UTC(2026, 10, 1, 10))), await merged({ featureId: f.id, systemState: "done" }, new Date(Date.UTC(2026, 10, 1, 11)))];
+    expect((await ctx.feedback.syncFeature(f.id))?.status).toBe("released");
+    const baseline = (await ctx.feat(f.id)).liveBaselineAt!;
+    // New fix tickets filed after it went live (after the baseline), still open.
+    const after = new Date(baseline.getTime() + 86_400_000);
+    const fix = await ctx.ticket({ featureId: f.id, title: "Setup wizard asks what the team works on", systemState: "in_progress", createdAt: after });
+    await ctx.ticket({ featureId: f.id, title: "Never leave a first task stuck", systemState: "blocked", createdAt: after });
+    // Filing them reopens the released feature: it is not released while they are open.
+    expect((await ctx.feedback.syncFeature(f.id))?.status).toBe("in_progress");
+    expect((await ctx.feat(f.id)).status).not.toBe("released");
+    // A manual In progress is not undone by another ticket event while the fix is open (the re-release bug).
+    await ctx.db.update(features).set({ status: "in_progress" }).where(eq(features.id, f.id));
+    await ctx.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, fix.id));
+    expect(await ctx.feedback.syncFeature(f.id)).toBeNull();
+    expect((await ctx.feat(f.id)).status).toBe("in_progress");
+    // Once every fix is done and live, it releases again.
+    await ctx.db.update(tickets).set({ systemState: "done", mergeCommit: NEW, mergedAt: new Date(), goLiveWait: null }).where(eq(tickets.featureId, f.id));
+    expect((await ctx.feedback.syncFeature(f.id))?.status).toBe("released");
+    expect(reviews.every((r) => r.featureId === f.id)).toBe(true);
   });
 
   it("rule 4: a plan ticket alone does not move a planned feature to in progress (regression)", async () => {
@@ -183,15 +210,84 @@ describe("syncFeature: the ordered rule table", () => {
     expect((await ctx.feedback.syncFeature(f.id))?.status).toBe("in_progress");
   });
 
-  it("rule 4: delivery work in review moves a considering feature to in progress; rule 5 leaves it alone otherwise", async () => {
+  it("rule 4: delivery work in review or blocked moves a considering feature to in progress; rule 5 leaves it alone otherwise", async () => {
     const f = await ctx.feature({ status: "considering" });
     await ctx.ticket({ featureId: f.id, systemState: "review" });
     expect((await ctx.feedback.syncFeature(f.id))?.status).toBe("in_progress");
+    // BOS-2893: a Blocked delivery ticket is open work too.
+    const b = await ctx.feature({ status: "considering" });
+    await ctx.ticket({ featureId: b.id, systemState: "blocked" });
+    expect((await ctx.feedback.syncFeature(b.id))?.status).toBe("in_progress");
     // An open delivery ticket that is only Ready (rule 5) leaves an in-progress feature as it is.
     const g = await ctx.feature({ status: "in_progress" });
     await ctx.ticket({ featureId: g.id, systemState: "ready" });
     expect(await ctx.feedback.syncFeature(g.id)).toBeNull();
     expect((await ctx.feat(g.id)).status).toBe("in_progress");
+  });
+
+  it("BOS-2893: a Blocked, unmerged delivery ticket keeps the feature In progress, never Released", async () => {
+    await serverRuns(NEW);
+    const f = await ctx.feature({ status: "planned" });
+    // One no-code research ticket, done: on its own that releases the feature (rule 2).
+    await ctx.ticket({ featureId: f.id, systemState: "done", mergeCommit: null });
+    expect((await ctx.feedback.syncFeature(f.id))?.status).toBe("released");
+    // Florence's case (feature review 8): a build ticket attached, Blocked on an owner card, merged but not live yet
+    // (the server still runs OLD). The feature must reopen and stay open.
+    await serverRuns(OLD);
+    const t = await ctx.ticket({ featureId: f.id, systemState: "blocked", mergeCommit: NEW, mergedAt: new Date(), goLiveWait: "server", touchesRunner: false, noCode: false });
+    expect(await ctx.feedback.ticketLive(await ctx.row(t.id), await ctx.feat(f.id))).toBe(false);
+    // The sync after the attach (the event path the bug was seen on) reopens it and keeps it open.
+    expect((await ctx.feedback.syncFeature(f.id))?.status).toBe("in_progress");
+    expect((await ctx.feat(f.id)).status).toBe("in_progress");
+    // A later sync leaves it open, not Released again.
+    expect(await ctx.feedback.syncFeature(f.id)).toBeNull();
+    expect((await ctx.feat(f.id)).status).toBe("in_progress");
+  });
+
+  it("BOS-2893: an open ticket that is Blocked but already merged and live still releases the feature", async () => {
+    await serverRuns(NEW);
+    const f = await ctx.feature({ status: "in_progress" });
+    // A ticket that went live first, so the feature has a baseline, plus a later build ticket merged and live whose
+    // move to done was lost (still Blocked): both are done work, so the feature releases as today (BOS-2686's rule).
+    await merged({ featureId: f.id, systemState: "done", touchesRunner: false, noCode: false }, new Date("2026-10-01T00:00:00Z"));
+    expect((await ctx.feedback.syncFeature(f.id))?.status).toBe("released");
+    const t = await merged({ featureId: f.id, systemState: "blocked", touchesRunner: false, noCode: false }, new Date("2026-10-02T00:00:00Z"));
+    expect(await ctx.feedback.ticketLive(await ctx.row(t.id), await ctx.feat(f.id))).toBe(true);
+    // Reopen by hand, then sync: the merged-and-live open ticket does not hold it back.
+    await ctx.db.update(features).set({ status: "in_progress" }).where(eq(features.id, f.id));
+    const u = await ctx.feedback.syncFeature(f.id);
+    expect(u?.status ?? (await ctx.feat(f.id)).status).toBe("released");
+    expect((await ctx.feat(f.id)).status).toBe("released");
+    expect(t.systemState).toBe("blocked");
+  });
+
+  it("BOS-2893: other features keep today's status; only one with a Blocked, unmerged ticket changes", async () => {
+    await serverRuns(NEW);
+    // A released feature whose work is all live, an in-progress one, a planned one with only a Backlog ticket, a declined one.
+    const live = await ctx.feature();
+    await merged({ featureId: live.id, systemState: "done", noCode: false });
+    expect((await ctx.feedback.syncFeature(live.id))?.status).toBe("released");
+    const doing = await ctx.feature({ status: "in_progress" });
+    await ctx.ticket({ featureId: doing.id, systemState: "ready" });
+    const planned = await ctx.feature({ status: "planned" });
+    await ctx.ticket({ featureId: planned.id, systemState: "backlog" });
+    const declined = await ctx.feature({ status: "declined" });
+    await ctx.ticket({ featureId: declined.id, systemState: "blocked" });
+    expect((await ctx.feedback.syncFeature(planned.id))?.status).toBeUndefined();
+    const before = await Promise.all([live, doing, planned, declined].map(async (f) => (await ctx.feat(f.id)).status));
+    expect(before).toEqual(["released", "in_progress", "planned", "declined"]);
+    // The BOS-2884 case on its own: a feature whose one done ticket has not gone live (the server never ran it) and a
+    // Blocked, unmerged build ticket must stay In progress, never Released.
+    const blocked = await ctx.feature({ status: "in_progress" });
+    await ctx.ticket({ featureId: blocked.id, systemState: "done", mergeCommit: NEW, mergedAt: new Date(), goLiveWait: "server", touchesRunner: false, noCode: false }, new Date("2026-10-01T00:00:00Z"));
+    await ctx.ticket({ featureId: blocked.id, systemState: "blocked", mergeCommit: NEW, mergedAt: new Date(), goLiveWait: "server", noCode: false }, new Date("2026-10-01T00:00:00Z"));
+    expect(await ctx.feedback.syncFeature(blocked.id)).toBeNull();
+    expect((await ctx.feat(blocked.id)).status).toBe("in_progress");
+    // A fresh sync leaves the others alone.
+    for (const f of [live, doing, planned, declined, blocked]) await ctx.feedback.syncFeature(f.id);
+    const after = await Promise.all([live, doing, planned, declined].map(async (f) => (await ctx.feat(f.id)).status));
+    expect(after).toEqual(before);
+    expect((await ctx.feat(blocked.id)).status).toBe("in_progress");
   });
 
   it("rule 2 + 3: an open delivery ticket keeps a released feature in progress", async () => {
@@ -228,13 +324,14 @@ describe("the go-live hook (this company puts its own work live)", () => {
   it("the CEO marking a merge live releases the feature its ticket delivers", async () => {
     const ceo = await ctx.agent(ctx.co.ceo.id);
     const f = await ctx.feature({ status: "in_progress" });
-    const t = await ctx.ticket({ featureId: f.id, systemState: "blocked", mergeCommit: NEW, mergedAt: new Date(), touchesRunner: false, goLiveWait: "own" });
+    const t = await ctx.ticket({ featureId: f.id, systemState: "blocked", mergeCommit: NEW, mergedAt: new Date(), touchesRunner: false, goLiveWait: "own", noCode: false });
     expect((await ctx.feat(f.id)).status).toBe("in_progress");
     const out = textOf(await ceo.callTool({ name: "update_ticket", arguments: { ticketId: t.id, markLive: "Their release script put it live", reason: "It is live" } }));
     expect(out).toContain("Marked live");
     // The ticket is not done yet, so the feature waits for it to close (rule 4 keeps it), but it is now live.
     expect((await ctx.row(t.id)).liveMarkedAt).not.toBeNull();
-    expect((await ctx.feat(f.id)).liveBaselineAt).not.toBeNull();
+    // BOS-2893: the baseline is recorded with the release, not while the feature is only in progress.
+    expect((await ctx.feat(f.id)).liveBaselineAt).toBeNull();
     // Once the ticket is done, the feature's release rule sees it live without another go-live event.
     await ctx.db.update(tickets).set({ systemState: "done", goLiveWait: null }).where(eq(tickets.id, t.id));
     expect((await ctx.feedback.syncFeature(f.id))?.status).toBe("released");

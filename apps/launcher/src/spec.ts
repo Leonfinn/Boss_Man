@@ -35,15 +35,6 @@ export function parsePackVolume(v: string | undefined): string | undefined {
   if (!VOLUME_NAME.test(s)) throw new Error(`BOSSMAN_CLAUDE_PACK_VOLUME is not a volume name: ${v}`);
   return s;
 }
-/** BOS-2804: BOSSMAN_INSTALL_LABEL=key=value is stamped on every container the launcher makes, so removing an install by label also removes its runners and guards. */
-const INSTALL_LABEL = /^([A-Za-z0-9_.-]{1,100})=([A-Za-z0-9_.-]{1,100})$/;
-export function parseInstallLabel(v: string | undefined): Record<string, string> | undefined {
-  const s = (v ?? "").trim();
-  if (!s) return undefined;
-  const m = INSTALL_LABEL.exec(s);
-  if (!m) throw new Error(`BOSSMAN_INSTALL_LABEL should be key=value, not ${v}`);
-  return { [m[1]!]: m[2]! };
-}
 export const TOKEN_TARGET = "/run/secrets/runner_token";
 /** Docker's default weight is 1024; runners get half, so the server and database win on a busy host. */
 export const DEFAULT_CPU_SHARES = 512;
@@ -57,8 +48,8 @@ export type LauncherConfig = {
   stack?: string;
   /** BOSSMAN_CLAUDE_PACK_VOLUME (BOS-2804): the pack volume an image install owns. Unset = the stack's own name. */
   packVolume?: string;
-  /** BOSSMAN_INSTALL_LABEL (BOS-2804): one extra label for everything the launcher makes. */
-  installLabel?: Record<string, string>;
+  /** BOSSMAN_INSTALL_LABEL (BOS-2803): "key=value" stamped on runners, guards, the pack installer and the pack volume. Unset = no label. */
+  installLabel?: string;
   /** The compose network the server is on, e.g. boss-man_default. Never host. */
   network: string;
   /** Where runners dial the server. */
@@ -174,6 +165,20 @@ export const guardImage = (stack?: string) => `${prefix(stack)}-netguard:current
 /** What the launcher asks Docker to list: a named stack lists only its own containers; the default lists as before. */
 export const listLabel = (stack?: string) => (stack ? `${STACK_LABEL}=${stack}` : `${LABEL}=1`);
 const stackLabels = (stack?: string): Record<string, string> => (stack ? { [STACK_LABEL]: stack } : {});
+/**
+ * BOS-2803: the image install's label (BOSSMAN_INSTALL_LABEL, "com.bossman.install=<project>", given by the compose file through the
+ * updater). Put on every runner, network guard and the pack volume, so one label filter finds everything an install owns. Unset = none.
+ */
+export const installLabels = (cfg: { installLabel?: string }): Record<string, string> => {
+  const [k, ...rest] = (cfg.installLabel ?? "").split("=");
+  return k && rest.length ? { [k]: rest.join("=") } : {};
+};
+export function parseInstallLabel(v: string | undefined): string | undefined {
+  const s = (v ?? "").trim();
+  if (!s) return undefined;
+  if (!/^[a-z0-9][a-z0-9.-]{0,100}=[A-Za-z0-9][A-Za-z0-9._-]{0,100}$/.test(s)) throw new Error(`BOSSMAN_INSTALL_LABEL should be key=value, like com.bossman.install=boss-man, not ${v}`);
+  return s;
+}
 export const companyDir = (cfg: LauncherConfig, slug: string) => path.join(cfg.dataRoot, "companies", slug);
 /** The same folder as the Docker host sees it: what goes into a runner's Binds (BOS-974). */
 const hostCompanyDir = (cfg: LauncherConfig, slug: string) => path.join(cfg.hostDataRoot ?? cfg.dataRoot, "companies", slug);
@@ -223,6 +228,8 @@ export type ChecksPlan = {
   agents: number | null;
   /** BOS-1498: one plain line for the owner: what a runner made now is given and why. */
   why: string;
+  /** BOS-2802: the most memory a runner can be given here (the machine's limit or the .env size); null when nothing limits it. The server turns it into "this machine can run N agents". */
+  ceilingBytes: number | null;
 };
 
 const gb = (b: number) => `${Math.round((b / GIB) * 10) / 10} GB`;
@@ -241,7 +248,7 @@ const n = (k: number, one: string, many: string) => `${k} ${k === 1 ? one : many
 export function planChecks(cfg: LauncherConfig): ChecksPlan {
   if (cfg.requestedSlots === undefined) {
     const why = `${gb(cfg.memoryBytes)}: ${cfg.envMemoryCap !== undefined ? "set by BOSSMAN_RUNNER_MEMORY in the host's .env" : "the starting size, until Boss Man sends your settings"}.`;
-    return { requested: null, slots: cfg.checkSlots ?? 1, memoryBytes: cfg.memoryBytes, reason: null, agents: null, why };
+    return { requested: null, slots: cfg.checkSlots ?? 1, memoryBytes: cfg.memoryBytes, reason: null, agents: null, why, ceilingBytes: null };
   }
   const want = cfg.requestedSlots;
   const agents = cfg.requestedAgents;
@@ -279,7 +286,7 @@ export function planChecks(cfg: LauncherConfig): ChecksPlan {
     else if (cfg.envMemoryCap !== undefined && slots === fits && (envWins || cfg.envMemoryCap <= hostCeiling)) reason = `The host's .env caps runner memory at ${gb(cfg.envMemoryCap)} (BOSSMAN_RUNNER_MEMORY), which fits ${slots}.`;
     else reason = `Not enough free memory for ${want}: this host has ${cfg.hostMemoryBytes ? gb(cfg.hostMemoryBytes) : "too little"}, which fits ${slots}.`;
   }
-  return { requested: want, slots, memoryBytes, reason, agents: agents ?? null, why };
+  return { requested: want, slots, memoryBytes, reason, agents: agents ?? null, why, ceilingBytes: sized && Number.isFinite(ceiling) ? ceiling : null };
 }
 
 /** The Docker create request for a company's runner. Snapshot-tested: change it on purpose only. */
@@ -302,7 +309,7 @@ export function containerSpec(cfg: LauncherConfig, slug: string, image?: string,
       // The runner has no Docker socket; it reports these with its kernel as the platform fingerprint (DR-049 point 1).
       ...(host ? [`BOSSMAN_HOST_DOCKER=${host.dockerVersion}`, `BOSSMAN_HOST_OS=${host.osType}`] : []),
     ],
-    Labels: { [LABEL]: "1", [COMPANY_LABEL]: slug, ...stackLabels(cfg.stack), ...cfg.installLabel },
+    Labels: { [LABEL]: "1", [COMPANY_LABEL]: slug, ...stackLabels(cfg.stack), ...installLabels(cfg) },
     HostConfig: {
       Binds: [...MOUNTS.map(([sub, target]) => `${path.join(dir, sub)}:${target}`), `${path.join(dir, "runner.token")}:${TOKEN_TARGET}:ro`, `${claudePackVolumeOf(cfg)}:${CLAUDE_PACK_TARGET}:ro`],
       NetworkMode: cfg.network,
@@ -416,7 +423,7 @@ export function netguardSpec(cfg: LauncherConfig, slug: string, runnerId: string
     Env: [`NETGUARD_ALLOW=${serverAddress(cfg.serverUrl)}`, ...(cfg.guardAllow?.length ? [`NETGUARD_EXTRA=${cfg.guardAllow.join(" ")}`] : [])],
     // Healthy once the table is loaded: the launcher waits for it before it counts the runner as guarded.
     Healthcheck: { Test: ["CMD", "nft", "list", "table", "inet", "bossman_netguard"], Interval: 1_000_000_000, Timeout: 3_000_000_000, Retries: 3 },
-    Labels: { [NETGUARD_LABEL]: "1", [COMPANY_LABEL]: slug, ...stackLabels(cfg.stack), ...cfg.installLabel },
+    Labels: { [NETGUARD_LABEL]: "1", [COMPANY_LABEL]: slug, ...stackLabels(cfg.stack), ...installLabels(cfg) },
     HostConfig: {
       Binds: [`${path.join(hostCompanyDir(cfg, slug), "netguard")}:/etc/netguard:ro`],
       NetworkMode: `container:${runnerId}`,

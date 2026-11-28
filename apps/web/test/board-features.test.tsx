@@ -523,7 +523,7 @@ describe("empty board columns", () => {
       }),
     );
     render(<Board companies={[company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
-    expect(await screen.findByText("Nothing waiting. Add a task to start.")).toBeTruthy();
+    expect(await screen.findByText("Nothing waiting. Add a task to start, or ask the CEO in Chat to plan the work.")).toBeTruthy();
     expect(screen.queryByText(/Nothing ready/)).toBeNull();
   });
 });

@@ -8,6 +8,8 @@ lead: Boss Man backs up its database before every update. This guide covers upda
 
 ![What happens when you update: back up first, update, check it is healthy, and the way back if it is not.](/img/update-and-backup.svg =1160x820 narrow=/img/update-and-backup-narrow.svg:360x2380 "An update backs up first, then updates and checks. The way back for code and the way back for data are different.")
 
+For what an update changes, whether work stops and what you press, in plain words, see [How updates work](/guides/how-updates-work). This page has the command-line steps.
+
 ## Update the server
 
 To get agents to save their work and stop before you update, see [Stopping work](/guides/stopping-work#example-before-a-server-update).

@@ -86,6 +86,22 @@ describe("the sweep pass", () => {
     expect(pass).toHaveProperty("goalChecks");
     expect((await db.select().from(companies).where(eq(companies.name, "Acme"))).length).toBe(1);
   });
+
+  it("BOS-2871: an early step that throws no longer stops the milestone-risk step and saves its failure count", async () => {
+    const { db } = await setup();
+    let milestoneRan = 0;
+    const sweeps = sweepService(db, {
+      wake: async () => ({}), isConnected: () => true, alert: async () => null, endRun: async () => ({}),
+      endUnconfirmedCancels: async () => { throw new Error("cancel read failed"); },
+      clearAlerts: async () => { throw new Error("closer read failed"); },
+      milestoneRisk: async () => void milestoneRan++,
+    });
+    const pass = await sweeps.run(async () => ({ raised: 0 }));
+    expect(pass.failedSteps).toEqual(["unconfirmed cancels", "close cards"]);
+    expect(milestoneRan).toBe(1);
+    // Before, the pass rejected before guard.finish(), so the owner card's counter never saw the failure.
+    expect(await sweepStepOkReason(db, "close cards")).toBeNull();
+  });
 });
 
 describe("sweepStepKey", () => {

@@ -3,16 +3,17 @@
 // linked the two. On the old code create_ticket has no checksCriterion and closing the check writes and wakes nothing.
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { checkTicketLine, readVerdicts, unreportedAfterMerge } from "@boss-man/shared";
+import { checkTicketLine, eventKey, readVerdicts, unreportedAfterMerge } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, features, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { activity, checkTicketLinks, features, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { workflowService } from "../src/services/workflow.js";
 import { issueRunToken } from "../src/mcp.js";
-import { appendLine, CHECK_REPORTED_REASON, checkTicketDoneRefusal, checkTicketVerdict, LONG_WATCH_FROM, openLongWatchChecks } from "../src/services/after-merge-check-tickets.js";
+import { appendLine, CHECK_REPORTED_REASON, checkTicketDoneRefusal, checkTicketVerdict, FOLD_FROM, LONG_WATCH_FROM, openLongWatchChecks } from "../src/services/after-merge-check-tickets.js";
+import { EVENT_CHECK_END_FROM, eventCheckEndSweep } from "../src/services/event-check-end.js";
 import { openBlockers } from "../src/services/ticket-links.js";
 import { wakeClass } from "../src/services/wake-classes.js";
 import { wakeWatchers } from "../src/services/watch-triggers.js";
@@ -455,5 +456,274 @@ describe("BOS-2643: a watch of a day or more is opened as its own check ticket",
     const [check] = await checksOf(c, build!.id);
     // BOS-2682: the check is a watch of live work, not new work on the feature, so it never joins the feature.
     expect(check!.featureId).toBeNull();
+  });
+
+  // BOS-2797: BOS-2663 ("after the next beta release") and BOS-974 ("one real install") sat open or bounced until split
+  // by hand. A criterion that waits on a future event is split exactly like a duration watch.
+  it("an after-merge criterion that waits on a future event opens its own check, tied back to the build", async () => {
+    const c = await setup();
+    const EVENT = { text: "After the next beta release, a real image install shows the new-release note", after: "merge" as const };
+    const made = await c.create(c.co.ceo.id, { title: "Show the new-release note", noCode: false, assignee: "Dev", acceptanceCriteria: [BEFORE, ONCE, EVENT] });
+    expect(made.isError, made.text).toBe(false);
+    expect(made.text).toContain('Criterion 3 needs a watch ("the next beta release")');
+    const [check, ...more] = await checksOf(c, made.id!);
+    expect(more).toEqual([]);
+    expect([check!.checksCriterion, check!.assigneeAgentId, check!.systemState]).toEqual([3, c.dev.id, "blocked"]);
+    expect(check!.body).toContain("waits on a future event");
+    const deps = await c.db.select().from(ticketDependencies);
+    expect(deps.filter((d) => d.blockedTicketId === check!.id).map((d) => [d.blockerTicketId, d.until])).toEqual([[made.id, "merged"]]);
+  });
+
+  it.each([
+    ["on the next real server update", "On the next real server update, the update card closes by itself", "the next real server update"],
+    ["one real install on x86 and ARM", "One real install on an x86 machine and an ARM machine starts from the published images", "One real install"],
+  ])("%s opens its own check; a one-time go-live reading stays on the build", async (_, text, phrase) => {
+    const c = await setup();
+    const READING = { text: "The live What's new page shows the entry", after: "merge" as const };
+    const made = await c.create(c.co.ceo.id, { title: "Event build", noCode: false, assignee: "Dev", acceptanceCriteria: [BEFORE, READING, { text, after: "merge" }] });
+    expect(made.isError, made.text).toBe(false);
+    expect(made.text).toContain(`Criterion 3 needs a watch ("${phrase}")`);
+    expect((await checksOf(c, made.id!)).map((x) => [x.checksCriterion, x.acceptanceCriteria])).toEqual([[3, [text]]]);
+  });
+
+  // BOS-2855: BOS-2778 and BOS-2779 each read the same 27 Nov wrap-up on "the next real update"; BOS-2847 repeated a
+  // check already held. On the old code the second build opens a second check, and a follow-up is always opened.
+  it("the event key: filler words, plurals and \"server\" before update don't count; a duration watch has none", () => {
+    expect(eventKey("On the next real server update, the update card closes")).toBe("next update");
+    expect(eventKey("After the next update, the banner is gone")).toBe("next update");
+    expect(eventKey("The next live upgrade keeps the hold")).toBe("next update");
+    expect(eventKey("After the next beta release, the note shows")).toBe("next beta release");
+    expect(eventKey("After the next release, the note shows")).toBe("next release");
+    expect(eventKey("The next runner rebuild keeps the cache")).toBe("next runner rebuild");
+    expect(eventKey("One real install on x86 starts")).toBe("install");
+    expect(eventKey("Over 3 days live, after the next release, nothing breaks")).toBeNull();
+    expect(eventKey("The live page shows the entry")).toBeNull();
+  });
+
+  const UPDATE_A = { text: "On the next real server update, the update card closes by itself", after: "merge" as const };
+  const UPDATE_B = { text: "After the next real update, the wrap-up note names the commit", after: "merge" as const };
+
+  it("a second build waiting on the same event joins the open check: one ticket, each build gets its own result", async () => {
+    const c = await setup();
+    const a = await c.create(c.co.ceo.id, { title: "Update card closes", noCode: false, assignee: "Dev", acceptanceCriteria: [BEFORE, UPDATE_A] });
+    const [check, ...none] = await checksOf(c, a.id!);
+    expect(none).toEqual([]);
+    const b = await c.create(c.co.ceo.id, { title: "Wrap-up names the commit", noCode: false, assignee: "Other", acceptanceCriteria: [BEFORE, ONCE, UPDATE_B] });
+    expect(b.isError, b.text).toBe(false);
+    expect(b.text).toContain(`already waits on that event, so Boss Man added it there`);
+    expect(b.text).toContain(check!.id);
+    // No second check ticket: B's criterion 3 is criterion 2 of A's check, tied back to B.
+    expect(await checksOf(c, b.id!)).toEqual([]);
+    expect((await c.db.select().from(tickets).where(eq(tickets.projectId, c.project.id))).filter((x) => x.checksTicketId)).toHaveLength(1);
+    const folded = await c.row(check!.id);
+    expect(folded.acceptanceCriteria).toEqual([UPDATE_A.text, expect.stringMatching(/^For [A-Z]+-\d+ criterion 3, once [A-Z]+-\d+ is live: After the next real update/)]);
+    expect((await c.db.select().from(checkTicketLinks).where(eq(checkTicketLinks.checkTicketId, check!.id))).map((l) => [l.ownCriterion, l.ticketId, l.criterion, l.appended])).toEqual([[2, b.id, 3, true]]);
+    // The check waits on both merges, since its reading only counts once both are live.
+    const deps = await c.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, check!.id));
+    expect(deps.map((d) => [d.blockerTicketId, d.until]).sort()).toEqual([[a.id, "merged"], [b.id, "merged"]].sort());
+    // Setting B's criteria again doesn't fold it twice or open a check.
+    await c.call(c.co.ceo.id, "update_ticket", { ticketId: b.id, acceptanceCriteria: [BEFORE, ONCE, UPDATE_B], reason: "same again" });
+    expect((await c.row(check!.id)).acceptanceCriteria).toHaveLength(2);
+    expect(await checksOf(c, b.id!)).toEqual([]);
+    // Both merge and close at go-live: B's folded criterion is tied like the check's own.
+    for (const [id, note] of [[a.id!, "1 pass"], [b.id!, "1 pass; 2 pass: the note reads as merged"]] as const) {
+      await c.db.update(tickets).set({ mergeCommit: "b".repeat(40), systemState: "blocked", liveAt: new Date(), stateNote: note }).where(eq(tickets.id, id));
+      const closed = await c.setState(c.co.ceo.id, { ticketId: id, state: "done", summary: note });
+      expect(closed.isError, closed.text).toBe(false);
+    }
+    // The update comes: criterion 1 passes for A, criterion 2 fails for B. Each build gets its own.
+    await c.db.update(tickets).set({ systemState: "in_progress" }).where(eq(tickets.id, check!.id));
+    const refused = await c.setState(c.dev.id, { ticketId: check!.id, state: "done", summary: "1 pass: the card closed" });
+    expect(refused.isError).toBe(true);
+    const reported = await c.setState(c.dev.id, { ticketId: check!.id, state: "done", summary: "1 pass: the card closed; 2 fail: the note named no commit" });
+    expect(reported.isError, reported.text).toBe(false);
+    expect((await c.row(a.id!)).stateNote).toMatch(/reported: 2 pass/);
+    expect((await c.row(a.id!)).stateNote).not.toMatch(/fail/);
+    expect((await c.row(b.id!)).stateNote).toMatch(/reported: 3 fail/);
+    // B closed at go-live, so its fail wakes the CEO (BOS-2417); A's pass wakes nobody.
+    const ceoWakes = await c.db.select().from(wakes).where(and(eq(wakes.agentId, c.co.ceo.id), eq(wakes.reason, CHECK_REPORTED_REASON)));
+    expect(ceoWakes.map((w) => w.ticketId)).toEqual([b.id]);
+  });
+
+  it("a duration watch, another event or another project is never folded", async () => {
+    const c = await setup();
+    const WEEK = { text: "A week after the next release, no install has failed", after: "merge" as const };
+    const a = await c.create(c.co.ceo.id, { title: "Build A", noCode: false, assignee: "Dev", acceptanceCriteria: [BEFORE, WEEK, UPDATE_A] });
+    const b = await c.create(c.co.ceo.id, { title: "Build B", noCode: false, assignee: "Dev", acceptanceCriteria: [BEFORE, WEEK, { text: "After the next beta release, the note shows", after: "merge" }] });
+    expect((await checksOf(c, a.id!)).map((x) => x.checksCriterion).sort()).toEqual([2, 3]);
+    expect((await checksOf(c, b.id!)).map((x) => x.checksCriterion).sort()).toEqual([2, 3]);
+    const other = await server.built.app.inject({ method: "POST", url: `/api/companies/${c.co.company.id}/projects`, headers: { cookie: server.cookie }, payload: { name: "Website" } });
+    expect(other.statusCode, other.body).toBeLessThan(300);
+    const w = await c.create(c.co.ceo.id, { title: "Build W", project: "Website", noCode: false, assignee: "Dev", acceptanceCriteria: [BEFORE, UPDATE_B] });
+    expect(w.isError, w.text).toBe(false);
+    expect((await checksOf(c, w.id!)).map((x) => x.checksCriterion)).toEqual([2]);
+    expect(await c.db.select().from(checkTicketLinks).where(inArray(checkTicketLinks.ticketId, [a.id!, b.id!, w.id!]))).toEqual([]);
+  });
+
+  it("a follow-up whose criterion an open check already carries is not opened, and is tied to that check", async () => {
+    const c = await setup();
+    const a = await c.create(c.co.ceo.id, { title: "Update card closes", noCode: false, assignee: "Dev", acceptanceCriteria: [BEFORE, UPDATE_A] });
+    const [check] = await checksOf(c, a.id!);
+    // Another merged ticket left the same live check unreported and hands it on.
+    const [t] = await c.db.insert(tickets).values({ companyId: c.co.company.id, projectId: c.project.id, title: "Earlier card fix", systemState: "blocked", assigneeAgentId: c.dev.id, mergeCommit: "d".repeat(40), liveAt: new Date(), acceptanceCriteria: [BEFORE, UPDATE_A], stateNote: "1 pass" }).returning();
+    const before = (await c.db.select().from(tickets)).length;
+    const closed = await c.setState(c.co.ceo.id, { ticketId: t!.id, state: "done", summary: "1 pass; 2 handed on", followUps: [{ title: "Re-check the card on the next update", assignee: "Dev", why: "Not seen live yet", criterion: 2 }] });
+    expect(closed.isError, closed.text).toBe(false);
+    expect(closed.text).toContain(`was not opened: open check ticket`);
+    expect(closed.text).toContain(check!.id);
+    expect((await c.db.select().from(tickets)).length).toBe(before);
+    expect((await c.db.select().from(checkTicketLinks).where(eq(checkTicketLinks.checkTicketId, check!.id))).map((l) => [l.ownCriterion, l.ticketId, l.criterion, l.appended])).toEqual([[1, t!.id, 2, false]]);
+    // The check's own criteria are unchanged, and its pass reaches both tickets.
+    expect((await c.row(check!.id)).acceptanceCriteria).toEqual([UPDATE_A.text]);
+    await c.db.update(tickets).set({ mergeCommit: "b".repeat(40), systemState: "blocked", liveAt: new Date() }).where(eq(tickets.id, a.id!));
+    await c.db.update(tickets).set({ systemState: "in_progress" }).where(eq(tickets.id, check!.id));
+    const reported = await c.setState(c.dev.id, { ticketId: check!.id, state: "done", summary: "1 pass: the card closed" });
+    expect(reported.isError, reported.text).toBe(false);
+    expect((await c.row(a.id!)).stateNote).toMatch(/reported: 2 pass/);
+    expect((await c.row(t!.id)).stateNote).toMatch(/reported: 2 pass/);
+    // A follow-up carrying a criterion no check holds is opened as before.
+    const [u] = await c.db.insert(tickets).values({ companyId: c.co.company.id, projectId: c.project.id, title: "Other fix", systemState: "review", assigneeAgentId: c.dev.id, acceptanceCriteria: [BEFORE, ONCE] }).returning();
+    const handed = await c.setState(c.co.ceo.id, { ticketId: u!.id, state: "done", summary: "1 pass", followUps: [{ title: "Read the comment live", assignee: "Dev", why: "Needs go-live", criterion: 2 }] });
+    expect(handed.text).toContain("Boss Man opened the follow-up");
+  });
+
+  it("a ticket stored before the change, with an event criterion, is left as it is", async () => {
+    const c = await setup();
+    const EVENT = { text: "After the next beta release, a real image install shows the note", after: "merge" as const };
+    const before = new Date(LONG_WATCH_FROM.getTime() - 3_600_000);
+    const [old] = await c.db.insert(tickets).values({ companyId: c.co.company.id, projectId: c.project.id, title: "Old build with an event", systemState: "ready", assigneeAgentId: c.dev.id, acceptanceCriteria: [BEFORE, EVENT], createdAt: before }).returning();
+    const reset = await c.call(c.co.ceo.id, "update_ticket", { ticketId: old!.id, acceptanceCriteria: [BEFORE, EVENT], reason: "criteria again" });
+    expect(reset.isError, reset.text).toBe(false);
+    expect(await checksOf(c, old!.id)).toEqual([]);
+    expect((await c.row(old!.id)).acceptanceCriteria).toEqual([BEFORE, EVENT]);
+  });
+
+  it("a check ticket stored before the change is left as it is: a build on the same event opens its own check", async () => {
+    const c = await setup();
+    const before = new Date(FOLD_FROM.getTime() - 3_600_000);
+    const [build] = await c.db.insert(tickets).values({ companyId: c.co.company.id, projectId: c.project.id, title: "Older build", systemState: "blocked", assigneeAgentId: c.dev.id, acceptanceCriteria: [BEFORE, UPDATE_A], createdAt: before }).returning();
+    const [old] = await c.db.insert(tickets).values({ companyId: c.co.company.id, projectId: c.project.id, title: "Older check", systemState: "blocked", assigneeAgentId: c.dev.id, acceptanceCriteria: [UPDATE_A.text], checksTicketId: build!.id, checksCriterion: 2, createdAt: before }).returning();
+    const b = await c.create(c.co.ceo.id, { title: "New build on the same update", noCode: false, assignee: "Dev", acceptanceCriteria: [BEFORE, UPDATE_B] });
+    expect(b.isError, b.text).toBe(false);
+    expect(b.text).not.toContain(old!.id);
+    expect((await checksOf(c, b.id!)).map((x) => x.checksCriterion)).toEqual([2]);
+    expect((await c.row(old!.id)).acceptanceCriteria).toEqual([UPDATE_A.text]);
+    expect(await c.db.select().from(checkTicketLinks).where(eq(checkTicketLinks.checkTicketId, old!.id))).toEqual([]);
+    expect(await c.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, old!.id))).toEqual([]);
+  });
+
+  // BOS-2863: an event check ends 7 days after go-live. Fails on the old code: there is no end, so the check stays open.
+  describe("event check end date", () => {
+    const EVENT = { text: "On the next real server update, the update card closes by itself", after: "merge" as const };
+    const DURATION = { text: "Over 3 days live, no new stuck alerts appear", after: "merge" as const };
+    const DAY = 86_400_000;
+
+    async function mergedBuild(c: Awaited<ReturnType<typeof setup>>, criteria: Array<{ text: string; after: "merge" }>) {
+      const made = await c.create(c.co.ceo.id, { title: "Event build", noCode: false, assignee: "Dev", acceptanceCriteria: [BEFORE, ...criteria] });
+      expect(made.isError, made.text).toBe(false);
+      const liveAt = new Date(Date.now() - 6.5 * DAY);
+      await c.db.update(tickets).set({ mergeCommit: "d".repeat(40), mergedAt: liveAt, liveAt, systemState: "done" }).where(eq(tickets.id, made.id!));
+      // Checks opened before the change keep today's behaviour; these are "new", whatever day the suite runs.
+      await c.db.update(tickets).set({ createdAt: new Date(EVENT_CHECK_END_FROM.getTime() + 3_600_000) }).where(eq(tickets.checksTicketId, made.id!));
+      return { made, liveAt };
+    }
+    const sweep = (c: Awaited<ReturnType<typeof setup>>, at: Date, woken: Array<{ agentId: string; reason: string; ticketId: string }>) =>
+      eventCheckEndSweep(c.db, { now: () => at, notify: async (agentId, i) => void woken.push({ agentId, reason: i.reason, ticketId: i.ticketId }), close: (id) => c.work.updateTicket(id, { state: "done", outcome: "completed", overLimit: true }) });
+
+    it("the create reply says the check ends 7 days after go-live", async () => {
+      const c = await setup();
+      const made = await c.create(c.co.ceo.id, { title: "Event build", noCode: false, assignee: "Dev", acceptanceCriteria: [BEFORE, EVENT] });
+      expect(made.text).toContain("ends 7 days after go-live");
+      expect(made.text).toContain("not observed in 7 days; covered by the merged tests");
+    });
+
+    it("warns the assignee once a day before the end, then closes it as not observed and writes the line on the build", async () => {
+      const c = await setup();
+      const { made, liveAt } = await mergedBuild(c, [EVENT]);
+      const [check] = await checksOf(c, made.id!);
+      await c.db.update(tickets).set({ systemState: "blocked" }).where(eq(tickets.id, check!.id));
+      const woken: Array<{ agentId: string; reason: string; ticketId: string }> = [];
+      // Day 5: nothing yet.
+      expect(await sweep(c, new Date(liveAt.getTime() + 5 * DAY), woken)).toEqual({ warned: 0, closed: 0 });
+      // 23 hours before the end: one warning, never repeated.
+      const warnAt = new Date(liveAt.getTime() + 7 * DAY - 23 * 3_600_000);
+      expect(await sweep(c, warnAt, woken)).toEqual({ warned: 1, closed: 0 });
+      expect(await sweep(c, warnAt, woken)).toEqual({ warned: 0, closed: 0 });
+      expect(woken).toEqual([{ agentId: c.dev.id, reason: "event check ending", ticketId: check!.id }]);
+      expect(wakeClass("event check ending")).toBe("waiting");
+      // Past the end: closed as completed, the result on the build's criterion, nothing reopens.
+      expect(await sweep(c, new Date(liveAt.getTime() + 7 * DAY + 60_000), woken)).toEqual({ warned: 0, closed: 1 });
+      const closed = await c.row(check!.id);
+      expect([closed.systemState, closed.outcome]).toEqual(["done", "completed"]);
+      const build = await c.row(made.id!);
+      expect(build.stateNote).toContain("not observed in 7 days; covered by the merged tests");
+      expect(build.stateNote).toMatch(/reported: 2 pass/);
+      expect(build.systemState).toBe("done");
+      expect(await sweep(c, new Date(liveAt.getTime() + 9 * DAY), woken)).toEqual({ warned: 0, closed: 0 });
+    });
+
+    it("keeps a real reading the assignee already wrote, and leaves a duration watch alone", async () => {
+      const c = await setup();
+      const { made, liveAt } = await mergedBuild(c, [EVENT, DURATION]);
+      const checks = await checksOf(c, made.id!);
+      expect(checks.map((x) => x.checksCriterion).sort()).toEqual([2, 3]);
+      const event = checks.find((x) => x.checksCriterion === 2)!;
+      await c.db.update(tickets).set({ systemState: "blocked", stateNote: "1 pass: saw it on the 3 Dec update" }).where(eq(tickets.id, event.id));
+      await c.db.update(tickets).set({ systemState: "blocked" }).where(eq(tickets.id, checks.find((x) => x.checksCriterion === 3)!.id));
+      expect(await sweep(c, new Date(liveAt.getTime() + 20 * DAY), [])).toEqual({ warned: 0, closed: 0 });
+      expect((await c.row(event.id)).systemState).toBe("blocked");
+      expect((await c.row(event.id)).stateNote).toBe("1 pass: saw it on the 3 Dec update");
+      expect((await c.row(checks.find((x) => x.checksCriterion === 3)!.id)).systemState).toBe("blocked");
+    });
+
+    it("a check stored before the change, with or without a watch date, is never closed or warned by it", async () => {
+      const c = await setup();
+      const { made, liveAt } = await mergedBuild(c, [EVENT]);
+      const [check] = await checksOf(c, made.id!);
+      const old = new Date(EVENT_CHECK_END_FROM.getTime() - 3_600_000);
+      for (const watchUntil of [null, new Date(liveAt.getTime() + 2 * DAY)]) {
+        await c.db.update(tickets).set({ systemState: "blocked", createdAt: old, watchUntil }).where(eq(tickets.id, check!.id));
+        const woken: Array<{ agentId: string; reason: string; ticketId: string }> = [];
+        expect(await sweep(c, new Date(liveAt.getTime() + 30 * DAY), woken)).toEqual({ warned: 0, closed: 0 });
+        expect(woken).toEqual([]);
+      }
+      expect((await c.row(check!.id)).systemState).toBe("blocked");
+    });
+
+    it("an author's earlier end date wins, and a build not yet live has no end", async () => {
+      const c = await setup();
+      const { made, liveAt } = await mergedBuild(c, [EVENT]);
+      const [check] = await checksOf(c, made.id!);
+      await c.db.update(tickets).set({ systemState: "blocked", watchUntil: new Date(liveAt.getTime() + 2 * DAY) }).where(eq(tickets.id, check!.id));
+      expect(await sweep(c, new Date(liveAt.getTime() + 3 * DAY), [])).toEqual({ warned: 0, closed: 1 });
+      const c2 = await setup();
+      const made2 = await c2.create(c2.co.ceo.id, { title: "Not merged", noCode: false, assignee: "Dev", acceptanceCriteria: [BEFORE, EVENT] });
+      const farFuture = new Date(liveAt.getTime() + 30 * DAY);
+      expect(await sweep(c2, farFuture, [])).toEqual({ warned: 0, closed: 0 });
+      expect(made2.isError).toBe(false);
+    });
+
+    // BOS-2855 with BOS-2863: a folded check ends with the last build it holds, and each build reads its own pass.
+    it("a check another build was folded into ends 7 days after the later go-live and reports to both builds", async () => {
+      const c = await setup();
+      const { made, liveAt } = await mergedBuild(c, [EVENT]);
+      const [check] = await checksOf(c, made.id!);
+      await c.db.update(tickets).set({ systemState: "blocked" }).where(eq(tickets.id, check!.id));
+      const second = await c.create(c.co.ceo.id, { title: "Second build on the same update", noCode: false, assignee: "Dev", acceptanceCriteria: [BEFORE, { text: "On the next update, the card shows the new wording", after: "merge" }] });
+      expect(second.text).toContain(check!.id);
+      expect(second.text).toContain("of the last build it holds");
+      // Past the first build's end, the second not merged yet: no end.
+      const firstEnd = new Date(liveAt.getTime() + 7 * DAY + 60_000);
+      expect(await sweep(c, firstEnd, [])).toEqual({ warned: 0, closed: 0 });
+      const liveB = new Date(liveAt.getTime() + 3 * DAY);
+      await c.db.update(tickets).set({ mergeCommit: "e".repeat(40), mergedAt: liveB, liveAt: liveB, systemState: "done" }).where(eq(tickets.id, second.id!));
+      expect(await sweep(c, firstEnd, [])).toEqual({ warned: 0, closed: 0 });
+      expect(await sweep(c, new Date(liveB.getTime() + 7 * DAY + 60_000), [])).toEqual({ warned: 0, closed: 1 });
+      for (const id of [made.id!, second.id!]) {
+        const b = await c.row(id);
+        expect(b.stateNote).toMatch(/reported: 2 pass/);
+        expect(b.stateNote).toContain("not observed in 7 days; covered by the merged tests");
+      }
+    });
   });
 });

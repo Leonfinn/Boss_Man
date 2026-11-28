@@ -37,22 +37,26 @@ const counted = isNull(feedbackNotes.confirmTokenHash);
 const planningTicket = (t: { title: string; planFirst: boolean }) => t.planFirst || /^(plan|design)\s*[(:]/i.test(t.title.trim());
 
 /**
- * BOS-2686: whether a ticket is delivery work for its feature. Delivery is what the feature promised: a ticket on it
- * from before it first went live (features.liveBaselineAt). A ticket added after that is a follow-up, and plan and
- * design tickets are never delivery. With no baseline (an unreleased feature) every ticket is delivery.
+ * BOS-2686 / BOS-2835: whether a ticket is delivery work for its feature. Delivery is what the feature promised: a
+ * ticket on it that nobody filed as a follow-up. Only a follow-up (a ticket handed on from another ticket, so it has a
+ * parent; BOS-2682) shows on the feature without holding it or reopening it, and plan and design tickets are never
+ * delivery. A ticket created after the feature first went live is still delivery: a fix nobody asked for is work the
+ * feature owns until it is live (BOS-2835), not a follow-up that releases it straight away. A follow-up recorded from
+ * a plan ticket is still a parent ticket, so it too is a follow-up.
  */
-export function isDeliveryTicket(t: { createdAt: Date; title: string; planFirst: boolean }, liveBaselineAt: Date | null | undefined): boolean {
+export function isDeliveryTicket(t: { title: string; planFirst: boolean; parentTicketId?: string | null }): boolean {
+  if (t.parentTicketId) return false;
   if (planningTicket(t)) return false;
-  return !liveBaselineAt || t.createdAt.getTime() <= liveBaselineAt.getTime();
+  return true;
 }
 
 /**
  * BOS-2686: when a feature first went live, from its tickets' recorded go-live: the earliest liveAt or liveMarkedAt of
  * a delivery ticket, or null when none says. A baseline already stored on the feature is never moved.
  */
-export function liveBaselineOf(rows: Array<{ createdAt: Date; title: string; planFirst: boolean; liveAt: Date | null; liveMarkedAt: Date | null }>): Date | null {
+export function liveBaselineOf(rows: Array<{ title: string; planFirst: boolean; parentTicketId?: string | null; liveAt: Date | null; liveMarkedAt: Date | null }>): Date | null {
   const stamps = rows
-    .filter((t) => isDeliveryTicket(t, null))
+    .filter((t) => isDeliveryTicket(t))
     .map((t) => t.liveAt ?? t.liveMarkedAt)
     .filter((d): d is Date => !!d);
   return stamps.length ? new Date(Math.min(...stamps.map((d) => d.getTime()))) : null;
@@ -686,55 +690,98 @@ export function feedbackService(
     },
 
     /**
+     * BOS-2893: whether a delivery ticket has already delivered: it was merged and live while the feature was live, then
+     * reopened by a later move. Only such a ticket releases the feature again without being done; a ticket filed after
+     * the feature first went live is new work and holds it open until it is done (BOS-2835), a reopened never-merged one
+     * holds it open, and one whose head moved on after its merge is not delivered again.
+     */
+    async hasMergedDelivery(t: typeof tickets.$inferSelect, feature: typeof features.$inferSelect, delivery: Array<typeof tickets.$inferSelect>): Promise<boolean> {
+      if (!t.mergeCommit || t.systemState === "done") return false;
+      // A feature that has never recorded a go-live has nothing merged-and-already-in: an open ticket on it is open
+      // work, so it holds the feature (the BOS-2884 case: a Blocked ticket that never went live).
+      if (!feature.liveBaselineAt) return false;
+      if (!(await this.ticketLive(t, feature))) return false;
+      // Only a ticket that went live while other delivery work was already live and done was delivered before this
+      // reopen; one merged but never shipped (no live done sibling) holds the feature open until it is done.
+      let siblingLive = false;
+      for (const o of delivery) if (o.id !== t.id && o.systemState === "done" && (await this.ticketLive(o, feature))) siblingLive = true;
+      if (!siblingLive) return false;
+      // BOS-2835: a ticket filed after the feature first went live is new work; reopening the feature by hand must not
+      // release it again. "First went live" is the earliest stamp among the delivery tickets.
+      const stamps = delivery.map((o) => o.liveAt ?? o.liveMarkedAt).filter((d): d is Date => !!d);
+      const firstLive = stamps.length ? new Date(Math.min(...stamps.map((d) => d.getTime()))) : feature.liveBaselineAt;
+      if (firstLive && t.createdAt > firstLive) return false;
+      const head = (t.checkedCommit ?? t.progressHead ?? "").toLowerCase();
+      if (head && head !== t.mergeCommit.toLowerCase()) return false;
+      return true;
+    },
+
+    /**
      * Moves one feature along with its tickets, called whenever a ticket of it starts, finishes, reopens, is added or
      * goes live. One ordered rule table (BOS-2686):
      *   1. declined: unchanged.
-     *   2. every delivery ticket is done and live: released.
+     *   2. every delivery ticket is done (or has already delivered: merged and live, then reopened) and live: released.
      *   3. released earlier, and a delivery ticket is open: in progress.
-     *   4. a delivery ticket is in progress or in review: in progress (from idea, considering or planned).
+     *   4. a delivery ticket is in progress, in review or blocked: in progress (from idea, considering or planned). A
+     *      ticket that has already delivered does not count as open here.
      *   5. otherwise: unchanged.
-     * A delivery ticket is one on the feature from before it first went live (features.liveBaselineAt); a ticket added
-     * after that is a follow-up, and plan/design tickets are not delivery work, so neither holds the feature nor
-     * reopens it. Once a ticket of it is live the first time, the feature is live and that is baselineAt from then on.
+     * A delivery ticket is one on the feature that nobody filed as a follow-up, so it holds the feature open and can
+     * reopen it; only follow-ups (handed on from another ticket, so they have a parent) and plan/design tickets are
+     * not delivery. BOS-2835: a ticket created after the feature first went live is delivery too, so a fix filed on a
+     * released feature keeps it open (and a manual In progress stands) until it is live. Once a ticket of it is live
+     * the first time, the feature is live and that is baselineAt from then on.
      */
     async syncFeature(featureId: string | null | undefined) {
       if (!featureId) return null;
       const [f] = await db.select().from(features).where(eq(features.id, featureId));
       if (!f || f.status === "declined") return null;
       const rows = await db.select().from(tickets).where(and(eq(tickets.featureId, featureId), isNull(tickets.parentTicketId)));
-      const delivery = rows.filter((t) => isDeliveryTicket(t, f.liveBaselineAt));
+      const delivery = rows.filter((t) => isDeliveryTicket(t));
       const live = new Map<string, boolean>();
       const isLive = async (t: (typeof tickets.$inferSelect)) => {
         if (!live.has(t.id)) live.set(t.id, await this.ticketLive(t, f));
         return live.get(t.id)!;
       };
-      // Rule 2: every delivery ticket is done and live (a feature with no delivery ticket is never released this way).
-      let released = delivery.length > 0;
+      // Rule 2: every delivery ticket is done (or has already delivered) and live (a feature with no delivery ticket is
+      // never released this way).
+      let allDelivered = delivery.length > 0;
       for (const t of delivery) {
-        if (t.systemState !== "done" || t.outcome === "cancelled" || !(await isLive(t))) {
-          released = false;
+        if (t.outcome === "cancelled" || !(t.systemState === "done" || (await this.hasMergedDelivery(t, f, delivery))) || !(await isLive(t))) {
+          allDelivered = false;
           break;
         }
       }
-      // The feature is live once a delivery ticket is: from then on, a ticket added to it is a follow-up (rule 3).
+      const released = allDelivered;
+      // The feature is live once a delivery ticket is; from then on the baseline is on record (BOS-2686).
       let baseline = f.liveBaselineAt;
       if (!baseline) {
         for (const t of delivery) if (await isLive(t)) baseline = t.liveAt ?? t.liveMarkedAt ?? now();
         baseline ??= liveBaselineOf(rows);
       }
-      // Rule 3: a follow-up never reopens a released feature; only a delivery ticket still open does (and it would
-      // have to be dated before the feature went live). Rule 4: delivery work in progress or in review.
-      const active = delivery.some((t) => t.systemState === "in_progress" || t.systemState === "review");
+      // Rule 3: a delivery ticket still open reopens a released feature; a follow-up does not (BOS-2835). Rule 4:
+      // delivery work in progress or in review. BOS-2893: a Blocked (or Ready, Backlog) delivery ticket reopens a
+      // released feature too; otherwise a blocked, never-merged ticket let the release stand.
+      // A ticket that has already delivered (merged, then closed) delivers whether or not it is reopened, so it does not
+      // hold the feature open; every other open one does.
+      let open = false;
+      let started = false;
+      for (const t of delivery) {
+        if (t.systemState === "done" || (await this.hasMergedDelivery(t, f, delivery))) continue;
+        open = true;
+        if (t.systemState === "in_progress" || t.systemState === "review" || t.systemState === "blocked") started = true;
+      }
       const next: FeatureStatus | null = released
         ? "released"
         : f.status === "released"
-          ? active
+          ? open
             ? "in_progress"
             : null
-          : active && ["idea", "considering", "planned"].includes(f.status)
+          : started && ["idea", "considering", "planned"].includes(f.status)
             ? "in_progress"
             : null;
-      if (baseline) await db.update(features).set({ liveBaselineAt: baseline }).where(and(eq(features.id, f.id), isNull(features.liveBaselineAt)));
+      // Record the baseline only with the release it belongs to: a sync that leaves the feature in progress (its open
+      // ticket has not gone live) must not stamp "the feature went live", or the next sync would release it (BOS-2893).
+      if (baseline && next === "released") await db.update(features).set({ liveBaselineAt: baseline }).where(and(eq(features.id, f.id), isNull(features.liveBaselineAt)));
       if (!next || next === f.status) return null;
       const [u] = await db
         .update(features)

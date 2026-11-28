@@ -11,6 +11,7 @@ import { agents, projects, settings, ticketMessages, tickets } from "../db/schem
 import { record } from "./activity.js";
 import { wakeWatchers } from "./watch-triggers.js";
 import { tellOnce } from "./tell-once.js";
+import { findReleaseManager } from "./release-log.js";
 import { isBackgroundLaneTitle } from "./check-gate.js";
 import { errorLines, readFailureLog, MAX_LINE, MAX_LINES, type GitHostConfig, type WorkflowJob, type WorkflowRun, type gitHostService } from "./git-hosts.js";
 
@@ -21,6 +22,9 @@ const STATE_KEY = (projectId: string) => `main_ci:${projectId}`;
 /** "workflow_run" (BOS-2299): a workflow that follows main's CI, such as Publish images, is main's business too. */
 const EVENTS = new Set(["push", "schedule", "workflow_dispatch", "workflow_run"]);
 const BAD = new Set(["failure", "timed_out", "startup_failure"]);
+/** BOS-2795: the website republish (BOS-2787) is this job of this workflow (.github/workflows/install-test.yml). */
+const SITE_WORKFLOW = "Install test";
+const SITE_JOB = "site";
 /** How many older runs are read to find the first one that broke. */
 const LOOK_BACK = 10;
 /** Runs per page, and the most pages read back to the last pass's mark (BOS-2468): 500 runs, many hours of a busy main. */
@@ -531,6 +535,19 @@ export function mainCiService(
         const agentId = who.agentId;
         if (agentId && notify) await tellOnce(`main CI ticket ${t.id}`, () => notify(agentId, { ticketId: t.id, reason: "main CI failed", note: `Main's CI failed at ${f.job} → ${f.step}. ${NEVER_WEAKEN}`, priority: 2 }), deps.log);
         await wakeWatchers(db, deps.notify, "github_main_failed", `${f.job} → ${f.step} on ${p.defaultBranch}, ticket ${t.id}`, { exceptTicketId: t.id }).catch(() => undefined);
+      }
+      // BOS-2795: the website republish is the "site" job of the Install test workflow (BOS-2787). A workflow can't
+      // message Boss Man, so a failed run of that job tells the Release Manager here, once per run attempt (the run is
+      // marked judged below). The main-CI ticket above is still opened; this only adds the wake, on that ticket.
+      const siteFailure = bad ? found.find((f) => f.workflow === SITE_WORKFLOW && f.job === SITE_JOB) : undefined;
+      const siteTicket = siteFailure ? state.open[siteFailure.key]?.ticketId : undefined;
+      if (siteFailure && siteTicket && deps.notify) {
+        const rm = await findReleaseManager(db, p.companyId);
+        const notify = deps.notify;
+        if (rm) {
+          await tellOnce(`website republish failed ${run.id}`, () => notify(rm.id, { ticketId: siteTicket, reason: "main CI failed", note: `The website republish FAILED after an install test (${run.url}): the old page is still live. Read the failed step and the release notes' "Website republish FAILED" line, fix the cause or republish by hand with scripts/publish-site.sh, and say in the release log what you did.`, priority: 2 }), deps.log);
+          await say(p.companyId, siteTicket, `Told the Release Manager (${rm.name}) that the website republish failed: ${run.url}.`);
+        }
       }
       judged[run.id] = run.attempt;
       }

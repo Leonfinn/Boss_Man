@@ -3,7 +3,7 @@
 import { and, eq, inArray } from "drizzle-orm";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { ageWords, isAfterMerge, OWNER_STEPS_OK, REAL_USE_ASK, REAL_USE_LABEL, recurringDutyHits, recurringDutyInDiff, REVIEW_KINDS, touchesInstallSurface, untrusted, usabilityGated, type Criterion } from "@boss-man/shared";
+import { ageWords, isAfterMerge, readCriteria, RUNNER_BLIND_FROM, RUNNER_BLIND_REVIEW_LINE, runnerBlindRefusal, OWNER_STEPS_OK, REAL_USE_ASK, REAL_USE_LABEL, recurringDutyHits, recurringDutyInDiff, REVIEW_KINDS, touchesInstallSurface, untrusted, usabilityGated, type Criterion } from "@boss-man/shared";
 import type { Db } from "./db/client.js";
 import { agents, decisions as decisionsTable, tickets, tickets as ticketsTable } from "./db/schema.js";
 import { record } from "./services/activity.js";
@@ -15,6 +15,7 @@ import { cardIdInput, resolveCardId, resolveReplacedBy } from "./services/card-i
 import { ReviewError, type HoldInput } from "./services/review.js";
 import { checkQueue } from "./services/check-queue.js";
 import { pageDiff } from "./services/review-diff-page.js";
+import { producedBlock, ticketHasRepo } from "./services/no-repo-wording.js";
 import { resolveReviewer } from "./services/review-policy.js";
 import { activeRows, latestRows } from "./services/review-kinds.js";
 import { signoffLine, signoffState } from "./services/signoff.js";
@@ -71,6 +72,9 @@ export function registerDecisionTools(
         urgentWhy: z.string().max(200).optional(),
         /** reissue of a card linked to after-merge criteria (BOS-1155): what each option means, pass, fail or none. */
         optionVerdicts: z.record(z.string().max(200), z.enum(["pass", "fail", "none"])).optional(),
+        /** reissue (DR-078, BOS-2798): the new options that need a picture or file attached, or text in the note, as raise_decision takes them. */
+        needsAttachment: z.array(z.string().min(1).max(200)).max(6).optional(),
+        needsNote: z.array(z.string().min(1).max(200)).max(6).optional(),
         steps: z.array(z.string().min(1).max(500)).max(12).optional(),
         lintOverride: lintOverrideSchema.optional().describe(LINT_OVERRIDE_HELP),
         setsUp: z.enum(ADDONS).optional(),
@@ -289,7 +293,7 @@ export function registerDecisionTools(
             // BOS-1660: the owner reads the question, options and triedFirst with host tokens filled; a recommendation or verdict names its option's new text.
             const filledAs = new Map(input.options.map((o, i) => [o, ask.options?.[i] ?? o]));
             const verdicts = input.optionVerdicts ? Object.fromEntries(Object.entries(input.optionVerdicts).map(([k, v]) => [filledAs.get(k) ?? k, v])) : undefined;
-            r = await decisions.advise({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, outcome: "reissue", runId: scope.runId, question: ask.question ?? input.question, options: ask.options ?? input.options, recommended: filledAs.get(input.recommended) ?? input.recommended, triedFirst: (ask.triedFirst ?? input.triedFirst ?? "").trim(), steps: reissueSteps?.length ? reissueSteps : undefined, ...(reissueSteps?.length && ask.stepSources ? { stepSources: ask.stepSources } : {}), ...(reissueSteps?.length && ask.opening ? { opening: ask.opening } : {}), lint: ask.lint, ...(verdicts ? { optionVerdicts: verdicts } : {}), ...(input.urgent ? { urgentWhy: input.urgentWhy!.trim() } : {}) });
+            r = await decisions.advise({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, outcome: "reissue", runId: scope.runId, question: ask.question ?? input.question, options: ask.options ?? input.options, recommended: filledAs.get(input.recommended) ?? input.recommended, triedFirst: (ask.triedFirst ?? input.triedFirst ?? "").trim(), steps: reissueSteps?.length ? reissueSteps : undefined, ...(reissueSteps?.length && ask.stepSources ? { stepSources: ask.stepSources } : {}), ...(reissueSteps?.length && ask.opening ? { opening: ask.opening } : {}), lint: ask.lint, ...(verdicts ? { optionVerdicts: verdicts } : {}), ...(input.urgent ? { urgentWhy: input.urgentWhy!.trim() } : {}), ...(input.needsAttachment?.length ? { attachOptions: input.needsAttachment.map((o) => filledAs.get(o) ?? o) } : {}), ...(input.needsNote?.length ? { noteOptions: input.needsNote.map((o) => filledAs.get(o) ?? o) } : {}) });
           } else if (input.outcome === "advice") {
             const [card] = await db.select({ kind: decisionsTable.kind, context: decisionsTable.context }).from(decisionsTable).where(and(eq(decisionsTable.id, input.id), eq(decisionsTable.companyId, scope.companyId)));
             const permission = !!card && card.kind === "permission" && (card.context as { type?: string }).type === "permission";
@@ -348,7 +352,7 @@ export function registerDecisionTools(
     "review",
     {
       description:
-        "For the CEO and the reviewers your company's review settings name for a ticket: review a ticket in your company that's ready for review. A ticket may need several reviews (code, security, infra, adversarial); they're requested together unless the CEO orders them. Each kind's reviewer is set in Settings > Reviews, where a kind may list several agents: each review goes to one of them (never someone who worked on the ticket), and the same one keeps it across rounds while available. action: diff (ticketId; shows the changes against the ticket's base, about 60,000 characters at a time: a long diff ends with a cut note saying how many files and lines are left and which, so call diff again with the offset it gives, or with path for one file, until you have read it all, and never approve on a part; an approval is refused if the branch moved since your last diff, so read it again), submit (ticketId, verdict approved or changes_requested, optional comments as {path, line, body} and a summary; kind if you hold more than one review on the ticket). When requesting changes you may add lesson: a one-line lesson learned for the project's brief — the owner decides whether it's added. If the ticket lists acceptance criteria, check the work against each one marked before merge, and when you request changes, name the criterion that fails; a criterion marked checked after merge is for a live host, so it never holds the review up. Usability gate: on a feature's ticket, one with owner setup steps, or one that changes what the owner installs, a code or infra approval must carry a \"Real use:\" walk-through in the summary (day 1, after routine updates and restarts, a week on, the owner away; every step the owner repeats and how often), or it is refused; a step the owner must repeat routinely fails the review. Owner setup steps: when the ticket has them, a code or infra approval must also pass ownerSteps (\"all needed and correct\", or a list of {step, why} for each step that is wrong, not needed, missing or unclear); any listed step means the server refuses approved and you must submit changes_requested (the list goes to the author). Also check the follow-up exists: when the summary, the description or a reply says someone else will do something next (\"the CEO will attach them\"), that work must be a ticket (set_ticket_state followUps), or the ticket must say why none is needed. CEO only: sequence (ticketId, order: kinds listed in the order they should run, e.g. [\"infra\",\"security\"]; empty runs them all at once) and overrule (ticketId, kind, reason: overrules a review that asked for changes; it does not replace the owner's sign-off) and prioritise_merge (ticketId, reason: puts a ticket's waiting merge or quick check next in line, below a fix for a broken main; logged; the whole check still runs) and retry_merge (ticketId: starts a fresh merge attempt on an approved ticket still in review whose merge was refused or never finished; the whole check runs again, it never skips the check or the owner's sign-off). Verdict approved_hold passes the review but holds the merge (give holdReason, and waitsOn tickets or decisions and/or holdUntil a date): the board shows the ticket as Held, nobody is woken about it, and you are woken once when what it waits on closes or the date comes, to re-check against current main and then use action release_hold (the normal approval and merge follow) or cancel_hold (withdraws your pass; it is reviewed again). The holding reviewer, the CEO and the owner can release or cancel a hold. You can't review a ticket assigned to you. If the state note has a \"Surfaces:\" line (the screens, cards and command forms the author checked, BOS-2733), judge whether that list is complete and name any place that shows the same thing and was left out.",
+        "For the CEO and the reviewers your company's review settings name for a ticket: review a ticket in your company that's ready for review. A ticket may need several reviews (code, security, infra, adversarial); they're requested together unless the CEO orders them. Each kind's reviewer is set in Settings > Reviews, where a kind may list several agents: each review goes to one of them (never someone who worked on the ticket), and the same one keeps it across rounds while available. action: diff (ticketId; shows the changes against the ticket's base, about 60,000 characters at a time: a long diff ends with a cut note saying how many files and lines are left and which, so call diff again with the offset it gives, or with path for one file, until you have read it all, and never approve on a part; an approval is refused if the branch moved since your last diff, so read it again; for a ticket in a project with no code repo there is no diff: it lists what the ticket produced, its wiki pages, files and links, with the tool that reads each, and you review those), submit (ticketId, verdict approved or changes_requested, optional comments as {path, line, body} and a summary; kind if you hold more than one review on the ticket). When requesting changes you may add lesson: a one-line lesson learned for the project's brief — the owner decides whether it's added. If the ticket lists acceptance criteria, check the work against each one marked before merge, and when you request changes, name the criterion that fails; a criterion marked checked after merge is for a live host, so it never holds the review up. Usability gate: on a feature's ticket, one with owner setup steps, or one that changes what the owner installs, a code or infra approval must carry a \"Real use:\" walk-through in the summary (day 1, after routine updates and restarts, a week on, the owner away; every step the owner repeats and how often), or it is refused; a step the owner must repeat routinely fails the review. Owner setup steps: when the ticket has them, a code or infra approval must also pass ownerSteps (\"all needed and correct\", or a list of {step, why} for each step that is wrong, not needed, missing or unclear); any listed step means the server refuses approved and you must submit changes_requested (the list goes to the author). Also check the follow-up exists: when the summary, the description or a reply says someone else will do something next (\"the CEO will attach them\"), that work must be a ticket (set_ticket_state followUps), or the ticket must say why none is needed. CEO only: sequence (ticketId, order: kinds listed in the order they should run, e.g. [\"infra\",\"security\"]; empty runs them all at once) and overrule (ticketId, kind, reason: overrules a review that asked for changes; it does not replace the owner's sign-off) and prioritise_merge (ticketId, reason: puts a ticket's waiting merge or quick check next in line, below a fix for a broken main; logged; the whole check still runs) and retry_merge (ticketId: starts a fresh merge attempt on an approved ticket still in review whose merge was refused or never finished; the whole check runs again, it never skips the check or the owner's sign-off). Verdict approved_hold passes the review but holds the merge (give holdReason, and waitsOn tickets or decisions and/or holdUntil a date): the board shows the ticket as Held, nobody is woken about it, and you are woken once when what it waits on closes or the date comes, to re-check against current main and then use action release_hold (the normal approval and merge follow) or cancel_hold (withdraws your pass; it is reviewed again). The holding reviewer, the CEO and the owner can release or cancel a hold. You can't review a ticket assigned to you. If the state note has a \"Surfaces:\" line (the screens, cards and command forms the author checked, BOS-2733), judge whether that list is complete and name any place that shows the same thing and was left out.",
       inputSchema: {
         action: z.enum(["diff", "submit", "sequence", "overrule", "retry_merge", "release_hold", "cancel_hold", "prioritise_merge"]),
         ticketId: z.string().uuid(),
@@ -425,6 +429,14 @@ export function registerDecisionTools(
           // Reading the diff counts as working on it: a reviewer woken about several tickets
           // starts on none, and gets shown with the one it is on (BOS-268). Never blocks the tool.
           await noteRunTicket(input.ticketId);
+          const checklist = criteriaChecklist(rt.acceptanceCriteria, rt.stateNote);
+          // The owner's setup steps are judged like code (DR-011 point 2): seen next to the criteria, and
+          // sent back if they are wrong, missing, or not in plain words by button path.
+          const setup = rt.ownerSetup?.trim()
+            ? `The owner's steps once this is live:\n${rt.ownerSetup.trim().split(/\r?\n/).map((l) => `- ${l.trim()}`).join("\n")}\nCheck each is needed, right and in plain words by button path. Your approval must pass ownerSteps: "${OWNER_STEPS_OK}", or a list of {step, why} for any step that is wrong or not needed (then request changes).\n\n`
+            : "";
+          // BOS-2820: a project with no repo has no diff; its result is its wiki pages and attachments, so list those to read.
+          if (!(await ticketHasRepo(db, rt.id))) return text(`${checklist}${setup}${await producedBlock(db, scope.companyId, rt.id)}`);
           const d = await review.diff(input.ticketId, scope.companyId);
           // BOS-1567: remember the head this diff showed, so submit can refuse an approval if the branch moved since.
           // A later page on another head than the stored one means the diff was read across two heads: start again.
@@ -435,21 +447,20 @@ export function registerDecisionTools(
           const paged = pageDiff({ diff: d.diff, path: input.path, offset: input.offset });
           if (paged.error) return fail(paged.error);
           const patch = paged.text;
-          const checklist = criteriaChecklist(rt.acceptanceCriteria, rt.stateNote);
-          // The owner's setup steps are judged like code (DR-011 point 2): seen next to the criteria, and
-          // sent back if they are wrong, missing, or not in plain words by button path.
-          const setup = rt.ownerSetup?.trim()
-            ? `The owner's steps once this is live:\n${rt.ownerSetup.trim().split(/\r?\n/).map((l) => `- ${l.trim()}`).join("\n")}\nCheck each is needed, right and in plain words by button path. Your approval must pass ownerSteps: "${OWNER_STEPS_OK}", or a list of {step, why} for any step that is wrong or not needed (then request changes).\n\n`
-            : "";
           // The "fixes live" marker is judged the same way (BOS-639): it heads the deploy card and pages the owner.
           const live = rt.fixesLive?.trim()
             ? `Fixes live: ${rt.fixesLive.trim()}\nWhen this merges the deploy card is headed "Urgent: contains the fix for" these words and pages the owner. Check it names a real live symptom this change fixes; correct it with submit fixesLive, or request changes.\n\n`
             : "";
           const gate = usabilityGateBlock(rt, d.files.map((f) => f.path), d.diff);
           const moved = movedMidRead ? "The branch moved since your first page; start again from offset 0 so you read one head throughout.\n\n" : "";
-          return text(`${moved}${checklist}${setup}${live}${gate}${EDGE_CASE_REVIEW_LINE}\n\nBase ${d.baseCommit.slice(0, 12)}, ${d.commits.length} commit(s).\nFiles:\n${files || "(none)"}\n\n${patch}${d.truncated ? "\n[diff truncated by the runner]" : ""}`);
+          return text(`${moved}${checklist}${setup}${live}${gate}${EDGE_CASE_REVIEW_LINE}\n${RUNNER_BLIND_REVIEW_LINE}\n\nBase ${d.baseCommit.slice(0, 12)}, ${d.commits.length} commit(s).\nFiles:\n${files || "(none)"}\n\n${patch}${d.truncated ? "\n[diff truncated by the runner]" : ""}`);
         }
         if (!input.verdict) return fail("Give the verdict.");
+        // BOS-2864: a ticket made after the rule can't be approved holding a criterion no agent can observe from the runner.
+        if (input.verdict !== "changes_requested" && rt.createdAt.getTime() >= Date.parse(RUNNER_BLIND_FROM)) {
+          const blind = runnerBlindRefusal(readCriteria(rt.acceptanceCriteria));
+          if (blind) return fail(blind);
+        }
         // A verdict on a ticket is touching it, like any other hook (BOS-268).
         await noteRunTicket(input.ticketId);
         // A reviewer may add the "fixes live" marker (BOS-639). It is set before the verdict, because an approval can merge at once.

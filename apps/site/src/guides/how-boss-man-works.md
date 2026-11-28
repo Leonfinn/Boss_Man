@@ -1,28 +1,30 @@
 ---
 title: How Boss Man works
-description: The parts of Boss Man and how they fit together: companies, agents, the runner, projects, features, tasks and sub-tasks, Decisions, reviews and the merge queue.
+description: The parts of Boss Man and how they fit together, for documents and research as well as code: companies, agents, the runner, projects, features, tasks and sub-tasks, Decisions, reviews and the merge queue.
 group: Start here
 order: 1
 lead: Boss Man is a web app you run on your own Linux machine. This page explains the parts and how they fit together.
 ---
 
-Boss Man is a web app you run on your own Linux machine. You use it to plan your software and have AI agents build it in your git repositories. Agents are grouped into companies, each with its own team, runner and secrets. This page explains the parts and how they fit together.
+Boss Man is a web app you run on your own Linux machine. You use it to plan work and have AI agents do it: research, reports and other writing, or software in your git repositories. Code is optional. Agents are grouped into companies, each with its own team, runner and secrets. This page explains the parts and how they fit together.
 
 ## Companies and agents
 
-A company is a team of agents with its own runner, secrets and budget. Every company has a CEO agent, which plans the work, writes tasks, assigns them and reviews simpler work. You hire the other agents from ready-made roles.
+A company is a team of agents with its own runner, secrets and budget. Every company has a CEO agent, which plans the work, writes tasks, assigns them and reviews simpler work. You hire the other agents from ready-made roles. See [The CEO](/guides/the-ceo) for what it does on its own and what it asks you first.
 
-Each agent is a session of Claude Code, Codex or OpenCode with a role, instructions and a model.
+Each agent is a session of Claude Code, Codex or OpenCode with a role, instructions and a model. For which roles to hire first, see [Hiring your first team](/guides/hiring-your-first-team).
 
 ## The runner
 
-The runner is the container where a company's agents work. Each company has one. It connects out to the Boss Man server, so it needs no open ports. Agents work on a separate copy of the repository for each task. You can add check workers on other machines to run checks.
+The runner is the container where a company's agents work. Each company has one. It connects out to the Boss Man server, so it needs no open ports. In a code project, agents work on a separate copy of the repository for each task. You can add check workers on other machines to run checks. See [Your agents' workspace (the runner)](/guides/the-runner) for why it is kept separate and what to do if it stops, and [What keeps agents fenced in](/guides/what-keeps-agents-fenced-in) for what agents can and cannot reach.
 
 ## Projects and tasks
 
-A project is one git repository. A task is one piece of work in a project. Each task has a title, a description, a risk level and up to 10 "Done when" lines that say what finished means. Agents and some pages also call a task a ticket: it means the same thing.
+A project is one stream of work with its own task board, such as "Client reports". It can hold documents only, or a code repository. In a documents project, agents write their results in your company's **Wiki**, for example "Compare the three biggest garden centres near us and write a one-page summary". In a code project, they change the code in the repository. See [Using Boss Man for work that isn't code](/guides/work-that-isnt-code) and [Code words for owners](/guides/code-words).
 
-A task is always in one of six states: backlog, ready, in progress, blocked, review or done.
+A task is one piece of work in a project. Each task has a title, a description, a risk level and up to 10 "Done when" lines that say what finished means. Agents and some pages also call a task a ticket: it means the same thing.
+
+A task is always in one of six states: backlog, ready, in progress, blocked, review or done. See [Tasks and the board](/guides/tasks-and-the-board) for how to write a good task and what each column means.
 
 ## Features, tasks and sub-tasks
 
@@ -39,7 +41,7 @@ A feature can sit on the roadmap and on the public feedback portal. A feature do
 
 **Task**: one piece of work an agent does in a project, with Done when lines, a risk level and a review. One or more tasks deliver a feature: a small feature needs one task, a bigger one needs several.
 
-To link a task to a feature, choose the feature under **Part of feature** when you add the task, or later on the task's page under **Roadmap, feature and dependencies**. When the first task of a feature starts, the feature moves to In progress. When all its tasks are done, it moves to Released. If the company has a production deploy target, it also waits until one of its tasks has been deployed there.
+To link a task to a feature, choose the feature under **Part of feature** when you add the task, or later on the task's page under **Roadmap, feature and dependencies**. When the first task of a feature starts, the feature moves to In progress. When all its tasks are done, it moves to Released. If the company has a production [deploy target](/guides/deploys), it also waits until one of its tasks has been deployed there.
 
 Work that is not a feature, such as an internal fix, a test or a server chore, is a task with no feature.
 
@@ -63,11 +65,11 @@ Not sure yet? Write a rough draft and choose [Let the CEO question me first](/gu
 
 ## Decisions
 
-Decisions is the page where Boss Man asks you things. Plans to approve, permission requests, sign-offs on high-risk work and questions all arrive there as cards. Each card offers its own buttons.
+Decisions is the page where Boss Man asks you things. Plans to approve, permission requests, sign-offs on high-risk work and questions all arrive there as cards. Each card offers its own buttons. See [Decisions](/guides/decisions) for the kinds of card and what happens if you do not answer.
 
 ## Reviews and the merge queue
 
-When an agent finishes a task, another agent reviews it. Approved work joins the merge queue, where Boss Man runs the project's checks and merges it if they pass. By default, high and critical work also needs your sign-off, and you approve its plan first. Change this in **Settings › Reviews**.
+When an agent finishes a task, another agent reviews it. Approved work joins the merge queue, where Boss Man runs the project's checks and merges it if they pass. By default, high and critical work also needs your sign-off, and you approve its plan first. Change this in **Settings › Reviews**. See [Review and risk](/guides/review-and-risk) for who checks work at each risk level.
 
 ![A task's path: it starts in the backlog, is built by an agent, is reviewed by another agent, goes through the merge queue and ends as done.](/img/tickets-path.svg =1160x560 narrow=/img/tickets-path-narrow.svg:360x1016 "A task's path from backlog to done.")
 

@@ -33,12 +33,12 @@ describe("the pack volume an install owns", () => {
 describe("the install label", () => {
   it("is parsed as key=value, or nothing", () => {
     expect(parseInstallLabel(undefined)).toBeUndefined();
-    expect(parseInstallLabel("com.bossman.install=acme")).toEqual({ "com.bossman.install": "acme" });
+    expect(parseInstallLabel("com.bossman.install=acme")).toBe("com.bossman.install=acme");
     expect(() => parseInstallLabel("nonsense")).toThrow(/BOSSMAN_INSTALL_LABEL/);
   });
 
   it("is on the runner, the guard and the pack installer, and absent when not given", () => {
-    const cfg = config({ installLabel: { "com.bossman.install": "acme" } });
+    const cfg = config({ installLabel: "com.bossman.install=acme" });
     const label = (spec: { Labels: object }) => (spec.Labels as Record<string, string>)["com.bossman.install"];
     expect(label(containerSpec(cfg, "app-co"))).toBe("acme");
     expect(label(netguardSpec(cfg, "app-co", "abc"))).toBe("acme");

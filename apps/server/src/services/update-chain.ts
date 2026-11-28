@@ -178,8 +178,45 @@ export function stepTie(tie: WrapTie, chain: UpdateChain, now: Date, opts: { bui
   return { tie: server ? { server } : {}, end: null };
 }
 
-/** The screen's view of a tie (shared wording, wrapUpWords). `swapping`: the runner drain has taken the wrap-up over. */
-export function tieView(tie: WrapTie | undefined, since: string, opts: { swapping?: boolean; liftsAt?: string | null } = {}): WrapTieView {
+/** BOS-2786: what Boss Man's own wrap-up records when it starts one: the press it is for, and when it asks agents to finish. */
+export type AutoWrap = { queuedAt: string | null; startsAt: string; tellAt: string };
+
+/**
+ * BOS-2786: whether Boss Man starts its own wrap-up now, and for which press. Only for a runner update that is queued
+ * (not yet with the host) behind a trial that ends in the future: `startsAt` is that trial's end. `offFor`: the press the
+ * owner cancelled Boss Man's wrap-up for, which is never started again. Agents are asked to finish `leadMin` before the end,
+ * or at once when less is left.
+ */
+export function autoWrapDue(chain: UpdateChain, now: Date, opts: { offFor: string | null; leadMin: number }): AutoWrap | null {
+  const r = chain.runner;
+  if (!r || r.stage !== "queued") return null;
+  // The press's own start time, else the end of the trial running now (the deploy wait's window, or the host's trial).
+  const trialEnd = chain.server?.stage === "live-trial" ? chain.server.trialEndsAt : null;
+  const startsAt = r.startsAt ?? trialEnd;
+  if (!startsAt) return null;
+  const ends = Date.parse(startsAt);
+  if (!Number.isFinite(ends) || ends <= now.getTime()) return null;
+  if (opts.offFor !== null && opts.offFor === (r.queuedAt ?? "")) return null;
+  const tellAt = new Date(Math.max(now.getTime(), ends - opts.leadMin * 60_000)).toISOString();
+  return { queuedAt: r.queuedAt, startsAt, tellAt };
+}
+
+/**
+ * BOS-2786: Boss Man's own wrap-up gives up when its runner update is still only queued `graceMin` after the trial's end
+ * (something else holds the press back). Once the host is building it, the build's own limit applies instead.
+ */
+export function autoWrapStuck(tie: WrapTie | undefined, auto: AutoWrap, now: Date, graceMin: number): boolean {
+  const r = tie?.runner;
+  if (!r || r.buildingSince || r.stage !== "queued") return false;
+  const ends = Date.parse(r.startsAt ?? auto.startsAt);
+  return Number.isFinite(ends) && now.getTime() - ends > graceMin * 60_000;
+}
+
+/**
+ * The screen's view of a tie (shared wording, wrapUpWords). `swapping`: the runner drain has taken the wrap-up over.
+ * `auto` (BOS-2786): Boss Man started it, and when it asks (or asked) agents to finish; absent once the owner pressed too.
+ */
+export function tieView(tie: WrapTie | undefined, since: string, opts: { swapping?: boolean; liftsAt?: string | null; auto?: { tellAt: string } | null } = {}): WrapTieView {
   const s = tie?.server && !tie.server.doneAt ? tie.server : tie?.server?.doneAt && (tie.runner || opts.swapping) ? tie.server : null;
   const r = tie?.runner;
   const runnerStage: WrapRunnerStage | null = opts.swapping ? "swapping" : r ? r.stage : null;
@@ -188,6 +225,7 @@ export function tieView(tie: WrapTie | undefined, since: string, opts: { swappin
     ...(s ? { server: { approvedAt: s.approvedAt, stage: s.doneAt ? "live-trial" : s.stage, liveAt: s.liveAt ?? null, trialEndsAt: s.trialEndsAt } } : {}),
     ...(runnerStage ? { runner: { queuedAt: r?.queuedAt ?? null, stage: runnerStage, startsAt: r?.startsAt ?? null, why: r?.why ?? null } } : {}),
     ...(!s && !runnerStage ? { liftsAt: opts.liftsAt ?? null } : {}),
+    ...(opts.auto ? { by: "boss-man" as const, tellAt: opts.auto.tellAt } : {}),
   };
 }
 

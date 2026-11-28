@@ -5,7 +5,9 @@
 // BOS-2690 (BOS-2671 3e): a one-time tip for people already using the keyboard, until this login has seen it.
 import { useEffect, useRef, useState } from "react";
 import { useMediaQuery } from "../hooks";
-import { G_WINDOW_MS, HELP_KEY, JUMPS, JUMP_PREFIX, SHOW_SHORTCUTS_EVENT, cardActionFor, screenKeys } from "../shortcut-list";
+import type { ShortcutEntry } from "@boss-man/shared";
+import { G_WINDOW_MS, HELP_KEY, JUMPS, JUMP_PREFIX, SHORTCUT_JUMPS, SHOW_SHORTCUTS_EVENT, cardActionFor, screenKeys } from "../shortcut-list";
+import { usePinned } from "../pinned-pages";
 
 /** The event that opens the list from outside the menu (BOS-2689), fired by Settings → Account's "Show all keyboard shortcuts". */
 export const OPEN_SHORTCUTS_EVENT = "bossman:open-shortcuts";
@@ -68,6 +70,9 @@ function openCard(): boolean {
  * singleLetterKeys (BOS-2689): with it off, "?", the g-sequences, g 1 to g 6 and the j/k/Enter card keys do
  * nothing, while Ctrl/Cmd+K and Escape keep working. The list still opens from the menu button and says so.
  * onTurnKeysOn: the list's "Turn them on", saved per login.
+ * shortcuts (BOS-2669 ticket 4): the owner's pinned list, read from the menu's provider; "g" then a digit opens
+ * the shortcut at that position and the list's "Your shortcuts in the menu" block names them. Without a provider
+ * (a bare render) there are none, so the digits and the block do nothing and don't show.
  * keyboardTipSeen / onTipSeen (BOS-2690): the one-time tip. Until this login has seen it, the first Tab
  * outside a text box or Ctrl K shows it; it doesn't take focus, never shows at 640 px or under or with the
  * keys off, and any of its four ways to close (Show shortcuts, Got it, Escape, "?") stores it as seen.
@@ -76,14 +81,16 @@ function openCard(): boolean {
 export function Shortcuts({ go, hasProjects, singleLetterKeys = true, onTurnKeysOn, keyboardTipSeen = true, onTipSeen, initialOpen = false, initialTip = false, noMouse }: { go: (to: string) => void; hasProjects: boolean; singleLetterKeys?: boolean; onTurnKeysOn?: () => void; keyboardTipSeen?: boolean; onTipSeen?: () => void; /** For the rendering test, which has no window when it builds the markup: forces the "These need a keyboard." line on or off. */ noMouse?: boolean; /** Open on the first draw: for the rendering test, which reads the markup. */ initialOpen?: boolean; /** Draw the tip on the first draw: for the rendering test. */ initialTip?: boolean }) {
   const [open, setOpen] = useState(initialOpen);
   const [tip, setTip] = useState(initialTip);
+  // The owner's pinned shortcuts (BOS-2669 ticket 4), for the digits and the list's own block.
+  const shortcuts: ShortcutEntry[] = usePinned()?.entries ?? [];
   // A phone (640 px or under) never sees the tip: the button isn't there either.
   const phone = useMediaQuery("(max-width: 640px)");
   const gAt = useRef(0);
   const back = useRef<HTMLElement | null>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
   // The key listener is added once; it reads the latest props and the tip's state through these refs.
-  const latest = useRef({ go, hasProjects, open, singleLetterKeys, keyboardTipSeen, phone, onTipSeen });
-  latest.current = { go, hasProjects, open, singleLetterKeys, keyboardTipSeen, phone, onTipSeen };
+  const latest = useRef({ go, hasProjects, open, singleLetterKeys, keyboardTipSeen, phone, onTipSeen, shortcuts });
+  latest.current = { go, hasProjects, open, singleLetterKeys, keyboardTipSeen, phone, onTipSeen, shortcuts };
   const tipRef = useRef(false);
   tipRef.current = tip;
 
@@ -166,6 +173,18 @@ export function Shortcuts({ go, hasProjects, singleLetterKeys = true, onTurnKeys
       }
       if (key === JUMP_PREFIX) {
         gAt.current = Date.now();
+        return;
+      }
+      const shortcut = SHORTCUT_JUMPS.find((s) => s.key === key);
+      if (shortcut) {
+        // Only "g" then a digit (BOS-2669 ticket 4); a digit on its own is left to the page.
+        if (!pending) return;
+        // A number with no shortcut does nothing, whether pressed after "g" or on its own.
+        const entry = latest.current.shortcuts[shortcut.position];
+        if (!entry) return;
+        e.preventDefault();
+        if (entry.gone) window.location.hash = `#/shortcut-gone/${entry.id}`;
+        else latest.current.go(entry.address.replace(/^#\//, ""));
         return;
       }
       const action = cardActionFor(e.key);
@@ -292,6 +311,21 @@ export function Shortcuts({ go, hasProjects, singleLetterKeys = true, onTurnKeys
                   <div key={r.keys.join()} className="shortcuts-row">
                     <dt>{r.keys.map((k) => <kbd key={k}>{k}</kbd>)}</dt>
                     <dd>{r.what}</dd>
+                  </div>
+                ))}
+              </dl>
+            </>
+          )}
+          {/* The owner's pinned shortcuts, by position (BOS-2669 ticket 4): "Your shortcuts in the menu" is the one
+              name BOS-2671 set for this block. With none pinned there is no block at all. */}
+          {shortcuts.length > 0 && (
+            <>
+              <h3 className="shortcuts-section">Your shortcuts in the menu</h3>
+              <dl className="shortcuts-list" aria-label="Your shortcuts in the menu">
+                {shortcuts.map((s, i) => (
+                  <div key={s.id} className="shortcuts-row">
+                    <dt><kbd>{JUMP_PREFIX}</kbd> then <kbd>{i + 1}</kbd></dt>
+                    <dd>{s.name}{s.gone && " (page no longer exists)"}</dd>
                   </div>
                 ))}
               </dl>
