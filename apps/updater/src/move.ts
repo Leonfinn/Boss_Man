@@ -10,9 +10,9 @@ import { imageRef, pullByDigest, type PullOptions } from "./pull.js";
 import { getVerifiedRelease, type ReleaseDeps } from "./release.js";
 import { compareVersions, IMAGE_NAMES, type Instruction } from "./schema.js";
 import { NEXT_SUFFIX, selfUpdate, type HandoverGate } from "./selfupdate.js";
-import { checkLayout, colourName, frontAlias, LAYOUT, otherColour } from "./spec.js";
+import { checkLayout, frontAlias, LAYOUT, otherColour } from "./spec.js";
 import type { StateStore } from "./state.js";
-import { type Colours, digestOf, findColours, flipAlias, isSwap, liveColour, releaseOf, removeNewColour, soakAndFinish, switchBack, waitReady, runSwap, type Clock, type Probe, type SwapDeps } from "./swap.js";
+import { type Colours, colourRef, colourRefOf, digestOf, findColours, flipAlias, isSwap, liveColour, releaseOf, removeNewColour, soakAndFinish, switchBack, waitReady, runSwap, type Clock, type Probe, type SwapDeps } from "./swap.js";
 
 export type MoveDeps = {
   cfg: Config;
@@ -125,14 +125,14 @@ export async function recover(deps: MoveDeps): Promise<Promise<void> | null> {
   const idle = s.idle;
   if (s.stage === "backing-up" || s.stage === "migrating" || s.stage === "starting-colour" || s.stage === "handing-over") {
     const cols = await findColours(docker);
-    if (s.restore) await docker.stop(colourName(idle), d.cfg.swap.stopGraceSeconds).catch(() => undefined);
+    if (s.restore) await docker.stop(colourRef(d.cfg, cols, idle), d.cfg.swap.stopGraceSeconds).catch(() => undefined);
     else if (s.stage === "backing-up" || s.stage === "migrating") {
       // The idle colour here is still the previous release's stopped standby (the rollback target): only the migrate one-shot is ours.
       await docker.remove(`${cfg.namePrefix}-migrate`).catch(() => undefined);
     } else if (cols[idle] && releaseOf(cols[idle]) === s.version) await removeNewColour(d, idle);
     else await docker.remove(`${cfg.namePrefix}-migrate`).catch(() => undefined);
     const liveInfo = cols[live];
-    if (liveInfo?.State.Running) await docker.signal(colourName(live), "SIGUSR2").catch(() => undefined);
+    if (liveInfo?.State.Running) await docker.signal(colourRef(d.cfg, cols, live), "SIGUSR2").catch(() => undefined);
     interrupted();
     return null;
   }
@@ -151,7 +151,7 @@ export async function recover(deps: MoveDeps): Promise<Promise<void> | null> {
   }
   if (s.stage === "soaking") return soakAndFinish(d, live, idle, commit ?? "", s.version ?? "the new version").then(() => undefined);
   if (s.stage === "stopping-old") {
-    await docker.stop(colourName(live), d.cfg.swap.stopGraceSeconds).catch(() => undefined);
+    await docker.stop(await colourRefOf(d, live), d.cfg.swap.stopGraceSeconds).catch(() => undefined);
     state.finish("done", `Updated to ${s.version ?? "the new version"}. The previous version is kept stopped, ready to go back to.`, "info", { currentVersion: s.version, live: idle, idle: live, soakUntil: null });
     return null;
   }

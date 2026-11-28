@@ -4,7 +4,7 @@
 // runner still starts and reports Claude absent: OpenCode and Codex keep working. Nothing here is a bypass:
 // the installer holds no extra capability and mounts no company data, only the shared pack volume.
 import { type Docker } from "./docker.js";
-import { CLAUDE_PACK_TARGET, LOG_CONFIG, claudePackVolume, runnerImage, type LauncherConfig } from "./spec.js";
+import { CLAUDE_PACK_TARGET, LOG_CONFIG, claudePackVolume, claudePackVolumeOf, runnerImage, type LauncherConfig } from "./spec.js";
 
 /** Where the runner image copies the pinned package.json and lockfile (root-owned). */
 export const PACK_SOURCE = "/opt/bossman-claude-pack";
@@ -34,10 +34,10 @@ export function packInstallerSpec(cfg: LauncherConfig, slug: string) {
     User: "1000:1000",
     Cmd: ["node_modules/.bin/tsx", "src/claude-pack-main.ts"],
     Env: [`BOSSMAN_CLAUDE_PACK=${PACK_ROOT}`, `BOSSMAN_CLAUDE_PACK_SOURCE=${PACK_SOURCE}`],
-    Labels: { "boss-man.claude-pack": "1", "boss-man.company": slug, ...(cfg.stack ? { "boss-man.stack": cfg.stack } : {}) },
+    Labels: { "boss-man.claude-pack": "1", "boss-man.company": slug, ...(cfg.stack ? { "boss-man.stack": cfg.stack } : {}), ...cfg.installLabel },
     HostConfig: {
       // A named volume: Docker makes it on first mount. No host folder is exposed, so no company data is.
-      Mounts: [{ Type: "volume", Source: packVolume(cfg.stack), Target: PACK_ROOT }],
+      Mounts: [{ Type: "volume", Source: claudePackVolumeOf(cfg), Target: PACK_ROOT }],
       NetworkMode: cfg.network,
       CapDrop: ["ALL"],
       CapAdd: [],

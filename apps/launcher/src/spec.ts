@@ -23,6 +23,27 @@ export const MOUNTS = [
  */
 export const CLAUDE_PACK_TARGET = "/opt/bossman-claude";
 export const claudePackVolume = (stack?: string) => `${stack ? `boss-man-${stack}` : "boss-man"}-claude-pack`;
+/**
+ * BOS-2804: an image install tells the launcher which volume holds its pack (BOSSMAN_CLAUDE_PACK_VOLUME, the one the updater fills
+ * and compose owns), so there is one pack volume, not a second `boss-man-claude-pack` the updater never reads. Unset = the names above.
+ */
+export const claudePackVolumeOf = (cfg: { stack?: string; packVolume?: string }) => cfg.packVolume ?? claudePackVolume(cfg.stack);
+const VOLUME_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+export function parsePackVolume(v: string | undefined): string | undefined {
+  const s = (v ?? "").trim();
+  if (!s) return undefined;
+  if (!VOLUME_NAME.test(s)) throw new Error(`BOSSMAN_CLAUDE_PACK_VOLUME is not a volume name: ${v}`);
+  return s;
+}
+/** BOS-2804: BOSSMAN_INSTALL_LABEL=key=value is stamped on every container the launcher makes, so removing an install by label also removes its runners and guards. */
+const INSTALL_LABEL = /^([A-Za-z0-9_.-]{1,100})=([A-Za-z0-9_.-]{1,100})$/;
+export function parseInstallLabel(v: string | undefined): Record<string, string> | undefined {
+  const s = (v ?? "").trim();
+  if (!s) return undefined;
+  const m = INSTALL_LABEL.exec(s);
+  if (!m) throw new Error(`BOSSMAN_INSTALL_LABEL should be key=value, not ${v}`);
+  return { [m[1]!]: m[2]! };
+}
 export const TOKEN_TARGET = "/run/secrets/runner_token";
 /** Docker's default weight is 1024; runners get half, so the server and database win on a busy host. */
 export const DEFAULT_CPU_SHARES = 512;
@@ -34,6 +55,10 @@ export type LauncherConfig = {
   dataRoot: string;
   /** BOSSMAN_STACK: names a second stack on this host (BOS-69). Unset = today's names, labels and images. */
   stack?: string;
+  /** BOSSMAN_CLAUDE_PACK_VOLUME (BOS-2804): the pack volume an image install owns. Unset = the stack's own name. */
+  packVolume?: string;
+  /** BOSSMAN_INSTALL_LABEL (BOS-2804): one extra label for everything the launcher makes. */
+  installLabel?: Record<string, string>;
   /** The compose network the server is on, e.g. boss-man_default. Never host. */
   network: string;
   /** Where runners dial the server. */
@@ -277,9 +302,9 @@ export function containerSpec(cfg: LauncherConfig, slug: string, image?: string,
       // The runner has no Docker socket; it reports these with its kernel as the platform fingerprint (DR-049 point 1).
       ...(host ? [`BOSSMAN_HOST_DOCKER=${host.dockerVersion}`, `BOSSMAN_HOST_OS=${host.osType}`] : []),
     ],
-    Labels: { [LABEL]: "1", [COMPANY_LABEL]: slug, ...stackLabels(cfg.stack) },
+    Labels: { [LABEL]: "1", [COMPANY_LABEL]: slug, ...stackLabels(cfg.stack), ...cfg.installLabel },
     HostConfig: {
-      Binds: [...MOUNTS.map(([sub, target]) => `${path.join(dir, sub)}:${target}`), `${path.join(dir, "runner.token")}:${TOKEN_TARGET}:ro`, `${claudePackVolume(cfg.stack)}:${CLAUDE_PACK_TARGET}:ro`],
+      Binds: [...MOUNTS.map(([sub, target]) => `${path.join(dir, sub)}:${target}`), `${path.join(dir, "runner.token")}:${TOKEN_TARGET}:ro`, `${claudePackVolumeOf(cfg)}:${CLAUDE_PACK_TARGET}:ro`],
       NetworkMode: cfg.network,
       CapDrop: ["ALL"],
       CapAdd: [],
@@ -391,7 +416,7 @@ export function netguardSpec(cfg: LauncherConfig, slug: string, runnerId: string
     Env: [`NETGUARD_ALLOW=${serverAddress(cfg.serverUrl)}`, ...(cfg.guardAllow?.length ? [`NETGUARD_EXTRA=${cfg.guardAllow.join(" ")}`] : [])],
     // Healthy once the table is loaded: the launcher waits for it before it counts the runner as guarded.
     Healthcheck: { Test: ["CMD", "nft", "list", "table", "inet", "bossman_netguard"], Interval: 1_000_000_000, Timeout: 3_000_000_000, Retries: 3 },
-    Labels: { [NETGUARD_LABEL]: "1", [COMPANY_LABEL]: slug, ...stackLabels(cfg.stack) },
+    Labels: { [NETGUARD_LABEL]: "1", [COMPANY_LABEL]: slug, ...stackLabels(cfg.stack), ...cfg.installLabel },
     HostConfig: {
       Binds: [`${path.join(hostCompanyDir(cfg, slug), "netguard")}:/etc/netguard:ro`],
       NetworkMode: `container:${runnerId}`,

@@ -5,6 +5,7 @@
 // The template is numbered by `installLayout`: a release that needs a different layout than LAYOUT is refused, or updates the
 // updater first (section 8).
 import { UpdaterError, type Config, type SwapConfig } from "./config.js";
+import { projectName } from "./names.js";
 
 /** The layout this code builds. release.json's installLayout above it means "this release needs an install-file change". */
 export const LAYOUT = 1;
@@ -21,7 +22,12 @@ export const LABEL_ROLE_UPDATER = "com.bossman.updater";
 
 /** The name that holds traffic: the colour with this alias on the front network is the live one. */
 export const LIVE_ALIAS = "server-live";
-export const colourName = (c: Colour) => `server-${c}`;
+/**
+ * BOS-2804: the name a colour is made under. With a name project (UPDATER_NAME_PROJECT, set by the image install's compose file from
+ * COMPOSE_PROJECT_NAME) it is `<project>-server-<colour>`, so two installs on one Docker host never share a container name; without
+ * it, the old fixed `server-<colour>`. An existing container is found by label, whatever it is called (see `colourRef` in swap.ts).
+ */
+export const colourName = (c: Colour, project: string | null = null) => projectName(project, `server-${c}`);
 export const frontAlias = (c: Colour) => `server-${c}-front`;
 
 export type SwapReady = Config & { swap: SwapConfig };
@@ -36,7 +42,7 @@ export type ColourParams = { colour: Colour; image: string; version: string; dig
 /** The create body for one server colour. The per-move override list (design section 5) is exactly: image, name/hostname, colour + role env, labels; aliases are set by `colourNetworks`. */
 export function colourSpec(cfg: SwapReady, p: ColourParams) {
   const [lk, lv] = splitLabel(cfg);
-  const name = colourName(p.colour);
+  const name = colourName(p.colour, cfg.swap.nameProject);
   return {
     Image: p.image,
     Hostname: name,
@@ -129,6 +135,14 @@ export const RELEASE_FILE_IN_LAUNCHER = "/run/release/release-current.json";
 export type HelperRelease = { version: string; launcher: string; runner: string; netguard: string; /** digests only: sha256:... */ };
 
 /**
+ * BOS-2804: what ties the launcher's work to this install. The pack volume is the one compose declares and the updater fills (so a
+ * runner reads the pack the updater installed, not a second `boss-man-claude-pack`); the install label goes on every runner, guard and
+ * pack installer the launcher makes, so removing an install by label removes them too. BOSSMAN_STACK is not set here: it would change
+ * the names and labels the launcher adopts its running runners by.
+ */
+export const launcherInstallEnv = (cfg: SwapReady): string[] => [`BOSSMAN_CLAUDE_PACK_VOLUME=${cfg.packVolume}`, `BOSSMAN_INSTALL_LABEL=${cfg.installLabel}`];
+
+/**
  * The launcher (BOS-1227): created from data like the colours, never copied from the running one. The image is the release's launcher
  * digest; BOSSMAN_RUNNER_IMAGE and BOSSMAN_NETGUARD_IMAGE are the release's digests, so a launcher that starts without the
  * `release-current` file still starts the release's runners. Root only to join the socket's group, then uid 1000 (apps/launcher/src/startup.ts).
@@ -140,7 +154,7 @@ export function launcherSpec(cfg: SwapReady, r: HelperRelease) {
   return {
     Image: `${cfg.registry}/boss-man-launcher@${r.launcher}`,
     User: "0:0",
-    Env: [...h.launcherEnv, `BOSSMAN_RUNNER_IMAGE=${cfg.registry}/boss-man-runner@${r.runner}`, `BOSSMAN_NETGUARD_IMAGE=${cfg.registry}/boss-man-netguard@${r.netguard}`, `BOSSMAN_RELEASE_FILE=${RELEASE_FILE_IN_LAUNCHER}`],
+    Env: [...h.launcherEnv, `BOSSMAN_RUNNER_IMAGE=${cfg.registry}/boss-man-runner@${r.runner}`, `BOSSMAN_NETGUARD_IMAGE=${cfg.registry}/boss-man-netguard@${r.netguard}`, `BOSSMAN_RELEASE_FILE=${RELEASE_FILE_IN_LAUNCHER}`, ...launcherInstallEnv(cfg)],
     Labels: { [lk]: lv, [LABEL_HELPER]: "launcher", [LABEL_RELEASE]: r.version, [LABEL_DIGEST]: r.launcher },
     Healthcheck: { Test: ["CMD", "node", "dist/check.js"], Interval: 5_000_000_000, Timeout: 5_000_000_000, Retries: 2, StartPeriod: 5_000_000_000 },
     HostConfig: {

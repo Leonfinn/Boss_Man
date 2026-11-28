@@ -135,7 +135,9 @@ services:
     pids_limit: 64
 
   updater:
-    container_name: updater
+    # BOS-2804: the name follows the compose project, so two installs on one Docker host never share a container name. The network
+    # alias `updater` (the service name) stays, so the server's calls to http://updater:3106 do not change.
+    container_name: ${COMPOSE_PROJECT_NAME:-boss-man}-updater
     image: ${BOSSMAN_REGISTRY:?Use --env-file images.env (see docs/35-install-from-images.md)}/boss-man-updater@${BOSSMAN_UPDATER_DIGEST:?Use --env-file images.env (this release needs boss-man-updater published)}
     restart: unless-stopped
     depends_on:
@@ -159,6 +161,10 @@ services:
       UPDATER_PACK_VOLUME: ${COMPOSE_PROJECT_NAME:-boss-man}_claude-pack
       UPDATER_NETWORK: ${COMPOSE_PROJECT_NAME:-boss-man}_default
       UPDATER_NAME_PREFIX: updater-job
+      # BOS-2804: the server colours, the launcher and the updater are named <project>-server-blue, <project>-launcher, <project>-updater.
+      # Unset (an install file from before this) keeps the old fixed names; the updater finds containers by label, so both work.
+      UPDATER_NAME_PROJECT: ${COMPOSE_PROJECT_NAME:-boss-man}
+      UPDATER_SELF_NAME: ${COMPOSE_PROJECT_NAME:-boss-man}-updater
       UPDATER_FRONT_NETWORK: ${COMPOSE_PROJECT_NAME:-boss-man}_front
       UPDATER_LAUNCHER_NETWORK: ${COMPOSE_PROJECT_NAME:-boss-man}_launcher
       UPDATER_SELF_NETWORK: ${COMPOSE_PROJECT_NAME:-boss-man}_updater
@@ -199,7 +205,7 @@ services:
       UPDATER_LAUNCHER_ENV: |
         BOSSMAN_DATA=/data
         BOSSMAN_DATA_HOST=auto
-        BOSSMAN_RUNNER_NETWORK=${BOSSMAN_RUNNER_NETWORK:-boss-man_default}
+        BOSSMAN_RUNNER_NETWORK=${BOSSMAN_RUNNER_NETWORK:-${COMPOSE_PROJECT_NAME:-boss-man}_default}
         BOSSMAN_RUNNER_URL=ws://server:3100/api/runner/connect
         BOSSMAN_RUNNER_MEMORY=${BOSSMAN_RUNNER_MEMORY:-}
         BOSSMAN_RUNNER_PIDS=${BOSSMAN_RUNNER_PIDS:-4096}

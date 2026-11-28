@@ -62,6 +62,13 @@ fd="$(echo "$cfg" | jq -r '.services.updater.environment | [.UPDATER_FIRST_SERVE
 echo "$cfg" | jq -r '.services.updater.environment.UPDATER_LAUNCHER_ENV' | grep -Eq '^BOSSMAN_(RUNNER|NETGUARD)_IMAGE=' && bad "UPDATER_LAUNCHER_ENV sets a runner or guard image" || ok "the launcher's runner and guard images come from the release, not the environment list"
 echo "$cfg" | jq -r '.services.updater.environment.UPDATER_LAUNCHER_MOUNTS' | grep -q ':/run/release:ro$' && ok "the launcher sees release-current read-only" || bad "launcher release mount"
 echo "$cfg" | jq -r '.services.updater.environment.UPDATER_SELF_MOUNTS' | grep -q 'launcher-key:/run/launcher:ro$' && ok "the next updater keeps the launcher key (read-only)" || bad "self mounts miss the launcher key"
+# BOS-2804: the updater and everything it makes are named after the compose project, so two installs on one Docker host never share a
+# container name. The default project keeps the same rule (boss-man-updater), not a bare name.
+echo "$cfg" | jq -e '.services.updater.container_name == "boss-man-updater" and .services.updater.environment.UPDATER_NAME_PROJECT == "boss-man" and .services.updater.environment.UPDATER_SELF_NAME == "boss-man-updater"' >/dev/null && ok "the default project names the updater boss-man-updater and tells the updater its project" || bad "updater name under the default project"
+cfg2="$(COMPOSE_PROJECT_NAME=acme docker compose --env-file "$T/images.env" -f docker-compose.images.yml config --format json)"
+echo "$cfg2" | jq -e '.services.updater.container_name == "acme-updater" and .services.updater.environment.UPDATER_NAME_PROJECT == "acme" and .services.updater.environment.UPDATER_SELF_NAME == "acme-updater"' >/dev/null && ok "another project names the updater acme-updater" || bad "updater name under project acme"
+echo "$cfg2" | jq -r '.services.updater.environment.UPDATER_LAUNCHER_ENV' | grep -q '^BOSSMAN_RUNNER_NETWORK=acme_default$' && ok "runners join the project's own network by default" || bad "runner network under project acme"
+echo "$cfg2" | jq -r '.services.updater.environment.UPDATER_LAUNCHER_ENV' | grep -Eq '^BOSSMAN_(CLAUDE_PACK_VOLUME|INSTALL_LABEL)=' && bad "UPDATER_LAUNCHER_ENV sets the pack volume or install label (the updater sets them)" || ok "the pack volume and install label are the updater's to set"
 # No host tools in the compose file's own steps (comments excluded).
 if grep -v '^[[:space:]]*#' docker-compose.images.yml | grep -Eq '\b(openssl|sudo|chown|stat -c)\b'; then bad "compose file uses host tools"; else ok "no host openssl, chown, stat or sudo"; fi
 [ -f docs/35-install-from-images.md ] && ok "the install guide exists" || bad "docs/35-install-from-images.md is missing"
@@ -125,8 +132,11 @@ P="bminstall$$"
   echo "BOSSMAN_RUNNER_NETWORK=${P}_default"
 } > "$T/run.env"
 dc() { docker compose -p "$P" --env-file "$T/run.env" -f docker-compose.images.yml --profile images "$@"; }
-# The updater makes these (not compose), under fixed names, so they are removed here by name; `down -v` removes the volumes.
-cleanup() { docker rm -f "boss-man-runner-smoke" "boss-man-netguard-smoke" launcher launcher-next server-blue server-green updater-next >/dev/null 2>&1; dc down -v --remove-orphans >/dev/null 2>&1; rm -rf "$T"; }
+# BOS-2804: the updater makes the server colours and the launcher (not compose) under names that follow the project, and stamps the
+# install's label on them and on the runners and guards the launcher makes, so they are removed here by label: never by a name that
+# another install on this Docker host could share. `down -v` removes the volumes (the pack volume among them).
+NL="${P}-launcher"
+cleanup() { docker ps -aq --filter "label=com.bossman.install=$P" | xargs -r docker rm -f >/dev/null 2>&1; docker rm -f "boss-man-runner-smoke" "boss-man-netguard-smoke" >/dev/null 2>&1; dc down -v --remove-orphans >/dev/null 2>&1; rm -rf "$T"; }
 trap cleanup EXIT
 
 dc pull -q || { bad "pull by digest"; exit 1; }
@@ -147,7 +157,7 @@ dc up -d || { dc logs --tail 40; bad "up"; exit 1; }
 # Wait for the event (the server answering), with a deadline: a cold pull-and-migrate can take minutes on a slow runner.
 deadline=$((SECONDS + ${INSTALL_WAIT_SECONDS:-300}))
 until curl -fsS "http://127.0.0.1:${INSTALL_HOST_PORT:-31100}/api/health" >/dev/null 2>&1; do
-  [ "$SECONDS" -lt "$deadline" ] || { docker ps -a --format '{{.Names}} {{.Status}}' | tr '\n' ';'; echo; for c in updater launcher server-blue; do echo "--- $c"; docker logs --tail 12 "$c" 2>&1 | cut -c1-260; done; bad "the server did not answer /api/health in time"; exit 1; }
+  [ "$SECONDS" -lt "$deadline" ] || { docker ps -a --format '{{.Names}} {{.Status}}' | tr '\n' ';'; echo; for c in "${P}-updater" "$NL" "${P}-server-blue"; do echo "--- $c"; docker logs --tail 12 "$c" 2>&1 | cut -c1-260; done; bad "the server did not answer /api/health in time"; exit 1; }
   sleep 3
 done
 ok "the server answers /api/health"
@@ -155,16 +165,21 @@ ok "the server answers /api/health"
 # test workflow reads it for the release's result; nothing else needs it.
 [ -z "${INSTALL_SECONDS_FILE:-}" ] || echo "$SECONDS" > "$INSTALL_SECONDS_FILE"
 
-launcher_log="$(docker logs launcher 2>&1)"
+launcher_log="$(docker logs "$NL" 2>&1)"
 # The first server can answer while the launcher is missing (the updater makes the launcher first, and logs why it could not): show that.
-docker inspect launcher >/dev/null 2>&1 || { echo "--- the launcher does not exist; updater log:"; docker logs --tail 15 updater 2>&1 | cut -c1-400; }
+docker inspect "$NL" >/dev/null 2>&1 || { echo "--- the launcher does not exist; updater log:"; docker logs --tail 15 "${P}-updater" 2>&1 | cut -c1-400; }
+# BOS-2804: every container the install made carries its project's name and its label; nothing is left under a fixed name another install could share.
+names="$(docker ps -a --filter "label=com.bossman.install=$P" --format '{{.Names}}' | sort | tr '\n' ' ')"
+for want in "${P}-updater" "$NL" "${P}-server-blue"; do case " $names" in *" $want "*) ok "$want exists and carries the install's label" ;; *) bad "$want is missing or has no install label (found: $names)" ;; esac; done
+# One pack volume: the one compose declares for this project; the launcher's own default (boss-man-claude-pack) is not made for it.
+docker volume inspect "${P}_claude-pack" >/dev/null 2>&1 && ok "the install's pack volume exists" || bad "the install's pack volume ${P}_claude-pack is missing"
 echo "$launcher_log" | grep -q 'dropped to uid 1000' && ok "the launcher dropped to uid 1000 with the socket's group" || bad "launcher privileges: $launcher_log"
 echo "$launcher_log" | grep -q '"msg":"data folder"' && ok "the launcher found its data volume on the host" || bad "launcher data folder"
 echo "$launcher_log" | grep -q 'launcher listening' && ok "the launcher is up and can reach Docker" || bad "launcher not listening"
 
 # Ask the launcher, from inside its container, to start a runner from the published runner image (it will not get a real token, so it cannot connect; starting is the point).
 tok="bmr_$(printf 'x%.0s' {1..43})"
-call() { docker exec --user 1000:1000 launcher node -e '
+call() { docker exec --user 1000:1000 "$NL" node -e '
 const fs=require("fs");const [m,p,b]=process.argv.slice(1);
 fetch("http://127.0.0.1:3105"+p,{method:m,headers:{authorization:"Bearer "+fs.readFileSync("/run/launcher/key","utf8").trim(),"content-type":"application/json"},body:b||undefined})
  .then(async r=>{console.log(r.status+" "+await r.text());process.exit(r.status<300?0:1)}).catch(e=>{console.log(String(e));process.exit(1)})' "$@"; }
