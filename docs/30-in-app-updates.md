@@ -206,7 +206,7 @@ A server deploy updates the server only. When an update changes the runners' cod
 
 ## What you may see instead of a deploy
 
-- **"Rejected: this change touches deployment files"**: run `scripts/deploy.sh` yourself in `$B/src`. The deployer refuses changes to files such as `scripts/`, `deploy/`, compose files and Dockerfiles.
+- **"Rejected: this change touches deployment files"**: run `scripts/deploy.sh` yourself in `$B/src`. The deployer refuses changes to the deploy scripts, `.env*`, the Caddyfile, and Compose changes that alter this host's db, proxy or volumes, give the server access to the host, or can't be compared (the message says which; docs/09, step 6). Dockerfiles and Compose files this host does not load no longer count.
 - **"Rejected: only one server deploy every 10 minutes"**: wait, then press **Try again** on Updates.
 - **`main` moved after you approved:** nothing to do. The approval deploys the newest checked commit on `main`. Only if `main` was rewritten so the approved commit is gone do you see "is not on main any more"; a new question for `main` follows within a few minutes.
 - **A to-do about deployment files you have already applied by hand**: it was written before you did. Answer **Done, it's applied**. It also closes by itself once the host reports the new commit running.

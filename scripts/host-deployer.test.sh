@@ -483,16 +483,23 @@ rm -f "$D/inbox/checked"
 c3="$(push docker-compose.yml)"
 req server "$c3"
 host
-has "$D/outbox/status.json" "deployment files (docker-compose.yml)"
+has "$D/outbox/status.json" "deployment files (docker-compose.yml"
+has "$D/outbox/status.json" "could not compare" # no Compose here to render the settings: hand, with the reason (BOS-2885)
 [[ $(calls) == 1 ]] || fail "infra change was deployed"
 infra_re="$(grep -o "^INFRA='[^']*'" "$here/host-deployer.sh" | sed "s/^INFRA='//; s/'\$//")"
+compose_re="$(grep -o "^COMPOSE_FILES='[^']*'" "$here/host-deployer.sh" | sed "s/^COMPOSE_FILES='//; s/'\$//")"
 not_re="$(grep -o "^NOT_INFRA='[^']*'" "$here/host-deployer.sh" | sed "s/^NOT_INFRA='//; s/'\$//")"
-for p in deploy/x.yml scripts/deploy.sh scripts/rebuild-live.sh scripts/update-runner.sh scripts/host-deployer.sh scripts/install-deployer.sh scripts/daily-backup.sh apps/server/Dockerfile .env.example; do # daily-backup.sh runs as root in the backup container (BOS-2176)
+# Hand-only whatever the host's settings say: deploy scripts, .env*, and the files under deploy/ that are not Compose files.
+for p in scripts/deploy.sh scripts/rebuild-live.sh scripts/update-runner.sh scripts/host-deployer.sh scripts/install-deployer.sh scripts/daily-backup.sh .env.example deploy/caddy/Caddyfile deploy/tailscale/serve.json; do # daily-backup.sh runs as root in the backup container (BOS-2176)
   if ! echo "$p" | grep -Eq "$infra_re" || echo "$p" | grep -Eq "$not_re"; then fail "$p should count as infra"; fi
 done
-# CI files and the Penpot and ntfy add-ons don't touch Boss Man's containers.
-for p in .github/workflows/ci.yml deploy/penpot.yml scripts/make-app-icons.mjs scripts/check-all.sh scripts/lint-migrations.mjs scripts/restore-test.sh deploy/ntfy.yml deploy/ntfy-bluegreen.yml; do
-  if echo "$p" | grep -Eq "$infra_re" && ! echo "$p" | grep -Eq "$not_re"; then fail "$p should not count as infra"; fi
+# Compose files are candidates: hand only when the rendered settings say so (BOS-2885).
+for p in docker-compose.yml docker-compose.images.yml deploy/x.yml deploy/truenas-bluegreen.yml deploy/check-worker/compose.yaml; do
+  if ! echo "$p" | grep -Eq "$compose_re" || echo "$p" | grep -Eq "$infra_re"; then fail "$p should be a compose candidate and not hand-only"; fi
+done
+# CI files, build inputs (Dockerfiles, .dockerignore, .npmrc) and the Penpot and ntfy add-ons don't touch Boss Man's containers.
+for p in .github/workflows/ci.yml deploy/penpot.yml scripts/make-app-icons.mjs scripts/check-all.sh scripts/lint-migrations.mjs scripts/restore-test.sh deploy/ntfy.yml deploy/ntfy-bluegreen.yml apps/server/Dockerfile apps/updater/Dockerfile .dockerignore .npmrc; do
+  if { echo "$p" | grep -Eq "$infra_re" || echo "$p" | grep -Eq "$compose_re"; } && ! echo "$p" | grep -Eq "$not_re"; then fail "$p should not count as infra"; fi
 done
 
 # 7. Bad files: garbage, shell syntax in a field, a symlink, an oversized file. None run anything.
@@ -768,7 +775,7 @@ case "$a" in
     echo "render $PWD" >>"$DL"; for f in svc-*; do [[ ! -f $f ]] || echo "${f#svc-} $(sha256sum <"$f" | cut -d' ' -f1)"; done ;;
   "--project-name "*" config") # the same settings as a rendered file, for a Compose without --hash
     [[ -z ${FAKE_NO_RENDER:-} ]] || exit 1
-    echo "name: p"; echo "services:"; for f in svc-*; do [[ ! -f $f ]] || { echo "  ${f#svc-}:"; echo "    image: $(cat "$f")"; }; done; echo "volumes:"; echo "  data: {}" ;;
+    echo "name: p"; echo "services:"; for f in svc-*; do [[ ! -f $f ]] || { echo "  ${f#svc-}:"; if [[ $(head -n 1 "$f") == "#yaml" ]]; then tail -n +2 "$f" | sed 's/^/    /'; else echo "    image: $(cat "$f")"; fi; }; done; echo "volumes:"; echo "  data: {}" ;;
   "exec -T db pg_dump"*) echo dump ;;
   "up -d --no-deps backup") # BOS-2176; BOS-2221: the daily folder must already exist (made by the host user, not by Docker)
     [[ -d $BOSSMAN_BACKUP_DIR/daily ]] && echo "daily folder ready" >>"$DL"; echo "ensure backup service" >>"$DL" ;;
@@ -1176,6 +1183,58 @@ echo cid2 >"$W/cid.db"; svc_check; has "$D/outbox/available.json" '"pendingServi
 has "$D/outbox/available.json" '"dbContainerId": "cid2"'
 at "$sF"; svc_check; has "$D/outbox/available.json" '"pendingServices": ["proxy"]'
 svc_check; has "$D/outbox/available.json" '"pendingServices": ["proxy"]' # and stays so until the proxy is recreated
+# 32b. BOS-2885: Compose and deploy/ files send an update to the hand path only when THIS host's rendered settings change in a
+# way the swap can't apply. infraPaths in available.json is the same verdict the refusal and pick_newest_checked use.
+pushc() { # file content...: change a file to exactly this content (one line per argument) and push main; prints the sha
+  mkdir -p "$(dirname "$T/w/$1")"; printf '%s\n' "${@:2}" >"$T/w/$1"
+  git -C "$T/w" add -A; git -C "$T/w" commit -qm "set $1"; gpush "$T/w" origin HEAD:main; git -C "$T/w" rev-parse HEAD
+}
+pushc2() { # two files in one commit: file1 content1 file2 (a random line)
+  mkdir -p "$(dirname "$T/w/$1")" "$(dirname "$T/w/$3")"; printf '%s\n' "$2" >"$T/w/$1"; echo "$RANDOM" >"$T/w/$3"
+  git -C "$T/w" add -A; git -C "$T/w" commit -qm "set $1 and $3"; gpush "$T/w" origin HEAD:main; git -C "$T/w" rev-parse HEAD
+}
+hand_of() { # live-commit: what the host reports for the tip now on main
+  at "$1"; svc_check; jget "$D/outbox/available.json" infraPaths
+}
+auto() { [[ $(hand_of "$1") == "" ]] || fail "$2 should be automatic: $(cat "$D/outbox/available.json")"; hasnt "$D/outbox/available.json" handReason; }
+handed() { # live-commit what reason
+  [[ $(hand_of "$1") == *"$2"* ]] || fail "$2 should be hand: $(cat "$D/outbox/available.json")"
+  has "$D/outbox/available.json" "$3"
+}
+# The cases push Compose changes to main and leave them there, so they run at the end of the file (hand_cases), after
+# every section that deploys from main.
+hand_cases() {
+nl=$'\n'
+sBase="$(pushc svc-server '#yaml' 'image: srv' 'environment:' '  A: one')"
+# a compose file nothing renders from, an updater Dockerfile and an unloaded overlay: automatic
+live="$sBase"; pushc docker-compose.images.yml "x$RANDOM" >/dev/null; auto "$live" "an unloaded compose file"
+pushc apps/updater/Dockerfile "x$RANDOM" >/dev/null; auto "$live" "a Dockerfile"
+pushc deploy/check-worker/compose.yaml "x$RANDOM" >/dev/null; auto "$live" "an unloaded overlay"
+pushc .npmrc "x$RANDOM" >/dev/null; auto "$live" ".npmrc"
+# an ordinary server setting (its environment) changes: automatic
+pushc2 svc-server $'#yaml\nimage: srv\nenvironment:\n  A: two' docker-compose.yml >/dev/null; auto "$live" "an ordinary server setting"
+# db or proxy settings change: their own card, so hand, with the reason
+sDb="$(pushc2 svc-db $'#yaml\nimage: pg2' docker-compose.yml)"; handed "$live" docker-compose.yml "it changes the db service"
+live="$sDb" # the db change is part of what runs from here on
+# a server service gains host reach: each one is hand
+for reach in $'volumes:\n  - type: bind\n    source: /host/x\n    target: /x' $'privileged: true' $'cap_add:\n  - NET_ADMIN' $'devices:\n  - /dev/x:/dev/x' $'network_mode: host' $'pid: host' $'security_opt:\n  - seccomp:unconfined'; do
+  pushc2 svc-server "#yaml${nl}image: srv${nl}environment:${nl}  A: one${nl}$reach" docker-compose.yml >/dev/null
+  handed "$live" docker-compose.yml "the server gains access to the host"
+done
+# a named volume is not host reach; a bind that was already there is not gained
+pushc2 svc-server $'#yaml\nimage: srv\nvolumes:\n  - type: volume\n    source: data\n    target: /data' docker-compose.yml >/dev/null; auto "$live" "a named volume"
+live="$(pushc svc-server '#yaml' 'image: srv' 'privileged: true')"
+pushc2 svc-server $'#yaml\nimage: srv2\nprivileged: true' docker-compose.yml >/dev/null; auto "$live" "a reach that was already there"
+# a render that fails: hand, and the reason says so
+pushc docker-compose.yml "x$RANDOM" >/dev/null
+FAKE_NO_RENDER=1 handed "$live" docker-compose.yml "could not compare"
+# files that are not Compose settings stay hand-only: the Caddyfile is mounted, so a render can't see it change
+pushc deploy/caddy/Caddyfile "x$RANDOM" >/dev/null; handed "$live" deploy/caddy/Caddyfile ""
+hasnt "$D/outbox/available.json" handReason
+# a build-only change next to a hand-only one lists only the hand-only file
+pushc apps/updater/Dockerfile "x$RANDOM" >/dev/null; [[ $(hand_of "$live") != *Dockerfile* ]] || fail "a Dockerfile was listed as a hand file"
+}
+
 # no deploy path starts, stops or recreates the database or the proxy: the server deploy rolls the colours only (DR-020 B)
 for f in host-deployer.sh rebuild-live.sh deploy.sh; do
   # Any compose up/run/restart/stop/kill/rm/create/down (also in the hint text) must name only the server colours,
@@ -1609,6 +1668,8 @@ printf 'REPO=%s\nAVAILABLE_REFRESH_SECONDS=0\n' "$LR/src" >"$LR/deployer/host.co
 BOSSMAN_DEPLOYER="$LR/deployer" "$here/host-deployer.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer exited non-zero (long range)"; }
 lr="$(node -e 'const o=require(process.argv[1]);process.stdout.write([o.commits.length,o.paths.length,o.infraPaths.join(","),o.commits.at(-1).subject].join(" "))' "$LR/deployer/outbox/available.json")"
 [[ $lr == "150 311 scripts/host-deployer.sh add 311 files" ]] || fail "long range: wanted 150 commits, 311 paths and host-deployer.sh, got: $lr"
+
+conf 0; reset_world blue "$cur"; hand_cases # BOS-2885
 
 # With no BOSSMAN_DEPLOYER, the copy uses the folder it sits in.
 own="$(mktemp -d)"; mkdir -p "$own/deployer"; cp "$here/host-deployer.sh" "$own/deployer/"
