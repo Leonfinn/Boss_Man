@@ -60,8 +60,9 @@ jobs:
       DOCKERHUB_PUBLISH: ${{ vars.DOCKERHUB_PUBLISH }}
       # BOS-2903: the release notes' pointer line needs the site's address. The website publish reads it from the `site`
       # environment, which this job (environment: publish) cannot see, so it comes from the repository variable instead
-      # (Settings > Secrets and variables > Actions > Variables; an environment variable named SITE_URL overrides it for
-      # this job). Empty on a fork with no website: scripts/release-notes.sh then leaves the pointer line out.
+      # (Settings > Secrets and variables > Actions > Variables). This job-level env takes precedence over any SITE_URL
+      # on the `publish` environment, so set the repository variable. Empty on a fork with no website:
+      # scripts/release-notes.sh then leaves the pointer line out.
       SITE_URL: ${{ vars.SITE_URL }}
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
