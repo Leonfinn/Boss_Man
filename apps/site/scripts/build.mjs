@@ -308,11 +308,21 @@ ${lists}
 
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
+/** The two shapes of the image label line that must sit directly under each What's new date (design note 3.1). */
+const LABEL_IN = /^\*\*In image (\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?)\*\*$/;
+const LABEL_NOT = /^\*\*Not in an image yet:\*\* (\S.*)$/;
+
 /**
  * Reads the repo's CHANGELOG.md for the "What's new" page. Everything above the first `## ` heading (the file's title, its
  * note for GitHub readers and the release-step comment) is left out. Every `## ` heading must be a date such as
  * "16 November 2026", newest first and never twice, and no entry may carry a ticket number: the page is for users, in
  * plain words. Any slip stops the build, so a release step that adds an entry can't ship a broken page.
+ *
+ * Each date must also open with its image label, directly under the heading and before the first bullet: either
+ * "**In image <full version>**" or "**Not in an image yet:** <words>". A day the weekly cut fell inside carries two:
+ * the newer label first, then the older "In image" line before its older entries (design note 3.1). A missing label,
+ * an unknown shape, or a "Not in an image yet" below an "In image" one anywhere later in the file stops the build, so
+ * a forgotten or mis-ordered relabel can't publish (BOS-2842).
  */
 export function readChangelog(file) {
   const name = path.basename(file);
@@ -323,18 +333,51 @@ export function readChangelog(file) {
   const ticket = /\bBOS-\d+\b/i.exec(source);
   if (ticket) throw new Error(`${name}: "${ticket[0]}" looks like a ticket number; describe the change in plain words instead`);
   let previous = Infinity;
+  let sawInImage = false;
   const dates = [];
-  for (const m of source.matchAll(/^## (.*)$/gm)) {
-    const heading = m[1].trim();
+  const sections = [];
+  for (const block of source.split(/^(?=## )/m)) {
+    const lines = block.split("\n");
+    const heading = lines[0].replace(/^## /, "").trim();
     const d = /^(\d{1,2}) ([A-Z][a-z]+) (\d{4})$/.exec(heading);
     const month = d ? MONTHS.indexOf(d[2]) : -1;
     const time = month >= 0 ? Date.UTC(+d[3], month, +d[1]) : NaN;
     if (Number.isNaN(time) || new Date(time).getUTCDate() !== +d[1]) throw new Error(`${name}: heading "${heading}" is not a date such as "16 November 2026"`);
     if (time >= previous) throw new Error(`${name}: "${heading}" is out of order (newest first, one entry per day)`);
     previous = time;
+
+    // One label line sits directly under the heading. A day the weekly cut fell inside has a second, later in the
+    // entry: "Not in an image yet" first, then "In image" before its older lines (design note 3.1).
+    let first = 1;
+    while (first < lines.length && lines[first].trim() === "") first++;
+    const labels = [];
+    for (let n = 1; n < lines.length; n++) {
+      const line = lines[n].trim();
+      const inImage = LABEL_IN.exec(line);
+      const notImage = LABEL_NOT.exec(line);
+      if (inImage) labels.push({ index: n, kind: "in", version: inImage[1], line });
+      else if (notImage) labels.push({ index: n, kind: "not", note: notImage[1], line });
+    }
+    if (labels.length === 0) {
+      const firstLine = lines[first]?.trim() ?? "";
+      if (firstLine.startsWith("**")) throw new Error(`${name}: "${heading}" has an unknown image label line "${firstLine}"; use "**In image <version>**" or "**Not in an image yet:** <words>"`);
+      throw new Error(`${name}: "${heading}" has no image label line; put "**In image <version>**" or "**Not in an image yet:** <words>" directly under its heading`);
+    }
+    if (labels[0].index !== first) throw new Error(`${name}: "${heading}" must start with its image label line, before the first bullet`);
+    for (const label of labels) {
+      if (label.kind === "in") sawInImage = true;
+      else if (sawInImage) throw new Error(`${name}: "${heading}" has a "Not in an image yet" label below an "In image" one (order: not-yet entries come above released ones)`);
+    }
+    if (labels.length > 2 || (labels.length === 2 && labels[1].kind !== "in")) {
+      throw new Error(`${name}: "${heading}" has too many image labels or a second "Not in an image yet" label; a split day is "Not in an image yet" (or the new "In image") first, then the older "In image <version>" before its older entries`);
+    }
+    if (labels.length === 2 && !lines.slice(labels[0].index + 1, labels[1].index).some((l) => l.trim() && !LABEL_IN.test(l.trim()) && !LABEL_NOT.test(l.trim()))) {
+      throw new Error(`${name}: "${heading}" has two image labels with nothing between them; the second label goes before the older entries it covers`);
+    }
     dates.push(heading);
+    sections.push({ heading, labels, body: lines.slice(1).join("\n") });
   }
-  return { source, dates };
+  return { source, dates, sections };
 }
 
 const FEED_LIMIT = 20;
@@ -358,15 +401,61 @@ export function whatsNewFeedXml(changelog, siteUrl, repo) {
   return `<?xml version="1.0" encoding="UTF-8"?>\n<feed xmlns="http://www.w3.org/2005/Atom" xml:lang="en-GB" xml:base="${siteUrl}/">\n  <id>${siteUrl}/whats-new.xml</id>\n  <title>Boss Man: What's new</title>\n  <link rel="self" type="application/atom+xml" href="${siteUrl}/whats-new.xml"/>\n  <link rel="alternate" type="text/html" href="${siteUrl}/whats-new"/>\n  <updated>${entries[0].updated}</updated>\n${entries.map((e) => e.xml).join("\n")}\n</feed>\n`;
 }
 
+const BOX_ICON = `<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M2 4.7 8 2l6 2.7v6.6L8 14l-6-2.7z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="m2.4 4.8 5.6 2.4 5.6-2.4M8 7.2v6.5" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>`;
+const CLOCK_ICON = `<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8.5" r="5.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 5.5v3.5l2.2 1.3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`;
+
+/** The website badge for one label line (design note 3.2). An "In image" badge links to that GitHub release. */
+function labelBadge(label, repo, split) {
+  const row = `wn-badge-row${split ? " split" : ""}`;
+  if (label.kind === "in") {
+    const version = escapeHtml(label.version);
+    return `<p class="${row}"><a class="wn-badge in" href="${escapeHtml(repo)}/releases/tag/v${version}">${BOX_ICON}In image ${version}</a></p>`;
+  }
+  return `<p class="${row}"><span class="wn-badge not">${CLOCK_ICON}Not in an image yet</span> <span class="wn-badge-note">${escapeHtml(label.note)}</span></p>`;
+}
+
+/**
+ * Turns each validated label line into a build token, so Markdown leaves it alone; the rendered paragraph is then
+ * replaced by the badge markup. The feed keeps the raw source, where the line stays plain bold text (as on GitHub).
+ */
+function labeledSource(changelog, repo) {
+  const badges = [];
+  const source = changelog.sections
+    .map((section, si) => {
+      let next = 0;
+      const body = section.body.split("\n").map((line) => {
+        const label = section.labels[next];
+        if (label && line.trim() === label.line) {
+          const token = `WNLABEL${si}X${next}`;
+          badges.push({ token, html: labelBadge(label, repo, next > 0) });
+          next++;
+          return token;
+        }
+        return line;
+      });
+      return `## ${section.heading}\n${body.join("\n")}`;
+    })
+    .join("");
+  return { source, badges };
+}
+
 function whatsNewPage(changelog, ctx) {
-  const { html, headings } = renderMarkdown(changelog.source, { name: "CHANGELOG.md", repo: ctx.vars.repo });
+  const labeled = labeledSource(changelog, ctx.vars.repo);
+  let { html, headings } = renderMarkdown(labeled.source, { name: "CHANGELOG.md", repo: ctx.vars.repo });
+  for (const badge of labeled.badges) html = html.replace(`<p>${badge.token}</p>`, badge.html);
   const toc = headings.map((h) => `<li><a href="#${h.id}">${escapeHtml(h.text)}</a></li>`).join("");
   const content = `<div class="wrap guide news">
 <main id="main" class="g-main" tabindex="-1">
 <h1>What's new</h1>
 <p class="g-lead">The changes you will notice in Boss Man, newest first, in plain words. Each date says which ready-made image has its changes. To get them, <a href="/guides/updates-and-backups">update your server</a>.</p>
-<p><strong>When you get each change.</strong> If you built Boss Man from source, you get each change as soon as it is added: update your server to pick it up. If you installed the ready-made Docker images, a new image comes out once a week, on Tuesdays, with every change up to then. A newer change waits for the next weekly image, so a feature listed here may not be in your install yet.</p>
-<p><strong>Which do I have?</strong> Open Settings → Server and runner → Updates. An image install says which image it runs there, for example "You run 0.1.0-beta.3". An install built from source shows no image number.</p>
+<aside class="wn-how" aria-labelledby="wn-how-h">
+<h2 id="wn-how-h">When you get each change</h2>
+<div class="wn-how-panels">
+<section><h3>Built from source</h3><p>You get each change as soon as it is added. Update your server to pick it up.</p></section>
+<section><h3>Ready-made Docker image</h3><p>A new image comes out once a week, on Tuesdays, with every change up to then. A newer change waits for the next image.</p></section>
+</div>
+<p class="wn-which"><strong>Which do I have?</strong> Open Settings → Server and runner → Updates. An image install says which image it runs there, for example "You run 0.1.0-beta.3". An install built from source shows no image number. <a href="/guides/updates-and-backups">How updating works</a>.</p>
+</aside>
 ${ctx.feed ? `<p class="g-meta"><a href="/whats-new.xml">Follow by feed</a></p>\n` : ""}${html}
 <p class="g-edit muted">The full history, with every change, is in the <a href="${ctx.vars.repo}/commits/main">list of changes on GitHub</a>.</p>
 </main>

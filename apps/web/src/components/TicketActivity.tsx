@@ -15,6 +15,7 @@ import { outcomeTag, when } from "../pages/Runs";
 import { STATUS, type TicketReview } from "./TicketReviews";
 import { describe, useTranscript } from "../transcript";
 import { Loader } from "./Loader";
+import { notStartedReason, useStartBlock } from "./StartBlock";
 import { LoadError } from "./LoadError";
 import { stopRun } from "../stop-run";
 import { copyText } from "../clipboard";
@@ -177,6 +178,9 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
   const end = useRef<HTMLDivElement>(null);
   const live = convo.data?.live ?? null;
   const other = agents.find((a) => a.id === to) ?? null;
+  // BOS-2814: an assignee that can't run yet, and no run has ever started: say why, with the button to the fix.
+  const startBlock = useStartBlock(companyId);
+  const notStarted = !live && runs.data !== null && runs.data.length === 0 && companyId ? notStartedReason(startBlock, assigneeId, assignee, companyId) : null;
   const working = live?.agent ?? assignee;
   useEffect(() => setBusy(live !== null), [live]);
 
@@ -530,6 +534,12 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
           Find
         </button>
       </div>
+      {notStarted && (
+        <p className="banner start-block" role="status" data-testid="not-started">
+          <span>{notStarted.text}</span>
+          <a className="btn primary" href={notStarted.link}>{notStarted.linkText}</a>
+        </p>
+      )}
       {findOpen && (
         <div className="chat-find" role="search">
           <input ref={findBox} type="search" aria-label="Find in this conversation" placeholder="Find in this conversation" value={findText} onChange={(e) => setFindText(e.target.value)} onKeyDown={onFindKey} />
@@ -656,7 +666,7 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
           <div className="compose-to">
             <label htmlFor="activity-to">To</label>
             <select id="activity-to" value={to} onChange={(e) => setTo(e.target.value)}>
-              <option value="">{working ? `${working} (working on it)` : "Nobody yet (a note only)"}</option>
+              <option value="">{working ? `${working} (${notStarted ? "assigned, not started" : "working on it"})` :"Nobody yet (a note only)"}</option>
               {agents
                 .filter((a) => a.id !== assigneeId && a.name !== live?.agent)
                 .map((a) => (

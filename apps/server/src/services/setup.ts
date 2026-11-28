@@ -1,6 +1,6 @@
 // The setup wizard (R56): where the owner is in it, and a checklist worked out from what's
 // actually set up, so it's right however each thing got done (wizard, Settings, or the CEO).
-import { and, asc, eq, inArray, isNotNull, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import { CONNECT_ENV_NAMES } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, owners, projects, runners, secretGrants, settings, tickets } from "../db/schema.js";
@@ -59,6 +59,29 @@ export function setupService(db: Db, deps: { isConnected: (runnerId: string) => 
       const value = { ...(await this.progress()), ...patch };
       await db.insert(settings).values({ key: KEY, value }).onConflictDoUpdate({ target: settings.key, set: { value } });
       return value;
+    },
+
+    /**
+     * BOS-2814: why an agent can't start yet, from the same facts the checklist reads. `items` are the must-haves
+     * still missing (a Claude account, what pays for the CEO, a connected runner); `noFunding` are the agents with
+     * nothing paying for them. Both empty means every agent can start.
+     */
+    async startBlock(companyId: string) {
+      const [c] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, companyId));
+      if (!c) return null;
+      const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, companyId));
+      const envs = (await db.select({ env: secretGrants.envName }).from(secretGrants).where(and(eq(secretGrants.companyId, companyId), inArray(secretGrants.envName, RUN_CREDENTIALS)))).map((g) => g.env);
+      const team = await db.select({ id: agents.id, role: agents.role, name: agents.name, fundingSourceId: agents.fundingSourceId }).from(agents).where(and(eq(agents.companyId, companyId), isNull(agents.retiredAt)));
+      const ceo = team.find((a) => a.role === "ceo");
+      const items: Array<{ id: "claude" | "funding" | "runner"; label: string; reason: string }> = [];
+      if (envs.length === 0) items.push({ id: "claude", label: "a Claude account", reason: "the company has no Claude account to run on yet" });
+      if (ceo && !ceo.fundingSourceId) {
+        // What an agent's "Not started" line says, and its button: the CEO's account is the one the wizard's step 7 sets.
+        const who = ceo.name === "CEO" ? "the CEO" : ceo.name;
+        items.push({ id: "funding", label: "what pays for the CEO", reason: `${who} has no Claude account to run on yet` });
+      }
+      if (!runner || !deps.isConnected(runner.id)) items.push({ id: "runner", label: "a connected runner", reason: "the runner isn't connected" });
+      return { items, noFunding: team.filter((a) => !a.fundingSourceId).map((a) => a.id) };
     },
 
     /** The eight steps, each done or not, for the "Finish setting up" list. */

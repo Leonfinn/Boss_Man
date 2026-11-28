@@ -12,6 +12,7 @@ import { useAction } from "./settings/shared";
 import { Funding } from "./settings/Funding";
 import { ProjectRow } from "./settings/Projects";
 import { ClaudeStep, fundingHint, RunnerStep } from "./SetupClaude";
+import { useStartBlock } from "../components/StartBlock";
 import { GuideLink, type GuideSlug } from "../guide-links";
 
 type Progress = { dismissed: boolean; left?: boolean; step: number; companyId: string | null; firstMerge?: { ref: string; minutes: number } | null; work?: "docs" | "code" };
@@ -346,6 +347,9 @@ function FundingStep({ company, onChanged, goTo, saved }: { company: Company; on
 function TicketStep({ company }: { company: Company }) {
   const projects = usePoll((signal) => api<Project[]>(`/api/companies/${company.id}/projects`, { signal }), 60_000, `setup-ticket-${company.id}`);
   const ceo = company.agents.find((a) => a.role === "ceo");
+  // BOS-2814: "starts straight away" only when Claude, what pays for the CEO and the runner are all in place.
+  const block = useStartBlock(company.id);
+  const ready = block !== null && block.items.length === 0;
   const [form, setForm] = useState({ title: "", body: "", toCeo: false });
   // The task description is kept in this browser as it is typed (DR-045); it goes once the task is added.
   const bodyKey = `setup-ticket-body/${company.id}`;
@@ -380,7 +384,7 @@ function TicketStep({ company }: { company: Company }) {
       {ceo && (
         <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14 }}>
           <input type="checkbox" checked={form.toCeo} onChange={(e) => setForm({ ...form, toCeo: e.target.checked })} />
-          Give it to {ceo.name} now (it starts straight away)
+          {ready ? `Give it to ${ceo.name} now (it starts straight away)` : `Give it to ${ceo.name}. It starts once Claude is connected and the runner is running.`}
         </label>
       )}
       <button type="submit" className="btn primary" style={{ alignSelf: "flex-start" }} disabled={!form.title.trim()}>
