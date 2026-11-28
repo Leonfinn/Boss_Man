@@ -16,7 +16,7 @@ import type { MainLogResult, RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, checkJobs, projects, runners, settings, ticketMerges, tickets, wakes } from "../src/db/schema.js";
-import { gateMergeMessage, isGateMergeOf, LIVE_UNPLACED_REASON, mergeMessageTicket } from "../src/services/missed-merges.js";
+import { gateMergeMessage, isGateMergeOf, LIVE_UNPLACED_REASON, mergeMessageTicket, wakeCeoIfLiveUnplaced } from "../src/services/missed-merges.js";
 import { allMergeOrder, serverHas } from "../src/services/go-live-wait.js";
 import { runnerUpdateNeed } from "../src/services/runner-update-need.js";
 
@@ -401,6 +401,28 @@ describe("a live commit that still can't be placed (BOS-1645)", () => {
     await c.review.recordMissedMerges();
     expect(await c.wakesOf(c.ceo.id, LIVE_UNPLACED_REASON)).toHaveLength(0);
     expect(await c.db.select().from(settings).where(eq(settings.key, `live_unplaced:${c.company.id}`))).toHaveLength(0);
+  });
+});
+
+describe("a server update wakes only the company it deploys (BOS-2931)", () => {
+  it("a second company's CEO gets no 'live commit not placed' wake for the server's commit, while the home company's does", async () => {
+    const c = (ctx = await setup());
+    const other = (await c.req("POST", "/api/companies", { name: "Other Co" })).json() as { company: { id: string }; ceo: { id: string } };
+    for (const id of [c.company.id, other.company.id]) {
+      await c.db.insert(settings).values({ key: `live_release:${id}`, value: { old: sha("7"), new: sha("7") } }).onConflictDoUpdate({ target: settings.key, set: { value: { old: sha("7"), new: sha("7") } } });
+    }
+    const woke: string[] = [];
+    const wake = async (agentId: string) => void woke.push(agentId);
+    const onMain = [{ sha: sha("7"), subject: "Hotfix", message: "Hotfix" }];
+    expect(await wakeCeoIfLiveUnplaced(c.db, other.company.id, onMain, wake)).toBe(false);
+    expect(woke).toEqual([]);
+    expect(await c.db.select().from(settings).where(eq(settings.key, `live_unplaced:${other.company.id}`))).toHaveLength(0);
+    // The sweep path too: no wake row for the other company's CEO.
+    await c.review.recordMissedMerges();
+    expect(await c.wakesOf(other.ceo.id, LIVE_UNPLACED_REASON)).toHaveLength(0);
+    // Control: the home company was woken by that same sweep, once.
+    expect(await c.wakesOf(c.ceo.id, LIVE_UNPLACED_REASON)).toHaveLength(1);
+    expect(woke).toEqual([]);
   });
 });
 
