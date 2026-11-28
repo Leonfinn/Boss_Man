@@ -74,7 +74,13 @@ export type DeployWait = {
   windowUntil?: string;
   handoverSince?: string;
   quiet?: Quiet;
+  /** BOS-2862: opened by the wait itself for a server trial the host reported with no wait row (see adoptTrial). */
+  adopted?: boolean;
 };
+
+/** BOS-2862: the last server deploy whose trial already had its hold (`<to_commit>@<ended>`), so a lifted hold isn't opened again. */
+export const TRIAL_SEEN_KEY = "deploy_wait_trial_seen";
+const trialKey = (s: DeployStatus) => `${s.to_commit}@${s.ended}`;
 
 export type DeployWaitDeps = {
   headroom: () => Promise<Headroom | null>;
@@ -241,11 +247,44 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
     return next;
   }
 
+  const markSeen = (s: DeployStatus | null) =>
+    s?.target === "server" && s.result === "deployed"
+      ? db.insert(settings).values({ key: TRIAL_SEEN_KEY, value: trialKey(s) }).onConflictDoUpdate({ target: settings.key, set: { value: trialKey(s) } })
+      : undefined;
+
   /** After the host reports this request deployed: the standby window, or (a single server, no window) done. */
   async function afterDeployed(w: DeployWait) {
     const until = await deps.trialUntil();
-    if (until && Date.parse(until) > now().getTime()) await save({ ...w, phase: "window", windowUntil: until });
-    else await end("deployed; no standby window");
+    if (until && Date.parse(until) > now().getTime()) {
+      await save({ ...w, phase: "window", windowUntil: until });
+      await markSeen(await deps.status());
+    } else await end("deployed; no standby window");
+  }
+
+  /**
+   * BOS-2862: a server update the host put live, in its trial, with no wait row. Only an update that went through
+   * begin() had a row, so any other way in had no trial hold at all: on 28 Nov e071cf14 went live by the host deployer
+   * and three merge checks restarted on the company runner 35 to 50 s after the takeover. Ways in with no row: an
+   * approval held behind a runner update and sent later by self-deploy (releaseHeldServer), an approval whose row had
+   * ended (the build ran past its 45 minutes), or a request written to the host some other way. The hold follows the
+   * host's real trial instead: the window is opened here, with the end self-deploy reports (trialUntil, which already
+   * says no trial once the standby has stopped), and ends as any window does. TRIAL_SEEN_KEY keeps a hold the owner
+   * lifted, or one that already ran, from being opened again for the same deploy. A by-hand update
+   * (scripts/rebuild-live.sh) rebuilds the live colour in place and leaves no standby, so it has no trial to hold.
+   */
+  async function adoptTrial(): Promise<DeployWait | null> {
+    const s = await deps.status();
+    if (s?.target !== "server" || s.result !== "deployed") return null;
+    const [seen] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, TRIAL_SEEN_KEY));
+    if (seen?.value === trialKey(s)) return null;
+    const until = await deps.trialUntil();
+    if (!until || Date.parse(until) <= now().getTime()) return null;
+    const live = Number.isFinite(Date.parse(s.ended)) ? s.ended : now().toISOString();
+    const w: DeployWait = { decisionId: s.id || `trial:${s.to_commit}`, commit: s.to_commit, fromCommit: s.from_commit, approvedAt: live, phase: "window", deadline: until, minutes: WAIT_MINUTES, origin: "hand", windowUntil: until, adopted: true };
+    await save(w);
+    await markSeen(s);
+    deps.log?.(`deploy wait: ${short(s.to_commit)} is live in its trial with no wait; merge checks are held until ${until}`);
+    return w;
   }
 
   /** The wait kind a phase counts as, and when it began, for the ends in update-waits.ts. The window and hand-over have ends of their own below. */
@@ -310,7 +349,7 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
     /** One pass, every few seconds. // leader-only */
     async step(): Promise<DeployWait | null> {
       let w = await get();
-      if (!w) return null;
+      if (!w) return adoptTrial();
       const t = now();
       // BOS-2058: every phase has its own end (update-waits.ts), not one 3-hour cap that threw the update away. Past the
       // expected end the CEO is woken once (never the owner); past the end the update goes ahead, or, where going ahead is
@@ -413,7 +452,9 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
       }
 
       if (w.phase === "window") {
-        if (ours && (s.result === "rolled_back" || s.result === "failed")) {
+        // An adopted window may carry a made-up id (the host's status had none): its own commit identifies it then.
+        const mine = ours || (!!w.adopted && s?.target === "server" && s.to_commit === w.commit);
+        if (mine && s && (s.result === "rolled_back" || s.result === "failed")) {
           await end(`switched back in the window (${s.result})`);
           return null;
         }
