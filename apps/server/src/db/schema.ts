@@ -2530,6 +2530,9 @@ export const ownerHolds = pgTable(
 export const serverSizeReadings = pgTable("server_size_readings", {
   day: text("day").primaryKey(),
   dbBytes: bigint("db_bytes", { mode: "number" }).notNull(),
+  /** BOS-2918: the data disk's used and total bytes that day (null on rows from before, or when statfs could not be read). */
+  diskUsedBytes: bigint("disk_used_bytes", { mode: "number" }),
+  diskTotalBytes: bigint("disk_total_bytes", { mode: "number" }),
   recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

@@ -6,7 +6,7 @@ import type { Db } from "../db/client.js";
 import { companies, decisions, serverSizeReadings } from "../db/schema.js";
 import { limitCounts } from "../db/limit-counts.js";
 
-export const HEALTH_LIMITS = { warnPercent: 0.1, warnBytes: 5 * 1024 ** 3, growthWarn: 0.5, slowSeconds: 60 };
+export const HEALTH_LIMITS = { warnPercent: 0.1, warnBytes: 5 * 1024 ** 3, growthWarn: 0.5, slowSeconds: 60, diskDaysToFull: 30, diskGrowthWarn: 0.05 };
 const DAY_MS = 86_400_000;
 const gb = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GB`;
 const dayKey = (d: Date) => d.toISOString().slice(0, 10);
@@ -30,6 +30,9 @@ export type DataHealth = {
   database: { bytes: number | null; dayAgoBytes: number | null; weekAgoBytes: number | null; growthPercent7d: number | null };
   /** The last 14 daily readings, oldest first. */
   history: { day: string; bytes: number }[];
+  /** BOS-2918: the last 14 daily disk readings (days with one), oldest first, and the 7-day trend when a week-old reading exists. */
+  diskHistory: { day: string; usedBytes: number; totalBytes: number }[];
+  diskTrend: { perDayBytes: number; growthPercent7d: number; daysToFull: number | null } | null;
   limits: { statementTimeouts: number; poolFull: number; since: "last 24 hours (since the server started if less)" };
   slowQueries: { seconds: number; query: string }[];
   warnings: string[];
@@ -77,18 +80,54 @@ export function dataHealthService(db: Db, deps: { dataDir?: string; now?: () => 
   }
 
   /** Keeps today's reading (first one of the day wins) and returns the readings from `days` days ago and the day before. */
-  async function recordAndRead(bytes: number | null) {
+  async function recordAndRead(bytes: number | null, d: ReturnType<typeof disk>) {
     const at = now();
-    if (bytes !== null) await db.insert(serverSizeReadings).values({ day: dayKey(at), dbBytes: bytes, recordedAt: at }).onConflictDoNothing();
+    if (bytes !== null) {
+      await db
+        .insert(serverSizeReadings)
+        .values({ day: dayKey(at), dbBytes: bytes, diskUsedBytes: d ? d.totalBytes - d.freeBytes : null, diskTotalBytes: d ? d.totalBytes : null, recordedAt: at })
+        .onConflictDoNothing();
+    }
     const since = dayKey(new Date(at.getTime() - 13 * DAY_MS));
     const rows = await db.select().from(serverSizeReadings).where(gte(serverSizeReadings.day, since)).orderBy(desc(serverSizeReadings.day));
     const near = (days: number) => rows.find((r) => r.day === dayKey(new Date(at.getTime() - days * DAY_MS)))?.dbBytes ?? null;
     const history = rows.slice(0, 14).reverse().map((r) => ({ day: r.day, bytes: Number(r.dbBytes) }));
-    return { dayAgo: near(1), weekAgo: near(7), history };
+    const diskHistory = rows
+      .slice(0, 14)
+      .reverse()
+      .filter((r) => r.diskUsedBytes !== null && r.diskTotalBytes !== null)
+      .map((r) => ({ day: r.day, usedBytes: Number(r.diskUsedBytes), totalBytes: Number(r.diskTotalBytes) }));
+    const weekRow = rows.find((r) => r.day === dayKey(new Date(at.getTime() - 7 * DAY_MS)));
+    const diskWeekAgoUsed = weekRow && weekRow.diskUsedBytes !== null ? Number(weekRow.diskUsedBytes) : null;
+    return { dayAgo: near(1), weekAgo: near(7), history, diskHistory, diskWeekAgoUsed };
   }
 
-  function warningsFor(d: ReturnType<typeof disk>, bytes: number | null, weekAgo: number | null): string[] {
+  /** BOS-2918: the disk's 7-day rate, from today's used bytes against the reading 7 days ago. Null without a week-old reading. */
+  function diskTrend(d: ReturnType<typeof disk>, weekAgoUsed: number | null) {
+    if (!d || weekAgoUsed === null) return null;
+    const used = d.totalBytes - d.freeBytes;
+    const perDay = (used - weekAgoUsed) / 7;
+    return {
+      perDayBytes: perDay,
+      growthOfDisk7d: (used - weekAgoUsed) / d.totalBytes,
+      daysToFull: perDay > 0 ? d.freeBytes / perDay : null,
+    };
+  }
+
+  function warningsFor(d: ReturnType<typeof disk>, bytes: number | null, weekAgo: number | null, diskWeekAgoUsed: number | null = null): string[] {
     const out: string[] = [];
+    const trend = diskTrend(d, diskWeekAgoUsed);
+    if (d && trend) {
+      const fast = trend.growthOfDisk7d > HEALTH_LIMITS.diskGrowthWarn;
+      const soon = trend.daysToFull !== null && trend.daysToFull < HEALTH_LIMITS.diskDaysToFull;
+      if (fast || soon) {
+        const rate = `${gb(trend.perDayBytes)} a day`;
+        out.push(
+          `The server's disk is filling up: ${gb(diskWeekAgoUsed as number)} to ${gb(d.totalBytes - d.freeBytes)} used in 7 days (${rate}, ${(trend.growthOfDisk7d * 100).toFixed(0)}% of the disk)` +
+            (trend.daysToFull !== null ? `, full in about ${Math.floor(trend.daysToFull)} days at that rate.` : "."),
+        );
+      }
+    }
     if (d && d.freeBytes < Math.max(d.totalBytes * HEALTH_LIMITS.warnPercent, HEALTH_LIMITS.warnBytes)) {
       out.push(`The server's data disk is running low: ${gb(d.freeBytes)} free of ${gb(d.totalBytes)} (${d.freePercent.toFixed(0)}%).`);
     }
@@ -103,14 +142,17 @@ export function dataHealthService(db: Db, deps: { dataDir?: string; now?: () => 
     async read(): Promise<DataHealth> {
       const d = disk();
       const bytes = await dbBytes();
-      const { dayAgo, weekAgo, history } = await recordAndRead(bytes);
+      const { dayAgo, weekAgo, history, diskHistory, diskWeekAgoUsed } = await recordAndRead(bytes, d);
+      const trend = diskTrend(d, diskWeekAgoUsed);
       return {
+        diskHistory,
+        diskTrend: trend ? { perDayBytes: Math.round(trend.perDayBytes), growthPercent7d: Math.round(trend.growthOfDisk7d * 1000) / 10, daysToFull: trend.daysToFull === null ? null : Math.floor(trend.daysToFull) } : null,
         disk: d,
         database: { bytes, dayAgoBytes: dayAgo, weekAgoBytes: weekAgo, growthPercent7d: bytes !== null && weekAgo ? Math.round((bytes / weekAgo - 1) * 100) : null },
         history,
         limits: { ...limitCounts(now().getTime()), since: "last 24 hours (since the server started if less)" },
         slowQueries: await slowQueries(),
-        warnings: warningsFor(d, bytes, weekAgo),
+        warnings: warningsFor(d, bytes, weekAgo, diskWeekAgoUsed),
       };
     },
 
@@ -118,8 +160,8 @@ export function dataHealthService(db: Db, deps: { dataDir?: string; now?: () => 
     async checkWarnings(): Promise<number> {
       const d = disk();
       const bytes = await dbBytes();
-      const { weekAgo } = await recordAndRead(bytes);
-      const warnings = warningsFor(d, bytes, weekAgo);
+      const { weekAgo, diskWeekAgoUsed } = await recordAndRead(bytes, d);
+      const warnings = warningsFor(d, bytes, weekAgo, diskWeekAgoUsed);
       if (!warnings.length) return 0;
       let raised = 0;
       for (const c of await db.select({ id: companies.id }).from(companies)) {
