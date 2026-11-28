@@ -88,7 +88,7 @@ async function installPack(docker: Docker, cfg: LauncherConfig, slug: string, lo
   if (old) await docker.remove(old.Id).catch(() => undefined);
   // BOS-2803: make the pack volume with the install label (Docker would otherwise make it unlabelled on first mount). Making a
   // volume that exists is a no-op, so an older, unlabelled one stays as it is. Failing is not a reason to skip the install.
-  if (Object.keys(installLabels(cfg)).length) await docker.createVolume(claudePackVolumeOf(cfg),installLabels(cfg)).catch((err) => log(`couldn't label the Claude pack volume: ${String((err as Error)?.message ?? err)}`));
+  if (Object.keys(installLabels(cfg)).length) await docker.createVolume(claudePackVolumeOf(cfg), installLabels(cfg)).catch((err) => log(`couldn't label the Claude pack volume: ${String((err as Error)?.message ?? err)}`));
   let id: string;
   try {
     id = await docker.create(name, packInstallerSpec(cfg, slug));

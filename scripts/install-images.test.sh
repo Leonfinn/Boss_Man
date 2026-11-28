@@ -12,6 +12,9 @@
 # At the end it removes the install the way docs/35-install-from-images.md "Start again from nothing" says (BOS-2803) and fails if any
 # container labelled for its project, any runner or guard, or any <project>_ or pack volume remains. That removal takes every runner and
 # guard on the host, so the real install refuses to start on a host that already has some (INSTALL_ALLOW_SHARED_HOST=1 overrides).
+# BOS-2804: after the runner check it starts a second install (project "<project>b", own ports, front subnet and network) beside the
+# first, checks both answer and share no container name or pack volume, removes the second by its install label, and checks the first
+# and its runner are untouched.
 # SC2015: ok and bad only print and set a flag, so "test && ok || bad" cannot run both. SC2317: cleanup runs from the EXIT trap.
 # shellcheck disable=SC2015,SC2317
 set -uo pipefail
@@ -140,6 +143,8 @@ docker info >/dev/null 2>&1 || { bad "INSTALL_RELEASE_JSON is set but there is n
 # test-shell.sh scrubs the environment, so GITHUB_REPOSITORY is not set here; the updater's compose needs BOSSMAN_UPDATER_REPO.
 GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-example/boss-man}" scripts/render-image-env.sh "$INSTALL_RELEASE_JSON" ${INSTALL_REGISTRY:+"$INSTALL_REGISTRY"} > "$T/real.env" || { bad "images.env from release.json"; exit 1; }
 P="bminstall$$"
+P2="${P}b"
+second_up=0
 {
   cat "$T/real.env"
   # The updater only starts on a release number like 0.1.0 or 0.1.0-beta.1; the CI release.json says "ci". Later lines win.
@@ -176,6 +181,8 @@ guide_removal() {
 }
 cleanup() {
   rc=$?
+  # A second install that was started and not yet removed (the test stopped early) goes first, by its own label.
+  [ "$second_up" = 1 ] && remove_second
   guide_removal
   # The guide's two look-only listings, plus the runners and guards: all must be empty.
   left_c="$(docker ps -a --format '{{.Names}}' --filter "label=com.bossman.install=$P"; docker ps -a --format '{{.Names}}' --filter label=boss-man.launcher=1; docker ps -a --format '{{.Names}}' --filter label=boss-man.netguard=1)"
@@ -258,5 +265,59 @@ if [ "$run_move" = 1 ]; then
   echo "--- helper move on the live stack (BOS-1227 criterion 4)"
   scripts/helper-move-live.sh "$P" "$T/run.env" || bad "helper move on the live stack"
 fi
+
+# BOS-2804 criterion 3: a second install, under another project name, runs beside the first on this Docker host. It has its own ports,
+# its own front subnet and its own runner network. Both answer; no container name, install label or pack volume is shared; and removing
+# the second by its install label leaves the first (and the runner it started) running and untouched.
+echo "--- second install beside the first (BOS-2804)"
+base_port="${INSTALL_HOST_PORT:-31100}"; base_portal="${INSTALL_PORTAL_PORT:-31101}"
+{
+  cat "$T/run.env"
+  echo "BOSSMAN_HOST_PORT=$((base_port + 10))"
+  echo "BOSSMAN_PORTAL_HOST_PORT=$((base_portal + 10))"
+  echo "BOSSMAN_RUNNER_NETWORK=${P2}_default"
+  echo "BOSSMAN_FRONT_SUBNET=172.30.1.16/28"
+  echo "BOSSMAN_FRONT_RANGE=172.30.1.24/29"
+  echo "BOSSMAN_FRONT_PROXY_IP=172.30.1.18"
+} > "$T/run2.env"
+dc2() { docker compose -p "$P2" --env-file "$T/run2.env" -f docker-compose.images.yml --profile images "$@"; }
+p_before="$(docker ps -aq --filter "label=com.bossman.install=$P" | sort | tr '\n' ' ')"
+second_up=1
+dc2 run --rm setup > "$T/setup-b.log" 2>&1 || { cat "$T/setup-b.log"; bad "setup of the second install"; exit 1; }
+dc2 up -d || { dc2 logs --tail 40; bad "up of the second install"; exit 1; }
+deadline=$((SECONDS + ${INSTALL_WAIT_SECONDS:-300}))
+until curl -fs -o /dev/null "http://127.0.0.1:$((base_port + 10))/api/health"; do
+  [ "$SECONDS" -lt "$deadline" ] || { docker ps -a --format '{{.Names}} {{.Status}}' | tr '\n' ';'; echo; for c in "${P2}-updater" "${P2}-launcher" "${P2}-server-blue"; do echo "--- $c"; docker logs --tail 12 "$c" 2>&1 | cut -c1-260; done; bad "the second install did not answer /api/health in time"; exit 1; }
+  sleep 3
+done
+ok "the second install answers /api/health beside the first"
+curl -fs -o /dev/null "http://127.0.0.1:${base_port}/api/health" && ok "the first install still answers" || bad "the first install stopped answering after the second started"
+names2="$(docker ps -a --filter "label=com.bossman.install=$P2" --format '{{.Names}}' | sort | tr '\n' ' ')"
+for want in "${P2}-updater" "${P2}-launcher" "${P2}-server-blue"; do case " $names2" in *" $want "*) ok "$want exists and carries the second install's label" ;; *) bad "$want is missing or has no label of the second install (found: $names2)" ;; esac; done
+shared="$(comm -12 <(docker ps -a --filter "label=com.bossman.install=$P" --format '{{.Names}}' | sort) <(docker ps -a --filter "label=com.bossman.install=$P2" --format '{{.Names}}' | sort))"
+[ -z "$shared" ] && ok "the two installs share no container name" || bad "container names in both installs: $shared"
+[ -n "$(docker volume ls -q --filter "name=^${P}_claude-pack\$")" ] && [ -n "$(docker volume ls -q --filter "name=^${P2}_claude-pack\$")" ] && ok "each install has its own pack volume" || bad "pack volumes: ${P}_claude-pack and ${P2}_claude-pack must both exist"
+[ -z "$(docker volume ls -q --filter name=boss-man-claude-pack)" ] && ok "no shared boss-man-claude-pack volume was made" || bad "a shared boss-man-claude-pack volume exists"
+# Remove the second install by its label, then its compose project and volumes (the same order as the guide, scoped to one install).
+remove_second() {
+  {
+    docker ps -aq --filter "label=com.bossman.install=$P2" | xargs -r docker rm -f
+  } >> "$T/removal2.log" 2>&1
+  dc2 down -v --remove-orphans > "$T/down2.log" 2>&1
+  {
+    docker volume ls -q --filter "label=com.bossman.install=$P2" | xargs -r docker volume rm
+    docker volume ls -q --filter "name=^${P2}_" | xargs -r docker volume rm
+  } >> "$T/removal2.log" 2>&1
+  second_up=0
+}
+remove_second
+left2="$(docker ps -a --format '{{.Names}}' --filter "label=com.bossman.install=$P2"; docker volume ls -q --filter "name=^${P2}_"; docker volume ls -q --filter "label=com.bossman.install=$P2")"
+[ -z "$left2" ] && ok "removing the second install left nothing of it behind" || bad "second install left: ${left2//$'\n'/ }"
+p_after="$(docker ps -aq --filter "label=com.bossman.install=$P" | sort | tr '\n' ' ')"
+[ "$p_before" = "$p_after" ] && ok "the first install's containers are the same after the second was removed" || bad "the first install's containers changed: before [$p_before] after [$p_after]"
+[ "$(docker inspect --format '{{.State.Running}}' boss-man-runner-smoke)" = true ] && ok "the first install's runner still runs" || bad "the first install's runner stopped when the second was removed"
+curl -fs -o /dev/null "http://127.0.0.1:${base_port}/api/health" && ok "the first install still answers after the second was removed" || bad "the first install stopped answering after the second was removed"
+[ -n "$(docker volume ls -q --filter "name=^${P}_claude-pack\$")" ] && ok "the first install's pack volume is untouched" || bad "the first install's pack volume is gone"
+
 call DELETE /runners/smoke >/dev/null 2>&1 || true
 exit "$fail"
