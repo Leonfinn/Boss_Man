@@ -86,6 +86,7 @@ describe("Settings → Runner during a planned swap (BOS-382 slice D)", () => {
       if (url.endsWith("/api/runner-report")) return json({ live: [live], update: null });
       if (url.endsWith("/api/maintenance")) return json({ on: false, last: null });
       if (url.endsWith("/api/self-deploy")) return json({ enabled: false });
+      if (url.endsWith("/api/release-watch")) return json({ active: false });
       return json([]);
     }));
     render(<SelfDeploy go={() => {}} />);
@@ -93,6 +94,27 @@ describe("Settings → Runner during a planned swap (BOS-382 slice D)", () => {
     expect(screen.getByRole("button", { name: "Update runners (finish runs first)" })).toBeTruthy();
     // The setup steps are in docs/30 (BOS-1572); docs/09 is how the deployer works, not how to install it.
     expect(screen.getByRole("link", { name: "how to set it up" }).getAttribute("href")).toMatch(/30-in-app-updates\.md$/);
+  });
+
+  // BOS-2821 (F27): an image install has the updater and no host deployer, so none of the build-from-source words apply.
+  it("on an image install with no host deployer it shows the release notice, one plain line and the update guide, and no deployer text or button", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (url.endsWith("/api/runner-report")) return json({ live: [live], update: null });
+      if (url.endsWith("/api/maintenance")) return json({ on: false, last: null });
+      if (url.endsWith("/api/self-deploy")) return json({ enabled: false });
+      if (url.endsWith("/api/release-watch")) return json({ active: true, current: "202611280514", channel: "stable", enabled: true, ntfy: false, checkedAt: null, couldntCheck: false, available: null, install: { linked: true, updater: null } });
+      return json([]);
+    }));
+    render(<SelfDeploy go={() => {}} />);
+    const line = await screen.findByTestId("updates-image-line");
+    expect(line.textContent).toBe("You run 202611280514. New releases appear here; nothing to do now.");
+    expect(screen.queryByText(/this install doesn't have one/)).toBeNull();
+    expect(screen.queryByText(/scripts\/update-runner\.sh/)).toBeNull();
+    expect(screen.queryByText(/host deployer/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Update runners (finish runs first)" })).toBeNull();
+    // The release notice (BOS-2713) is there, and the "What happens in an update?" guide link follows the plain line.
+    expect(screen.getByTestId("release-notice")).toBeTruthy();
+    expect(screen.getByRole("link", { name: /What happens in an update\?/ }).getAttribute("href")).toMatch(/\/guides\/how-updates-work$/);
   });
 
   it("the fleet list tags a swapping runner Updating and a frozen one Paused", async () => {
