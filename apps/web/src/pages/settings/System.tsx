@@ -96,6 +96,7 @@ export function DbHistory({ history }: { history: { day: string; bytes: number }
     <details data-testid="health-db-history" style={{ fontSize: 14, marginTop: 6 }}>
       <summary>Database size, last 14 days</summary>
       {rows.length < 14 && <p className="muted" style={{ margin: "4px 0" }}>{rows.length === 1 ? "1 day recorded so far" : `${rows.length} days recorded so far`}</p>}
+      <div style={{ overflowX: "auto" }}>
       <table style={{ borderCollapse: "collapse" }}>
         <tbody>
           {rows.map((r, i) => {
@@ -113,6 +114,7 @@ export function DbHistory({ history }: { history: { day: string; bytes: number }
           })}
         </tbody>
       </table>
+      </div>
     </details>
   );
 }
@@ -130,6 +132,7 @@ export function DiskHistory({ history, trend }: { history: { day: string; usedBy
         </p>
       )}
       {rows.length < 14 && <p className="muted" style={{ margin: "4px 0" }}>{rows.length === 1 ? "1 day recorded so far" : `${rows.length} days recorded so far`}</p>}
+      <div style={{ overflowX: "auto" }}>
       <table style={{ borderCollapse: "collapse" }}>
         <tbody>
           {rows.map((r, i) => {
@@ -146,6 +149,7 @@ export function DiskHistory({ history, trend }: { history: { day: string; usedBy
           })}
         </tbody>
       </table>
+      </div>
     </details>
   );
 }
@@ -165,7 +169,7 @@ export function ServerHealth() {
           {(v.warnings ?? []).map((w) => (
             <p key={w} className="error" role="alert">{w}</p>
           ))}
-          <ul style={{ fontSize: 14, margin: 0, paddingLeft: 18 }}>
+          <ul style={{ fontSize: 14, margin: 0, paddingLeft: 18, minWidth: 0 }}>
             <li data-testid="health-disk">Data disk: {v.disk ? `${healthGb(v.disk.freeBytes)} free of ${healthGb(v.disk.totalBytes)} (${v.disk.freePercent.toFixed(0)}% free)` : "not available"}<DiskHistory history={v.diskHistory} trend={v.diskTrend} /></li>
             <li data-testid="health-db">
               Database: {healthGb(v.database.bytes)}. 1 day ago {healthGb(v.database.dayAgoBytes)}, 7 days ago {healthGb(v.database.weekAgoBytes)}

@@ -53,10 +53,20 @@ const diskHistory = days.map((day, i) => ({ day, usedBytes: (117 + i * 9) * GB, 
 const trend = { perDayBytes: 9 * GB, growthPercent7d: 12.6, daysToFull: 25 };
 
 const html = `<!doctype html><html><head><meta charset="utf-8"><style>${css}</style></head><body><main class="main">${renderToStaticMarkup(
-  <>
-    <DbHistory history={dbHistory} />
-    <DiskHistory history={diskHistory} trend={trend} />
-  </>,
+  // The same card and list the Server health box renders (Section in settings/shared.tsx, ServerHealth in System.tsx).
+  <section className="card" data-testid="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+    <h2 style={{ fontSize: 17, fontWeight: 600 }}>Server health</h2>
+    <ul style={{ fontSize: 14, margin: 0, paddingLeft: 18, minWidth: 0 }}>
+      <li>
+        Data disk
+        <DiskHistory history={diskHistory} trend={trend} />
+      </li>
+      <li>
+        Database
+        <DbHistory history={dbHistory} />
+      </li>
+    </ul>
+  </section>,
 )}</main></body></html>`;
 
 const read = () => {
@@ -69,8 +79,12 @@ const read = () => {
     diskText: disk.innerText,
     trendText: (disk.querySelector('[data-testid="health-disk-trend"]') as HTMLElement).innerText,
     rows: disk.querySelectorAll("tr").length,
-    diskBelowDb: diskBox.top >= dbBox.bottom - 0.5,
+    diskBelowDb: dbBox.top >= diskBox.bottom - 0.5,
     diskRight: diskBox.right,
+    dbRight: dbBox.right,
+    cardRight: (document.querySelector('[data-testid="card"]') as HTMLElement).getBoundingClientRect().right,
+    tableRights: [...document.querySelectorAll("details table")].map((t) => t.getBoundingClientRect().right),
+    wrapScrolls: [...document.querySelectorAll("details table")].every((t) => getComputedStyle(t.parentElement as HTMLElement).overflowX === "auto"),
     pageWidth: document.documentElement.clientWidth,
     scrollOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
   };
@@ -84,7 +98,7 @@ const devices = [
 
 describe.skipIf(!browser)("server health disk line in a real browser (BOS-2918)", () => {
   for (const d of devices) {
-    it(`${d.name}: the 14-day disk table follows the database table and fits the page`, async () => {
+    it(`${d.name}: the 14-day disk and database tables sit one above the other and fit inside the card`, async () => {
       const page = await browser!.newPage({ viewport: d.viewport, deviceScaleFactor: d.deviceScaleFactor, hasTouch: d.hasTouch, isMobile: d.isMobile });
       try {
         await page.setContent(html, { waitUntil: "load" });
@@ -93,7 +107,10 @@ describe.skipIf(!browser)("server health disk line in a real browser (BOS-2918)"
         expect(got.trendText).toContain("full in about 25 days");
         expect(got.rows).toBe(14);
         expect(got.diskBelowDb).toBe(true);
-        expect(got.diskRight).toBeLessThanOrEqual(got.pageWidth + 0.5);
+        expect(got.diskRight).toBeLessThanOrEqual(got.cardRight + 0.5);
+        expect(got.dbRight).toBeLessThanOrEqual(got.cardRight + 0.5);
+        expect(got.cardRight).toBeLessThanOrEqual(got.pageWidth + 0.5);
+        expect(got.wrapScrolls).toBe(true);
         expect(got.scrollOverflow).toBeLessThanOrEqual(1);
         const path = await shotPath(d.name);
         if (path) await page.screenshot({ path, fullPage: true });
