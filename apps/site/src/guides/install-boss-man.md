@@ -55,7 +55,7 @@ The image install has not yet been run from start to finish on a real machine fo
 | Preview | Docker Desktop 4.60 or newer on macOS and Windows. Not yet proven on a real machine. Docker Desktop's enhanced container isolation must be off, or the Boss Man images allowed. |
 | Not yet | Podman, rootless Docker, Docker Desktop before 4.60, Proxmox LXC containers (use a full virtual machine), and 32-bit ARM (use a 64-bit OS). |
 
-Boss Man needs the Linux kernel for two safety features: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. On a platform outside the first row, Boss Man refuses to run agents unless both are proven on that machine, or you choose otherwise in **Settings → Server and runner**. Settings shows whether each one is working: the network guard under **Settings → Server and runner → This server**, and the agent fence under **Settings → Permissions → Agent fence**.
+Boss Man needs the Linux kernel for two safety features: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. On a platform outside the first row, Boss Man refuses to run agents unless both are proven on that machine, or you choose otherwise in **Settings → Server and runner**. **Settings → Permissions → Agent fence** shows whether each one is working. What each one blocks, platform by platform, is in [What keeps agents fenced in](/guides/what-keeps-agents-fenced-in).
 
 ### 1. Get the files
 
@@ -105,17 +105,7 @@ docker compose --env-file images.env -f docker-compose.images.yml run --rm setup
 
 This writes the master key into a Docker volume called `config`, and the database password into one called `db-secret`. It is safe to run again: it never replaces a file that exists.
 
-**Back up both volumes**, and keep the copies off this machine. Without the master key, Boss Man cannot read your stored secrets again. Without the database password, the server cannot reach its database. After step 5, run these two in the same folder (they use the default project name `boss-man`; not yet run on a real install):
-
-```sh Copy the two key volumes into one file
-docker run --rm -v boss-man_config:/from/config:ro -v boss-man_db-secret:/from/db-secret:ro -v "$PWD":/to pgvector/pgvector:0.8.7-pg17-bookworm tar czf /to/boss-man-keys.tgz -C /from .
-```
-
-```sh Copy the database backups into a folder
-docker compose --env-file images.env -f docker-compose.images.yml cp backup:/backups/. ./boss-man-backups
-```
-
-Boss Man makes a database backup every day by itself (the newest 14 are kept on this machine, so copy them off now and then). Move `boss-man-keys.tgz` and the `boss-man-backups` folder to another machine or disk, and treat the keys file like a password. To restore onto a fresh install, follow "Daily database backup, copy-off and restore" in [`docs/35-install-from-images.md`](@repo/blob/main/docs/35-install-from-images.md).
+**Back up both volumes**, and keep the copies off this machine. Without the master key, Boss Man cannot read your stored secrets again. Without the database password, the server cannot reach its database.
 
 ### 4. Choose who can reach it
 
@@ -162,6 +152,64 @@ The runner image does not contain Claude Code. The first time a runner starts, B
 - **TrueNAS SCALE.** Use the machine's shell, put the two files in a folder on a dataset, and follow the steps. First check that `docker compose version` works, because TrueNAS versions differ in how they run Docker. Not yet run on a real TrueNAS machine for this install. For snapshots and backups, see [`docs/06-install-truenas.md`](@repo/blob/main/docs/06-install-truenas.md).
 - **Docker Desktop (preview).** Follow the steps in a terminal. Not tried yet.
 
+### Start again from nothing
+
+This deletes everything this install made, including your company data, your keys and the database. Back up first if you want to keep anything. Do this only on a machine that runs just this install: step 2 removes every runner and network guard on the machine, not only this install's. `boss-man` below is the project name unless you set another with `-p` or `COMPOSE_PROJECT_NAME`; use your own name in its place. Run each command in the folder with `images.env`. A command that finds nothing to remove prints nothing, and that is fine.
+
+The order matters: the updater and launcher started some containers that Compose does not know, and they hold your volumes, so they go first.
+
+1. Remove every container this install owns:
+
+```sh Run in the folder with images.env
+docker ps -aq --filter label=com.bossman.install=boss-man | xargs -r docker rm -f
+```
+
+2. Remove the runners, then the network guards:
+
+```sh Run in the folder with images.env
+docker ps -aq --filter label=boss-man.launcher=1 | xargs -r docker rm -f
+```
+
+```sh Run in the folder with images.env
+docker ps -aq --filter label=boss-man.netguard=1 | xargs -r docker rm -f
+```
+
+3. Remove what Compose knows, with its volumes:
+
+```sh Run in the folder with images.env
+docker compose -f docker-compose.images.yml --env-file images.env down -v --remove-orphans
+```
+
+4. Remove the Claude pack volume. The second command catches one an older install made without the label:
+
+```sh Run in the folder with images.env
+docker volume ls -q --filter label=com.bossman.install=boss-man | xargs -r docker volume rm
+```
+
+```sh Run in the folder with images.env
+docker volume ls -q --filter name=boss-man-claude-pack | xargs -r docker volume rm
+```
+
+Compose can leave the `config` and `data` volumes behind, so remove whatever is still named for the project (`boss-man_`, or your own project name):
+
+```sh Run in the folder with images.env
+docker volume ls -q --filter name=^boss-man_ | xargs -r docker volume rm
+```
+
+5. Check nothing is left. Both commands only list, and both must print nothing:
+
+```sh Run in the folder with images.env
+docker ps -a --format '{{.Names}}' --filter label=com.bossman.install=boss-man
+```
+
+```sh Run in the folder with images.env
+docker volume ls -q --filter name=boss-man
+```
+
+If either prints a name, run `docker ps -a` and remove that container with `docker rm -f` and its name, then repeat steps 3 to 5.
+
+Not yet confirmed on a real host as of 2026-11-27; the release install test runs these same steps after each real install.
+
 ### Updating to a new release
 
 Nothing updates by itself. Take a release from Boss Man's own update screen: the updater checks the signed release, downloads every image of it by digest, backs up the database, switches the server over, watches it for 15 minutes (going back by itself if it fails), and then moves the rest of the release. Your data and keys stay, because they are in volumes.
@@ -189,7 +237,7 @@ The second option: build every image on your own machine from the code. Use it i
 - an AI account: a Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic. A Claude Pro or Max plan is the easiest start, because the CEO is a Claude Code agent unless you change it. You pay for this account. Boss Man itself is free.
 - a computer with a web browser on the same network
 
-Boss Man needs Linux because two safety features use the Linux kernel: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. Settings shows whether each one is working on your machine: the network guard under **Settings → Server and runner → This server**, and the agent fence under **Settings → Permissions → Agent fence**.
+Boss Man needs Linux because two safety features use the Linux kernel: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. **Settings → Permissions → Agent fence** shows whether each one is working on your machine. See [What keeps agents fenced in](/guides/what-keeps-agents-fenced-in).
 
 Mac and Windows: not supported yet for this install, but we're testing Docker Desktop. On a Mac with Apple silicon, the agent fence already works under Docker Desktop. The network guard isn't proven there yet, and Windows hasn't been tested. For now, use a Linux machine.
 

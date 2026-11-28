@@ -16,7 +16,7 @@ The top of each wizard page says which step you are on, for example "Step 2 of 6
 
 ## Your company
 
-Type a **Company name** and a sentence or two under **What it's for**, for example "We write market research reports for small shops". The CEO plans the work from this. Choose **Create the company**, then **Next**.
+Type a **Company name** and a sentence or two under **What it's for**, for example "We write market research reports for small shops". The CEO, the agent in charge of your company, plans the work from this. See [The CEO](/guides/the-ceo). Choose **Create the company**, then **Next**.
 
 Boss Man creates the company's CEO agent and a paused Wiki Maintainer. If the launcher is on (the image install always turns it on, and the build install sets `BOSSMAN_LAUNCHER=1` in `.env`, as [Install Boss Man](/guides/install-boss-man#build-from-source) shows), Boss Man also starts the company's runner. If it is off, you start the runner yourself at the runner step.
 
@@ -27,13 +27,13 @@ Pick one:
 - **Documents, research and writing**: reports, research, plans and other written work. The agents write their results in your company's **Wiki**. This is the default.
 - **Code in a git repository**: the agents change code in a repository on GitHub or Gitea.
 
-A project is one stream of work with its own task board, such as "Client reports". Type a **Project name** and choose **Add the project**. You can change your choice later in **Settings**.
+A project is one stream of work with its own task board, such as "Client reports". Type a **Project name** and choose **Add the project**. You can change your choice later in **Settings**. For what a documents company sees and skips, see [Using Boss Man for work that isn't code](/guides/work-that-isnt-code).
 
-If you picked code, the project also needs its repository. Paste its address into **Git repo**, for example `https://github.com/you/repo.git`. Under **When work is approved**, choose **Merge into the default branch** or **Open a pull request**. Choose the pull request option if your default branch only accepts pull requests.
+If you picked code, the project also needs its repository. Paste its address into **Git repo**, for example `https://github.com/you/repo.git`. Under **When work is approved**, choose **Merge into the default branch** or **Open a pull request**. Choose the pull request option if your default branch only accepts pull requests. New to repos, branches and pull requests? See [Code words for owners](/guides/code-words).
 
 ## The runner
 
-The runner is your agents' workspace: a separate, locked-down space where they work. Wait for it to say **Connected**. This can take up to a minute. If it says **Not connected**, choose **Start the runner**.
+The runner is your agents' workspace: a separate, locked-down space where they work. Wait for it to say **Connected**. This can take up to a minute. If it says **Not connected**, choose **Start the runner**. To find out more, see [Your agents' workspace (the runner)](/guides/the-runner).
 
 ## Claude
 
@@ -52,11 +52,11 @@ The wizard shows this step only if you picked **Code in a git repository**. A gi
 - On GitHub, make a fine-grained personal access token for only the repositories this company works on, with Contents, Pull requests, Workflows and Actions set to read and write. The wizard's **How do I get a token?** lists every step.
 - On Gitea, open **Settings > Applications > Generate New Token** and give it repository Read and Write.
 
-Paste it, save, and choose **Check the token against** your project. You should see "The token can read and push to the repo."
+Paste it, save, and choose **Check the token against** your project. You should see "The token can read and push to the repo." Step-by-step help and what to do when it expires are in [Git token](/guides/checks-and-check-workers#git-token).
 
 ## Checks before merging (code companies only)
 
-The wizard shows this step only if you picked **Code in a git repository**. A check is an automatic test Boss Man runs on finished code before it joins the project. Under **Before merging, Boss Man will**, choose the command Boss Man runs before it merges approved work. Boss Man suggests one from your repository. Choose **Re-detect** if the list looks generic.
+The wizard shows this step only if you picked **Code in a git repository**. A check is an automatic test Boss Man runs on finished code before it joins the project. Under **Before merging, Boss Man will**, choose the command Boss Man runs before it merges approved work. Boss Man suggests one from your repository. Choose **Re-detect** if the list looks generic. To find out whether you need a check at all, see [Checks and check workers](/guides/checks-and-check-workers).
 
 ## What pays for the CEO
 
@@ -64,7 +64,7 @@ If you saved a Claude sign-in code at the Claude step, this step is already done
 
 ## A first task
 
-A task is one piece of work for an agent. To see how tasks differ from features, see [Features, tasks and sub-tasks](/guides/how-boss-man-works#features-tasks-and-sub-tasks).
+A task is one piece of work for an agent. For how to write a good one, with examples, see [Tasks and the board](/guides/tasks-and-the-board). To see how tasks differ from features, see [Features, tasks and sub-tasks](/guides/how-boss-man-works#features-tasks-and-sub-tasks).
 
 Type a **Title** and, under **Description**, say what you want back. For example:
 
@@ -93,6 +93,8 @@ The CEO needs someone to hand work to.
 :::worked
 The agent shows on the Agents page with a **Pause** button. To change it later, open the ⋯ menu and choose **Edit**.
 :::
+
+To choose the rest of your team, or to read the CEO's team-plan card, see [Hiring your first team](/guides/hiring-your-first-team).
 
 ## Add more tasks and features
 

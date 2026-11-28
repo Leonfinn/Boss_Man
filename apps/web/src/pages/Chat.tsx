@@ -5,7 +5,7 @@ import { Fragment, useEffect, useLayoutEffect, useRef, useState, type FormEvent,
 import { api, type Company } from "../api";
 import { download } from "../csv";
 import { NoCompany } from "../components/NoCompany";
-import { NEWLINE_KEY_HINT, useCoarsePointer, usePoll } from "../hooks";
+import { NEWLINE_KEY_HINT, useCoarsePointer, useHasCode, usePoll } from "../hooks";
 import { useDraft } from "../drafts";
 import { when } from "./Runs";
 import { atTime } from "./settings/updates";
@@ -191,6 +191,7 @@ export function RememberThis({ companyId, text }: { companyId: string; text: str
 }
 
 export function ChatPage({ companies, companyId, agentId, messageId, maintenance = null, go, onChanged }: { companies: Company[]; companyId: string | undefined; agentId: string | undefined; /** BOS-2192: a search result's message, scrolled to once loaded. */ messageId?: string; maintenance?: Maintenance | null; go: (to: string) => void; onChanged: () => void }) {
+  const hasCode = useHasCode();
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
   const threads = usePoll((signal) => (company ? api<Thread[]>(`/api/companies/${company.id}/chat/threads`, { signal }) : Promise.resolve([])), 5000, company?.id ?? "none");
   const team = threads.data ?? [];
@@ -655,7 +656,7 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
                 {olderThanShown && <p className="muted">The message you searched for is older than the messages shown here, so the chat opens at its newest. Use "Load older messages" at the top to go back to it.</p>}
                 {items.length === 0 && chat.data && (
                   <p className="muted">
-                    {current.role === "ceo" || current.duty === "assistant" ? 'Try: "Add rate limiting to the login API before the beta, after the auth refactor."' : `Ask ${current.name} about their work, or for something to go on the board.`}
+                    {current.role === "ceo" || current.duty === "assistant" ? (hasCode ? 'Try: "Add rate limiting to the login API before the beta, after the auth refactor."' : 'Try: "Plan this month\'s client reports: who needs one, what goes in it, and when each is due."') : `Ask ${current.name} about their work, or for something to go on the board.`}
                   </p>
                 )}
                 {items.map((m, i) => {

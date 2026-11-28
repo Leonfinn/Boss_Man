@@ -11,7 +11,7 @@ import { RiskHelp, useRiskTiers, type RiskTiers } from "../components/RiskHelp";
 import { State } from "../components/State";
 import { Loader } from "../components/Loader";
 import { statusLineText, type StatusLine } from "./MergeQueue";
-import { hashQuery, usePoll } from "../hooks";
+import { hashQuery, useHasCode, usePoll } from "../hooks";
 import { useWheelToPage } from "../wheel-to-page";
 import { DRAFT_CHANGED, clearDraft, readDraftJson, saveFormDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
@@ -191,6 +191,7 @@ type FormDraft = { mode: "feature" | "task"; title: string; body: string; risk: 
 
 /** Add form: a new feature (the top-level card) or a new task, optionally part of a feature. */
 function AddForm({ companyId, projectId, initial, agents, features, goals, tiers, hasCeo, onAddTask, onAddFeature, onGrill, onClose }: { companyId: string; projectId: string; initial: Adding; agents: Company["agents"]; features: Feature[]; goals: Tree; tiers: RiskTiers; hasCeo: boolean; onAddTask: (t: NewTicketInput) => Promise<unknown>; onAddFeature: (f: NewFeatureInput) => Promise<unknown>; onGrill: (d: { kind: "task" | "feature"; title: string; description: string | null }) => Promise<unknown>; onClose: () => void }) {
+  const hasCode = useHasCode();
   const blank = { title: "", body: "", risk: "none" as Risk | "none", assignee: "", feature: initial.featureId, plan: hasCeo, goal: { objectiveId: null, milestoneId: null } as GoalLink, criteria: "", after: new Set<number>() };
   const draftKey = (mode: "feature" | "task") => `new-${mode}/${companyId}/${projectId}`;
   // Restoring is worked out once, before the first save, or the save would write the blank form over it.
@@ -356,7 +357,7 @@ function AddForm({ companyId, projectId, initial, agents, features, goals, tiers
           id="nt-body"
           label={isFeature ? "What problem does it solve, and for whom?" : "Description"}
           rows={6}
-          placeholder={isFeature ? "" : "What should be done, and what counts as finished."}
+          placeholder={isFeature ? "" : hasCode ? "What should be done, and what counts as finished." : "What should be done, and what counts as finished. For example: plan this month's client reports."}
           value={form.body}
           onChange={(text) => setForm({ ...form, body: text })}
           onPaste={img.onPaste}
@@ -880,6 +881,7 @@ function TicketCard({ sameAs, waiters, t, mine, merging, who, name, prefix, tier
 export function Board({ companies, projectId, subpage, go, onCompaniesChanged, decisionsOpen }: { companies: Company[]; projectId: string | undefined; subpage?: string; go: (to: string) => void; onCompaniesChanged: () => void; /** The Decisions badge's figure, so the board can say how many open questions hold no task. */ decisionsOpen?: number | null }) {
   // The wheel over the sideways board must scroll the page even when the hand adds a little sideways movement (BOS-1915).
   const boardScrollRef = useWheelToPage();
+  const hasCode = useHasCode();
   // BOS-2828: columns that run off the right edge say so, until the owner has scrolled to the last one.
   const [moreRight, setMoreRight] = useState(false);
   useEffect(() => {
@@ -1059,9 +1061,9 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged, d
   const progressCol = cols.find((c) => c.systemState === "in_progress");
   const readyCol = cols.find((c) => c.systemState === "ready");
   const standing = {
-    inProgress: (progressCol?.tickets ?? []).filter((t) => !t.waitingOnOwner && !t.wipExempt && passes(t)).length,
+    inProgress: (progressCol?.tickets ?? []).filter((t) => !t.waitingOnOwner && !t.wipExempt && !t.recurring && !t.ownCheck && passes(t)).length,
     nextUp: (readyCol?.tickets ?? []).filter((t) => t.nextUp && passes(t)).length,
-    beingChecked: lanes.find((l) => l.checking)?.tickets.filter(passes).length ?? 0,
+    beingChecked: (lanes.find((l) => l.checking)?.tickets.filter(passes).length ?? 0) + (progressCol?.tickets ?? []).filter((t) => !t.waitingOnOwner && !t.wipExempt && !t.recurring && t.ownCheck && passes(t)).length,
     watching: lanes.find((l) => l.liveCheck)?.tickets.filter(passes).length ?? 0,
   };
   // BOS-1910: every shown card the watchdog has handed on, in lane order; the strip links to the first.
@@ -1432,11 +1434,11 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged, d
                 ) : merging ? (
                   <header className="lane-head">
                     <div className="lane-title">
-                      <h2 id="lane-merging">Approved, merging</h2>
+                      <h2 id="lane-merging">{hasCode ? "Approved, merging" : "Approved"}</h2>
                       <span className="mono">{shown.length}</span>
                     </div>
                     <span className="lane-hint">
-                      Every reviewer approved. Boss Man checks and merges these itself. <a href={`#/merge-queue/${current?.companyId ?? ""}`}>See the merge queue</a>
+                      {hasCode ? <>Every reviewer approved. Boss Man checks and merges these itself. <a href={`#/merge-queue/${current?.companyId ?? ""}`}>See the merge queue</a></> : "Every reviewer approved."}
                     </span>
                   </header>
                 ) : held ? (
@@ -1504,7 +1506,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged, d
                     </button>
                   </p>
                 ) : (
-                  shown.length === 0 && <p className="lane-empty">{merging ? (heldCount > 0 ? `Nothing is merging right now. ${heldCount === 1 ? "1 approved task is" : `${heldCount} approved tasks are`} held, waiting: see "Passed, held" next.` : "Nothing approved is waiting to merge.") : (EMPTY_HINT[col.systemState] ?? "No tasks here.")}</p>
+                  shown.length === 0 && <p className="lane-empty">{merging ? (heldCount > 0 ? `Nothing is merging right now. ${heldCount === 1 ? "1 approved task is" : `${heldCount} approved tasks are`} held, waiting: see "Passed, held" next.` : hasCode ? "Nothing approved is waiting to merge." : "Nothing approved yet.") : (EMPTY_HINT[col.systemState] ?? "No tasks here.")}</p>
                 )}
                 {done ? (
                   <>

@@ -183,6 +183,8 @@ export function Sidebar(props: {
   companyTallies?: Record<string, { open: number; waiting: number }>;
   unread: number;
   feedback: number;
+  /** BOS-2819: false for a company with no code project: no Merge queue row. Absent means true. */
+  hasCode?: boolean;
   mergeWaiting: number;
   mergeStuck: number;
   /** Kept for the callers; the browser-notifications button now sits on the Notifications page (BOS-1506). */
@@ -351,7 +353,7 @@ export function Sidebar(props: {
         {BLOCKS.map((block, bi) => (
           <section key={bi} aria-label={["Overview", "Work", "Company"][bi]}>
             <ul>
-              {block.map((entry) => {
+              {block.filter((entry) => props.hasCode !== false || isGroup(entry) || entry.id !== "merge-queue").map((entry) => {
                 if (isGroup(entry)) {
                   const open = !panelMode && openGroups.includes(entry.group);
                   const shown = panelMode && panel?.id === entry.group;

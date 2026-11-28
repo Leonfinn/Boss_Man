@@ -286,6 +286,8 @@ export type Ticket = {
   dueDate: string | null;
   /** Why this in-progress ticket doesn't count towards the WIP limit; null when it counts (BOS-1172). */
   wipExempt?: "waits" | "plan" | "live" | "busy" | null;
+  /** BOS-2879: this In progress ticket's own quick check is queued or running; it counts as "being checked", not "in progress". */
+  ownCheck?: boolean;
   /** BOS-1908: the ticket this In progress ticket's agent is running instead ("Agent busy on BOS-N"). */
   busyOnTicketId?: string | null;
   busyOnNumber?: number | null;
