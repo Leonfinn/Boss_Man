@@ -25,6 +25,7 @@ import {
   isJudgeable,
   judgePermission,
   selfSetVariableRefusal,
+  shellFileWriteRefusal,
   commandOf,
   type JudgeReading,
   type PermissionJudgeMode,
@@ -2024,6 +2025,19 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           record(null, "deny", ruleName);
           if (send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: "deny" })) return { outcome: "deny" as const, rule: ruleName, decisionId: null };
           // The runner dropped off: carry on to the usual card, so the verdict is not lost.
+        }
+      }
+      // BOS-2856: a shell command that writes a file (`echo x >> f`, `tee`, a here-doc into a file, `sed -i`) is refused at once with
+      // one fixed hint and raises no card: the rule is to use the Write or Edit tool. Like the refusal above it only replaces a card.
+      // A plain `echo >> f` is a built-in allow (no card), so the rule applies to an allow too: the agent is sent to its Write tool either way.
+      if (outcome !== "deny" && event.kind === "execute") {
+        const shell = (event.rawInput as Record<string, unknown> | null)?.["command"];
+        const refusal = typeof shell === "string" ? shellFileWriteRefusal(shell) : null;
+        if (refusal) {
+          send(runner.id, { type: "run.message", runId: event.runId, text: refusal, interrupt: false });
+          const ruleName = "A shell command that writes a file is refused";
+          record(null, "deny", ruleName);
+          if (send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: "deny" })) return { outcome: "deny" as const, rule: ruleName, decisionId: null };
         }
       }
       // BOS-376: the same tool call can come back as a new request (a harness retry, or a second run of the

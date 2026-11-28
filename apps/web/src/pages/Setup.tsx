@@ -1,7 +1,7 @@
 // The setup wizard (R56): eight steps from a new install to agents at work, each skippable,
 // with progress saved so it resumes. The steps reuse the Settings sections, so there's one way
 // to do each thing. What's still undone shows on Decisions until it's done or dismissed.
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api, type Company, type FundingSource, type Project } from "../api";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 import { usePoll } from "../hooks";
@@ -18,16 +18,19 @@ type Progress = { dismissed: boolean; left?: boolean; step: number; companyId: s
 export type ChecklistItem = { id: string; label: string; done: boolean };
 
 const STEPS = [
-  { id: "company", title: "Your company", why: "Name it and say what it's for. The CEO plans the work from this." },
+  { id: "company", title: "Your company", why: "Name it and say what it's for. Boss Man hires a CEO for you, and the CEO plans the work from this." },
   { id: "project", title: "What will your team work on?", why: "Pick the kind of work your team does and name its first project. You can change this later in Settings." },
-  { id: "runner", title: "The runner", why: "The runner is the container the company's agents work in. It connects out to this server, so it needs no open ports. The full panel is in Settings." },
-  { id: "credential", title: "Claude", why: "Agents need something to run on. Paste the sign-in code from your Claude Pro or Max subscription: it also pays for the CEO. Or use an API key instead." },
+  { id: "credential", title: "Claude account", why: "Agents need something to run on. Paste the sign-in code from your Claude Pro or Max subscription: it also pays for the CEO. Or use an API key instead." },
+  { id: "runner", title: "Your agents' workspace", why: "This is the private space on your machine where your agents do their work. It usually takes under 2 minutes. When it is ready you will see a green Connected." },
   { id: "git", title: "A git token", why: "So agents can clone, push, and open pull requests on the project's repo." },
   { id: "checks", title: "Checks before merging", why: "Boss Man looks at the repo, through the runner, and proposes the check that runs before work merges. High-risk work can add a slower one." },
   { id: "funding", title: "What pays for the CEO", why: "Funding sources track cost and quota. Choose the one the CEO runs on; the Agents page sets the rest." },
-  { id: "ticket", title: "A first task", why: "Optional: something for the team to start on." },
+  { id: "ticket", title: "First task", why: "Optional: something for the team to start on." },
   { id: "before", title: "Before you go", why: "What is ready, what still stops agents starting, and how Boss Man reaches you." },
 ] as const;
+
+/** The saved step number keeps its old meaning (2 = the workspace, 3 = Claude) so an owner mid-wizard when the Claude step moved ahead of the workspace resumes on the same step. The swap is its own inverse: use it on read and on write. */
+const savedStep = (n: number) => (n === 2 ? 3 : n === 3 ? 2 : n);
 
 /** The last step (BOS-2818): what is ready and what still stops agents, how permission cards work, and the optional phone push. */
 export function BeforeStep({ items, onFix }: { items: ChecklistItem[]; onFix: (stepId: string) => void }) {
@@ -104,11 +107,11 @@ function CompanyStep({ company, onCreated }: { company: Company | undefined; onC
     <form onSubmit={save} style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 640 }}>
       <div className="field">
         <label htmlFor="setup-name">Company name</label>
-        <input id="setup-name" required maxLength={80} placeholder="e.g. Boss Man Co" value={name} onChange={(e) => setName(e.target.value)} />
+        <input id="setup-name" required maxLength={80} placeholder="e.g. Fernleaf Studio" value={name} onChange={(e) => setName(e.target.value)} />
       </div>
       <div className="field">
         <label htmlFor="setup-mission">What it's for</label>
-        <DraftTextarea draftKey={missionKey} id="setup-mission" rows={3} maxLength={2000} placeholder="e.g. Build and run Boss Man itself: features from the roadmap, fixes from feedback." value={mission} onChange={setMission} />
+        <DraftTextarea draftKey={missionKey} id="setup-mission" rows={3} maxLength={2000} placeholder="e.g. Research and write a monthly report on garden-centre trends for our customers." value={mission} onChange={setMission} />
       </div>
       {company ? (
         <SaveButton {...sv} busy={busy} disabled={!name.trim()} style={{ alignSelf: "flex-start" }} />
@@ -212,6 +215,7 @@ function ChecksStep({ company, onChanged }: { company: Company; onChanged: () =>
   if (!withRepo.length) return <p className="muted">No project has a repo yet. Add one in step 2, then come back for this.</p>;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <p style={{ margin: 0 }}>A check is a command that runs on every change before it merges, such as your tests. Not sure? Choose Nothing; you can change it later.</p>
       {withRepo.map((p) => (
         <ProjectRow key={p.id} p={p} only="checks" onChanged={onChanged} />
       ))}
@@ -323,7 +327,7 @@ function TicketStep({ company }: { company: Company }) {
   const [form, setForm] = useState({ title: "", body: "", toCeo: false });
   // The task description is kept in this browser as it is typed (DR-045); it goes once the task is added.
   const bodyKey = `setup-ticket-body/${company.id}`;
-  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const [note, setNote] = useState<{ ok: boolean; text: string; taskId?: string } | null>(null);
   const project = projects.data?.[0];
   const add = async (e: FormEvent) => {
     e.preventDefault();
@@ -335,7 +339,7 @@ function TicketStep({ company }: { company: Company }) {
       });
       setForm({ title: "", body: "", toCeo: false });
       clearDraft(bodyKey);
-      setNote({ ok: true, text: `Added. Open it from the Kanban, or at #/tickets/${t.id}.` });
+      setNote({ ok: true, text: "Added.", taskId: t.id });
     } catch (err) {
       setNote({ ok: false, text: (err as Error).message });
     }
@@ -345,7 +349,7 @@ function TicketStep({ company }: { company: Company }) {
     <form onSubmit={add} style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 640 }}>
       <div className="field">
         <label htmlFor="setup-ticket-title">Title</label>
-        <input id="setup-ticket-title" required maxLength={200} placeholder="e.g. Read the repo and propose a roadmap" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} />
+        <input id="setup-ticket-title" required maxLength={200} placeholder="e.g. Draft a one-page proposal template for new clients" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} />
       </div>
       <div className="field">
         <label htmlFor="setup-ticket-body">Description</label>
@@ -363,6 +367,12 @@ function TicketStep({ company }: { company: Company }) {
       {note && (
         <p role={note.ok ? "status" : "alert"} className={note.ok ? "muted" : "error"}>
           {note.text}
+          {note.taskId && (
+            <>
+              {" "}
+              <a href={`#/tickets/${note.taskId}`}>Open the task</a>
+            </>
+          )}
         </p>
       )}
     </form>
@@ -441,10 +451,17 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
   const [chosen, setChosen] = useState<Work | null>(null);
   useEffect(() => {
     if (progress.data && step === null) {
-      setStep(Math.min(progress.data.step, STEPS.length - 1));
+      setStep(savedStep(Math.min(progress.data.step, STEPS.length - 1)));
       setCompanyId(progress.data.companyId);
     }
   }, [progress.data, step]);
+  // Focus moves to the step's form each time the step changes (not on the first show), so keyboard and screen-reader users land on it.
+  const formRef = useRef<HTMLElement>(null);
+  const shown = useRef<number | null>(null);
+  useEffect(() => {
+    if (step !== null && shown.current !== null && shown.current !== step) formRef.current?.focus({ preventScroll: true });
+    shown.current = step;
+  }, [step]);
   const company = companies.find((c) => c.id === companyId) ?? (companyId ? undefined : companies[0]);
   const list = usePoll((signal) => (company ? api<ChecklistItem[]>(`/api/companies/${company.id}/setup-checklist`, { signal }) : Promise.resolve([])), 3_000, `setup-steps-${company?.id ?? "none"}`);
   const projs = usePoll((signal) => (company ? api<Project[]>(`/api/companies/${company.id}/projects`, { signal }) : Promise.resolve([] as Project[])), 15_000, `setup-work-${company?.id ?? "none"}`);
@@ -463,7 +480,7 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
   const save = (patch: Partial<Progress>) => void api("/api/setup-progress", { method: "PUT", body: patch }).catch(() => {});
   const move = (to: number) => {
     setStep(to);
-    save({ step: to, companyId: company?.id ?? null });
+    save({ step: savedStep(to), companyId: company?.id ?? null });
     window.scrollTo({ top: 0 });
   };
   const finish = () => {
@@ -483,7 +500,8 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
     <>
       <header className="page-head">
         <div>
-          <p className="label">Setting up{pos > 0 ? ` · Step ${pos + 1} of ${visible.length}` : ""}</p>
+          <p className="label">Setting up · step {pos + 1} of {visible.length}</p>
+          <progress className="setup-bar" aria-label="Setup progress" max={visible.length} value={pos + 1} />
           <h1>{s.title}</h1>
           <p className="sub">{s.why}</p>
         </div>
@@ -497,7 +515,7 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
           </li>
         ))}
       </ol>
-      <section className="card" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <section ref={formRef} tabIndex={-1} aria-label={s.title} className="card setup-card" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
         {step === 0 && (
           <CompanyStep
             company={company}
@@ -510,8 +528,8 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
           />
         )}
         {step === 1 && company && <ProjectStep company={company} work={work} onWork={setWork} onChanged={refresh} />}
-        {step === 2 && company && <RunnerStep company={company} onChanged={refresh} />}
-        {step === 3 && company && <ClaudeStep company={company} onChanged={refresh} onTokenSaved={() => setTokenPath(true)} />}
+        {step === 2 && company && <ClaudeStep company={company} onChanged={refresh} onTokenSaved={() => setTokenPath(true)} />}
+        {step === 3 && company && <RunnerStep company={company} onChanged={refresh} />}
         {step === 4 && company && <GitStep company={company} onChanged={refresh} />}
         {step === 5 && company && <ChecksStep company={company} onChanged={refresh} />}
         {step === 6 && company && <FundingStep company={company} onChanged={refresh} />}
@@ -525,9 +543,14 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
           )}
           {step < last ? (
             <>
-              <button type="button" className={done(s.id) ? "btn primary" : "btn"} disabled={!company} onClick={() => move(next)}>
-                {done(s.id) ? "Next" : "Skip for now"}
+              <button type="button" className="btn primary" disabled={!company || !done(s.id)} onClick={() => move(next)}>
+                Next: {STEPS[next]!.title}
               </button>
+              {!done(s.id) && (
+                <button type="button" className="linkish" disabled={!company} onClick={() => move(next)}>
+                  Skip this step
+                </button>
+              )}
             </>
           ) : (
             <button type="button" className="btn primary" onClick={finish}>

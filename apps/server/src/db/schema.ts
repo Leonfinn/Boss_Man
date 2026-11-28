@@ -1183,6 +1183,10 @@ export const reviewHolds = pgTable(
     closedAt: timestamp("closed_at", { withTimezone: true }),
     /** When the reviewer was woken to re-check, once every wait had closed. */
     wokenAt: timestamp("woken_at", { withTimezone: true }),
+    /** BOS-2870: the holder was woken a second time, an hour after the first, because the hold was still open. */
+    remindedAt: timestamp("reminded_at", { withTimezone: true }),
+    /** BOS-2870: two hours after the first wake the hold was still open, so a card went up (to the CEO, or the owner when the CEO holds it). */
+    escalatedAt: timestamp("escalated_at", { withTimezone: true }),
     createdAt: createdAt(),
   },
   (t) => [uniqueIndex("review_holds_one_open").on(t.ticketId).where(sql`${t.status} = 'open'`), index("review_holds_ticket").on(t.ticketId)],

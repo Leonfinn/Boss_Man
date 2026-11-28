@@ -4,7 +4,7 @@ import { api, ApiError, type AdvisedDecision, type ClosedNoticeCard, type Compan
 import { art } from "../brand";
 import { copyText, selectText } from "../clipboard";
 import { State } from "../components/State";
-import { hashQuery, usePoll } from "../hooks";
+import { hashQuery, useHasCode, usePoll } from "../hooks";
 import { ageLabel, dayLabel, raisedAgo } from "../age";
 import { clearDraft, readDraft, saveDraft } from "../drafts";
 import { describe, useTranscript } from "../transcript";
@@ -629,6 +629,7 @@ function useLinkedCard(): string | null {
 }
 
 export function Decisions({ decisions, companies, loaded, loadError = false, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany, withTeam = [], advised = [], closedNotices = [], tally, startBlock = null }: { /** BOS-2814: what keeps agents from starting; the red bar and the empty state read it. */ startBlock?: StartBlock | null; decisions: Decision[]; companies: Company[]; loaded: boolean; loadError?: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode | ((folded: boolean) => ReactNode); elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void; withTeam?: TeamAlert[]; advised?: AdvisedDecision[]; closedNotices?: ClosedNoticeCard[]; tally?: DecisionTally | null }) {
+  const hasCode = useHasCode();
   const [filter, setFilter] = useState<string | null>(null);
   const [savedProject, setSavedProject] = useState<string | null>(readProjectFilter);
   const pickProject = (v: string | null) => {
@@ -1454,7 +1455,7 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
                                 </label>
                               );
                             })}
-                            <small className="muted">A reviewer you hire does code, security, infra or adversarial reviews once you name them in Settings › Reviews.</small>
+                            <small className="muted">A reviewer you hire does {hasCode ? "code, security, infra or adversarial " : ""}reviews once you name them in Settings › Reviews.</small>
                           </fieldset>
                         )}
                         {d.context?.type === "hire" && !!d.context.proposal?.skills?.length && (

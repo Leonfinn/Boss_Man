@@ -102,7 +102,7 @@ export function ReleaseNoticeBody({ v, busy, set, install, dismiss, extra }: { v
       )}
       {v.available && !running && v.install && !v.install.linked && (
         <p className="muted" style={{ fontSize: 14 }}>
-          This server was made before the Install button existed, so install this release by hand (see the updating guide). The server that update makes will have the button.
+          The Install button is not here yet: this server was made before it existed. After this release is installed by hand once (see the updating guide), the button appears by itself within about 30 minutes. Nothing else is needed from you.
         </p>
       )}
       {finished && (

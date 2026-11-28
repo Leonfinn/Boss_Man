@@ -5,7 +5,7 @@ import { setCompanyPause } from "./settings/Team";
 import { api, type Company, type Decision, type DecisionTally, type RunRow } from "../api";
 import { NoCompany } from "../components/NoCompany";
 import { raisedAgo } from "../age";
-import { usePoll } from "../hooks";
+import { useHasCode, usePoll } from "../hooks";
 import { away } from "../server-watch";
 import { Avatar } from "../components/Avatar";
 import { Loader } from "../components/Loader";
@@ -144,6 +144,7 @@ export function WeekFold({ companyId, week, title }: { companyId: string; week: 
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<WeekView | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const hasCode = useHasCode();
   const load = () => {
     setError(null);
     api<WeekView>(`/api/companies/${companyId}/weekly-summary/view?week=${week}`).then(setView, (e: Error) => setError(e.message));
@@ -159,8 +160,8 @@ export function WeekFold({ companyId, week, title }: { companyId: string; week: 
       <div style={{ padding: "0 18px 14px" }}>
         {error ? <LoadError what="this summary" message={error} onRetry={load} /> : !view ? <p className="muted">{open ? "Loading…" : ""}</p> : (
           <>
-            <p>Merged: {view.merged.length === 0 ? "nothing" : `${view.merged.length} ticket${view.merged.length === 1 ? "" : "s"}`}</p>
-            {view.merged.length > 0 && (
+            {hasCode && <p>Merged: {view.merged.length === 0 ? "nothing" : `${view.merged.length} ticket${view.merged.length === 1 ? "" : "s"}`}</p>}
+            {hasCode && view.merged.length > 0 && (
               <ul>
                 {view.merged.slice(0, 10).map((m, i) => (
                   <li key={m.id ?? i}>{m.id ? <a href={`#/tickets/${m.id}`}>{m.title}</a> : m.title}{m.feature ? <span className="muted"> · {m.feature}</span> : null}</li>
@@ -184,6 +185,7 @@ export function Dashboard({ company, decisions = null, tally = null, onChanged }
   const merges = usePoll((signal) => (company ? api<MergeHealthView>(`/api/companies/${company.id}/merge-queue`, { signal }).catch(() => null) : Promise.resolve(null)), 20_000, `dash-merges-${company?.id ?? "none"}`);
   const startBlock = useStartBlock(company?.id);
   const cantStart = !!startBlock && startBlock.items.length > 0;
+  const hasCode = useHasCode();
   if (!company) return <NoCompany />;
   if (data.error && !away(data.error)) return <LoadError what="the dashboard" message={data.error.message} onRetry={data.reload} />;
   const d = data.data;
@@ -194,7 +196,7 @@ export function Dashboard({ company, decisions = null, tally = null, onChanged }
   const stuck = merges.data && !company.paused ? stuckSummary(merges.data) : null;
   const slow = merges.data && !company.paused ? slowSummary(merges.data) : null;
   const paused = merges.data && !company.paused ? pausedSummary(merges.data) : null;
-  const lines = healthLines({ health: d.health ?? {}, merges: merges.data, stuck, slow, running: s.running, companyId: company.id, cantStart });
+  const lines = healthLines({ health: d.health ?? {}, merges: merges.data, stuck, slow, running: s.running, companyId: company.id, hasCode, cantStart });
   return (
     <>
       <header className="page-head">
@@ -206,10 +208,10 @@ export function Dashboard({ company, decisions = null, tally = null, onChanged }
 
       <StartBlockBar block={startBlock} />
 
-      <MergesStuckBanner stuck={stuck} slow={slow} paused={paused} brakeOff={merges.data && !company.paused ? brakeOffSummary(merges.data) : null} companyId={company.id} />
+      {hasCode && <MergesStuckBanner stuck={stuck} slow={slow} paused={paused} brakeOff={merges.data && !company.paused ? brakeOffSummary(merges.data) : null} companyId={company.id} />}
 
 
-      {s.inProgressCounted != null && <WorkStands counts={{ inProgress: s.inProgressCounted, nextUp: s.nextUp ?? 0, beingChecked: s.beingChecked ?? 0, watching: s.watching ?? 0 }} hrefFor="#/board" />}
+      {s.inProgressCounted != null && <WorkStands counts={{ inProgress: s.inProgressCounted, nextUp: s.nextUp ?? 0, beingChecked: s.beingChecked ?? 0, watching: s.watching ?? 0 }} hrefFor="#/board" working={s.running} />}
 
       <div className="dash-lead">
         <RightNow lines={lines} paused={company.paused} companyId={company.id} onResume={onChanged ? async () => { await setCompanyPause(company.id, false); onChanged(); } : undefined} />
@@ -273,7 +275,7 @@ export function Dashboard({ company, decisions = null, tally = null, onChanged }
             </small>
           )}
           <small className="muted">
-            {s.awaitingReview != null && s.approvedToMerge != null ? `${s.awaitingReview} awaiting review, ${s.approvedToMerge} approved, waiting to merge` : `${s.inReview} in review`}, {s.open} open, {s.blocked} blocked{s.waitingLiveCheck ? `, ${s.waitingLiveCheck} merged, waiting for a live check` : ""}
+            {s.awaitingReview != null && s.approvedToMerge != null ? `${s.awaitingReview} awaiting review, ${s.approvedToMerge} approved${hasCode ? ", waiting to merge" : ""}` : `${s.inReview} in review`}, {s.open} open, {s.blocked} blocked{s.waitingLiveCheck ? `, ${s.waitingLiveCheck} merged, waiting for a live check` : ""}
           </small>
         </a>
         {s.blocked > 0 && <OldestBlocked oldest={s.oldestBlocked} />}

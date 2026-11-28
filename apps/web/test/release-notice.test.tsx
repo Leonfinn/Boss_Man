@@ -57,10 +57,11 @@ describe("ReleaseNotice", () => {
     expect(screen.queryByRole("button", { name: /^Install/ })).toBeNull();
   });
 
-  it("an install made before the link existed is told to install by hand, with no dead button", async () => {
+  it("an install made before the link existed is told when the button appears, with no dead button and no step beyond the update", async () => {
     stubFetchByUrl({ "/api/release-watch": { ...base, available, install: { linked: false, updater: null } } });
     render(<ReleaseNotice />);
-    expect(await screen.findByText(/install this release by hand/)).toBeTruthy();
+    expect(await screen.findByText(/the button appears by itself within about 30 minutes/)).toBeTruthy();
+    expect(screen.getByText(/Nothing else is needed from you/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: /^Install/ })).toBeNull();
   });
 

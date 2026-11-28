@@ -9,7 +9,9 @@
 # It pulls the published images by digest, runs setup twice (the second run must change nothing), starts the stack under its own
 # project name, waits for the server to answer, then asks the launcher to start a runner from the published runner image.
 #   INSTALL_RELEASE_JSON=release.json INSTALL_REGISTRY=ghcr.io/<owner> scripts/install-images.test.sh
-# It removes its own containers and volumes at the end (only those of its project) and touches nothing else on the host.
+# At the end it removes the install the way docs/35-install-from-images.md "Start again from nothing" says (BOS-2803) and fails if any
+# container labelled for its project, any runner or guard, or any <project>_ or pack volume remains. That removal takes every runner and
+# guard on the host, so the real install refuses to start on a host that already has some (INSTALL_ALLOW_SHARED_HOST=1 overrides).
 # SC2015: ok and bad only print and set a flag, so "test && ok || bad" cannot run both. SC2317: cleanup runs from the EXIT trap.
 # shellcheck disable=SC2015,SC2317
 set -uo pipefail
@@ -38,7 +40,7 @@ EOF
 # ---- Static checks: always run ----
 cfg="$(docker compose --env-file "$T/images.env" --profile '*' -f docker-compose.images.yml config --format json 2>&1)" || { echo "$cfg"; bad "compose file is valid"; exit 1; }
 # Every service made by Boss Man is a digest; the one outside image (the database) is a pinned tag.
-unpinned="$(echo "$cfg" | jq -r '.services | to_entries[] | select(.key != "db" and .key != "backup") | select(.value.image | test("@sha256:[0-9a-f]{64}$") | not) | .key')"
+unpinned="$(echo "$cfg" | jq -r '.services | to_entries[] | select(.key != "db") | select(.value.image | test("@sha256:[0-9a-f]{64}$") | not) | .key')"
 [ -z "$unpinned" ] && ok "every Boss Man image is pulled by digest" || bad "not pinned by digest: $unpinned"
 echo "$cfg" | jq -e '.services.db.image | test(":[0-9]")' >/dev/null && ok "the database image is pinned to a version" || bad "database image not pinned"
 echo "$cfg" | jq -e '[.services[] | has("build")] | any | not' >/dev/null && ok "nothing is built" || bad "a service has a build section"
@@ -53,7 +55,7 @@ echo "$cfg" | jq -e '.services.updater.cap_add == ["SETGID","SETUID"] or .servic
 # BOS-1227 (941c): compose owns the database, the proxy, the updater and setup, and nothing else. A server or launcher service here
 # would let `docker compose up` bring an old one back beside the updater's, which is the fight the design rules out.
 svcs="$(echo "$cfg" | jq -r '.services | keys | join(" ")')"
-[ "$svcs" = "backup db proxy setup updater" ] && ok "compose runs only the database, its backup, the proxy, the updater and setup" || bad "services in compose: $svcs"
+[ "$svcs" = "db proxy setup updater" ] && ok "compose runs only the database, the proxy, the updater and setup" || bad "services in compose: $svcs"
 echo "$cfg" | jq -e '(.services.proxy.ports | length) == 2 and (.services.proxy.networks.front.ipv4_address != null)' >/dev/null && ok "the proxy owns the ports" || bad "proxy ports"
 # The updater builds the first server colour and the launcher from its own settings: they must name the release's digests, and the
 # runner and guard images must not be in the launcher's environment list (the updater sets them from the release).
@@ -64,18 +66,28 @@ echo "$cfg" | jq -r '.services.updater.environment.UPDATER_LAUNCHER_MOUNTS' | gr
 echo "$cfg" | jq -r '.services.updater.environment.UPDATER_SELF_MOUNTS' | grep -q 'launcher-key:/run/launcher:ro$' && ok "the next updater keeps the launcher key (read-only)" || bad "self mounts miss the launcher key"
 # No host tools in the compose file's own steps (comments excluded).
 if grep -v '^[[:space:]]*#' docker-compose.images.yml | grep -Eq '\b(openssl|sudo|chown|stat -c)\b'; then bad "compose file uses host tools"; else ok "no host openssl, chown, stat or sudo"; fi
-# BOS-2817: the image install runs its own daily backup (the server's "backup overdue" card needs it), into the backups volume, and writes
-# the settings rows the server reads. The loop is inline: the install has no scripts folder.
-echo "$cfg" | jq -e '.services.backup.volumes | map(.source) | contains(["backups"])' >/dev/null && ok "the backup service writes to the backups volume" || bad "backup service volume"
-echo "$cfg" | jq -r '.services.backup.command[0]' | grep -q 'daily_backup_last' && ok "the backup service records daily_backup_last" || bad "backup service does not record daily_backup_last"
-echo "$cfg" | jq -r '.services.backup.command[0]' | sed 's/\$\$/$/g' | bash -n && ok "the backup loop is valid shell" || bad "backup loop has a shell syntax error"
 [ -f docs/35-install-from-images.md ] && ok "the install guide exists" || bad "docs/35-install-from-images.md is missing"
+# BOS-2803: the guide's removal steps, in order (the real half's cleanup runs the same commands for its own project).
+guide_cmds=('label=com.bossman.install=boss-man | xargs -r docker rm -f' 'label=boss-man.launcher=1 | xargs' 'label=boss-man.netguard=1 | xargs' 'down -v --remove-orphans' 'docker volume ls -q --filter label=com.bossman.install=boss-man' 'docker volume ls -q --filter name=boss-man-claude-pack' 'docker volume ls -q --filter name=^boss-man_ | xargs')
+prev=0; order_ok=1
+for c in "${guide_cmds[@]}"; do
+  n="$(grep -nF -- "$c" docs/35-install-from-images.md | head -1 | cut -d: -f1)"
+  { [ -n "$n" ] && [ "$n" -gt "$prev" ]; } && prev="$n" || { order_ok=0; echo "guide step missing or out of order: $c"; }
+done
+[ "$order_ok" = 1 ] && ok "the guide removes labelled containers, runners, guards, then down -v, then the pack volume" || bad "the guide's removal steps are missing or out of order"
+echo "$cfg" | jq -r '.services.updater.environment.UPDATER_LAUNCHER_ENV' | grep -q '^BOSSMAN_INSTALL_LABEL=com.bossman.install=' && ok "the launcher gets the install label to stamp on runners, guards and the pack volume" || bad "UPDATER_LAUNCHER_ENV lacks BOSSMAN_INSTALL_LABEL"
 # BOS-2788: docker-compose.images.yml is not a default Compose file name, so every guide step that runs compose with images.env must
 # pass -f docker-compose.images.yml, as this test does. Both guides are read; a step with --env-file images.env and no -f fails.
 for guide in docs/35-install-from-images.md apps/site/src/guides/install-boss-man.md; do
   [ -f "$guide" ] || { bad "$guide is missing"; continue; }
   nof="$(grep -n 'docker compose .*--env-file images\.env' "$guide" | grep -v -- '-f docker-compose\.images\.yml' || true)"
   [ -z "$nof" ] && ok "$guide: every image-install compose command names -f docker-compose.images.yml" || bad "$guide: compose command without -f docker-compose.images.yml: $nof"
+done
+
+# BOS-2796: the compose file's own usage comment and the launcher's guard-missing message show the same command.
+for f in docker-compose.images.yml apps/launcher/src/launcher.ts; do
+  nof="$(grep -n 'docker compose .*--env-file images\.env' "$f" | grep -v -- '-f docker-compose\.images\.yml' || true)"
+  [ -z "$nof" ] && ok "$f: every image-install compose command names -f docker-compose.images.yml" || bad "$f: compose command without -f docker-compose.images.yml: $nof"
 done
 
 # BOS-2388: the real install half below only runs with a Docker daemon and INSTALL_RELEASE_JSON, so a workflow that builds its
@@ -130,8 +142,45 @@ P="bminstall$$"
   echo "BOSSMAN_RUNNER_NETWORK=${P}_default"
 } > "$T/run.env"
 dc() { docker compose -p "$P" --env-file "$T/run.env" -f docker-compose.images.yml --profile images "$@"; }
-# The updater makes these (not compose), under fixed names, so they are removed here by name; `down -v` removes the volumes.
-cleanup() { docker rm -f "boss-man-runner-smoke" "boss-man-netguard-smoke" launcher launcher-next server-blue server-green updater-next >/dev/null 2>&1; dc down -v --remove-orphans >/dev/null 2>&1; rm -rf "$T"; }
+# BOS-2803: removal follows the guide's "Start again from nothing" (docs/35-install-from-images.md) step for step, then checks nothing is
+# left. The updater and the launcher made containers compose does not know; they hold the volumes, so they go before `down -v`.
+# The guide's steps 2 and 4 take every runner, guard and pack volume on the host, so the test refuses to start on a host that
+# already has any (INSTALL_ALLOW_SHARED_HOST=1 overrides, and then removes theirs too).
+if [ -z "${INSTALL_ALLOW_SHARED_HOST:-}" ] && [ -n "$(docker ps -aq --filter label=boss-man.launcher=1; docker ps -aq --filter label=boss-man.netguard=1)" ]; then
+  bad "this host already has Boss Man runners or guards, and the removal step would delete them (set INSTALL_ALLOW_SHARED_HOST=1 to allow)"; exit 1
+fi
+guide_removal() {
+  # Output goes to a log file, not away: the listings after this step are what fail the test, and the log says why.
+  {
+    docker ps -aq --filter "label=com.bossman.install=$P" | xargs -r docker rm -f
+    docker ps -aq --filter label=boss-man.launcher=1 | xargs -r docker rm -f
+    docker ps -aq --filter label=boss-man.netguard=1 | xargs -r docker rm -f
+  } >> "$T/removal.log" 2>&1
+  dc down -v --remove-orphans > "$T/down.log" 2>&1
+  {
+    docker volume ls -q --filter "label=com.bossman.install=$P" | xargs -r docker volume rm
+    docker volume ls -q --filter name=boss-man-claude-pack | xargs -r docker volume rm
+    # Compose left config and data behind in CI (nothing mounted them); the guide's last removal takes what is named for the project.
+    docker volume ls -q --filter "name=^${P}_" | xargs -r docker volume rm
+  } >> "$T/removal.log" 2>&1
+}
+cleanup() {
+  rc=$?
+  guide_removal
+  # The guide's two look-only listings, plus the runners and guards: all must be empty.
+  left_c="$(docker ps -a --format '{{.Names}}' --filter "label=com.bossman.install=$P"; docker ps -a --format '{{.Names}}' --filter label=boss-man.launcher=1; docker ps -a --format '{{.Names}}' --filter label=boss-man.netguard=1)"
+  left_v="$(docker volume ls -q --filter "name=${P}_"; docker volume ls -q --filter "label=com.bossman.install=$P"; docker volume ls -q --filter name=boss-man-claude-pack)"
+  if [ -n "$left_c$left_v" ]; then
+    bad "removal left behind (containers: ${left_c//$'\n'/ }; volumes: ${left_v//$'\n'/ })"
+    # Say why: the output of down, every container left on the host with its labels, and who still mounts each leftover volume.
+    echo "--- down -v said: $(tail -n 12 "$T/down.log" 2>&1 | tr '\n' ';' | cut -c1-600)"
+    echo "--- containers left: $(docker ps -a --format '{{.Names}} {{.Status}} {{.Label "com.bossman.install"}}' | tr '\n' ';' | cut -c1-600)"
+    for v in $left_v; do echo "--- volume $v used by: $(docker ps -a --filter "volume=$v" --format '{{.Names}}' | tr '\n' ' ')"; done
+  else ok "the guide's removal left no container and no volume behind"; fi
+  rm -rf "$T"
+  [ "$rc" -eq 0 ] || exit "$rc"
+  exit "$fail"
+}
 trap cleanup EXIT
 
 dc pull -q || { bad "pull by digest"; exit 1; }
