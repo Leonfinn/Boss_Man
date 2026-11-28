@@ -23,6 +23,7 @@ import { buildCsv, download } from "../csv";
 import { Loader } from "../components/Loader";
 import { LoadError } from "../components/LoadError";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
+import { GuideLink } from "../guide-links";
 
 // A card's note and own-word answer are kept in this browser as they are typed (BOS-637): a
 // freeze or a reload must not cost the owner what they wrote. The cards arrive one at a time, so
@@ -1115,6 +1116,9 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
                         <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\n")[0]!} refs={d.refs} /></h2>
                         {d.context.covered && <p style={{ whiteSpace: "pre-wrap", margin: 0 }}>Already covered: {d.context.covered}</p>}
                         {d.context.costLine && <p style={{ margin: 0, fontWeight: 600 }}>{d.context.costLine}</p>}
+                        <p style={{ margin: 0 }}>
+                          <GuideLink slug="hiring-your-first-team">How hiring works</GuideLink>
+                        </p>
                       </>
                     ) : !x && !rule && d.question.split("\n").length > PREVIEW_LINES + 2 ? (
                       <>

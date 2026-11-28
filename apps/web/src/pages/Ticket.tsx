@@ -3,6 +3,7 @@ import { POINTS_EXPLAINED, TASK_SIZES, windowLabel } from "@boss-man/shared";
 import { api, ApiError, RISKS, type Company, type Risk, type TicketDetail, type WorkspaceDiff } from "../api";
 import { RiskLevels, useRiskTiers } from "../components/RiskHelp";
 import { FieldHelp } from "../components/FieldHelp";
+import { GuideLink } from "../guide-links";
 import { Markdown } from "../components/Markdown";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
@@ -1176,7 +1177,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           <dl>
             <dt>
               Status
-              <FieldHelp label="Status">Done closes it without merging. In review asks the reviewers. Ready and In progress wake the assignee.</FieldHelp>
+              <FieldHelp label="Status">Done closes it without merging. In review asks the reviewers. Ready and In progress wake the assignee. <GuideLink slug="board-and-decisions">Read more</GuideLink></FieldHelp>
             </dt>
             <dd>
               <span className={`tag ${t.systemState === "review" && (t.signoff === "waiting" || t.signoff === "missing") ? "amber" : (STATE_TONE[t.systemState] ?? "")}`}>{t.systemState === "done" && t.outcome === "cancelled" ? "Cancelled" : (STATE_LABEL[t.systemState] ?? t.systemState)}</span>
@@ -1228,6 +1229,9 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
               <label htmlFor="t-risk">Risk</label>
               <FieldHelp label="Risk">
                 <RiskLevels tiers={tiers} current={t.risk} />
+                <p style={{ margin: "6px 0 0" }}>
+                  <GuideLink slug="review-and-risk">Read more</GuideLink>
+                </p>
               </FieldHelp>
             </dt>
             <dd>
@@ -1263,6 +1267,9 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                 <p>An agent, such as a scrum master, that posts a short status update on this task and what it depends on.</p>
                 <p>The watcher reports on this task and its sub-tasks, and steps in when all of them have stalled.</p>
                 <p>Updates appear in Activity and your notifications.</p>
+                <p style={{ margin: "6px 0 0" }}>
+                  <GuideLink slug="the-watchdog">Read more</GuideLink>
+                </p>
               </FieldHelp>
             </dt>
             <dd>
