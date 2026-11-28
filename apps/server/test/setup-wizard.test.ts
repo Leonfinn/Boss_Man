@@ -88,6 +88,28 @@ describe("the setup wizard (R56)", () => {
     expect((await checklist()).find((i) => i.id === "merged")!.done).toBe(true);
   });
 
+  it("BOS-2815: counts a key saved for any listed option as the connect step done, and leaves an existing company's setup token and CEO link alone", async () => {
+    const c = (ctx = await setup());
+    const { company, ceo } = (await c.req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string }; ceo: { id: string } };
+    const item = async () => ((await c.req("GET", `/api/companies/${company.id}/setup-checklist`)).json() as Array<{ id: string; done: boolean }>).find((i) => i.id === "credential")!.done;
+    expect(await item()).toBe(false);
+
+    // An OpenRouter key, which agents could already run on but the checklist ignored.
+    const { secret } = (await c.req("POST", "/api/secrets", { name: "App Co OpenRouter", kind: "generic", value: "sk-or-example-key" })).json();
+    await c.req("POST", `/api/secrets/${secret.id}/grants`, { companyId: company.id, envName: "OPENROUTER_API_KEY" });
+    expect(await item()).toBe(true);
+
+    // An existing company keeps its setup-token source and the CEO on it, whatever else is saved.
+    const { secret: token } = (await c.req("POST", "/api/secrets", { name: "Claude", kind: "claude_oauth_token", value: "sk-ant-oat01-example-token-value" })).json();
+    await c.req("POST", `/api/secrets/${token.id}/grants`, { companyId: company.id, envName: "CLAUDE_CODE_OAUTH_TOKEN" });
+    const source = (await c.req("POST", "/api/funding-sources", { name: "Claude Max", kind: "subscription", provider: "anthropic", secretId: token.id })).json() as { id: string };
+    await c.req("PATCH", `/api/agents/${ceo.id}`, { fundingSourceId: source.id });
+    const before = (await c.req("GET", "/api/funding-sources")).json() as Array<{ id: string; secretId: string | null }>;
+    const ceoRow = (await c.req("GET", "/api/companies")).json() as Array<{ agents: Array<{ id: string; fundingSourceId: string | null }> }>;
+    expect(before.find((s) => s.id === source.id)!.secretId).toBe(token.id);
+    expect(ceoRow[0]!.agents.find((a) => a.id === ceo.id)!.fundingSourceId).toBe(source.id);
+  });
+
   it("gives a company with no repo a list that can finish: no git token or checks, first task finished", async () => {
     const c = (ctx = await setup());
     const { company } = (await c.req("POST", "/api/companies", { name: "Docs Co" })).json() as { company: { id: string } };

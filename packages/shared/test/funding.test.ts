@@ -1,5 +1,51 @@
 import { describe, expect, it } from "vitest";
-import { HARNESSES, harnessLoadsSkills, isClaudeModel, modelFitProblem } from "../src/funding.js";
+import { CONNECT_OPTIONS, FUNDING_PROVIDERS, connectValueProblem, connectSetsUpElsewhere, connectSaves, HARNESSES, harnessLoadsSkills, isClaudeModel, modelFitProblem } from "../src/funding.js";
+
+describe("the connect step's list of ways to pay (BOS-2815)", () => {
+  it("covers every provider an agent can run on, with a plan and a key by each other where both exist", () => {
+    // Bedrock, Foundry and gateways are one "Other API provider" row.
+    const covered = new Set(CONNECT_OPTIONS.filter((o) => o.id !== "other").map((o) => o.provider));
+    expect([...FUNDING_PROVIDERS].filter((p) => !["bedrock", "foundry", "gateway"].includes(p)).every((p) => covered.has(p))).toBe(true);
+    expect(CONNECT_OPTIONS.filter((o) => o.id === "other").map((o) => o.provider)).toEqual(["gateway"]);
+    // Each provider's plan comes straight before its API key, so neither is set apart.
+    const ids = CONNECT_OPTIONS.map((o) => o.id);
+    expect(ids).toEqual(["claude-plan", "anthropic-key", "chatgpt-plan", "openai-key", "ollama-plan", "ollama-key", "synthetic", "openrouter", "other"]);
+  });
+
+  it("every plan that needs a command has steps with a link, and the plans with no value say how to sign in", () => {
+    // A plan whose row needs a command on a computer has an install-first link (Rex's must-fix on BOS-2815).
+    for (const o of CONNECT_OPTIONS.filter((x) => x.needs === "command" && x.command)) {
+      expect(o.command!.installUrl, o.id).toMatch(/^https:\/\//);
+      expect(o.command!.run, o.id).toBeTruthy();
+    }
+    // ChatGPT and Ollama Cloud are signed in to in their own tool: install first, with a link, then sign in.
+    for (const id of ["chatgpt-plan", "ollama-plan"]) {
+      const o = CONNECT_OPTIONS.find((x) => x.id === id)!;
+      expect(o.signIn, id).not.toBeNull();
+      expect(o.signIn!.installUrl, id).toMatch(/^https:\/\//);
+      expect(o.signIn!.tool, id).toBeTruthy();
+      // They save no value here, so they are "set up elsewhere", not a box that would fail.
+      expect(connectSaves(o), id).toBe(false);
+      expect(connectSetsUpElsewhere(o), id).toBe(true);
+    }
+    // Every option is either savable here, set up in its own tool, or (only "other") set in Settings → Secrets.
+    for (const o of CONNECT_OPTIONS) expect(connectSaves(o) || connectSetsUpElsewhere(o) || o.id === "other", o.id).toBe(true);
+  });
+
+  it("tells an owner what to do with a key that doesn't look like the provider's", () => {
+    const claude = CONNECT_OPTIONS.find((o) => o.id === "claude-plan")!;
+    const anthropic = CONNECT_OPTIONS.find((o) => o.id === "anthropic-key")!;
+    expect(connectValueProblem(anthropic, "sk-ant-oat01-a-token")).toMatch(/That's a setup token, not an API key/);
+    expect(connectValueProblem(anthropic, "sk-ant-api03-ok")).toBeNull();
+    expect(connectValueProblem(anthropic, "nonsense")).toMatch(/isn't an Anthropic API key/);
+    expect(connectValueProblem(claude, "sk-ant-api03-a-key")).toMatch(/That's an API key, not a setup token/);
+    expect(connectValueProblem(claude, "sk-ant-oat01-ok")).toBeNull();
+    expect(connectValueProblem(claude, "  sk-ant-oat01-with spaces ")).toBeNull();
+    // A key Boss Man can't judge the shape of gets no made-up complaint.
+    expect(connectValueProblem(CONNECT_OPTIONS.find((o) => o.id === "openrouter")!, "anything")).toBeNull();
+    expect(connectValueProblem(claude, "")).toMatch(/empty/);
+  });
+});
 
 describe("modelFitProblem (BOS-477)", () => {
   it("refuses a DeepSeek model on a Claude account, naming the field", () => {

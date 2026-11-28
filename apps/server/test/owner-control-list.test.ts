@@ -452,7 +452,9 @@ describe("OWNER_CONTROLS matches the web app", () => {
     expect([...screensOf("pages/Funding.tsx#Funding")]).toEqual(["Funding"]);
     // A funding source is added on Funding (and in Setup), the place for it since BOS-1019.
     expect([...screensOf("pages/settings/Funding.tsx#Funding")].sort()).toEqual(["Funding", "Setup"]);
-    expect([...screensOf("pages/settings/Credentials.tsx#Credentials")].sort()).toEqual(["Secrets", "Setup"]);
+    // Since BOS-2815 the connect step sets up the CEO's account with its own rows, so the shared Credentials panel is
+    // no longer shown on Setup; it stays on Secrets.
+    expect([...screensOf("pages/settings/Credentials.tsx#Credentials")].sort()).toEqual(["Secrets"]);
     // Each override still names a real component, and each tab override a file that renders it.
     for (const id of Object.keys(PAGE_SCREEN)) expect(defined.has(id), id).toBe(true);
     for (const site of Object.keys(SITE_SCREEN)) {

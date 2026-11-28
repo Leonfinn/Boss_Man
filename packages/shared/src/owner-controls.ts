@@ -54,9 +54,17 @@ export const OWNER_CONTROLS = {
   Setup: [
     "Create the company", "Add the project", "Check the token against …", "Add the task to …", "Continue", "Dismiss", "Saving",
     "Back", "Next", "Skip this step", "Leave setup for now", "Skip setup for now", "Fix this",
-    // The Claude and runner steps (BOS-1495), then the credentials, funding and project panels Setup shares with Settings and Projects.
-    "Save the code", "Save the token", "Start the runner",
-    "Save", "Check with Claude", "Check", "Remove", "Edit", "Delete", "Add funding source", "Cancel", "Re-detect",
+    // The connect, git-token and runner steps (BOS-1495, BOS-2815: one row per way to pay, then its Save; the connect
+    // step's "How this works" links go in a new tab, so they are links, not buttons, and are not listed here), then
+    // the credentials, funding and project panels Setup shares with Settings and Projects.
+    "Browser only", "One command on a computer", "Save and connect", "Go back to the connect step",
+    // The git-token step's box and Check button (BOS-2823).
+    "Save the token",
+    "Start the runner",
+    // A plan row's one click that makes its funding source and pays for the CEO (the rest is the plan's name), and
+    // its busy label (BOS-2815).
+    "Pay for the CEO with", "Setting up",
+    "Save", "Edit", "Delete", "Add funding source", "Cancel", "Re-detect",
   ],
   Decisions: [
     "Show more", "Show less", "Show all …", "Show the whole", "Save and approve", "Cancel", "Edit these values before approving", "All companies",
@@ -277,8 +285,11 @@ export const OWNER_FIELDS = {
   Settings: ["Find a setting"],
   Setup: [
     "Company name", "What it's for", "Project name", "The CEO", "Title", "Description", "Give it to",
-    // The credentials, funding and project panels Setup shares with Secrets, Access and funding, and Projects.
-    "Claude sign-in code", "Git token", "Ends on", "Add", "Value", "Name", "Variable name",
+    // The connect step's value box (BOS-2815); each key's box takes the provider's name, so it is not one fixed label.
+    "The setup token",
+    // The git-token step's box (BOS-2823), then the funding panel Setup shares with Settings and Projects. Since
+    // BOS-2815 the shared Credentials panel is no longer shown on Setup (the connect step sets up the account).
+    "Git token", "Name",
     "Editing …", "New funding source", "Kind", "Provider", "Monthly grant (USD)", "Cycle starts on",
     "Reviews for this project", "Cost cap per task (USD)", "Monthly spend cap (USD)", "Git repo", "Default branch",
     "When work is approved", "Before merging, Boss Man will", "For high-risk work, also",

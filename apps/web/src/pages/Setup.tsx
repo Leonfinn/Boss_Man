@@ -10,17 +10,20 @@ import { DraftTextarea } from "../components/DraftTextarea";
 import { useAction } from "./settings/shared";
 import { Funding } from "./settings/Funding";
 import { ProjectRow } from "./settings/Projects";
-import { ClaudeStep, RunnerStep } from "./SetupClaude";
+import { ClaudeStep, fundingHint, RunnerStep } from "./SetupClaude";
 import { useStartBlock } from "../components/StartBlock";
 import { GuideLink, type GuideSlug } from "../guide-links";
 
 type Progress = { dismissed: boolean; left?: boolean; step: number; companyId: string | null; firstMerge?: { ref: string; minutes: number } | null; work?: "docs" | "code" };
 export type ChecklistItem = { id: string; label: string; done: boolean };
 
+/** The connect step's title (BOS-2815), also used as the wizard's heading so it reads the same in both places. */
+export const CONNECT_TITLE = "How do you want to connect your first agent?";
+
 const STEPS = [
   { id: "company", title: "Your company", why: "Name it and say what it's for. Boss Man hires a CEO for you, and the CEO plans the work from this." },
   { id: "project", title: "What will your team work on?", why: "Pick the kind of work your team does and name its first project. You can change this later in Settings." },
-  { id: "credential", title: "Claude account", why: "Agents need something to run on. Paste the sign-in code from your Claude Pro or Max subscription: it also pays for the CEO. Or use an API key instead." },
+  { id: "credential", title: CONNECT_TITLE, why: "Your agents need an account to run on, and that account is what you pay for their work. Pick whichever you already have; saving an API key sets what pays for the CEO." },
   { id: "runner", title: "Your agents' workspace", why: "This is the private space on your machine where your agents do their work. It usually takes under 2 minutes. When it is ready you will see a green Connected." },
   { id: "git", title: "A git token", why: "So agents can clone, push, and open pull requests on the project's repo." },
   { id: "checks", title: "Checks before merging", why: "Boss Man looks at the repo, through the runner, and proposes the check that runs before work merges. High-risk work can add a slower one." },
@@ -352,12 +355,18 @@ function GitStep({ company, onChanged }: { company: Company; onChanged: () => vo
   );
 }
 
-function FundingStep({ company, onChanged }: { company: Company; onChanged: () => void }) {
+function FundingStep({ company, onChanged, goTo, saved }: { company: Company; onChanged: () => void; goTo: (to: number) => void; saved: boolean }) {
   const sources = usePoll((signal) => api<FundingSource[]>("/api/funding-sources", { signal }), 15_000, "setup-sources");
   const ceo = company.agents.find((a) => a.role === "ceo");
   const [error, setError] = useState<string | null>(null);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {/* Nothing saved from the connect step yet: say where it is set up, above the general form (BOS-2815). */}
+      {!saved && !ceo?.fundingSourceId && (
+        <p className="banner" data-testid="setup-funding-hint" style={{ margin: 0 }}>
+          <span>{fundingHint()}</span> <button type="button" className="linkish" onClick={() => goTo(2)}>Go back to the connect step</button>
+        </p>
+      )}
       <Funding company={company} onChanged={() => (sources.reload(), onChanged())} />
       {ceo && (
         <div className="field" style={{ maxWidth: 420 }}>
@@ -514,8 +523,9 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
   const progress = usePoll((signal) => api<Progress>("/api/setup-progress", { signal }), 0x7fffffff, "setup-progress-page");
   const [step, setStep] = useState<number | null>(null);
   const [companyId, setCompanyId] = useState<string | null>(null);
-  // Saving the Claude setup token also made the funding source, so "What pays for the CEO" is skipped (BOS-1495).
-  const [tokenPath, setTokenPath] = useState(false);
+  // Saving any option in the connect step also made the funding source, so "What pays for the CEO" is skipped
+  // (BOS-1495 for the setup token, BOS-2815 for every option); until an earlier load shows the checklist item done.
+  const [connected, setConnected] = useState(false);
   const [chosen, setChosen] = useState<Work | null>(null);
   useEffect(() => {
     if (progress.data && step === null) {
@@ -559,9 +569,9 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
   const s = STEPS[step]!;
   const done = (id: string) => list.data?.find((i) => i.id === id)?.done ?? false;
   const FUNDING = STEPS.findIndex((x) => x.id === "funding");
-  // Going forward steps over the funding step when the token path already did it; Back and the stepper still reach it.
+  // Going forward steps over the funding step once the connect step has done it; Back and the stepper still reach it.
   const after = (from: number) => visible.find(({ i }) => i > from)?.i ?? from + 1;
-  const next = after(step) === FUNDING && tokenPath && done("funding") ? after(FUNDING) : after(step);
+  const next = after(step) === FUNDING && connected && done("funding") ? after(FUNDING) : after(step);
   const pos = Math.max(0, visible.findIndex(({ i }) => i === step));
   const last = visible[visible.length - 1]!.i;
   return (
@@ -601,11 +611,11 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
           />
         )}
         {step === 1 && company && <ProjectStep company={company} work={work} onWork={setWork} onChanged={refresh} />}
-        {step === 2 && company && <ClaudeStep company={company} onChanged={refresh} onTokenSaved={() => setTokenPath(true)} />}
+        {step === 2 && company && <ClaudeStep company={company} onChanged={refresh} onSaved={() => setConnected(true)} />}
         {step === 3 && company && <RunnerStep company={company} onChanged={refresh} />}
         {step === 4 && company && <GitStep company={company} onChanged={refresh} />}
         {step === 5 && company && <ChecksStep company={company} onChanged={refresh} />}
-        {step === 6 && company && <FundingStep company={company} onChanged={refresh} />}
+        {step === 6 && company && <FundingStep company={company} onChanged={refresh} goTo={move} saved={connected} />}
         {step === 7 && company && <TicketStep company={company} />}
         {step === 8 && company && <BeforeStep items={list.data ?? []} onFix={(id) => move(STEPS.findIndex((x) => x.id === id))} />}
         <div className="setup-nav">

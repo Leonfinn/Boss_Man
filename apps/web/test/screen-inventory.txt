@@ -424,7 +424,6 @@ sections:
   - Still stops agents starting
   - When an agent needs your OK
 reads: 
-  - /api/companies/:id/deploy-targets
   - /api/companies/:id/grants
   - /api/companies/:id/projects
   - /api/companies/:id/review-policy
@@ -432,7 +431,6 @@ reads:
   - /api/companies/:id/setup-checklist
   - /api/companies/:id/start-block
   - /api/funding-sources
-  - /api/secrets
   - /api/setup-progress
 
 ## #/shortcut-gone

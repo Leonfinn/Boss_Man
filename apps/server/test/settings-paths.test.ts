@@ -3,6 +3,8 @@
 // this runs it over each such string, so rotating a page's name can't leave a card, notice or tool description
 // sending the owner to a place that is gone. It also checks the first part is one of the pages itself, since a
 // string such as "Settings → Reviews and CEO" would otherwise pass as an unknown heading.
+// Another site's own menu ("ollama.com: Settings → Keys") is not ours to walk, so a line that names its host before
+// the arrow is skipped (BOS-2815); our own Settings paths are checked exactly as before.
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,6 +23,13 @@ const RETIRED = ["access and funding", "reviews and ceo", "rules"];
 
 /** A "Settings → …" that is not Boss Man's: GitHub's own token page, which no list of ours can follow. */
 const EXTERNAL = /^(?:Developer settings|Billing and licensing)\b/;
+/**
+ * Another site's own settings (BOS-2815): "platform.claude.com: … then Settings → API keys" is Anthropic Console's
+ * menu, not ours, so our walker can't follow it. A line names a site when it starts with a host before a colon; the
+ * test then skips that "Settings →" only when it is the first arrow after that site name. A step to our own Settings
+ * still fails, however it is worded.
+ */
+const SITE = /^(?:(?!Settings\s*(?:→|->|›|>)).)*[a-z0-9-]+(?:\.[a-z0-9-]+)+\s*:\s*$/i;
 
 function sources(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
@@ -34,22 +43,38 @@ function sources(dir: string): string[] {
 function pathsIn(src: string): string[] {
   return [...src.matchAll(ARROW)].map((m) => m[0]!.split(/Settings\s*(?:→|->|›|>)\s*/)[1]!.trim());
 }
+/** The text on the same line before each arrow, so a "Settings →" that is another site's menu can be told apart. */
+function beforeEachArrow(src: string): string[] {
+  return [...src.matchAll(ARROW)].map((m) => src.slice(src.lastIndexOf("\n", m.index!) + 1, m.index!));
+}
 
 describe("every Settings path in server and shared code exists (BOS-1019)", () => {
   const files = DIRS.flatMap(sources);
   it("finds Settings paths to check (the scan works)", () => {
     const found = files.flatMap((f) => pathsIn(readFileSync(f, "utf8")));
     expect(found.length).toBeGreaterThan(50);
+    // The site allowance (BOS-2815) lets only a path that names another site's host through; our own paths still fail.
+    // The text before an arrow, which ends at the host on a site's own line ("…site: \"ollama.com: ").
+    expect(SITE.test("    steps: { site: \"ollama.com: ")).toBe(true);
+    expect(SITE.test("    steps: { site: \"platform.claude.com: ")).toBe(true);
+    expect(SITE.test("Open ")).toBe(false);
+    expect(SITE.test("Settings → Server and runner ")).toBe(false);
+    // A host after our own Settings is not a reason to skip the path: it has to come first.
+    expect(SITE.test("Open Settings → Spend limits, then example.com: ")).toBe(false);
   });
 
   for (const file of files) {
     const src = readFileSync(file, "utf8");
     const paths = pathsIn(src);
     if (!paths.length) continue;
+    const before = beforeEachArrow(src);
     const name = relative(ROOT, file);
     it(`${name} names real Settings pages`, () => {
-      for (const p of paths) {
-        if (EXTERNAL.test(p)) continue;
+      paths.forEach((p, i) => {
+        if (EXTERNAL.test(p)) return;
+        // Another site's menu before this arrow ("ollama.com: Settings → Keys"): not ours, so nothing to walk.
+        const site = SITE.exec(before[i]!);
+        if (site) return;
         const first = norm(p.split(/\s*(?:→|->|›|>)\s*/)[0]!).replace(/\s+(?:leads|names|panel|line|should|again|instead|is|are|must|has|does)\b.*$/, "");
         // A retired tab ("Access and funding", "Reviews and CEO") is stale text: name the new page instead.
         if (RETIRED.includes(first) && !PAGES.has(first)) {
@@ -63,10 +88,10 @@ describe("every Settings path in server and shared code exists (BOS-1019)", () =
         expect(r8, `"Settings → ${p}" in ${name}: ${r8.join("; ")}`).toEqual([]);
         // The whole path (BOS-1649): after the page, every part must be a tab, a listed section heading, a button or a
         // field (OWNER_SECTIONS), so renaming a heading in the web app fails here and not on an owner's card.
-        if (EXTERNAL.test(p)) continue;
+        if (EXTERNAL.test(p)) return;
         const whole = screenFindings(`Open Settings → ${p}.`, []).r8;
         expect(whole, `"Settings → ${p}" in ${name}: ${whole.join("; ")}`).toEqual([]);
-      }
+      });
     });
   }
 });
