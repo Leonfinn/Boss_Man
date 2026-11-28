@@ -8,7 +8,7 @@ import path from "node:path";
 import type { ContainerInfo, ContainerSummary, Docker } from "../src/docker.js";
 import { ensurePack, packContainerName, packInstallerSpec, packVolume } from "../src/claude-pack.js";
 import { launcher } from "../src/launcher.js";
-import { containerSpec, type LauncherConfig } from "../src/spec.js";
+import { containerSpec, netguardSpec, type LauncherConfig } from "../src/spec.js";
 
 const TOKEN = `bmr_${"t".repeat(43)}`;
 const config = (): LauncherConfig => ({ dataRoot: mkdtempSync(path.join(tmpdir(), "bm-cpack-")), network: "boss-man_default", serverUrl: "ws://server:3100/api/runner/connect", memoryBytes: 4 * 1024 ** 3, pidsLimit: 4096 });
@@ -36,6 +36,9 @@ function fakeDocker(exitCode = 0) {
     },
     async hostInfo() {
       return { dockerVersion: "27.0.1", osType: "linux" };
+    },
+    async createVolume(name, labels) {
+      calls.push(`volume ${name} ${JSON.stringify(labels)}`);
     },
     async imageId() {
       return "img";
@@ -106,6 +109,34 @@ describe("ensurePack", () => {
     const fake = fakeDocker(0);
     expect(await ensurePack(fake.docker, config(), "app-co", () => {})).toBe(true);
     expect(fake.calls).toEqual(["inspect boss-man-claude-pack-app-co", "create boss-man-claude-pack-app-co", "start id1", "wait id1", "remove id1"]);
+  });
+
+  it("BOS-2803: with an install label, makes the pack volume with it and stamps it on the installer, runner and guard", async () => {
+    const fake = fakeDocker(0);
+    const cfg = { ...config(), installLabel: "com.bossman.install=demo" };
+    expect(await ensurePack(fake.docker, cfg, "app-co", () => {})).toBe(true);
+    expect(fake.calls[1]).toBe('volume boss-man-claude-pack {"com.bossman.install":"demo"}');
+    const lab = (s: { Labels: object }) => (s.Labels as Record<string, string>)["com.bossman.install"];
+    expect(lab(packInstallerSpec(cfg, "app-co"))).toBe("demo");
+    expect(lab(containerSpec(cfg, "app-co"))).toBe("demo");
+    expect(lab(netguardSpec(cfg, "app-co", "id1"))).toBe("demo");
+    expect(lab(containerSpec(config(), "app-co"))).toBeUndefined();
+  });
+
+  it("BOS-2803: a volume that can't be labelled does not stop the install", async () => {
+    const fake = fakeDocker(0);
+    fake.docker.createVolume = async () => {
+      throw new Error("nope");
+    };
+    const logs: string[] = [];
+    expect(await ensurePack(fake.docker, { ...config(), installLabel: "com.bossman.install=demo" }, "app-co", (m) => logs.push(m))).toBe(true);
+    expect(logs.join("\n")).toMatch(/couldn't label/);
+  });
+
+  it("BOS-2803: no label means no volume call", async () => {
+    const fake = fakeDocker(0);
+    await ensurePack(fake.docker, config(), "app-co", () => {});
+    expect(fake.calls.some((c) => c.startsWith("volume"))).toBe(false);
   });
 
   it("reports not-ready on a non-zero exit, and never throws", async () => {
