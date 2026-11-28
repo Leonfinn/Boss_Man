@@ -107,7 +107,7 @@ You need Tailscale HTTPS on your tailnet (Tailscale admin page → DNS → HTTPS
    V=$(curl -fsS https://api.github.com/repos/Leonfinn/Boss_Man/releases | grep -m1 '"tag_name"' | cut -d '"' -f 4) && curl -fsSLO https://github.com/Leonfinn/Boss_Man/releases/download/$V/docker-compose.ntfy.images.yml
    ```
 
-   It is signed like the other two; `docker-compose.ntfy.images.yml.sigstore.json` is next to it on the release page.
+   It needs Docker Compose 2.23 or newer (`docker compose version` shows yours). It is signed like the other two; `docker-compose.ntfy.images.yml.sigstore.json` is next to it on the release page.
 
 2. Add the address and the one-time key to `images.env`. The address is `https://boss-man-ntfy.<your tailnet>.ts.net:8443` (your tailnet's name is on the Tailscale admin page, DNS tab):
 
@@ -121,7 +121,7 @@ You need Tailscale HTTPS on your tailnet (Tailscale admin page → DNS → HTTPS
    docker compose -p boss-man-ntfy --env-file images.env -f docker-compose.ntfy.images.yml --profile ntfy up -d
    ```
 
-   Then remove the `TS_AUTHKEY=` line from `images.env`; the login is kept in a volume. `docker compose -p boss-man-ntfy --env-file images.env -f docker-compose.ntfy.images.yml ps` should show `ntfy` and `tailscale` as `healthy` within a minute.
+   Then remove the `TS_AUTHKEY=` line from `images.env`; the login is kept in a volume. `docker compose -p boss-man-ntfy --env-file images.env -f docker-compose.ntfy.images.yml --profile ntfy ps` should show `ntfy` and `tailscale` as `healthy` within a minute.
 
 4. Make the two users. `bossman-publish` lets Boss Man send (write only); `phone-read` lets your phone listen (read only). Choose a topic of 20 or more random letters and digits (it works like a password) and a long password for the phone. Each command is one line; the first of each pair sets the password in the command itself, so nothing waits for typing:
 
