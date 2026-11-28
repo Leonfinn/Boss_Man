@@ -23,6 +23,8 @@ export type SnapTicket = {
   held?: boolean;
   /** The ticket was made ready and then released from its last blocker at this time (BOS-659). */
   unblockedAt?: Date | null;
+  /** BOS-2875: refs of the in-progress tickets that fill the assignee's in-progress limit (set only while they are at it): this ready ticket is queued behind them. */
+  queuedBehind?: string[];
   /** Send-backs so far. */
   bounces: number;
   /**
@@ -46,8 +48,11 @@ export type Snapshot = { tickets: SnapTicket[]; runs: SnapRun[]; holds: SnapHold
 export type Trip = {
   ticketId: string;
   rule: WatchdogRule;
-  detail: { idleMs?: number; limitMs?: number; runId?: string; runOutcome?: string | null; decisionId?: string; holds?: number; bounces?: number; blockedUntil?: string; queuePosition?: number };
+  detail: { idleMs?: number; limitMs?: number; runId?: string; runOutcome?: string | null; decisionId?: string; holds?: number; bounces?: number; blockedUntil?: string; queuePosition?: number; queuedBehind?: string[] };
 };
+
+/** BOS-2875: a Ready ticket whose assignee is at their in-progress limit is "queued behind" their tickets, and is flagged "ready, no run started" only after this long. */
+export const QUEUED_BEHIND_FLAG_MS = 24 * 3_600_000;
 
 /** BOS-2416: a quick check of a ticket in review that has waited this long in the check line (queued, not yet running) raises one "check line backed up" note. */
 export const CHECK_LINE_BACKED_UP_MS = 3 * 3_600_000;
@@ -186,7 +191,11 @@ export function evaluate(snap: Snapshot, s: WatchdogSettings, now: Date): Trip[]
       // never waiting to be started, so it is left to the missed-work sweep.
       if (!runs.length && x.unblockedAt) {
         const idle = t - Math.max(since, x.unblockedAt.getTime());
-        if (idle >= s.idleAgentMinutes * 60_000) add("unstarted", { idleMs: idle, limitMs: s.idleAgentMinutes * 60_000 });
+        // BOS-2875: an assignee at their in-progress limit cannot start it: it is queued behind the tickets that fill their limit,
+        // not stalled. Quiet until it has sat queued QUEUED_BEHIND_FLAG_MS, so a real stall still shows.
+        const queued = x.queuedBehind?.length ? x.queuedBehind : null;
+        if (queued && idle < QUEUED_BEHIND_FLAG_MS) continue;
+        if (idle >= s.idleAgentMinutes * 60_000) add("unstarted", { idleMs: idle, limitMs: s.idleAgentMinutes * 60_000, ...(queued ? { queuedBehind: queued } : {}) });
       }
     } else if (x.state === "review") {
       // Approved by everyone: the merge sweep owns it, and raises a merge card of its own if it can't land.
