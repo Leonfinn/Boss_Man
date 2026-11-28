@@ -356,8 +356,8 @@ const fs=require("fs");const [m,p,b]=process.argv.slice(1);
 fetch("http://127.0.0.1:3105"+p,{method:m,headers:{authorization:"Bearer "+fs.readFileSync("/run/launcher/key","utf8").trim(),"content-type":"application/json"},body:b||undefined})
  .then(async r=>{console.log(r.status+" "+await r.text());process.exit(r.status<300?0:1)}).catch(e=>{console.log(String(e));process.exit(1)})' "$@"; }
 out2="$(call2 PUT /runners/smoketwo "{\"token\":\"$tok\"}" 2>&1)" && ok "the second launcher started a runner" || bad "second install runner start: $out2"
-mounts1="$(docker inspect --format '{{range .Mounts}}{{.Name}} {{end}}' boss-man-runner-smoke 2>/dev/null)"
-mounts2="$(docker inspect --format '{{range .Mounts}}{{.Name}} {{end}}' boss-man-runner-smoketwo 2>/dev/null)"
+mounts1="$(docker inspect --format '{{range .Mounts}}{{.Name}} {{end}}' boss-man-runner-smoke || true)"
+mounts2="$(docker inspect --format '{{range .Mounts}}{{.Name}} {{end}}' boss-man-runner-smoketwo || true)"
 case " $mounts1" in *" ${P}_claude-pack "*) ok "the first install's runner mounts ${P}_claude-pack" ;; *) bad "the first install's runner mounts: $mounts1" ;; esac
 case " $mounts2" in *" ${P2}_claude-pack "*) ok "the second install's runner mounts ${P2}_claude-pack" ;; *) bad "the second install's runner mounts: $mounts2 (launcher env: $(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${P2}-launcher" | grep -E '^BOSSMAN_(CLAUDE_PACK_VOLUME|INSTALL_LABEL|STACK)=' | tr '\n' ' '))" ;; esac
 case "$mounts1$mounts2" in *"boss-man-claude-pack"*) bad "a runner mounts the shared boss-man-claude-pack (first: $mounts1; second: $mounts2)" ;; *) ok "no runner mounts a shared boss-man-claude-pack" ;; esac
