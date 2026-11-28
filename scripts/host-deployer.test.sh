@@ -490,16 +490,16 @@ infra_re="$(grep -o "^INFRA='[^']*'" "$here/host-deployer.sh" | sed "s/^INFRA='/
 compose_re="$(grep -o "^COMPOSE_FILES='[^']*'" "$here/host-deployer.sh" | sed "s/^COMPOSE_FILES='//; s/'\$//")"
 not_re="$(grep -o "^NOT_INFRA='[^']*'" "$here/host-deployer.sh" | sed "s/^NOT_INFRA='//; s/'\$//")"
 # Hand-only whatever the host's settings say: deploy scripts, .env*, and the files under deploy/ that are not Compose files.
-for p in scripts/deploy.sh scripts/rebuild-live.sh scripts/update-runner.sh scripts/host-deployer.sh scripts/install-deployer.sh scripts/daily-backup.sh .env.example deploy/caddy/Caddyfile deploy/tailscale/serve.json; do # daily-backup.sh runs as root in the backup container (BOS-2176)
-  if ! echo "$p" | grep -Eq "$infra_re" || echo "$p" | grep -Eq "$not_re"; then fail "$p should count as infra"; fi
+for p in scripts/deploy.sh scripts/rebuild-live.sh scripts/update-runner.sh scripts/host-deployer.sh scripts/install-deployer.sh scripts/daily-backup.sh .env.example deploy/caddy/Caddyfile deploy/tailscale/serve.json deploy/x.toml deploy/cfg/app.xml deploy/index.html deploy/l; do # daily-backup.sh runs as root in the backup container (BOS-2176)
+  if ! echo "$p" | grep -Eq "$infra_re" || echo "$p" | grep -Eq "$compose_re" || echo "$p" | grep -Eq "$not_re"; then fail "$p should count as infra"; fi
 done
-# Compose files are candidates: hand only when the rendered settings say so (BOS-2885).
+# Compose files are candidates: hand only when the rendered settings say so (BOS-2885). needs_hand takes them out of INFRA's deploy/ clause.
 for p in docker-compose.yml docker-compose.images.yml deploy/x.yml deploy/truenas-bluegreen.yml deploy/check-worker/compose.yaml; do
-  if ! echo "$p" | grep -Eq "$compose_re" || echo "$p" | grep -Eq "$infra_re"; then fail "$p should be a compose candidate and not hand-only"; fi
+  if ! echo "$p" | grep -Eq "$compose_re"; then fail "$p should be a compose candidate"; fi
 done
 # CI files, build inputs (Dockerfiles, .dockerignore, .npmrc) and the Penpot and ntfy add-ons don't touch Boss Man's containers.
 for p in .github/workflows/ci.yml deploy/penpot.yml scripts/make-app-icons.mjs scripts/check-all.sh scripts/lint-migrations.mjs scripts/restore-test.sh deploy/ntfy.yml deploy/ntfy-bluegreen.yml apps/server/Dockerfile apps/updater/Dockerfile .dockerignore .npmrc; do
-  if { echo "$p" | grep -Eq "$infra_re" || echo "$p" | grep -Eq "$compose_re"; } && ! echo "$p" | grep -Eq "$not_re"; then fail "$p should not count as infra"; fi
+  if { echo "$p" | grep -Eq "$infra_re" && ! echo "$p" | grep -Eq "$compose_re" || echo "$p" | grep -Eq "$compose_re"; } && ! echo "$p" | grep -Eq "$not_re"; then fail "$p should not count as infra"; fi
 done
 
 # 7. Bad files: garbage, shell syntax in a field, a symlink, an oversized file. None run anything.
@@ -1221,6 +1221,11 @@ for reach in $'volumes:\n  - type: bind\n    source: /host/x\n    target: /x' $'
   pushc2 svc-server "#yaml${nl}image: srv${nl}environment:${nl}  A: one${nl}$reach" docker-compose.yml >/dev/null
   handed "$live" docker-compose.yml "the server gains access to the host"
 done
+# keys outside the server allow-list (BOS-2885 security review): volumes_from, group_add, build, env_file, cgroup, uts, user: hand
+for odd in $'volumes_from:\n  - launcher' $'group_add:\n  - "998"' $'build:\n  context: /' $'env_file:\n  - /host/secrets.env' $'cgroup: host' $'uts: host' $'user: root'; do
+  pushc2 svc-server "#yaml${nl}image: srv${nl}environment:${nl}  A: one${nl}$odd" docker-compose.yml >/dev/null
+  handed "$live" docker-compose.yml "setting, which the host does not apply by itself"
+done
 # a named volume is not host reach; a bind that was already there is not gained
 pushc2 svc-server $'#yaml\nimage: srv\nvolumes:\n  - type: volume\n    source: data\n    target: /data' docker-compose.yml >/dev/null; auto "$live" "a named volume"
 live="$(pushc svc-server '#yaml' 'image: srv' 'privileged: true')"
@@ -1231,6 +1236,8 @@ FAKE_NO_RENDER=1 handed "$live" docker-compose.yml "could not compare"
 # files that are not Compose settings stay hand-only: the Caddyfile is mounted, so a render can't see it change
 pushc deploy/caddy/Caddyfile "x$RANDOM" >/dev/null; handed "$live" deploy/caddy/Caddyfile ""
 hasnt "$D/outbox/available.json" handReason
+pushc deploy/prometheus.toml "x$RANDOM" >/dev/null; handed "$live" deploy/prometheus.toml ""
+pushc deploy/cfg/app.xml "x$RANDOM" >/dev/null; handed "$live" deploy/cfg/app.xml ""
 # a build-only change next to a hand-only one lists only the hand-only file
 pushc apps/updater/Dockerfile "x$RANDOM" >/dev/null; [[ $(hand_of "$live") != *Dockerfile* ]] || fail "a Dockerfile was listed as a hand file"
 }

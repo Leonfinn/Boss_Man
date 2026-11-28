@@ -86,7 +86,7 @@ INBOX="$D/inbox" OUTBOX="$D/outbox" STATE="$D/state" LOG="$D/deployer.log"
 # invisible in the rendered settings). Compose files and deploy/*.yml/yaml (COMPOSE_FILES) are hand only when this host's
 # rendered settings change in a way the swap can't apply (compose_hand_reason). Dockerfiles, .dockerignore and .npmrc are build
 # inputs of the images the deploy builds itself, so they are not on the list.
-INFRA='^(scripts/(deploy|rebuild-live|update-runner|host-deployer|install-deployer|daily-backup)\.sh$|\.env|deploy/([^/]+/)*[^/]*([^l]|[^m]l)$)'
+INFRA='^(scripts/(deploy|rebuild-live|update-runner|host-deployer|install-deployer|daily-backup)\.sh$|\.env|deploy/)' # deploy/ files that are Compose files are taken out again in needs_hand (COMPOSE_FILES)
 COMPOSE_FILES='^(docker-compose[^/]*\.ya?ml$|deploy/([^/]+/)*[^/]*\.ya?ml$)'
 # Under deploy/ but never used by Boss Man's own containers: the Penpot add-on is its own Compose project (docs/15).
 NOT_INFRA='^deploy/(penpot|ntfy|ntfy-bluegreen)\.yml$'
@@ -367,6 +367,22 @@ reach_facts() {
     END { flush() }
   ' | LC_ALL=C sort -u
 }
+# Allow-list (BOS-2885 security review): the only keys of a server service that may change on the automatic path. Any other
+# key added, changed or removed (volumes_from, group_add, build, env_file, cgroup, uts, user, ports, a key Compose adds later...)
+# goes by hand. volumes stays on the list because ordinary volume changes are common; reach_facts still refuses a host bind.
+SERVER_KEYS_OK='^(environment|image|labels|healthcheck|deploy|command|entrypoint|restart|stop_grace_period|stop_signal|mem_limit|mem_reservation|cpus|pids_limit|expose|depends_on|volumes|networks)$'
+# stdin: rendered config. One "service|key|block" line per top-level key of every service (block's newlines turned into "~"), sorted.
+server_key_blocks() {
+  LC_ALL=C awk '
+    function flush() { if (svc != "" && key != "") print svc "|" key "|" blk; key = ""; blk = "" }
+    /^[^ ]/ { flush(); svc = ""; ins = ($0 ~ /^services:/); next }
+    !ins { next }
+    /^  [A-Za-z0-9_.-]+:[ ]*$/ { flush(); svc = $1; sub(/:$/, "", svc); next }
+    /^    [A-Za-z_0-9.-]+:/ { flush(); key = $1; sub(/:$/, "", key); blk = $0; next }
+    { if (key != "") blk = blk "~" $0 }
+    END { flush() }
+  ' | LC_ALL=C sort
+}
 # stdin: rendered config. Everything that is not under services: (top-level volumes, networks, secrets).
 non_service_text() { awk '/^[^ ]/ { ins = ($0 ~ /^services:/) } !ins { print }'; }
 
@@ -388,7 +404,7 @@ render_config() { # commit project: sets RCFG to the rendered config of a commit
 
 # Sets HAND_REASON; returns 0 when the change has to be applied by hand, 1 when the swap can apply it.
 compose_hand_reason() { # head commit
-  local head=$1 commit=$2 project old new f1 f2 n gained
+  local head=$1 commit=$2 project old new f1 f2 n gained odd
   HAND_REASON=""
   project="$(compose_project)"
   if render_config "$head" "$project"; then old=$RCFG; else old=""; fi
@@ -406,8 +422,10 @@ compose_hand_reason() { # head commit
   if [[ $(non_service_text <<<"$old") != "$(non_service_text <<<"$new")" ]]; then
     HAND_REASON="it changes the volumes, networks or secrets"; return 0
   fi
+  odd="$(LC_ALL=C comm -3 <(server_key_blocks <<<"$old") <(server_key_blocks <<<"$new") | tr -d '\t' | awk -F'|' -v ok="$SERVER_KEYS_OK" '$1 ~ /^server(-blue|-green)?$/ && $2 !~ ok { print $2 }' | sort -u | head -3 | tr '\n' ',')"
   gained="$(LC_ALL=C comm -13 <(reach_facts <<<"$old") <(reach_facts <<<"$new") | { grep -E '^server(-blue|-green)?\|' || true; } | head -3 | tr '\n' ';')"
   if [[ -n $gained ]]; then HAND_REASON="the server gains access to the host (${gained%;})"; return 0; fi
+  if [[ -n $odd ]]; then HAND_REASON="it changes the server's ${odd%,} setting, which the host does not apply by itself"; return 0; fi
   return 1
 }
 
@@ -418,8 +436,8 @@ needs_hand() { # head commit
     [[ -n $HAND_FILES ]]; return
   fi
   paths="$(g diff --name-only "$head" "$commit" | { grep -Ev "$NOT_INFRA" || true; })"
-  HAND_FILES="$(grep -E "$INFRA" <<<"$paths" || true)" HAND_REASON=""
-  cand="$(grep -E "$COMPOSE_FILES" <<<"$paths" | { grep -Ev "$INFRA" || true; } || true)"
+  HAND_FILES="$(grep -E "$INFRA" <<<"$paths" | { grep -Ev "$COMPOSE_FILES" || true; } || true)" HAND_REASON=""
+  cand="$(grep -E "$COMPOSE_FILES" <<<"$paths" || true)"
   if [[ -n $cand ]] && compose_hand_reason "$head" "$commit"; then
     HAND_FILES+="${HAND_FILES:+$'\n'}$cand"
   else
