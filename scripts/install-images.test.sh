@@ -4,6 +4,7 @@
 # Without INSTALL_RELEASE_JSON (the merge check, scripts/test-shell.sh): the compose file is read, never started. It checks what makes
 # the install "pull only": every image named by digest, nothing built, no host folder bound but the Docker socket, nothing
 # on the host (openssl, chown, sudo) mentioned in the steps. Needs the docker CLI and compose plugin; skips with a message without them.
+# The UPDATER_SPEC_ENV check (BOS-2921) runs before that skip: it reads the compose file and the updater's settings parser alone.
 #
 # With INSTALL_RELEASE_JSON=<release.json> (CI, on x86 and arm64 runners, and by hand on a host with Docker): the real install.
 # It pulls the published images by digest, runs setup twice (the second run must change nothing), starts the stack under its own
@@ -134,6 +135,25 @@ else
     bad "scripts/render-image-env.sh refuses a release.json built like the CI install step: $(tr '\n' ' ' < "$T/ci-render.err")"
   fi
 fi
+
+# BOS-2921: the compose file's UPDATER_SPEC_ENV block is a contract with the updater, which refuses some keys there because it sets
+# them for each colour from the release. BOS-2817 added BOSSMAN_IMAGE_INSTALL to the block; the updater then refused to start, and
+# only the real-install half (a Docker daemon) noticed, so GitHub run 46003749123 was the first to see it. Checked here, with no
+# daemon or Docker CLI, by running the updater's real config parser (apps/updater/src/config.ts) on the block: no second copy of the
+# refused keys can drift. apps/updater/scripts/spec-env-refused.mjs does that; this only runs it on the compose file and a broken copy.
+# GitHub CI runs this test's no-daemon half on every branch; that is what the fix asks for, and the full check runs the tip's copy.
+if [ -x "$(command -v node)" ]; then
+  rrc=0; rout="$(node apps/updater/scripts/spec-env-refused.mjs docker-compose.images.yml 2>&1)" || rrc=$?
+  if [ "$rrc" -eq 0 ]; then ok "the updater accepts docker-compose.images.yml's UPDATER_SPEC_ENV block"
+  elif [ "$rrc" -eq 1 ]; then bad "the updater refuses docker-compose.images.yml's UPDATER_SPEC_ENV block: ${rout#REFUSED }"
+  else bad "could not check docker-compose.images.yml's UPDATER_SPEC_ENV block against the updater: $rout"; fi
+  # The check must catch a refused key; a copy that has one more line it must refuse proves it does, not just says ok.
+  awk '/^[[:space:]]*UPDATER_SPEC_ENV: *\|/ { print; print "        BOSSMAN_IMAGE_INSTALL=1"; next } { print }' \
+    docker-compose.images.yml > "$T/spec-env-bad.yml"
+  rrc=0; rout="$(node apps/updater/scripts/spec-env-refused.mjs "$T/spec-env-bad.yml" 2>&1)" || rrc=$?
+  if [ "$rrc" -eq 1 ] && [[ "$rout" == *BOSSMAN_IMAGE_INSTALL* ]]; then ok "the UPDATER_SPEC_ENV check names BOSSMAN_IMAGE_INSTALL on a copy with it set"
+  else bad "the UPDATER_SPEC_ENV check missed BOSSMAN_IMAGE_INSTALL on a copy with it set (exit $rrc): $rout"; fi
+else bad "no node to check docker-compose.images.yml's UPDATER_SPEC_ENV block against the updater"; fi
 
 # ---- The real install ----
 if [ -z "${INSTALL_RELEASE_JSON:-}" ]; then

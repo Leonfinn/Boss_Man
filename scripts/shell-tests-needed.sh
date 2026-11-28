@@ -16,7 +16,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.." || { echo "run: cannot enter the repo"; e
 needed_path() {
   case "$1" in
     *.sh) return 0 ;;
-    scripts/* | deploy/* | apps/runner/* | apps/netguard/* | skills/penpot/* | .github/workflows/*) return 0 ;;
+    scripts/* | deploy/* | apps/runner/* | apps/updater/* | apps/netguard/* | skills/penpot/* | .github/workflows/*) return 0 ;;
     docker-compose*.yml | */docker-compose*.yml) return 0 ;;
     Dockerfile* | */Dockerfile*) return 0 ;;
     package.json | pnpm-lock.yaml | pnpm-workspace.yaml) return 0 ;;
