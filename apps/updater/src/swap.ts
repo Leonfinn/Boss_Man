@@ -177,7 +177,7 @@ export async function migrate(d: SwapDeps, image: string, version: string): Prom
 }
 
 /** Steps 4 and 5: create and start the idle colour, wait for the health gate, then the handover. Leaves the old colour leading on any failure. */
-export async function bringUp(d: SwapDeps, live: Colour, idle: Colour, release: Release, ins: { version: string; serverDigest: string }, restore: boolean): Promise<void> {
+export async function bringUp(d: SwapDeps, live: Colour, idle: Colour, release: Pick<Release, "commit">, ins: { version: string; serverDigest: string }, restore: boolean): Promise<void> {
   const { docker, state } = d;
   const idleName = colourName(idle);
   const commit = release.commit;
@@ -248,7 +248,7 @@ export async function soakAndFinish(d: SwapDeps, live: Colour, idle: Colour, com
 }
 
 /** Steps 2 to 8 for a normal move, or the standby-release move. The caller has verified the release and pulled the images. */
-export async function runSwap(d: SwapDeps, release: Release, ins: { version: string; serverDigest: string }, restore: boolean): Promise<void> {
+export async function runSwap(d: SwapDeps, release: Pick<Release, "commit">, ins: { version: string; serverDigest: string }, restore: boolean, sameRelease = false): Promise<void> {
   const { docker, state } = d;
   const cols = await findColours(docker);
   const live = liveColour(cols, sw(d).frontNetwork);
@@ -257,7 +257,8 @@ export async function runSwap(d: SwapDeps, release: Release, ins: { version: str
   const r = await probeOf(d)(LIVE_ALIAS);
   if (!r?.ok || r.role !== "leader") return fail("live_unhealthy", "The running version is not healthy right now, so the update was not started. Nothing was changed.");
   state.update({ live, idle, commit: release.commit });
-  if (!restore) {
+  // BOS-2717: re-making the live release with the updater link changes no data, so no backup and no migration.
+  if (!restore && !sameRelease) {
     state.update({ stage: "backing-up" });
     state.update({ backup: await backup(d) });
     state.update({ stage: "migrating" });

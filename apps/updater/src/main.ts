@@ -2,7 +2,7 @@
 // settings) swaps the server colours through the Docker API, then updates itself last (design sections 5 and 8).
 import { loadConfig, UpdaterError } from "./config.js";
 import { dockerClient, socketTransport } from "./docker.js";
-import { converge, firstStart, reconcile } from "./firststart.js";
+import { converge, firstStart, reconcile, relinkServer } from "./firststart.js";
 import { recover, runMove, type MoveDeps } from "./move.js";
 import { callHandover, newGate, OLD_SUFFIX } from "./selfupdate.js";
 import { createServer } from "./server.js";
@@ -54,6 +54,7 @@ async function main() {
   // deferred helper move. Never stops the updater: a failure is a note in the status and a retry.
   if (sw) {
     let settling = false;
+    const relinkTried = { done: false };
     const settle = async (atStart: boolean) => {
       // A tick that fires while the previous one still waits (a busy launcher is waited on for up to 10 minutes) is skipped.
       if (settling) return;
@@ -63,6 +64,8 @@ async function main() {
         if (atStart) for (const n of await firstStart(deps)) log(n);
         for (const n of await reconcile(deps)) log(n);
         await converge(deps);
+        // BOS-2717: a server made before the Install button existed is given its link by itself.
+        for (const n of await relinkServer(deps, relinkTried)) log(n);
       } catch (e) {
         log(`reconcile failed: ${String((e as Error)?.message ?? e)}`);
       } finally {
