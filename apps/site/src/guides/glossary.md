@@ -15,6 +15,7 @@ A term marked **[code only]** comes up only in companies whose agents write code
 - **Advice on permission cards**: A setting under **Settings > Permissions** that lets Boss Man suggest which button to press on a permission card: **Advise**, **Watch** or **Off**. It never answers a card for you. ([Guide 6](/guides/permissions#advice-on-permission-cards))
 - **After-merge check**: A Done when line ticked **On a real host (checked after merge)**, because it can only be checked on the live system. Reviewers skip it, and the ticket stays open after the merge until it has a pass or fail. ([Guide 7](/guides/reviews-and-merge-queue#after-it-goes-live))
 - **Agent**: An AI worker with a job title (researcher, writer, checker) that works on your tasks. Each agent has instructions and a model, and runs in Claude Code, Codex or OpenCode. ([Guide 1](/guides/how-boss-man-works#companies-and-agents))
+- **Agent fence**: A kernel limit that keeps each agent's commands to its own folders, away from other tasks, other agents and the runner's keys. See its state under **Settings > Permissions > Agent fence**. ([What keeps agents fenced in](/guides/what-keeps-agents-fenced-in#the-agent-fence-each-agent-keeps-to-its-own-folders))
 - **Agent program**: The program an agent runs in: Claude Code, Codex or OpenCode. Each one can use different AI accounts. ([Guide 5](/guides/agents-and-models#agent-programs-and-accounts))
 - **Approved, merging**: The Review lane on the board for tickets that every reviewer approved, while Boss Man checks and merges them. ([Guide 4](/guides/board-and-decisions#the-three-review-lanes))
 - **API key**: A password-like code from Anthropic's website that lets Boss Man use Claude and bills you per use. ([Connect a Claude account](/guides/connect-a-claude-account))
@@ -27,6 +28,7 @@ A term marked **[code only]** comes up only in companies whose agents write code
 - **Backups**: Copies of the database that Boss Man makes before every update, kept in the install folder next to `src`. Test one with `scripts/restore-test.sh` before you rely on it. ([Guide 10](/guides/updates-and-backups#where-backups-are-kept))
 - **Blocked**: The board column for tickets that are only waiting: on another ticket, an open card (plan cards too), a date, or the change going live. Blocked tickets do not count towards the in-progress limits. ([Guide 4](/guides/board-and-decisions#what-blocked-means))
 - **Board**: The project's columns that show where each task is, from Backlog to Done. Open **Projects** and choose a project to see it. ([Tasks and the board](/guides/tasks-and-the-board#the-board-s-columns), and [Guide 4](/guides/board-and-decisions#the-board-s-columns))
+- **Branch**: A separate copy of the code where one task's work happens. Boss Man gives each task in a code project its own branch. **[code only]** ([Code words for owners](/guides/code-words#branch))
 - **Built-in allows**: What agents may do at once, with no card: use Boss Man's own tools, read, search and edit files, fetch web pages and run other shell commands. Ask rules do not apply to them. ([Guide 6](/guides/permissions#who-is-asked))
 - **Built-in guards**: Boss Man's fixed checks on risky requests: pushing, publishing and destructive commands come to you, and some deletes go to the CEO first. An Allow rule cannot let a guarded request run. ([Guide 6](/guides/permissions#who-is-asked))
 
@@ -94,7 +96,7 @@ A term marked **[code only]** comes up only in companies whose agents write code
 
 ## N
 
-- **Network guard**: The first check on every request, which refuses addresses agents must not reach, such as your home network or the Boss Man machine. No permission rule can lift it. To let runners reach an extra address, add it to `BOSSMAN_NETGUARD_ALLOW` in `.env`. ([Guide 6](/guides/permissions#who-is-asked))
+- **Network guard**: The first check on every request, which refuses addresses agents must not reach, such as your home network or the Boss Man machine. No permission rule can lift it. To let runners reach an extra address, add it to `BOSSMAN_NETGUARD_ALLOW` in `.env`. ([Guide 6](/guides/what-keeps-agents-fenced-in#the-network-guard-agents-stay-off-your-home-network))
 - **No size**: A ticket nobody has given points yet. It adds nothing to the points left, so a forecast with unsized tickets is only as good as the sized ones. ([Guide 1](/guides/how-boss-man-works#features-tasks-and-sub-tasks))
 - **Note**: The lowest notification level, shown on the Notifications page only. ([Guide 8](/guides/phone-notifications#notification-levels))
 - **ntfy**: A free, open-source notification service that you run yourself. Boss Man uses it to send notifications to your phone. ([Guide 8](/guides/phone-notifications#send-notifications-to-your-phone))
@@ -114,6 +116,7 @@ A term marked **[code only]** comes up only in companies whose agents write code
 - **Points**: How big a ticket is: a number it is given when it is planned. A bigger number means more work. The Roadmap adds up the points still to do to forecast when a milestone finishes. ([Guide 1](/guides/how-boss-man-works#features-tasks-and-sub-tasks))
 - **Priority 1**: A tick box on the ticket page, once called **Urgent**. The ticket goes first in the check queue and the merge line, keeps running when a plan is nearly used up, and you get one alert when it is ready to go live. ([Guide 4](/guides/board-and-decisions#the-ticket-page))
 - **Project**: One stream of work with its own task board, such as "Client reports". It can hold documents only, or a code repository that a company's agents work in. ([Guide 1](/guides/how-boss-man-works#projects-and-tasks))
+- **Pull request**: A request, made on GitHub or Gitea, to merge a task's branch into the main version of the code. Choose **Open a pull request** under **When work is approved** if your repo only accepts changes that way. **[code only]** ([Code words for owners](/guides/code-words#merge-or-pull-request-which-to-choose))
 
 ## Q
 
@@ -123,7 +126,7 @@ A term marked **[code only]** comes up only in companies whose agents write code
 ## R
 
 - **Ready**: The board column for tickets ready for an agent to pick up. ([Guide 4](/guides/board-and-decisions#the-board-s-columns))
-- **Repo** (repository): The online folder, on GitHub or Gitea, where a software project's code is kept. **[code only]** ([Guide 3](/guides/first-company-and-ticket#what-will-your-team-work-on))
+- **Repo** (repository): The online folder, on GitHub or Gitea, where a software project's code is kept. A project needs one only if your agents work on code. **[code only]** ([Code words for owners](/guides/code-words#repo), and [Guide 3](/guides/first-company-and-ticket#what-will-your-team-work-on))
 - **Review**: Another agent, or you, checks finished work against the task's Done when lines before it counts as done. On the board, the Review column has three lanes. ([Review and risk](/guides/review-and-risk), and [Guide 7](/guides/reviews-and-merge-queue#what-a-review-checks))
 - **Risk level**: How much harm a task could do if it went wrong: trivial, low, medium, high or critical. Higher risk gets more checks and your sign-off. ([Review and risk](/guides/review-and-risk#the-five-risk-levels))
 - **Rules**: Your own permission rules under **Settings > Permissions**, each with the outcome **Allow**, **Ask the CEO**, **Ask me** or **Deny**. Deny rules always win. Then your Allow rules apply. **Ask the CEO** and **Ask me** rules only apply to requests that would otherwise ask. ([Guide 6](/guides/permissions#rules))
@@ -151,6 +154,7 @@ A term marked **[code only]** comes up only in companies whose agents write code
 - **Tailnet**: Your private Tailscale network: the devices that can reach each other through Tailscale. ([Guide 9](/guides/add-ons#tailscale-https-from-anywhere-on-your-tailnet))
 - **Tailscale**: An add-on that gives Boss Man an HTTPS address that only your own devices can reach. You need it for phone notifications. ([Guide 9](/guides/add-ons#tailscale-https-from-anywhere-on-your-tailnet))
 - **Task**: One piece of work, with what it should produce and how you will know it is done (its Done when lines). One or more tasks deliver a feature, and work that is not a feature is a task with no feature. Add one with **Add task**. Also called a ticket. ([Tasks and the board](/guides/tasks-and-the-board#how-to-write-a-good-task), and [Guide 1](/guides/how-boss-man-works#features-tasks-and-sub-tasks))
+- **Team plan**: The CEO's card on Decisions that proposes several hires at once, one row per hire. Untick anyone you don't want, then choose the hire button. ([Hiring your first team](/guides/hiring-your-first-team#the-ceo-s-team-plan-card))
 - **Thinking**: How hard the model thinks before it answers, from **Default** and **Low** up to **Max**. Not every model offers every level. ([Guide 5](/guides/agents-and-models#choose-a-thinking-level))
 - **Ticket**: Another name for a task. See **Task**. ([Guide 1](/guides/how-boss-man-works#projects-and-tasks))
 - **Tool servers**: Servers (MCP) that give agents extra tools, such as reading web pages. Add them under **Settings > Tools and deploys**. ([Guide 9](/guides/add-ons#tool-servers-extra-tools-from-servers-you-run))
