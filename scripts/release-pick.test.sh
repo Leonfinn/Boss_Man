@@ -201,4 +201,13 @@ notes="$(cd "$G" && env -u SITE_URL "$N" "$C1" "$C4")"
 echo "$notes" | grep -q "What's new shows" && fail "with no SITE_URL there should be no pointer: $notes"
 echo "$notes" | grep -qx -- "- New line one." || fail "with no SITE_URL the notes should still print: $notes"
 
+# BOS-2903: the release job must pass SITE_URL to the notes step, or the pointer above never appears in a real release.
+# The job runs in the `publish` environment, so it can only read a variable as ${{ vars.SITE_URL }} from the repository or
+# that environment; a secret, or the `site` environment's copy the website publish uses, would never reach it.
+wf="$REPO_ROOT/.github/workflows/release.yml"
+grep -Eq '^      SITE_URL: \$\{\{ vars\.SITE_URL \}\}$' "$wf" \
+  || fail "release.yml must pass SITE_URL from a variable (vars.SITE_URL) to the release step that writes the notes"
+awk '/^  [a-z][a-z-]*:$/{job=$1} job=="release:" && /^    environment:/{print; exit}' "$wf" | grep -qx '    environment: publish' \
+  || fail "release.yml's release job should still run in the publish environment"
+
 echo "release-pick.test.sh: ok"
