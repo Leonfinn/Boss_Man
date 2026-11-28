@@ -114,6 +114,18 @@ describe("watchdog rules (BOS-58)", () => {
     expect(rules([ready({ unblockedAt: ago(20), stateChangedAt: ago(60), assigneeAgentId: null })], [], [done])).toEqual(["t1:unassigned"]);
   });
 
+  it("BOS-2875: a ready ticket whose assignee is at their limit is queued, not flagged, until it has sat 24 h", () => {
+    const done: SnapHold = { blockedTicketId: "t1", kind: "ticket", holderTicketId: "x", resolved: true };
+    const queued = (min: number) => ticket({ state: "ready", stateChangedAt: ago(min + 10), unblockedAt: ago(min), queuedBehind: ["BOS-1", "BOS-2"] });
+    expect(rules([queued(20)], [], [done])).toEqual([]);
+    expect(rules([queued(5 * 60)], [], [done])).toEqual([]);
+    const late = evaluate({ tickets: [queued(24 * 60)], runs: [], holds: [done] }, s, NOW);
+    expect(late.map((x) => x.rule)).toEqual(["unstarted"]);
+    expect(late[0]!.detail.queuedBehind).toEqual(["BOS-1", "BOS-2"]);
+    // Under their limit (no queuedBehind): flagged as before.
+    expect(rules([ticket({ state: "ready", stateChangedAt: ago(30), unblockedAt: ago(20) })], [], [done])).toEqual(["t1:unstarted"]);
+  });
+
   it("flags a crashed run, and a run that ended without moving the ticket, after the grace and only if nothing is scheduled", () => {
     const crashed = run({ startedAt: ago(5 + RUN_ENDED_GRACE_MS / 60_000), endedAt: ago(RUN_ENDED_GRACE_MS / 60_000), outcome: "error: Out of memory" });
     expect(rules([ticket({ stateChangedAt: ago(200) })], [crashed])).toEqual(["t1:run_crashed"]);

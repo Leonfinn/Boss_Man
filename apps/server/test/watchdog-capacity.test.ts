@@ -207,4 +207,21 @@ describe("rule 1 and 2 hand-offs reach the Scrum Master (BOS-659)", () => {
     const flags = await ctx.db.select().from(watchdogFlags).where(eq(watchdogFlags.ticketId, released.id));
     expect(flags.map((f) => f.rule)).toEqual(["unstarted"]);
   });
+
+  it("rule 2 (BOS-2875): not flagged while the assignee is at their in-progress limit, flagged once they have room", async () => {
+    await ctx.switchOn();
+    const blocker = await ctx.ticket({ title: "Blocker", systemState: "done", stateChangedAt: ctx.ago(30) });
+    const busyA = await ctx.ticket({ title: "Busy A", systemState: "in_progress", stateChangedAt: ctx.ago(5) });
+    const busyB = await ctx.ticket({ title: "Busy B", systemState: "in_progress", stateChangedAt: ctx.ago(5) });
+    const released = await ctx.ticket({ title: "Was blocked", stateChangedAt: ctx.ago(30) });
+    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: released.id, blockerTicketId: blocker.id });
+    // Keep the two busy tickets quiet (a scheduled check is a plan; a live run would park them as "busy elsewhere", which frees the limit).
+    for (const b of [busyA, busyB]) await ctx.db.update(tickets).set({ monitorAt: ctx.ago(-60) }).where(eq(tickets.id, b.id));
+    await ctx.watchdog.run();
+    expect(await ctx.db.select().from(watchdogFlags).where(eq(watchdogFlags.ticketId, released.id))).toHaveLength(0);
+    // One of them finishes: the assignee has room, so the ticket that did not start is flagged.
+    await ctx.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, busyB.id));
+    await ctx.watchdog.run();
+    expect((await ctx.db.select().from(watchdogFlags).where(eq(watchdogFlags.ticketId, released.id))).map((f) => f.rule)).toEqual(["unstarted"]);
+  });
 });

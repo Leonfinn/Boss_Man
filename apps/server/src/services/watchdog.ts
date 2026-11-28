@@ -20,7 +20,7 @@ import { recentOwnerAnswer } from "./stale-requests.js";
 import { checkOwnerAsk } from "./owner-answers.js";
 import type { Embedder } from "./wiki-semantic.js";
 import { getHold, holdBlocksStarts } from "./maintenance.js";
-import { busyAgentIds } from "./agent-wip.js";
+import { busyAgentIds, cantMoveSql, readWipLimits } from "./agent-wip.js";
 import { heldTicketIds } from "./review-holds.js";
 import { activeRows, evaluate as evaluateReviews, latestRows, REVIEW_REASON } from "./review-kinds.js";
 import { openBlockers, ticketBlockerFinished } from "./ticket-links.js";
@@ -456,7 +456,26 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
         if (Date.now() - s.at.getTime() < PREFLIGHT_MAX_WAIT_MS) checks.set(ticketId, [...(checks.get(ticketId) ?? []), { from: s.at, to: null }]);
       }
     }
+    // BOS-2875: a ready ticket whose assignee is at their in-progress limit is queued behind the tickets that fill it (the WIP
+    // counting rule: in progress and able to move). Computed only for the ready tickets the "unstarted" rule can look at.
+    const queuedBehind = new Map<string, string[]>();
+    const agentLimit = (await readWipLimits(db)).agent;
+    const waitingAssignees = new Set(rows.filter((r) => r.systemState === "ready" && r.assigneeAgentId && releasedAt(r)).map((r) => r.assigneeAgentId!));
+    if (agentLimit != null && waitingAssignees.size) {
+      const counting = await db
+        .select({ assigneeAgentId: tickets.assigneeAgentId, number: tickets.number })
+        .from(tickets)
+        .where(and(inArray(tickets.assigneeAgentId, [...waitingAssignees]), eq(tickets.systemState, "in_progress"), sql`not ${cantMoveSql}`))
+        .orderBy(asc(tickets.number));
+      const refsBy = new Map<string, string[]>();
+      for (const w of counting) refsBy.set(w.assigneeAgentId!, [...(refsBy.get(w.assigneeAgentId!) ?? []), ticketRef(c?.prefix, w.number) ?? `#${w.number}`]);
+      for (const r of rows) {
+        const refs = r.assigneeAgentId ? refsBy.get(r.assigneeAgentId) : undefined;
+        if (refs && refs.length >= agentLimit) queuedBehind.set(r.id, refs);
+      }
+    }
     const snapTickets: SnapTicket[] = rows.map((r) => ({
+      queuedBehind: queuedBehind.get(r.id),
       id: r.id,
       state: r.systemState,
       assigneeAgentId: r.assigneeAgentId,
