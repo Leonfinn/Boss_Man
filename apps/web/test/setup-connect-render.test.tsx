@@ -94,6 +94,13 @@ describe.skipIf(!browser)("the setup wizard's connect step, drawn (BOS-2815)", (
               const allPicks = rows.map((r) => r.querySelector<HTMLElement>(".connect-pick")!.getBoundingClientRect());
               const detail = document.querySelector<HTMLElement>(".connect-detail");
               const box = detail?.getBoundingClientRect() ?? null;
+              const row = detail?.closest<HTMLElement>(".connect-row");
+              // The longest command in the open row (a plan's install line), which must wrap inside its row, not run off it.
+              const codes = Array.from(detail?.querySelectorAll<HTMLElement>("li code") ?? []);
+              const widest = codes.reduce<HTMLElement | null>((w, c) => (!w || c.scrollWidth > w.scrollWidth ? c : w), null);
+              const longest = widest
+                ? { right: widest.getBoundingClientRect().right, over: widest.scrollWidth - widest.clientWidth, rowRight: row!.getBoundingClientRect().right, text: (widest.textContent ?? "").length }
+                : null;
               const doc = document.documentElement;
               return {
                 count: rows.length,
@@ -101,6 +108,7 @@ describe.skipIf(!browser)("the setup wizard's connect step, drawn (BOS-2815)", (
                 widths: [...new Set(picks.map((b) => Math.round(b.width)))],
                 minTap: Math.min(...allPicks.map((b) => Math.round(b.height))),
                 right: box ? box.right : 0,
+                longest,
                 expands: document.querySelectorAll(".connect-pick[aria-expanded='true']").length,
                 scrolls: doc.scrollWidth > doc.clientWidth + 1,
                 expectCount,
@@ -118,6 +126,11 @@ describe.skipIf(!browser)("the setup wizard's connect step, drawn (BOS-2815)", (
           if (state.open) {
             expect(m.expands).toBe(1);
             expect(m.right).toBeLessThanOrEqual(d.width + 1);
+            // A long command wraps inside its row, never past it or the page, and is not cut off.
+            if (m.longest) {
+              expect(m.longest.over, `a command is cut off at ${d.width} (${state.name})`).toBeLessThanOrEqual(1);
+              expect(m.longest.right, `a command runs past its row at ${d.width} (${state.name})`).toBeLessThanOrEqual(Math.min(d.width, m.longest.rowRight) + 1);
+            }
           }
           expect(m.scrolls, `a sideways scroll at ${d.width} (${state.name})`).toBe(false);
           if (scratch) await p.screenshot({ path: (await import("node:path")).join(scratch, `connect-${state.name}-${d.width}.png`) });
