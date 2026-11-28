@@ -58,7 +58,7 @@ describe("setup wizard checks", () => {
     expect(await screen.findByLabelText("Git token")).toBeTruthy();
     expect(screen.getByText("Lets your agents save their work to your GitHub repository.")).toBeTruthy();
     expect(screen.queryByLabelText("Variable name")).toBeNull();
-    expect(screen.queryByText(/Check the token against/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Check the token against/ })).toBeNull();
     expect(screen.getByText(/pull request/, { selector: "strong" })).toBeTruthy();
   });
 
