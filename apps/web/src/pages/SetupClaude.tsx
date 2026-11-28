@@ -161,7 +161,7 @@ export function RunnerStep({ company, onChanged }: { company: Company; onChanged
           </button>
         ) : (
           <p style={{ margin: 0 }}>
-            To connect it, open <a href={`#/settings/${company.id}/runner`}>Settings → Server and runner → Runner</a> and follow the steps there.
+            This host has no launcher, so the workspace is started by hand. Follow <a href={TROUBLESHOOT} target="_blank" rel="noreferrer">the runner guide</a>.
           </p>
         ))}
       {act.view}

@@ -36,6 +36,7 @@ function fakeDocker() {
       const c = containers.get(name);
       return c ? ({ Id: c.id, Name: `/${name}`, Config: { Labels: c.labels, Env: (c.spec as { Env?: string[] }).Env }, HostConfig: (c.spec as { HostConfig?: ContainerInfo["HostConfig"] }).HostConfig, State: { Status: c.state, StartedAt: new Date(c.startedAt).toISOString(), ExitCode: c.exitCode, ...(c.health ? { Health: { Status: c.health } } : {}) }, NetworkSettings: { Networks: Object.fromEntries([...c.networks].map((n) => [n, {}])) } } as ContainerInfo) : null;
     },
+    async createVolume() {},
     async hostInfo() {
       return { dockerVersion: "27.0.1", osType: "linux" };
     },

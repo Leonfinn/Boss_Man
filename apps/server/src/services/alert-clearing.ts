@@ -7,7 +7,7 @@
 import { and, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import { mergeContext } from "./decision-context.js";
 import type { Db } from "../db/client.js";
-import { decisions, features, reviewRequests, runners, runs, secrets, ticketDependencies, tickets, wakes } from "../db/schema.js";
+import { decisions, features, reviewHolds, reviewRequests, runners, runs, secrets, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { record } from "./activity.js";
 import { signoffClearedReason } from "./signoff.js";
 import { allMergeOrder, commitIsLive } from "./go-live-wait.js";
@@ -88,7 +88,9 @@ export type ClearWhen =
   | { kind: "sweepStepOk"; step: string }
   | { kind: "hostWarningGone"; key: string }
   /** A token-expiry card (BOS-2825): that secret now has a newer version, so a new value was saved. */
-  | { kind: "secretReplaced"; secretId: string; version: number };
+  | { kind: "secretReplaced"; secretId: string; version: number }
+  /** BOS-2870: the card about a review hold left unreleased: the hold was released or cancelled. */
+  | { kind: "holdClosed"; holdId: string };
 
 type Card = { id: string; companyId: string; status: string; createdAt: Date; question: string; context: unknown };
 
@@ -175,6 +177,9 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
         break;
       case "mergeFailuresCalm":
         if (typeof c.companyId === "string" && typeof c.reason === "string") out.push({ kind: "mergeFailuresCalm", companyId: c.companyId, reason: c.reason });
+        break;
+      case "holdClosed":
+        if (typeof c.holdId === "string") out.push({ kind: "holdClosed", holdId: c.holdId });
         break;
       default:
         break;
@@ -357,6 +362,11 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
         const [s] = await db.select({ version: secrets.version, name: secrets.name }).from(secrets).where(eq(secrets.id, c.secretId));
         if (!s) return "the secret is no longer on record";
         return s.version > c.version ? `a new value was saved for ${s.name}` : null;
+      }
+      case "holdClosed": {
+        const [h] = await db.select({ status: reviewHolds.status, closedBy: reviewHolds.closedBy }).from(reviewHolds).where(eq(reviewHolds.id, c.holdId));
+        if (!h) return "the hold is no longer on record";
+        return h.status === "open" ? null : `the hold was ${h.status}${h.closedBy ? ` by ${h.closedBy}` : ""}`;
       }
       case "landingTurnEnded":
         if (!deps.landingTurnHeld) return null;

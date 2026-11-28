@@ -53,7 +53,7 @@ export const OWNER_CONTROLS = {
   "Log in": ["Create owner account", "Log in"],
   Setup: [
     "Create the company", "Add the project", "Check the token against …", "Add the task to …", "Continue", "Dismiss", "Saving",
-    "Back", "Next", "Skip for now", "Finish", "I know what I'm doing, let me get on with it",
+    "Back", "Next", "Skip this step", "Leave setup for now", "Skip setup for now", "Fix this",
     // The Claude and runner steps (BOS-1495), then the credentials, funding and project panels Setup shares with Settings and Projects.
     "Save the code", "Start the runner",
     "Save", "Check with Claude", "Check", "Remove", "Edit", "Delete", "Add funding source", "Cancel", "Re-detect",
@@ -154,6 +154,8 @@ export const OWNER_CONTROLS = {
     "Write", "Preview", "Cancel", "Edit", "New page here", "History …", "Delete", "Put this version back",
     "Back to the current one", "Re-embed all", "Test", "Hide pages", "Show pages", "New page", "Discard draft",
     "Deleted pages", "Restore", "Restoring", "Download",
+    // BOS-2828: the Wiki Maintainer banner's button.
+    "Turn it on",
     // A page's "Copy link", "Copied" for a moment after a copy (BOS-2259).
     "Copy link", "Copied",
   ],
@@ -192,7 +194,7 @@ export const OWNER_CONTROLS = {
   ],
   "Server and runner": [
     "Reconnect runner", "Start runner", "Restart", "Stop", "Download CSV", "Copy token", "Issue a new runner token", "Register a runner",
-    "Review and deploy", "Check for updates now", "Build and update runners", "Deploy to staging", "Cancel queued runner update", "Save", "Save add-ons", "Cancel the update", "Update runners (finish runs first)",
+    "Install", "Got it", "Review and deploy", "Check for updates now", "Build and update runners", "Deploy to staging", "Cancel queued runner update", "Save", "Save add-ons", "Cancel the update", "Update runners (finish runs first)",
     // The update wait (BOS-420): the same button reads by phase.
     "Stop making room", "Lift the hold now",
     // The server-wide hold (BOS-836); Resume is on the banner every screen shows while it is on.
@@ -262,7 +264,7 @@ export type OwnerScreen = keyof typeof OWNER_CONTROLS;
  */
 export const OWNER_FIELDS = {
   "Any screen": ["New company name"],
-  "Log in": ["Username", "Password"],
+  "Log in": ["Username", "Password", "Type the password again"],
   // The Engagements list's status filter (BOS-2260).
   Engagements: ["Show", "Search engagements"],
   // The Runs page's search box (BOS-2317).

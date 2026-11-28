@@ -25,6 +25,7 @@ import {
   isJudgeable,
   judgePermission,
   selfSetVariableRefusal,
+  shellFileWriteRefusal,
   commandOf,
   type JudgeReading,
   type PermissionJudgeMode,
@@ -333,7 +334,7 @@ export type DecisionContext =
   | { type: "rename"; agentId: string; newName: string; before: string; byAgentId: string }
   /** A change to the company's standing rules (BOS-353), applied when the owner approves. */
   | { type: "standing_rules"; text: string; byAgentId: string }
-  | { type: "team_plan"; projectId: string | null; covered: string; hires: TeamHire[]; byAgentId: string }
+  | { type: "team_plan"; projectId: string | null; covered: string; /** BOS-2824: the plan's one-line cost, in plain words. */ costLine?: string; hires: TeamHire[]; byAgentId: string }
   /** A model-setup change for an existing agent (BOS-128): the owner approves, edits or rejects it. */
   | { type: "model_change"; agentId: string; before: AgentModelConfig; proposed: AgentModelConfig; byAgentId: string; runningRunId?: string | null; applied?: { at: string; afterRunId: string | null; config?: AgentModelConfig } }
   /** A permission rule the CEO drafted from the owner's plain request; added when they answer ADD_RULE. A "question" kind, so the owner can also answer in their own words. */
@@ -990,7 +991,7 @@ export { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, TAKE_REVIEW, REASSIGN_REVIEW,
 export type AgentModelConfig = { harness: string; provider: string; model: string; fundingSourceId: string; fundingSourceName?: string };
 
 /** One proposed hire in a team plan (docs/13). */
-export type TeamHire = { name: string; template?: string; title?: string | null; model?: string | null; fundingSourceId?: string | null; fundingSourceName?: string; harness?: string; provider?: string; skills?: string[]; reason: string; serves?: string | null };
+export type TeamHire = { name: string; template?: string; title?: string | null; model?: string | null; fundingSourceId?: string | null; fundingSourceName?: string; /** BOS-2824: the funding source's kind (subscription, api_payg, …), for the plan's cost line. */ fundingSourceKind?: string; harness?: string; provider?: string; skills?: string[]; reason: string; serves?: string | null };
 export type HireProposal = { name: string; template?: string; title?: string | null; instructions?: string | null; model?: string | null; fundingSourceId?: string | null; harness?: string; provider?: string; reason?: string; /** Skills or packs the new agent gets before its first run. */ skills?: string[]; /** Tickets waiting for this hire; they go to the new agent once hired. */ forTickets?: string[] };
 export const TEAM_HIRE = "Hire the ticked ones";
 export const TEAM_NOT_NOW = "Not now";
@@ -1025,6 +1026,12 @@ export type AnswerExtra = {
    * merge done in the same press, and a ticket with nothing to merge marked done instead of left in review.
    */
   merge?: { markDone: boolean };
+  /**
+   * BOS-2859: the owner answered from somewhere other than the card itself (the Updates panel's Build and update
+   * runners press). Said in the audit line, e.g. "approved by owner via Updates panel". Only server routes behind the
+   * owner's session set it; no agent tool passes it.
+   */
+  via?: string;
 };
 
 /** Which checkout a working-copy cleanup deletes in, and what (BOS-120). */
@@ -2018,6 +2025,19 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           record(null, "deny", ruleName);
           if (send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: "deny" })) return { outcome: "deny" as const, rule: ruleName, decisionId: null };
           // The runner dropped off: carry on to the usual card, so the verdict is not lost.
+        }
+      }
+      // BOS-2856: a shell command that writes a file (`echo x >> f`, `tee`, a here-doc into a file, `sed -i`) is refused at once with
+      // one fixed hint and raises no card: the rule is to use the Write or Edit tool. Like the refusal above it only replaces a card.
+      // A plain `echo >> f` is a built-in allow (no card), so the rule applies to an allow too: the agent is sent to its Write tool either way.
+      if (outcome !== "deny" && event.kind === "execute") {
+        const shell = (event.rawInput as Record<string, unknown> | null)?.["command"];
+        const refusal = typeof shell === "string" ? shellFileWriteRefusal(shell) : null;
+        if (refusal) {
+          send(runner.id, { type: "run.message", runId: event.runId, text: refusal, interrupt: false });
+          const ruleName = "A shell command that writes a file is refused";
+          record(null, "deny", ruleName);
+          if (send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: "deny" })) return { outcome: "deny" as const, rule: ruleName, decisionId: null };
         }
       }
       // BOS-376: the same tool call can come back as a new request (a harness retry, or a second run of the
@@ -3905,7 +3925,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // The activity line is cut at 300 characters, and the brief shows 100, so a long question is shortened here to
       // keep the answer in it (BOS-951 criterion 3: the whats_new line shows the option chosen, not only the question).
       const asked = d.question.length > 80 ? `${d.question.slice(0, 79)}…` : d.question;
-      await record(db, { companyId: d.companyId, ticketId: freed[0]?.ticketId, kind: "decision_answered", summary: settled ? `${settled.name} settled "${asked}": ${answer}.${settled.note ? ` Reason: ${settled.note}` : ""}` : `${extra.by === "ceo" ? "The CEO settled" : "Owner answered"} "${asked}": ${answer}`, at: now() });
+      await record(db, { companyId: d.companyId, ticketId: freed[0]?.ticketId, kind: "decision_answered", summary: settled ? `${settled.name} settled "${asked}": ${answer}.${settled.note ? ` Reason: ${settled.note}` : ""}` : `${extra.by === "ceo" ? "The CEO settled" : "Owner answered"} "${asked}": ${answer}${extra.via && !settled && extra.by !== "ceo" ? ` (${extra.via})` : ""}`, at: now() });
       let unblocked: Array<typeof tickets.$inferSelect> = [];
       // Linked tickets the card never moved (BOS-919: one in review keeps its state): not released, but still
       // the ticket the answer is about, so the asker is woken on it and its assignee hears the answer too.

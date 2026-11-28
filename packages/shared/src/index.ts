@@ -41,6 +41,7 @@ export * from "./workflow-report.js";
 export * from "./sizing.js";
 export * from "./permission-judge.js";
 export * from "./self-set-variable.js";
+export * from "./shell-file-write.js";
 export * from "./devices.js";
 export * from "./shortcuts.js";
 export { SavedShortcut } from "./shortcut-shape.js";

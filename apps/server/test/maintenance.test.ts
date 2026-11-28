@@ -292,6 +292,63 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(true);
   });
 
+  // BOS-2861: on 27 Nov the owner saw a worker's new quick check as plain "Running" under the update banner and read it as
+  // 20 more minutes. Both Merge queue tabs now mark each running check from the drain's own waited / not-waited reads, and
+  // the banner's count is the waited ones only.
+  it("the Merge queue marks which running checks a runner update waits for, from the drain's own lists (BOS-2861)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const [proj] = await c.db.insert(projects).values({ companyId: a.id, name: "Dev" }).returning();
+    const [t1] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "On the runner", number: 1 }).returning();
+    const [t2] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "On the worker", number: 2 }).returning();
+    const [t3] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "Merge on the worker", number: 3 }).returning();
+    const [w] = await c.db.insert(checkWorkers).values({ name: "worker-example", tokenHash: "x" } as never).returning();
+    const job = async (ticketId: string, o: { kind: string; scope: string; worker: boolean }) =>
+      (await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId, kind: o.kind, scope: o.scope, commit: "c1", tree: randomUUID(), state: "running", workerId: o.worker ? w!.id : null, startedAt: new Date(), lastOutputAt: new Date() }).returning())[0]!;
+    const onRunner = await job(t1!.id, { kind: "pre_review", scope: "quick", worker: false });
+    const onWorker = await job(t2!.id, { kind: "pre_review", scope: "quick", worker: true });
+    const mergeOnWorker = await job(t3!.id, { kind: "merge", scope: "quick", worker: true });
+    type Marks = { updateWait?: { update: string; checks: Array<{ jobId: string; ticketId: string; kind: string; holdsUpdate: boolean }> } };
+    const marks = async (page: "check-queue" | "merge-queue") => ((await c.req("GET", `/api/companies/${a.id}/${page}`)).json() as Marks).updateWait;
+    // No update: no marks.
+    expect(await marks("check-queue")).toBeUndefined();
+    expect(await marks("merge-queue")).toBeUndefined();
+    await c.req("POST", "/api/maintenance/start", {});
+    const want = {
+      update: "runner",
+      checks: expect.arrayContaining([
+        { jobId: onRunner.id, ticketId: t1!.id, kind: "pre_review", holdsUpdate: true },
+        { jobId: onWorker.id, ticketId: t2!.id, kind: "pre_review", holdsUpdate: false },
+        { jobId: mergeOnWorker.id, ticketId: t3!.id, kind: "merge", holdsUpdate: false },
+      ]),
+    };
+    for (const page of ["check-queue", "merge-queue"] as const) {
+      const m = await marks(page);
+      expect(m).toEqual(want);
+      expect(m!.checks).toHaveLength(3);
+    }
+    // The banner's "waiting for N checks" names only the waited one; the worker's two are named as not waited for.
+    const st = (await c.maint()) as { checks: number; checksList: { ticket: string }[]; workerChecksList: { ticket: string }[] };
+    expect(st.checks).toBe(1);
+    expect(st.checksList.map((x) => x.ticket)).toEqual([expect.stringMatching(/-1$/)]);
+    expect(st.workerChecksList.map((x) => x.ticket).sort()).toEqual([expect.stringMatching(/-2$/), expect.stringMatching(/-3$/)]);
+    // The owner's "stop the checks and update now" waits for no check, so nothing is marked as waited for.
+    expect((await c.maintenance.updateNow()).ok).toBe(true);
+    expect(await marks("check-queue")).toBeUndefined();
+  });
+
+  it("with no check worker every running check is marked as waited for (BOS-2861)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const [proj] = await c.db.insert(projects).values({ companyId: a.id, name: "Dev" }).returning();
+    const [t] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "T", number: 1 }).returning();
+    for (const kind of ["merge", "pre_review"]) await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind, scope: "quick", commit: "c1", tree: randomUUID(), state: "running", startedAt: new Date(), lastOutputAt: new Date() });
+    await c.req("POST", "/api/maintenance/start", {});
+    const m = ((await c.req("GET", `/api/companies/${a.id}/check-queue`)).json() as { updateWait?: { checks: Array<{ holdsUpdate: boolean }> } }).updateWait;
+    expect(m!.checks.map((x) => x.holdsUpdate)).toEqual([true, true]);
+    expect(((await c.maint()) as { checks: number }).checks).toBe(2);
+  });
+
   it("the status names the runner check it waits on, and update-now ends the wait (BOS-1600)", async () => {
     const c = (ctx = await setup());
     const a = await c.company("App Co", "app-co");
@@ -386,7 +443,7 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     expect(drainForecast({ runs: 0, checks: [], deadline, now })).toEqual({ phase: "swapping", expectedFinishAt: null, overdue: false });
     expect(drainForecast({ runs: 2, checks: [], deadline, now })).toEqual({ phase: "waiting", expectedFinishAt: null, overdue: false });
     expect(drainForecast({ runs: 2, checks: [], deadline, now: new Date("2026-11-19T14:01:00Z") }).overdue).toBe(true);
-    const check = { companyId: "c1", ticket: "BOS-1", kind: "merge", scope: "full", startedAt: "2026-11-19T13:20:00Z", runningForMinutes: 10, usuallyMinutes: 40 };
+    const check = { id: "j1", companyId: "c1", ticket: "BOS-1", kind: "merge", scope: "full", startedAt: "2026-11-19T13:20:00Z", runningForMinutes: 10, usuallyMinutes: 40 };
     expect(drainForecast({ runs: 0, checks: [check], deadline, now })).toMatchObject({ expectedFinishAt: "2026-11-19T14:00:00.000Z", overdue: false });
     expect(drainForecast({ runs: 0, checks: [{ ...check, usuallyMinutes: null }], deadline, now }).expectedFinishAt).toBeNull();
   });

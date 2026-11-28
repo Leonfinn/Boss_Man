@@ -1,5 +1,5 @@
 {
-  "id": "8217fb88-e584-413f-973c-19f2dd7ec784",
+  "id": "a618c737-297b-4059-81dd-1c39c2fae362",
   "prevId": "52fea352-214e-4aef-96c0-fcac1199c3c4",
   "version": "7",
   "dialect": "postgresql",
@@ -8492,6 +8492,18 @@
           "primaryKey": false,
           "notNull": false
         },
+        "reminded_at": {
+          "name": "reminded_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "escalated_at": {
+          "name": "escalated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -9885,12 +9897,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": 1
-        },
-        "expires_at": {
-          "name": "expires_at",
-          "type": "date",
-          "primaryKey": false,
-          "notNull": false
         },
         "created_at": {
           "name": "created_at",

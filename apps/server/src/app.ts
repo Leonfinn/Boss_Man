@@ -28,12 +28,12 @@ import { runnersService } from "./services/runners.js";
 import { connectionSummary } from "./services/runner-connections.js";
 import { allowsPrivate, type HostLookup, LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { watchCiTokenGrant } from "./services/ci-identity-card.js";
-import { AnswerError, clearOwnerTodo, decisionsService, setDecisionSettledListener, setOwnerTodoFacts } from "./services/decisions.js";
+import { AnswerError, UPDATE_RUNNERS, clearOwnerTodo, decisionsService, setDecisionSettledListener, setOwnerTodoFacts } from "./services/decisions.js";
 import { githubWatchService, WATCH_TOKEN_ENV } from "./services/github-watch.js";
 import { markOwnerOpened, recentClosedNotices } from "./services/closed-notice.js";
 import { getHold, holdBlocksStarts, maintenanceService } from "./services/maintenance.js";
-import { runnerBusy, runnerChecks, serverWaitChecks, updateWaitCountsRun, workerChecks } from "./services/runner-busy.js";
-import { activeWaits, runnerHoldWait } from "./services/update-waits.js";
+import { runnerBusy, runnerChecks, serverWaitChecks, updateCheckMarks, updateWaitCountsRun, workerChecks } from "./services/runner-busy.js";
+import { activeWaits, checkCountingWaits, runnerHoldWait } from "./services/update-waits.js";
 import { runnerWatchService } from "./services/runner-watch.js";
 import { runnerReportService } from "./services/runner-report.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
@@ -76,7 +76,7 @@ import { recoveryService } from "./services/recovery.js";
 import { holdView } from "./services/review-holds.js";
 import { type CI_TIMING, isSignoffPending, MERGE_WAIT_MS, ReviewError, ReviewHeldError, reviewService } from "./services/review.js";
 import { CI_TIMING as CI_PUBLISH_TIMING } from "./services/ci-publish.js";
-import { ciPreflightService } from "./services/ci-preflight.js";
+import { ciPreflightService, type PreflightHoldState } from "./services/ci-preflight.js";
 import { checkPolicy as checkPolicyIn, effectivePolicy } from "./services/review-policy.js";
 import { listReviews } from "./services/review-kinds.js";
 import { openSignoffCard, signoffState } from "./services/signoff.js";
@@ -94,6 +94,7 @@ import { chaptersService } from "./services/chapters.js";
 import { FeedbackError, feedbackService } from "./services/feedback.js";
 import { portalRoutes, sendLogo, type PortalLimits } from "./portal.js";
 import { TicketImageError, ticketImagesService } from "./services/ticket-images.js";
+import { NOTE_KEEP_MAX, NOTE_PASTE_MAX, shrinkNote } from "./services/long-note.js";
 import { ChatError, chatService } from "./services/chat.js";
 import { chatTraceService } from "./services/chat-trace.js";
 import type { TraceUpdate } from "./services/chat-trace.js";
@@ -108,6 +109,7 @@ import { secretScanService } from "./services/secret-scan.js";
 import { PRIORITY_WATCH_REASON, priorityWatchService } from "./services/priority-watch.js";
 import { checkIdleService, IDLE_CHECK_SLOT_REASON, idleView } from "./services/check-idle.js";import { MERGE_STALL_REASON, mergeStallService, mergeTrainStatus } from "./services/merge-stall.js";
 import { milestoneRiskService } from "./services/milestone-risk.js";
+import { eventCheckEndSweep } from "./services/event-check-end.js";
 import { landingTurnAlertSweep, usualCiWait, usualMergeCheck } from "./services/landing-turn-eta.js";
 import { softHold } from "./services/deploy-wait-hold.js";
 import { checkGate } from "./services/check-gate.js";
@@ -410,7 +412,7 @@ export async function buildApp(opts: AppOptions) {
   let checkWake: ((agentId: string, w: { ticketId: string; reason: string; note: string; priority?: number }) => Promise<unknown>) | undefined;
   let checkHold: ReturnType<typeof checkHoldService> | undefined;
   // BOS-2284: set where the GitHub-CI pre-flight is built (below); the check that ended starts or drops the run that waited for it.
-  let ciPreflightLate: { onQuickEnded: (job: { kind: string; ticketId: string }) => Promise<void> } | undefined;
+  let ciPreflightLate: { onQuickEnded: (job: { kind: string; ticketId: string }) => Promise<void>; holdState: (ticketId: string, head: string) => Promise<PreflightHoldState> } | undefined;
   // BOS-1093: a set private-details list that can't be read says so once, in the log and to the owner, and the scan runs its secret rules only.
   const scanListWarning: ScanListWarning = {
     log: (m) => app.log.warn(m),
@@ -962,6 +964,8 @@ export async function buildApp(opts: AppOptions) {
     priorityWatch: () => priorityWatch.run(),
     // BOS-2581: a milestone the owner put in the CEO's hands turning At risk or Late; tells only.
     milestoneRisk: () => milestoneRisk.run(),
+    // BOS-2863: an event check ends 7 days after go-live; it closes as "not observed" and its assignee is warned a day before.
+    eventChecks: () => eventCheckEndSweep(db, { now: opts.now, notify: (agentId, input) => scheduler.notify(agentId, input), close: (ticketId) => work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true }) }),
     mergeStall: async () => {
       await landingTurnAlert.run(); // BOS-2359
       return mergeStall.run();
@@ -1280,6 +1284,8 @@ export async function buildApp(opts: AppOptions) {
     branchHead: opts.branchHead ??((ticketId) => review.diff(ticketId).then((d) => d.head)),
     // BOS-2303: a ticket approved while this check ran merges (or goes back) as soon as the check ends.
     releaseHolds: (ticketId) => review.releaseHolds(ticketId),
+    // BOS-2880: the hold also waits for GitHub's CI before review (built below), so a ticket is not opened for review ahead of it.
+    ci: (ticketId, head) => ciPreflightLate!.holdState(ticketId, head),
   });
   releaseGoLive = (companyId) => review.releaseGoLiveWaiters(companyId);
   // The owner's read-only merge queue screen (BOS-587): what runs, what waits, how the last ones ended.
@@ -1536,6 +1542,8 @@ export async function buildApp(opts: AppOptions) {
     timing: { ...CI_PUBLISH_TIMING, ...opts.ciTiming },
     log: (m) => app.log.warn(m),
     wake: (agentId, w) => scheduler.notify(agentId, w),
+    // BOS-2880: a finished run settles the ticket held as "Being checked" (opens the reviews or sends it back) instead of waking its agent.
+    settleHold: async (ticketId) => (await checkHold?.settle(ticketId)) ?? "none",
     context: async (t) => {
       const [p] = await db.select({ repoUrl: projects.repoUrl, gitHost: projects.gitHost, gitApiBase: projects.gitApiBase, defaultBranch: projects.defaultBranch }).from(projects).where(eq(projects.id, t.projectId));
       const repo = p?.repoUrl ? parseRepoUrl(p.repoUrl) : null;
@@ -2483,14 +2491,26 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/companies/:id/dashboard", async (req) => dashboard.get(IdParam.parse(req.params).id));
 
     // The merge queue, read-only (BOS-587): what is running now, what waits and how the last ones ended.
-    owner.get("/api/companies/:id/merge-queue", async (req) => mergeQueue.get(IdParam.parse(req.params).id));
+    // BOS-2861: while an update drains, which of the company's running checks it waits for, from the waits' own reads
+    // (runner-busy.ts updateCheckMarks). Absent when no such wait is on; a failed read leaves the rows unmarked, never wrong.
+    const updateWaitMarks = async (companyId: string) => {
+      const waits = await checkCountingWaits(db);
+      if (!waits.runner && !waits.server) return {};
+      const checks = await updateCheckMarks(db, companyId, waits);
+      return { updateWait: { update: waits.runner ? ("runner" as const) : ("server" as const), checks } };
+    };
+    owner.get("/api/companies/:id/merge-queue", async (req) => {
+      const id = IdParam.parse(req.params).id;
+      const [view, marks] = await Promise.all([mergeQueue.get(id), updateWaitMarks(id).catch(() => ({}))]);
+      return { ...view, ...marks };
+    });
     // The live check queue, for the Merge queue page's "Queued checks" tab (BOS-1174). Read-only.
     owner.get("/api/companies/:id/check-queue", async (req) => {
       const id = IdParam.parse(req.params).id;
       const queue = await checkQueueSvc.list(id, new Date(), await checks.capacity(id), await checks.machines(id));
       // R46: "free, not taking X because …" for every machine with a free slot that declined a job it could take.
       // BOS-1942: the server's own host name, so "Running on this server (name)" reads the same as on the Merges tab.
-      return { ...queue, serverHost: await hostFacts.serverHost().catch(() => null), idleSlots: (await checkIdle.view(id)).map(idleView) };
+      return { ...queue, serverHost: await hostFacts.serverHost().catch(() => null), idleSlots: (await checkIdle.view(id)).map(idleView), ...(await updateWaitMarks(id).catch(() => ({}))) };
     });
     // BOS-1517: one ticket's status line for its page; null when it isn't in the merge pipeline.
     owner.get("/api/companies/:id/merge-queue/:ticketId/status", async (req) => {
@@ -2828,7 +2848,7 @@ export async function buildApp(opts: AppOptions) {
     });
 
     // Scheduling and kill switches, the runner update hold, self-deploy, restart and deploy targets (R30, R14, R15).
-    serverAdminRoutes(owner, { db, scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun: (runId) => runsSvc.cancel(runId), activeWaits: () => currentUpdateWaits(), releaseWatch });
+    serverAdminRoutes(owner, { db, scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun: (runId) => runsSvc.cancel(runId), activeWaits: () => currentUpdateWaits(), releaseWatch, approveRunnerCard: async (id, req) => decisionsSvc.answer(id, UPDATE_RUNNERS, { by: await ownerName(req), via: "approved by owner via Updates panel" }) });
 
     // The decision queue (R20), ranked, with what each row holds up.
     owner.get("/api/decisions", async () => decisionsSvc.queue());
@@ -2877,15 +2897,16 @@ export async function buildApp(opts: AppOptions) {
       return { ok: await markOwnerOpened(db, id) };
     });
 
-    owner.post("/api/decisions/:id/answer", async (req, reply) => {
+    owner.post("/api/decisions/:id/answer", { bodyLimit: 15 * 1024 * 1024 }, async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const { answer, assigneeAgentId, note, reasonLink, custom, picks, modelConfig, alwaysScope, alwaysTtl } = z
+      const { answer, assigneeAgentId, note: givenNote, reasonLink, custom, picks, modelConfig, alwaysScope, alwaysTtl } = z
         .object({
           answer: z.string().trim().min(1).max(OWNER_MESSAGE_MAX),
           assigneeAgentId: Uuid.optional(),
           // BOS-2798: a note can carry pasted command output, which the raiser's wake gets whole; 2000 refused most logs.
           // What reads it for a short field (a lesson, a change reason) caps or checks it there.
-          note: z.string().trim().max(20_000).optional(),
+          // BOS-2874: one over NOTE_KEEP_MAX is never refused; the whole text is attached and the note keeps its start and end.
+          note: z.string().trim().max(NOTE_PASTE_MAX).optional(),
           reasonLink: z.string().trim().max(400).optional(),
           custom: z.boolean().optional(),
           alwaysScope: z.enum(["agent", "company"]).optional(),
@@ -2896,6 +2917,13 @@ export async function buildApp(opts: AppOptions) {
             .optional(),
         })
         .parse(req.body);
+      let note = givenNote;
+      if (note && note.length > NOTE_KEEP_MAX) {
+        const [card] = await db.select({ companyId: decisions.companyId }).from(decisions).where(eq(decisions.id, id));
+        if (!card) return reply.code(404).send({ error: "not_open" });
+        const file = await images.upload(card.companyId, { name: "owner-note.txt", base64: Buffer.from(note, "utf8").toString("base64") });
+        note = shrinkNote(note, file.markdown) ?? note;
+      }
       try {
         const result = await decisionsSvc.answer(id, answer, { assigneeAgentId, note, reasonLink, custom, picks, modelConfig, alwaysScope, alwaysTtl, by: await ownerName(req) });
         return result ?? reply.code(404).send({ error: "not_open" });

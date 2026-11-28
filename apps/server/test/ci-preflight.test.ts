@@ -366,6 +366,37 @@ describe("BOS-2438: readsWorkflows", () => {
   });
 });
 
+describe("BOS-2880: hand-in with real GitHub CI state", () => {
+  it("needsHold is true for a CI change, holdState goes waiting -> passed, and the hand-in is held", async () => {
+    const s = await setup({ files: [wf], ci: "passed" });
+    const preflight = ciPreflightService(s.db, { hosts: { ciStatus: async () => ({ state: "passed", waiting: [], failed: [] }), failures: async () => [] } as never, timing: FAST, wake: (_a, w) => void s.wakes.push(w), context: async () => ({ target: { cfg, token: "x" }, prepare: async () => ({ status: "prepared", commit: "mergecommit1", tree: "t", targetSha: "mainhead1" }), publish: s.publish, unpublish: s.unpublish }) });
+    const [t] = await s.db.select().from(tickets).where(eq(tickets.id, s.ticket));
+    expect(await preflight.needsHold(t!, s.d)).toBe(true);
+    expect(await preflight.holdState(s.ticket, "headcommit1")).toEqual({ state: "none" });
+    const svc = checkRequestService(s.db, { diff: async () => s.d, preflight });
+    expect(await svc.reviewRefusal(s.co, s.ticket, s.agent)).toBeNull();
+    expect(await svc.holdForReview({ companyId: s.co, agentId: s.agent, ticketId: s.ticket })).toMatchObject({ held: true });
+    await settled(s);
+    expect(await preflight.holdState(s.ticket, "headcommit1")).toEqual({ state: "passed" });
+    expect(await preflight.needsHold(t!, s.d)).toBe(false);
+  });
+
+  it("a failed run reads as failed with the jobs named", async () => {
+    const s = await setup({ files: [wf], ci: "failed" });
+    await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
+    await settled(s);
+    const preflight = ciPreflightService(s.db, { hosts: {} as never, timing: FAST, context: async () => null });
+    expect(await preflight.holdState(s.ticket, "headcommit1")).toMatchObject({ state: "failed", detail: expect.stringMatching(/check-worker-image/) });
+  });
+
+  it("a branch with no CI or image files needs no hold", async () => {
+    const s = await setup({ files: [{ path: "apps/server/src/x.ts", added: 1, removed: 0 }] });
+    const preflight = ciPreflightService(s.db, { hosts: {} as never, timing: FAST, context: async () => ({ target: { cfg, token: "x" }, prepare: async () => ({}) as never, publish: s.publish, unpublish: s.unpublish }) });
+    const [t] = await s.db.select().from(tickets).where(eq(tickets.id, s.ticket));
+    expect(await preflight.needsHold(t!, s.d)).toBe(false);
+  });
+});
+
 describe("the images_paths copy", () => {
   it("matches the changes job in ci.yml", () => {
     const yml = readFileSync(new URL("../../../.github/workflows/ci.yml", import.meta.url), "utf8");

@@ -31,7 +31,7 @@ export function goToCard(ticketId: string) {
   el.querySelector<HTMLElement>("a")?.focus({ preventScroll: true });
 }
 
-export function WorkStands({ counts, targets, hrefFor, stuck = 0, stuckTicketId, onShowStuck }: { /** BOS-2351: on the Board, clicking "looks stuck" calls this to show only the stuck cards, instead of moving to the first. */ onShowStuck?: () => void; counts: WorkStandsCounts; targets?: WorkStandsTargets; /** Off the Board: where each item goes instead (the Board page). */ hrefFor?: string; /** BOS-1910: tickets the watchdog has handed to the Scrum Master; hidden at 0. */ stuck?: number; /** The first of them, which the item links to. */ stuckTicketId?: string }) {
+export function WorkStands({ counts, targets, hrefFor, stuck = 0, stuckTicketId, onShowStuck, working }: { /** BOS-2879: agents with a live run now (the figure of "N agents running now"); leads the strip so "in progress" is not read as agents. Omitted: no pill. */ working?: number; /** BOS-2351: on the Board, clicking "looks stuck" calls this to show only the stuck cards, instead of moving to the first. */ onShowStuck?: () => void; counts: WorkStandsCounts; targets?: WorkStandsTargets; /** Off the Board: where each item goes instead (the Board page). */ hrefFor?: string; /** BOS-1910: tickets the watchdog has handed to the Scrum Master; hidden at 0. */ stuck?: number; /** The first of them, which the item links to. */ stuckTicketId?: string }) {
   const quiet = QUIET.filter((i) => counts[i.key] > 0);
   const link = (i: Item | "inProgress", text: string, icon: string) => {
     const key = i === "inProgress" ? "inProgress" : i.key;
@@ -39,14 +39,20 @@ export function WorkStands({ counts, targets, hrefFor, stuck = 0, stuckTicketId,
     const onClick = target ? (e: MouseEvent) => { e.preventDefault(); goToLane(target); } : undefined;
     return (
       <a key={key} className={`standing-item ${key}`} href={hrefFor ?? `#lane-${target ?? key}`} onClick={onClick} data-testid={`standing-${key}`}>
-        <span aria-hidden="true" className="standing-icon">{icon}</span>
+        {icon && <span aria-hidden="true" className="standing-icon">{icon}</span>}
         <b>{counts[key]}</b> {text}
       </a>
     );
   };
   return (
     <div className="standing" role="group" aria-label="Where work stands" data-testid="work-stands">
-      {link("inProgress", "in progress", "●")}
+      {working != null && (
+        <a className="standing-item working" href="#/agents" data-testid="standing-working">
+          <span aria-hidden="true" className="standing-icon">●</span>
+          <b>{working}</b> {working === 1 ? "agent" : "agents"} working now
+        </a>
+      )}
+      {link("inProgress", working != null ? (counts.inProgress === 1 ? "task in progress" : "tasks in progress") : "in progress", working != null ? "" : "●")}
       {stuck > 0 && (
         <a className="standing-item stuck" href={hrefFor ?? "#"} onClick={hrefFor ? undefined : onShowStuck ? (e) => { e.preventDefault(); onShowStuck(); } : stuckTicketId ? (e) => { e.preventDefault(); goToCard(stuckTicketId); } : undefined} data-testid="standing-stuck">
           <span aria-hidden="true" className="standing-icon">⚠</span>

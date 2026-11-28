@@ -26,7 +26,7 @@ import { watchGuardEvents } from "./guard-events.js";
 import { CHECKS_FILE, launcher, launcherServer } from "./launcher.js";
 import { releaseReader } from "./release-current.js";
 import { checkSetup, explainError } from "./selfcheck.js";
-import { listLabel, MAX_AGENTS, type KeptMemory, parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseImageRef, parseMemory, parseOpencodeSessionDays, parsePids, parsePnpmStoreDir, parseStack, type LauncherConfig } from "./spec.js";
+import { listLabel, MAX_AGENTS, type KeptMemory, parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseImageRef, parseInstallLabel, parseMemory, parseOpencodeSessionDays, parsePids, parsePnpmStoreDir, parseStack, type LauncherConfig } from "./spec.js";
 
 const env = process.env;
 // The image install (BOS-974) starts as root with SETUID/SETGID only; this joins the Docker socket's group and drops to uid 1000 before anything else.
@@ -77,6 +77,7 @@ const cfg: LauncherConfig = {
   ...(cpuPlan.on ? { cpuset: formatCpuList(cpuPlan.runnerThreads) } : {}),
   dataRoot,
   stack: parseStack(env.BOSSMAN_STACK),
+  installLabel: parseInstallLabel(env.BOSSMAN_INSTALL_LABEL),
   network: env.BOSSMAN_RUNNER_NETWORK ?? "boss-man_default",
   serverUrl: env.BOSSMAN_RUNNER_URL ?? "ws://server:3100/api/runner/connect",
   memoryBytes: parseMemory(env.BOSSMAN_RUNNER_MEMORY),

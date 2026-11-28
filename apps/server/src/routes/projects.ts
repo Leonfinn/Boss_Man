@@ -283,7 +283,7 @@ export function projectRoutes(
 
   // The setup wizard (R56): where the owner is in it, and what's still to do for a company.
   owner.get("/api/setup-progress", async () => setup.progress());
-  owner.put("/api/setup-progress", async (req) => setup.save(z.object({ dismissed: z.boolean(), step: z.number().int().min(0).max(10), companyId: Uuid.nullable(), work: z.enum(["docs", "code"]) }).partial().parse(req.body)));
+  owner.put("/api/setup-progress", async (req) => setup.save(z.object({ dismissed: z.boolean(), left: z.boolean(), step: z.number().int().min(0).max(10), companyId: Uuid.nullable(), work: z.enum(["docs", "code"]) }).partial().parse(req.body)));
   owner.get("/api/companies/:id/setup-checklist", async (req, reply) => (await setup.checklist(IdParam.parse(req.params).id)) ?? reply.code(404).send({ error: "not_found" }));
 
   // Is the company's git token good for this repo (R58, R56)? One read of the repo, with its permissions.

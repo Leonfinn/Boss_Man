@@ -305,6 +305,17 @@ export const ALERT_KINDS = {
   spend_rate: {
     topRung: "owner",
   },
+  // review-holds.ts chaseReadyHolds (BOS-2870): a reviewer's hold whose waits are all done, still not released two hours
+  // after the holder was first woken. The CEO can release or cancel any hold, so it stops with the CEO; one card per
+  // hold, closed by itself (holdClosed) once the hold is released or cancelled.
+  review_hold_unreleased: {
+    topRung: "ceo",
+  },
+  // The same, when the CEO is the holder (or nobody is): nobody above the CEO but the owner can release it, so the card
+  // starts with the owner and names the hold (BOS-2870). Closed by itself (holdClosed).
+  review_hold_unreleased_owner: {
+    topRung: "owner",
+  },
   // A plain raise (the scheduler's add-on notice and any caller that only says where it may go).
   alert: {
     topRung: "ceo",

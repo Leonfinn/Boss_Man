@@ -43,7 +43,12 @@ export type PreflightDeps = {
   wake?: (agentId: string, w: { ticketId: string; reason: string; note: string; priority?: number }) => PromiseLike<unknown> | unknown;
   timing?: CiTiming;
   log?: (line: string) => void;
+  /** BOS-2880: settles a ticket held as "Being checked" once a run has ended (check-hold's settle); without it the agent is woken as before. */
+  settleHold?: (ticketId: string) => PromiseLike<"released" | "bounced" | "waiting" | "none"> | "released" | "bounced" | "waiting" | "none";
 };
+
+/** BOS-2880: where GitHub's CI before review stands for a commit, as the "Being checked" hold reads it. */
+export type PreflightHoldState = { state: "none" | "passed" | "waiting" } | { state: "failed"; detail: string };
 
 const short = (s: string) => s.slice(0, 8);
 
@@ -159,6 +164,10 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
     }
     await db.insert(checkResults).values({ companyId: t.companyId, ticketId: t.id, sha: head, kind: PREFLIGHT_KIND, passed, detail: text.slice(0, 1000) });
     await record(db, { companyId: t.companyId, ticketId: t.id, kind: PREFLIGHT_ACTIVITY, summary: `GitHub CI before review: ${passed ? "passed" : "failed"} for commit ${short(head)}. ${text.slice(0, 600)}` }).catch(() => undefined);
+    // BOS-2880: a ticket held as "Being checked" is settled by its hold (a pass opens the reviews with no agent run; a failure
+    // sends it back to In progress and wakes the agent once, with this text). Only a ticket not held wakes its agent here.
+    const settled = await Promise.resolve(deps.settleHold?.(t.id)).catch(() => "none" as const);
+    if (settled === "released" || settled === "bounced") return;
     await Promise.resolve(deps.wake?.(agentId, { ticketId: t.id, reason: "check_result", note: `GitHub CI before review (commit ${short(head)}): ${passed ? "passed" : "FAILED"}.\n${text}`, priority: 2 })).catch(() => undefined);
   }
 
@@ -242,6 +251,35 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
   }
 
   return {
+    /**
+     * BOS-2880: what the "Being checked" hold reads for the commit it holds. No row for the commit: nothing was asked ("none", the
+     * hold waits on the quick check alone). A result, a not-applicable mark, a run in memory or a started/waiting row: as named.
+     */
+    async holdState(ticketId: string, head: string): Promise<PreflightHoldState> {
+      if (await latest(ticketId, PREFLIGHT_NA_KIND, head)) return { state: "passed" };
+      const r = await latest(ticketId, PREFLIGHT_KIND, head);
+      const started = await latest(ticketId, PREFLIGHT_STARTED_KIND, head);
+      // A result older than the newest start belongs to an earlier attempt on this commit: the new run is still going.
+      if (r && (!started || r.at >= started.at)) return r.passed ? { state: "passed" } : { state: "failed", detail: r.detail ?? "see the ticket" };
+      if (running.get(ticketId)?.head === head || started) return { state: "waiting" };
+      const w = await latest(ticketId, PREFLIGHT_WAITING_KIND, head);
+      if (!w) return { state: "none" };
+      const skipped = await latest(ticketId, PREFLIGHT_SKIPPED_KIND, head);
+      if (skipped && skipped.at >= w.at) return { state: "failed", detail: "GitHub's CI jobs were not started because the quick check on this commit did not pass." };
+      return { state: "waiting" };
+    },
+
+    /**
+     * BOS-2880: whether the move to review of this branch has to wait for GitHub's CI before review (it changes CI or image
+     * files, the project can run it, and it has neither passed nor been marked not applicable for this commit).
+     */
+    async needsHold(t: { id: string; companyId: string; projectId: string }, d: Pick<WorkspaceDiff, "head" | "files">): Promise<boolean> {
+      const ctx = await deps.context(t);
+      if (!ctx || !needsEarlyGithubRun(d.files.map((f) => f.path), !!ctx.mainWorkflows)) return false;
+      if (await latest(t.id, PREFLIGHT_NA_KIND, d.head)) return false;
+      return !(await latest(t.id, PREFLIGHT_KIND, d.head))?.passed;
+    },
+
     /** BOS-2284: a pre-review check job ended: start or drop the GitHub run that waited for it. */
     async onQuickEnded(job: { kind: string; ticketId: string }): Promise<void> {
       if (job.kind !== "pre_review") return;
@@ -341,7 +379,7 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
       if (reason) {
         await db.insert(checkResults).values({ companyId: t.companyId, ticketId: t.id, sha: d.head, kind: PREFLIGHT_NA_KIND, passed: true, detail: reason.slice(0, 500) });
         await record(db, { companyId: t.companyId, ticketId: t.id, kind: PREFLIGHT_ACTIVITY, summary: `The author marked GitHub's CI jobs before review as not applicable: ${reason.slice(0, 300)}` }).catch(() => undefined);
-        return "GitHub's CI jobs are marked not applicable with your reason; the move to review is no longer held for them.";
+        return "GitHub's CI jobs are marked not applicable with your reason; the ticket is no longer held for them.";
       }
       if (running.get(t.id)?.head === d.head) return "GitHub's CI jobs for this commit are already running; you will be woken with the result.";
       const done = await latest(t.id, PREFLIGHT_KIND, d.head);
@@ -351,10 +389,10 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
       if (!(await quickJobs(t, d.head, tree)).some((j) => j.state === "passed")) {
         const w = await latest(t.id, PREFLIGHT_WAITING_KIND, d.head);
         if (!w) await db.insert(checkResults).values({ companyId: t.companyId, ticketId: t.id, sha: d.head, kind: PREFLIGHT_WAITING_KIND, passed: false, detail: touchesWorkflows(paths) ? `${agentId}|${tree ?? ""}|${WORKFLOW_MARK}` : tree ? `${agentId}|${tree}` : agentId });
-        return "This branch changes CI or image files, so GitHub's own CI jobs run on it too, but only after your quick check passes on this exact commit (a red GitHub run on unfinished work only sends the owner a failure notice). If the quick check fails, GitHub's run is skipped and the ticket says so. The ticket can't move to review until both pass. You will be woken with each result; do not poll. If GitHub's jobs truly don't apply, ask again with ciNotApplicable and a reason.";
+        return "This branch changes CI or image files, so GitHub's own CI jobs run on it too, but only after your quick check passes on this exact commit (a red GitHub run on unfinished work only sends the owner a failure notice). If the quick check fails, GitHub's run is skipped and the ticket says so. If your code is finished, move the ticket to review now: it waits there as \"Being checked\" and the reviews open when both pass. You are woken only if one fails; do not poll. If GitHub's jobs truly don't apply, ask again with ciNotApplicable and a reason.";
       }
       launch(t, agentId, d.head, ctx, touchesWorkflows(paths));
-      return `This branch changes CI or image files, so GitHub's own CI jobs run on it merged with main as well${touchesWorkflows(paths) ? " (with main's workflow files, not yours: your workflow edit is first run by the merge gate after the reviews)" : ""} (this can take a while). The ticket can't move to review until they pass. You will be woken with the result; do not poll. If they truly don't apply, ask again with ciNotApplicable and a reason.`;
+      return `This branch changes CI or image files, so GitHub's own CI jobs run on it merged with main as well${touchesWorkflows(paths) ? " (with main's workflow files, not yours: your workflow edit is first run by the merge gate after the reviews)" : ""} (this can take a while). If your code is finished, move the ticket to review now: it waits there as "Being checked" and the reviews open when they pass. You are woken only if they fail; do not poll. If they truly don't apply, ask again with ciNotApplicable and a reason.`;
     },
 
     /** The move to review: a reason to refuse it (plain words), or null. `diff` reads the branch from the runner. */
