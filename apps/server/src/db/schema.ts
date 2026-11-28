@@ -1037,6 +1037,11 @@ export const secrets = pgTable("secrets", {
   masterKeyVersion: integer("master_key_version").notNull().default(1),
   hint: text("hint").notNull(),
   version: integer("version").notNull().default(1),
+  /**
+   * The day the token stops working, when its owner told Boss Man (BOS-2825). Null for a kind that doesn't
+   * expire predictably and for every token saved before this column existed, so those get no reminder.
+   */
+  expiresAt: date("expires_at"),
   createdAt: createdAt(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

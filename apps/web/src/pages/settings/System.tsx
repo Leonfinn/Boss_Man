@@ -12,6 +12,7 @@ import { when } from "../Runs";
 import { DraftTextarea } from "../../components/DraftTextarea";
 import { SaveButton } from "../../components/SaveButton";
 import { Section, useAction } from "./shared";
+import { GuideLink } from "../../guide-links";
 import { CheckWorkers, type CheckWorkerView } from "./CheckWorkers";
 import { ReleaseNotice } from "./ReleaseNotice";
 import { DEFAULT_POLICY, policyLine, policyValid, SlotSplitFields, type SlotPolicy } from "./SlotSplit";
@@ -390,6 +391,9 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
           )}
         </div>
       </div>
+      <p style={{ margin: 0 }}>
+        <GuideLink slug="how-updates-work">What happens in an update?</GuideLink>
+      </p>
       {(st.primary || st.normal.length > 0) && (
         <div className="upd-main">
           {st.primary && (

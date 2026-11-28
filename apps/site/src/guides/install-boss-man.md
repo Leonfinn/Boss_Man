@@ -25,7 +25,7 @@ Plan on 16 GB of memory for one company with Boss Man's default settings. 8 GB c
 | Disk | 100 GB free, on an SSD | 250 GB or more, on an SSD or NVMe drive |
 | CPU | 4 cores, 64-bit (x86-64, or arm64 for the image install) | 8 cores or more |
 
-**How memory is shared.** Each company gets one runner, the container its agents work in. Boss Man gives each runner 2 GB, plus 1 GB for each agent that may run at once, plus 3 GB for each check. With the defaults (6 agents and 1 check) that is 11 GB. Boss Man always leaves 2 GB of the machine for its server and database, so on a smaller machine the runner gets less. If the runner gets under 4 GB, Boss Man warns you to run fewer agents. You set both numbers in **Settings → Server and runner → Limits and checks**, under **Agents at once** and **Checks at once**, and the **Checks** section there shows what the runner gets and why.
+**How memory is shared.** Each company gets one [runner](/guides/the-runner), the container its agents work in. Boss Man gives each runner 2 GB, plus 1 GB for each agent that may run at once, plus 3 GB for each [check](/guides/checks-and-check-workers). With the defaults (6 agents and 1 check) that is 11 GB. Boss Man always leaves 2 GB of the machine for its server and database, so on a smaller machine the runner gets less. If the runner gets under 4 GB, Boss Man warns you to run fewer agents. You set both numbers in **Settings → Server and runner → Limits and checks**, under **Agents at once** and **Checks at once**, and the **Checks** section there shows what the runner gets and why.
 
 **More than one company.** Each runner is sized from the whole machine, but a runner with no work uses almost no memory. Add memory for the companies that will be busy at the same time.
 
@@ -43,7 +43,7 @@ Every step below is a command to copy and paste, or a page to open. You type not
 
 - a 64-bit machine (x86-64 or arm64) with at least 4 GB of memory, running Linux. For agents to run, size it as in [What machine do I need](#what-machine-do-i-need). Step 2 installs Docker on it.
 - internet access from that machine
-- a Claude account: a Pro or Max plan, or an API key from Anthropic. The first start needs it, because the CEO is a Claude Code agent. You can add other AI providers later, under **Settings → Secrets** (see [Agents and models](/guides/agents-and-models)). You pay for this account. Boss Man itself is free.
+- a Claude account: a Pro or Max plan, or an API key from Anthropic. The first start needs it, because the CEO is a Claude Code agent. You can add other AI providers later, under **Settings → Secrets** (see [Agents and models](/guides/agents-and-models)). You pay for this account. Boss Man itself is free. To choose between a plan and a key, see [Connect a Claude account](/guides/connect-a-claude-account).
 - only if your agents will work on code: a GitHub or Gitea account, for the repositories they work in. A team that works on documents and research does not need one.
 - a computer with a web browser on the same network
 
@@ -243,7 +243,7 @@ The runner image does not contain Claude Code. The first time a runner starts, B
 
 ### Start again from nothing
 
-This deletes everything this install made, including your company data, your keys and the database. Back up first if you want to keep anything. Do this only on a machine that runs just this install: step 2 removes every runner and network guard on the machine, not only this install's. `boss-man` below is the project name unless you set another with `-p` or `COMPOSE_PROJECT_NAME`; use your own name in its place. Run each command in the folder with `images.env`. A command that finds nothing to remove prints nothing, and that is fine.
+This deletes everything this install made, including your company data, your keys and the database. Back up first if you want to keep anything. Every step finds this install's own containers and volumes by its install label, so another install on the same machine is left alone. `boss-man` below is the project name unless you set another with `-p` or `COMPOSE_PROJECT_NAME`; use your own name in its place. Run each command in the folder with `images.env`. A command that finds nothing to remove prints nothing, and that is fine.
 
 The order matters: the updater and launcher started some containers that Compose does not know, and they hold your volumes, so they go first.
 
@@ -253,15 +253,27 @@ The order matters: the updater and launcher started some containers that Compose
 docker ps -aq --filter label=com.bossman.install=boss-man | xargs -r docker rm -f
 ```
 
-2. Remove the runners, then the network guards:
+2. Remove this install's runners, then its network guards, found by the install label:
 
 ```sh Run in the folder with images.env
-docker ps -aq --filter label=boss-man.launcher=1 | xargs -r docker rm -f
+docker ps -aq --filter label=com.bossman.install=boss-man --filter label=boss-man.launcher=1 | xargs -r docker rm -f
 ```
 
 ```sh Run in the folder with images.env
-docker ps -aq --filter label=boss-man.netguard=1 | xargs -r docker rm -f
+docker ps -aq --filter label=com.bossman.install=boss-man --filter label=boss-man.netguard=1 | xargs -r docker rm -f
 ```
+
+A runner or guard made before the install label existed (an older release) has no label, so step 1 does not catch it, and Docker has no filter for "no label". Only if you first installed from an older release that had no label, remove those unlabelled ones by hand: this lists them, then you remove the ones that belong to this install (a second install's older containers carry no label either, so leave those). The listing prints each container's id and install label; the removal takes only the ids you pass:
+
+```sh Run in the folder with images.env
+docker ps -aq --filter label=boss-man.launcher=1 | xargs -r docker inspect -f '{{.Id}} {{index .Config.Labels "com.bossman.install"}}'
+```
+
+```sh Run in the folder with images.env
+docker ps -aq --filter label=boss-man.netguard=1 | xargs -r docker inspect -f '{{.Id}} {{index .Config.Labels "com.bossman.install"}}'
+```
+
+For each id whose install label is empty, run `docker rm -f <id>`.
 
 3. Remove what Compose knows, with its volumes:
 
@@ -301,7 +313,7 @@ Not yet confirmed on a real host as of 2026-11-27; the release install test runs
 
 ### Updating to a new release
 
-Nothing updates by itself. Take a release from Boss Man's own update screen: the updater checks the signed release, downloads every image of it by digest, backs up the database, switches the server over, watches it for 15 minutes (going back by itself if it fails), and then moves the rest of the release. Your data and keys stay, because they are in volumes.
+Nothing updates by itself. Take a release from Boss Man's own update screen: the updater checks the signed release, downloads every image of it by digest, backs up the database, switches the server over, watches it for 15 minutes (going back by itself if it fails), and then moves the rest of the release. Your data and keys stay, because they are in volumes. The steps on the update screen are in [How updates work](/guides/how-updates-work#on-an-image-install).
 
 You do not run `docker compose pull` or `up -d` for a release any more. Do not run `setup` again: it is only for the first install. The **Build and update runners** button in Settings builds images from source, so it does not apply to this install.
 
@@ -331,7 +343,7 @@ The second option: build every image on your own machine from the code. Use it i
 - a 64-bit Linux machine with Docker Engine and Docker Compose v2 (check with `docker compose version`)
 - `git`, `openssl` and `curl` on that machine
 - only if your agents will work on code: a GitHub or Gitea account, for the repositories they work in. A team that works on documents and research does not need one.
-- an AI account: a Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic. A Claude Pro or Max plan is the easiest start, because the CEO is a Claude Code agent unless you change it. You pay for this account. Boss Man itself is free.
+- an AI account: a Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic. A Claude Pro or Max plan is the easiest start, because the CEO is a Claude Code agent unless you change it. You pay for this account. Boss Man itself is free. To choose between a Claude plan and a key, see [Connect a Claude account](/guides/connect-a-claude-account).
 - a computer with a web browser on the same network
 
 Boss Man needs Linux because two safety features use the Linux kernel: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. **Settings → Permissions → Agent fence** shows whether each one is working on your machine. See [What keeps agents fenced in](/guides/what-keeps-agents-fenced-in).

@@ -7,6 +7,7 @@ import { buildCsv, download } from "../../csv";
 import { spanText } from "../../components/TicketStateHistory";
 import { when } from "../Runs";
 import { Section, useAction } from "./shared";
+import { GuideLink } from "../../guide-links";
 import type { UpdateRow } from "./updates";
 
 const csvDay = () => new Date().toISOString().slice(0, 10);
@@ -251,6 +252,9 @@ export function SafetyCards({ companyId, safety, connected, onChanged }: { compa
           </div>
         </div>
       ))}
+      <p style={{ margin: "10px 0 0" }}>
+        <GuideLink slug="what-keeps-agents-fenced-in">What keeps agents fenced in</GuideLink>
+      </p>
       {act.view}
     </div>
   );
