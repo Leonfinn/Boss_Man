@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ATTACH_FIRST, figureText, HARNESSES, harnessLabel, modelFitProblem, NOTE_FIRST, optionNeeds, parseStep, providerLabel, splitStepSource, type AlwaysTtl, type StepPiece, type StepSource, type Where } from "@boss-man/shared";
+import { ATTACH_FIRST, figureText, HARNESSES, harnessLabel, modelFitProblem, NOTE_FIRST, optionNeeds, parseStep, providerLabel, splitStepSource, type AlwaysTtl, type StepPiece, type StepSource } from "@boss-man/shared";
 import { api, ApiError, type AdvisedDecision, type ClosedNoticeCard, type Company, type Decision, type DecisionTally, type DeployUpdate, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
 import { art } from "../brand";
-import { copyText, selectText } from "../clipboard";
+import { copyText } from "../clipboard";
+import { CommandBlock } from "../components/CommandBlock";
 import { State } from "../components/State";
 import { hashQuery, useHasCode, usePoll } from "../hooks";
 import { ageLabel, dayLabel, raisedAgo } from "../age";
@@ -328,47 +329,6 @@ function DeployUpdateView({ u }: { u: DeployUpdate }) {
           </ul>
         </div>
       )}
-    </div>
-  );
-}
-
-/** One command to paste, in its own block with a Copy button that copies exactly this text (BOS-269). */
-function CommandBlock({ command, where }: { command: string; where?: Where }) {
-  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
-  const pre = useRef<HTMLPreElement>(null);
-  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const alive = useRef(true);
-  // Clear the reset timer on unmount: a timer that outlives the page fires after the DOM is gone (BOS-1783).
-  useEffect(() => {
-    alive.current = true;
-    return () => {
-      alive.current = false;
-      clearTimeout(timer.current);
-    };
-  }, []);
-  const copy = async () => {
-    const ok = await copyText(command);
-    if (!alive.current) return;
-    setState(ok ? "copied" : "failed");
-    if (!ok) selectText(pre.current);
-    clearTimeout(timer.current);
-    timer.current = setTimeout(() => setState("idle"), 2000);
-  };
-  const label = state === "copied" ? "Copied" : state === "failed" ? "Couldn't copy, select the text instead" : "Copy";
-  return (
-    <div style={{ margin: "6px 0" }}>
-      {where && (
-        <div style={{ fontSize: 13, color: "var(--muted, #888)", margin: "0 0 2px 2px" }}>
-          On <strong>{where.host}</strong>, as {where.as === "root" ? <strong>root</strong> : "the logged-in account"}.
-        </div>
-      )}
-      <div data-command style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-        {/* Sideways only (BOS-962 sweep, same as BOS-554): the command wraps, so it never needs to scroll vertically, and without overflow-y: hidden a one-pixel overflow would swallow the wheel. */}
-        <pre ref={pre} style={{ flex: 1, minWidth: 0, margin: 0, padding: "8px 10px", overflowX: "auto", overflowY: "hidden", whiteSpace: "pre-wrap", overflowWrap: "anywhere", background: "var(--field)", color: "var(--head)", border: "1px solid var(--line-strong)", fontFamily: "var(--mono)", borderRadius: 6, fontSize: 13 }}>
-          <code>{command}</code>
-        </pre>
-        <button type="button" onClick={copy} aria-label="Copy this command" aria-live="polite" style={{ flex: "none", maxWidth: "42%", whiteSpace: "normal", lineHeight: 1.2, alignSelf: "stretch", padding: "0 10px" }}>{label}</button>
-      </div>
     </div>
   );
 }

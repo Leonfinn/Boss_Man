@@ -17,7 +17,7 @@ import { LoadError } from "../components/LoadError";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { ThinkingTrace } from "../components/ThinkingTrace";
-import { linkPieces, type LinkContext } from "../links";
+import { linked, MessageText, previewText, visibleParts } from "../components/MessageText";
 import { countHits, dayStart, findQuery, findSpots, firstOnOrAfter, spotIndex, splitHits, stepSpot, type FindSpot, type Segment } from "../chat-find";
 import { isFarUp, messageLink, newSince } from "../chat-scroll";
 import { copyText } from "../clipboard";
@@ -30,29 +30,9 @@ type Chat = { agentId: string; items: Message[]; hasMore?: boolean; state: strin
 type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; runs: number; chatOpen: boolean; /** BOS-2404: while a runner is being swapped, when chat answers again at the latest. */ chatBackBy?: string | null; /** BOS-1951 */ merges?: number; checks?: number; unknownWait?: boolean; /** BOS-1877 */ phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean };
 type Thread = { id: string; name: string; role: "ceo" | "manager" | "worker"; duty: string | null; state: string; last: { role: Message["role"]; text: string; createdAt: string } | null };
 
-/** Plain text with in-app links made clickable (BOS-358): one shared builder, see links.ts. */
-export function linked(text: string, wikiCompanyId?: string, ctx: LinkContext = {}, mark: (words: string) => ReactNode = (w) => w): ReactNode {
-  return linkPieces(text, { ...ctx, companyId: wikiCompanyId ?? ctx.companyId }).map((p, i) =>
-    p.kind === "text" ? (
-      <Fragment key={i}>{mark(p.text)}</Fragment>
-    ) : p.kind === "image" ? (
-      <a key={i} href={p.src} target="_blank" rel="noreferrer" className="msg-img">
-        <img src={p.src} alt={p.alt} loading="lazy" />
-      </a>
-    ) : p.kind === "file" ? (
-      <a key={i} href={p.href} download className="file-chip">
-        {p.text}
-      </a>
-    ) : (
-      <a key={i} href={p.href}>
-        {mark(p.text)}
-      </a>
-    ),
-  );
-}
-
-/** What a message shows as words (plain text and link text), for the find box: never the markup or an image. */
-export const visibleParts = (text: string) => linkPieces(text, {}).flatMap((p) => (p.kind === "text" || p.kind === "link" ? [p.text] : []));
+// The chat renders its messages with the shared message-text component (BOS-2853): links, and fenced
+// commands as code boxes with Copy. Re-exported here because other screens (ticket activity) use them.
+export { linked, visibleParts } from "../components/MessageText";
 
 /** The whole conversation as Markdown (BOS-2313): oldest first, no thinking traces; attachments stay as their links. */
 export function chatMarkdown(agentName: string, date: string, items: Message[]): string {
@@ -581,7 +561,7 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
                         {t.name} <small>{roleOf(t)}</small>
                         {unread(t) && <span className="dot" aria-label="new reply" />}
                       </span>
-                      <span className="preview">{t.state !== "idle" ? busyText(t.state, t.name) : t.last ? `${t.last.role === "owner" ? "You: " : ""}${t.last.text}` : "No messages yet"}</span>
+                      <span className="preview">{t.state !== "idle" ? busyText(t.state, t.name) : t.last ? `${t.last.role === "owner" ? "You: " : ""}${previewText(t.last.text)}` : "No messages yet"}</span>
                     </span>
                     {t.last && <time className="when">{when(t.last.createdAt)}</time>}
                   </a>
@@ -686,18 +666,29 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
                           onStepToggle={(idx, v) => setStepOpen((s) => ({ ...s, [m.id]: { ...s[m.id], [idx]: v } }))}
                         />
                       )}
-                      <p>
-                        {m.text.includes(ASK_CEO) && ceo ? (
-                          <>
-                            {linked(m.text.split(ASK_CEO)[0]!, undefined, {}, mark)}
-                            <button type="button" className="linkish" onClick={() => send(undefined, ceo, items.slice(0, i).reverse().find((x) => x.role === "owner")?.text ?? "")}>
-                              Ask the CEO
-                            </button>
-                          </>
+                      {(() => {
+                        const asking = m.text.includes(ASK_CEO) && !!ceo;
+                        const body = asking ? m.text.split(ASK_CEO)[0]! : m.text;
+                        // A fenced reply gets the code-box layout (BOS-2853); ordinary text keeps the plain bubble.
+                        const fenced = body.includes("```");
+                        const words = fenced ? <MessageText text={body} mark={mark} /> : linked(body, undefined, {}, mark);
+                        const ask = asking ? (
+                          <button type="button" className="linkish" onClick={() => send(undefined, ceo, items.slice(0, i).reverse().find((x) => x.role === "owner")?.text ?? "")}>
+                            Ask the CEO
+                          </button>
+                        ) : null;
+                        return fenced ? (
+                          <div className="msg-text">
+                            {words}
+                            {ask}
+                          </div>
                         ) : (
-                          linked(m.text, undefined, {}, mark)
-                        )}
-                      </p>
+                          <p>
+                            {words}
+                            {ask}
+                          </p>
+                        );
+                      })()}
                       <small>
                         {m.role === "owner" ? "You" : m.role === "assistant" ? current.name : "Boss Man"} · {when(m.createdAt)}
                       </small>

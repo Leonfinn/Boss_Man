@@ -7,6 +7,7 @@ import { when } from "./Runs";
 import { MoreText } from "./Decisions";
 import { READ_IDS_MAX, groupByDay } from "../notice-days";
 import { FeedItem, LevelTag, feedTitle } from "../components/FeedItem";
+import { plainText } from "../components/MessageText";
 import { buildCsv, download } from "../csv";
 
 const LEVEL: Record<NotifyLevel, { label: string; tone: string; help: string }> = {
@@ -44,9 +45,11 @@ export function noticesToCsv(rows: Notice[]): string {
 }
 
 function Item({ n, onRead }: { n: Notice; onRead: (id: string) => void }) {
+  // A mirrored chat reply can carry a fenced command: the feed shows its command, never the ``` lines (BOS-2853).
+  const body = n.body ? plainText(n.body) : n.body;
   // When the question became the title, show only what follows its first line (if anything) as the body.
-  const headline = feedTitle(n.title, n.body);
-  const rest = headline === n.title ? n.body : (n.body ?? "").trim().split(/\n/).slice(1).join("\n").trim();
+  const headline = feedTitle(n.title, body);
+  const rest = headline === n.title ? body : (body ?? "").trim().split(/\n/).slice(1).join("\n").trim();
   return (
     <li className="card" style={{ display: "flex", flexDirection: "column", gap: 6, padding: "12px 16px", opacity: n.readAt ? 0.7 : 1 }}>
       <FeedItem
