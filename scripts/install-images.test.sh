@@ -309,8 +309,14 @@ names2="$(docker ps -a --filter "label=com.bossman.install=$P2" --format '{{.Nam
 for want in "${P2}-updater" "${P2}-launcher" "${P2}-server-blue"; do case " $names2" in *" $want "*) ok "$want exists and carries the second install's label" ;; *) bad "$want is missing or has no label of the second install (found: $names2)" ;; esac; done
 shared="$(comm -12 <(docker ps -a --filter "label=com.bossman.install=$P" --format '{{.Names}}' | sort) <(docker ps -a --filter "label=com.bossman.install=$P2" --format '{{.Names}}' | sort))"
 [ -z "$shared" ] && ok "the two installs share no container name" || bad "container names in both installs: $shared"
-[ -n "$(docker volume ls -q --filter "name=^${P}_claude-pack\$")" ] && [ -n "$(docker volume ls -q --filter "name=^${P2}_claude-pack\$")" ] && ok "each install has its own pack volume" || bad "pack volumes: ${P}_claude-pack and ${P2}_claude-pack must both exist"
-[ -z "$(docker volume ls -q --filter name=boss-man-claude-pack)" ] && ok "no shared boss-man-claude-pack volume was made" || bad "a shared boss-man-claude-pack volume exists"
+# The updater makes the pack volume when it installs the pack, which can follow the first answer from /api/health: wait for it, with a deadline.
+pack_deadline=$((SECONDS + 60))
+until [ -n "$(docker volume ls -q --filter "name=^${P2}_claude-pack\$")" ] || [ "$SECONDS" -ge "$pack_deadline" ]; do sleep 2; done
+[ -n "$(docker volume ls -q --filter "name=^${P}_claude-pack\$")" ] && [ -n "$(docker volume ls -q --filter "name=^${P2}_claude-pack\$")" ] && ok "each install has its own pack volume" || bad "pack volumes: ${P}_claude-pack and ${P2}_claude-pack must both exist (volumes now: $(docker volume ls -q | grep -i pack | tr '\n' ' '))"
+if [ -z "$(docker volume ls -q --filter name=boss-man-claude-pack)" ]; then ok "no shared boss-man-claude-pack volume was made"; else
+  # Name who uses it and what each launcher was told, so the next run says where it came from (names only, no secrets).
+  bad "a shared boss-man-claude-pack volume exists (used by: $(docker ps -a --filter volume=boss-man-claude-pack --format '{{.Names}}' | tr '\n' ' '); launcher env: $(for c in "$NL" "${P2}-launcher"; do echo "$c: $(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$c" | grep -E '^BOSSMAN_(CLAUDE_PACK_VOLUME|INSTALL_LABEL|STACK)=' | tr '\n' ' ')"; done))"
+fi
 remove_second
 left2="$(docker ps -a --format '{{.Names}}' --filter "label=com.bossman.install=$P2"; docker volume ls -q --filter "name=^${P2}_"; docker volume ls -q --filter "label=com.bossman.install=$P2")"
 [ -z "$left2" ] && ok "removing the second install left nothing of it behind" || bad "second install left: ${left2//$'\n'/ }"
