@@ -103,7 +103,12 @@ describe.skipIf(!can)("Settings → Runner: connection Download CSV (BOS-2545, r
         if (p.touch && p.width < 641) expect(box.height).toBeGreaterThanOrEqual(44);
         if (out) {
           mkdirSync(out, { recursive: true });
-          await root.screenshot({ path: path.join(out, `runner-connection-csv-${p.name}.png`) });
+          // The picture is proof, not an assertion (BOS-2899). locator.screenshot waits for the element's box to hold
+          // still, and on GitHub's slower runners it can time out after its own 30 s and fail the CSV and layout checks
+          // above. Stop animations so the box settles, and never let saving the picture fail the test.
+          await root.screenshot({ path: path.join(out, `runner-connection-csv-${p.name}.png`), animations: "disabled", timeout: 10_000 }).catch((e: Error) => {
+            process.stderr.write(`runner-connection-csv-render: ${p.name} screenshot not saved (checks above passed): ${e.message.split("\n")[0]}\n`);
+          });
         }
         const [dl] = await Promise.all([page.waitForEvent("download"), button.click()]);
         expect(dl.suggestedFilename()).toMatch(/^runner-connection-\d{4}-\d{2}-\d{2}\.csv$/);
