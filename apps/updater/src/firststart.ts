@@ -137,9 +137,9 @@ export async function relinkServer(d: MoveDeps, tried: { done: boolean }): Promi
   if (!isSwap(d) || tried.done || !updaterLink(d.cfg)) return [];
   const st = d.state.get();
   if (st.stage !== "idle" && st.stage !== "done" && st.stage !== "failed" && st.stage !== "rolled-back") return [];
-  // BOS-2900: claim the move before any await, so a refusal from begin is the only way another move can be running. The awaits
-  // below (the Docker list and the leader probe) would otherwise leave a gap in which the owner's Install could start, and begin
-  // here would then throw busy on top of it.
+  // BOS-2900: the stage is checked before the awaits below (the Docker list and the leader probe), and begin is synchronous straight
+  // after them, so the owner's Install can start in that gap; a busy from begin then returns a note and never writes over that move.
+  // Only a move this call began reaches the failure-writing catch.
   let version: string;
   let digest: string;
   let probeCommit: string;
