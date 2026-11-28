@@ -6,7 +6,7 @@ order: 8
 lead: Boss Man tells you about things at four levels. You can have the urgent ones sent to your phone through your own ntfy server. ntfy is a free, open-source notification service.
 ---
 
-**Image install or build-from-source?** The levels, browser notifications, quiet hours and the choice of which cards reach your phone are settings in Boss Man, and work on both installs. Sending to your phone needs your own ntfy server and Tailscale, which are started from files in the source code. On an image install (your folder holds `images.env` and `docker-compose.images.yml`) there are no steps for that yet, so use browser notifications. The phone steps below are for a build-from-source install only.
+**Image install or build-from-source?** The levels, browser notifications, quiet hours and the choice of which cards reach your phone are settings in Boss Man, and work on both installs. Sending to your phone needs your own ntfy server, reached over Tailscale. The steps differ by install. On an image install (your folder holds `images.env` and `docker-compose.images.yml`), follow [On an image install](#on-an-image-install). On a build-from-source install, follow [Send notifications to your phone](#send-notifications-to-your-phone).
 
 ## Notification levels
 
@@ -42,6 +42,34 @@ Build-from-source install only. You need Tailscale set up first (see [Add-ons](/
 6. On your phone, install the ntfy app. Add the exact `NTFY_BASE_URL` address from step 1, including `:8443`. Do not use Boss Man's own address. Log in as the phone user with that password, and subscribe to your topic.
 7. Choose **Send a test to my phone**. It appears after you save. The test should arrive within seconds.
 
+## On an image install
+
+Not yet confirmed on a real host (28 Nov 2026). The file passes Docker Compose's own check, but nobody has run these steps with a phone yet.
+
+ntfy comes as one more release file, `docker-compose.ntfy.images.yml`. It runs as its own Compose project, `boss-man-ntfy`, with its own Tailscale device, `boss-man-ntfy`. That device publishes only ntfy, not Boss Man's page. Boss Man updates never touch it. The two **Set up for me** buttons on the Notifications page do not work here, so you make the ntfy users with commands and type the values in yourself.
+
+You need:
+
+- a release that has the file. It was added on 28 Nov 2026. If your release's page on GitHub does not list `docker-compose.ntfy.images.yml`, update Boss Man first.
+- Docker Compose 2.23 or newer (`docker compose version` shows yours).
+- HTTPS Certificates turned on in the Tailscale admin console (DNS tab), and a one-time auth key (Settings → Keys).
+
+The steps, with every command in full, are in [`docs/31-phone-notifications.md`, "Image install"](@repo/blob/main/docs/31-phone-notifications.md#image-install-no-source-folder). Run them in the folder with `images.env`. In short:
+
+1. Download `docker-compose.ntfy.images.yml` from the release you installed.
+2. Add `NTFY_BASE_URL=https://boss-man-ntfy.<tailnet>.ts.net:8443` and `TS_AUTHKEY=<one-time key>` to `images.env`.
+3. Start it with `docker compose -p boss-man-ntfy --env-file images.env -f docker-compose.ntfy.images.yml --profile ntfy up -d`. Then delete the `TS_AUTHKEY` line. **It worked if** the same command with `ps` in place of `up -d` shows `ntfy` and `tailscale` as `healthy` within a minute.
+4. Make a publish user for Boss Man and a read-only user for your phone, give them your topic, and make Boss Man's token.
+5. In Boss Man, open **Notifications**. Under **How you're told**, set **ntfy server** to `http://ntfy:80`, then fill in your **Topic**, the **Access token** and **Boss Man's address on your phone**, and choose **Save**.
+6. On your phone, add your `NTFY_BASE_URL` address in the ntfy app, log in as the phone user and subscribe to your topic. Then choose **Send a test to my phone**.
+
+Later on:
+
+- **After a reboot** it starts by itself.
+- **After a Boss Man update** you need to do nothing. If the release notes say the ntfy file changed, download the new one and run the start command again. Your users and the Tailscale login are kept.
+- **To stop it**, run the start command with `down` in place of `up -d`. Never add `-v`: that deletes the users and the Tailscale login.
+- **Back up** the volumes `boss-man-ntfy_ntfy-data` and `boss-man-ntfy_tailscale-state` with your other backups.
+
 ## Which cards reach your phone
 
 Under **Send to my phone**, choose **Urgent only (default)** or **All decisions**.
@@ -70,7 +98,7 @@ If pushes only show when you open the app after an ntfy restart, close the app f
 
 ## iPhone
 
-iPhones need a wake-up sent through ntfy.sh for instant delivery. Without it, a push can take hours to arrive. Add `NTFY_UPSTREAM_BASE_URL=https://ntfy.sh` to `.env` on your build-from-source install and run the start command again. ntfy.sh receives only the message ID, not the text. Android does not need this.
+iPhones need a wake-up sent through ntfy.sh for instant delivery. Without it, a push can take hours to arrive. Add `NTFY_UPSTREAM_BASE_URL=https://ntfy.sh` to `.env` (or to `images.env` on an image install) and run the ntfy start command again. ntfy.sh receives only the message ID, not the text. Android does not need this.
 
 The ntfy.sh wake-up is about speed only. It does not help a push break through a Focus or Do Not Disturb.
 
@@ -89,7 +117,7 @@ ntfy plans Critical alerts, which sound even on silent, for a later app version.
 
 ## If the test fails
 
-Check that ntfy is running with `docker compose -p boss-man-ntfy ps`, and that Boss Man's server is on the `edge` network that Tailscale set up.
+Check that ntfy is running with `docker compose -p boss-man-ntfy ps`. On a build-from-source install, also check that Boss Man's server is on the `edge` network that Tailscale set up. On an image install, ntfy waits for Boss Man's private network: start Boss Man first, then the ntfy start command again. If your install uses a Compose project name other than `boss-man`, add `BOSSMAN_FRONT_NETWORK=<project>_front` to `images.env`.
 
 ## Urgent pushes are silent at night on Android
 
