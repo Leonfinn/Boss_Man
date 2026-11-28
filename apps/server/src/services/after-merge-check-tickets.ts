@@ -6,7 +6,7 @@
 // BOS-2417: a merged parent whose only unreported criteria are tied to open check tickets may close at go-live (the
 // tie is not a reason to sit Blocked for a week); its watch moves to the check tickets, and the result still lands here.
 import { and, eq, isNotNull, ne, or, sql } from "drizzle-orm";
-import { checkTicketLine, criterionText, isAfterMerge, longWatchIndexes, longWatchPhrase, readCriteria, readVerdicts, ticketRef, unreportedAfterMerge } from "@boss-man/shared";
+import { EVENT_WATCH_DAYS, EVENT_WATCH_NOT_OBSERVED, eventWatchPhrase, checkTicketLine, criterionText, isAfterMerge, longWatchIndexes, longWatchPhrase, readCriteria, readVerdicts, ticketRef, unreportedAfterMerge, watchPhrase } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { activity, agents, companies, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
@@ -29,7 +29,8 @@ const TITLE_MAX = 200;
 const fitTitle = (s: string) => (s.length > TITLE_MAX ? `${s.slice(0, TITLE_MAX - 3).trimEnd()}...` : s);
 
 /**
- * BOS-2643: opens each after-merge criterion of a build ticket that names a watch of a day or more (longWatchPhrase) as
+ * BOS-2643: opens each after-merge criterion of a build ticket that names a watch of a day or more (longWatchPhrase), or
+ * since BOS-2797 a future event such as "the next beta release" or "one real install" (eventWatchPhrase), as
  * its own check ticket, tied with checksCriterion, so the build can close at go-live (BOS-2417) instead of sitting open
  * for the watch (BOS-2302, BOS-2298: merged in hours, open 3 days). Safe to repeat: a criterion with an open check
  * already gets none. Nothing for a no-code build (it never merges, so its check would never start), a build that is
@@ -61,14 +62,15 @@ export async function openLongWatchChecks(db: Db, work: Work, buildId: string, o
     const n = i + 1;
     if (have.has(n)) continue;
     const text = criterionText(criteria[i]!);
-    const phrase = longWatchPhrase(text)!;
+    const phrase = watchPhrase(text)!;
+    const why = longWatchPhrase(text) ? "needs a watch of a day or more" : "waits on a future event";
     const body = [
-      `**Why:** criterion ${n} of ${ref} ("${t.title}") needs a watch of a day or more ("${phrase}"), so Boss Man opened it as this check ticket when ${ref} was opened (BOS-2643). ${ref} can then close once it is live, and this ticket keeps the watch.`,
+      `**Why:** criterion ${n} of ${ref} ("${t.title}") ${why} ("${phrase}"), so Boss Man opened it as this check ticket when ${ref} was opened (BOS-2643, BOS-2797). ${ref} can then close once it is live, and this ticket keeps the watch.`,
       "",
       ...(opts.suggested ? [`**Suggested assignee:** ${opts.suggested} (named by the closing agent; the CEO decides).`, ""] : []),
       `**Done when:** ${text}`,
       "",
-      `This ticket waits on ${ref}'s merge and starts by itself then. Once ${ref} is live, move this ticket to Blocked with blocked_until the end of the watch. When the watch is over, close it with a numbered result ("1 pass: <what you saw>" or "1 fail: <why>"): Boss Man writes it on criterion ${n} of ${ref} ([${ref}](#/tickets/${t.id})).`,
+      `This ticket waits on ${ref}'s merge and starts by itself then. Once ${ref} is live, move this ticket to Blocked with blocked_until the end of the watch (for an event, when you expect it). When the watch is over or the event has happened, close it with a numbered result ("1 pass: <what you saw>" or "1 fail: <why>"): Boss Man writes it on criterion ${n} of ${ref} ([${ref}](#/tickets/${t.id})).`,
     ].join("\n");
     const c = await work.createTicket(t.projectId, { title: fitTitle(`Watch for ${ref} criterion ${n}: ${text}`), body, risk: t.risk ?? "medium", size: 1, state: "backlog", featureId: null, createdByAgentId: opts.byAgentId, noCode: true, acceptanceCriteria: [text] });
     await db.update(tickets).set({ checksTicketId: t.id, checksCriterion: n }).where(eq(tickets.id, c.id));
@@ -83,9 +85,12 @@ export async function openLongWatchChecks(db: Db, work: Work, buildId: string, o
   return made;
 }
 
+/** BOS-2863: true when a watch phrase names a future event and no duration (those keep the assignee's own report). */
+const isEventPhrase = (phrase: string) => !!eventWatchPhrase(phrase) && !longWatchPhrase(phrase);
+
 /** The line a tool reply adds for the checks openLongWatchChecks opened; empty when none. */
 export const longWatchNote = (checks: readonly LongWatchCheck[]): string =>
-  checks.length ? ` ${checks.map((c) => `Criterion ${c.criterion} needs a watch ("${c.phrase}"), so Boss Man opened it as check ticket ${c.ref} (${c.id}), which waits on this ticket's merge; this ticket can close once it is live, and the check reports its result here.`).join(" ")}` : "";
+  checks.length ? ` ${checks.map((c) => `Criterion ${c.criterion} needs a watch ("${c.phrase}"), so Boss Man opened it as check ticket ${c.ref} (${c.id}), which waits on this ticket's merge; this ticket can close once it is live, and the check reports its result here.${isEventPhrase(c.phrase) ? ` It ends ${EVENT_WATCH_DAYS} days after go-live: if the event hasn't happened by then, Boss Man closes it as "${EVENT_WATCH_NOT_OBSERVED}" (a pass, not a fail).` : ""}`).join(" ")}` : "";
 
 /** The wake reason; "waiting" class in wake-classes.ts, so it is never dropped. */
 export const CHECK_REPORTED_REASON = "after-merge check reported";
@@ -224,7 +229,9 @@ export async function reportCheckTicket(db: Db, ticketId: string, now: Date = ne
     summary = `${ref} closed without a pass or fail${check.outcome === "cancelled" ? " (cancelled)" : ""}, so criterion ${n} is still not reported.`;
     note = `${named}, the check for criterion ${n} of this ticket ("${criterionText(criterion)}"), was ${check.outcome === "cancelled" ? "cancelled" : "closed without a pass or fail on its own criteria"}, so Boss Man recorded nothing. Criterion ${n} is still not reported: read ${ref}, then report it or split out a new check.`;
   } else {
-    const line = checkTicketLine(ref, n, verdict, criterionText(criterion), check.title);
+    // BOS-2863: an event check that ended unobserved says so on the build's criterion (a pass, not a fail).
+    const unobserved = verdict === "pass" && (check.stateNote ?? "").includes(EVENT_WATCH_NOT_OBSERVED);
+    const line = `${checkTicketLine(ref, n, verdict, criterionText(criterion), check.title)}${unobserved ? ` — ${EVENT_WATCH_NOT_OBSERVED}` : ""}`;
     const nextNote = appendLine(parent.stateNote, line);
     await db.update(tickets).set({ stateNote: nextNote, stateNoteAt: now }).where(eq(tickets.id, parent.id));
     const left = parent.mergeCommit ? unreportedAfterMerge(criteria, nextNote) : null;

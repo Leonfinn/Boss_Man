@@ -199,6 +199,7 @@ services:
       UPDATER_LAUNCHER_ENV: |
         BOSSMAN_DATA=/data
         BOSSMAN_DATA_HOST=auto
+        BOSSMAN_INSTALL_LABEL=com.bossman.install=${COMPOSE_PROJECT_NAME:-boss-man}
         BOSSMAN_RUNNER_NETWORK=${BOSSMAN_RUNNER_NETWORK:-boss-man_default}
         BOSSMAN_RUNNER_URL=ws://server:3100/api/runner/connect
         BOSSMAN_RUNNER_MEMORY=${BOSSMAN_RUNNER_MEMORY:-}

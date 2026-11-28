@@ -16,9 +16,14 @@ import { ownerSetupFacts, ownerSetupLines, workerSetupLines } from "./owner-reco
 import { namedThingsSection, type NamedSources } from "./named-things.js";
 import { swapUntilForScreen } from "./maintenance.js";
 
-/** Drops the "You said "X" on card Y, 2026-11-01, about Z, ..." footer lines that BOS-1855 saved under older CEO replies. */
-export function stripYouSaidLines(text: string): string {
-  return text.replace(/(?:\n+|^)You said "[^\n]*?, \d{4}-\d{2}-\d{2}, about [^\n]*/g, "").trimEnd();
+import { stripCodeNotes, stripYouSaidLines } from "./reply-notes.js";
+export { stripYouSaidLines };
+/**
+ * Drops a "Done in this reply: …" or "No changes made in this reply." line the model wrote itself (BOS-2852): the chat history it
+ * reads holds the lines Boss Man saved under earlier replies, and a reply that copies one would get a second, real one under it.
+ */
+export function stripChangeLines(text: string): string {
+  return text.replace(/(?:\n+|^)(?:Done in this reply: [^\n]*|No changes made in this reply\.)(?=\n|$)/g, "").trimEnd();
 }
 import { runCapabilities } from "./run-capabilities.js";
 import type { ChatTraceService } from "./chat-trace.js";
@@ -284,7 +289,10 @@ export function chatService(
           .where(and(eq(ownerChatMessages.companyId, companyId), eq(ownerChatMessages.agentId, agentId)))
           .orderBy(desc(ownerChatMessages.createdAt))
           .limit(HISTORY)
-      ).reverse();
+      )
+        .reverse()
+        // BOS-2854: the agent sees its earlier replies without the notes the code added under them, here and in the PA prompt and the named-things lookup.
+        .map((m) => (m.role === "assistant" ? { ...m, text: stripCodeNotes(m.text) } : m));
       const ceo = agent.role === "ceo";
       if (agent.duty === "assistant") return paPrompt(agent, company?.name ?? "this company", recent);
       return [
@@ -322,7 +330,7 @@ export function chatService(
         ...(await reportBackSection(db, companyId, agentId, new Date()).catch(() => [])),
         "",
         "The conversation so far, oldest first:",
-        ...recent.map((m) => `${m.role === "owner" ? "Owner" : m.role === "assistant" ? "You" : "Boss Man"}: ${m.text}`),
+        ...recent.map((m) => `${m.role === "owner" ? "Owner" : m.role === "assistant" ? "You" : "Boss Man"}: ${m.role === "assistant" ? stripChangeLines(m.text) : m.text}`),
       ].join("\n");
     },
 
@@ -335,7 +343,8 @@ export function chatService(
     },
 
     /** The answering run's final message becomes the agent's reply. */
-    async onAgentMessage(runId: string, text: string) {
+    async onAgentMessage(runId: string, rawText: string) {
+      const text = stripChangeLines(rawText);
       // Registered at once, so the run-end check waits for the whole save, however many lookups build the notes first.
       const work = (async () => {
       const [r] = await db.select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose, duty: agents.duty }).from(runs).innerJoin(agents, eq(agents.id, runs.agentId)).where(eq(runs.id, runId));

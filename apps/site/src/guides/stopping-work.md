@@ -84,7 +84,7 @@ Stopping a run does not pause the agent. If something wakes it again, it starts 
 
 ## End all running runs
 
-Open **Runs** in the sidebar. Under **Running now**, choose **End all running runs**, then confirm. Only you, the owner, see this button, and only while something is running.
+Open **Activity > Runs** in the sidebar. Under **Running now**, choose **End all running runs**, then confirm. Only you, the owner, see this button, and only while something is running.
 
 Every run going now, in every company, ends at once. Work the agents have not saved is lost. Commits they already made are kept. If one run cannot be ended, Boss Man carries on with the rest.
 

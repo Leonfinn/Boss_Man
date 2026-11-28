@@ -148,6 +148,17 @@ async function launch(): Promise<any | null> {
   return null;
 }
 
+/**
+ * Open a route. "networkidle" is only a settle hint here: as a goto condition it has a fixed 30 s limit and, on a
+ * slow GitHub runner where the app keeps asking for data, it can run out before the page is wrong in any way. So
+ * wait for the document, give the network a bounded chance to go quiet, and let the callers wait for what they
+ * measure (a selector, the root's text, fonts) with their own deadlines.
+ */
+async function open(page: any, url: string): Promise<void> {
+  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 });
+  await page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => undefined);
+}
+
 /** Run in the page: every tag's painted text, font, dot and contrast against its own background. */
 function measureTags() {
   const lum = (c: number[]) => {
@@ -203,8 +214,11 @@ describe.skipIf(!built && !strict)("BOS-1124 tags and feed items as painted at 1
     }
     try {
       const page = await browser.newPage({ viewport: { width: 1667, height: 724 }, deviceScaleFactor: 1 });
-      await page.goto(`${base}/#/notifications`, { waitUntil: "networkidle" });
-      await page.waitForSelector(".feed-title", { timeout: 15_000 });
+      await open(page, `${base}/#/notifications`);
+      await page.waitForSelector(".feed-title", { timeout: 30_000 });
+      await page.waitForSelector(".tag", { timeout: 30_000 });
+      // Web fonts and the stylesheet's last rules must be in before anything is measured.
+      await page.evaluate(() => document.fonts.ready.then(() => undefined));
 
       const tags = await page.evaluate(measureTags);
       expect(tags.length).toBeGreaterThan(1);
@@ -235,7 +249,7 @@ describe.skipIf(!built && !strict)("BOS-1124 tags and feed items as painted at 1
     } finally {
       /* the shared browser is closed in afterAll */
     }
-  }, 60_000);
+  }, 90_000);
 
   // One test per width (BOS-1708): the three widths walked in one test shared a single 120 s budget, which GitHub's
   // slower runners overran (18 page loads, each with a fixed sleep). Each width has its own budget now.
@@ -251,10 +265,11 @@ describe.skipIf(!built && !strict)("BOS-1124 tags and feed items as painted at 1
       {
         for (const route of ["board", "decisions", "agents", "notifications", "dashboard", "ticket"]) {
           const page = await browser.newPage({ viewport: { width: w, height: h }, deviceScaleFactor: 1 });
-          await page.goto(`${base}/#/${route === "dashboard" ? "" : route === "ticket" ? "tickets/t1" : route}`, { waitUntil: "networkidle" });
+          await open(page, `${base}/#/${route === "dashboard" ? "" : route === "ticket" ? "tickets/t1" : route}`);
           // Wait for the app to have drawn something (a route's own content or the error page), then two frames, so a
           // render error has shown before it is read; no fixed sleep.
-          await page.waitForFunction(() => (document.getElementById("root")?.textContent ?? "").trim().length > 0, undefined, { timeout: 15_000 });
+          await page.waitForFunction(() => (document.getElementById("root")?.textContent ?? "").trim().length > 0, undefined, { timeout: 30_000 });
+          await page.evaluate(() => document.fonts.ready.then(() => undefined));
           await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))));
           const failed = await page.evaluate(() => {
             const t = document.body.textContent ?? "";

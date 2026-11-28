@@ -392,8 +392,13 @@ describe("skills library (R71)", () => {
     expect(textOf(await propose(c.ceo.id, plan))).toBe("A team plan for this is already waiting for the owner.");
     const [d] = (await c.db.select().from(decisions)).filter((x) => (x.context as { type?: string }).type === "team_plan");
     expect(d).toMatchObject({ tier: "owner", options: ["Hire the ticked ones", "Not now"] });
-    expect(d!.question).toContain("Team plan for Site: the CEO proposes 2 hires.");
-    expect(d!.question).toContain("1. Quinn (qa) Harness: Claude Code · Provider: Anthropic · Model: claude-opus-4-5 · Paid from: Claude Max: Checks each release in a browser. Skills: triage.");
+    expect(d!.question).toContain("Hire 2 agents for Site?");
+    // (BOS-2824) Each hire is one plain row; the model setup is not repeated in the question, and one line says the cost.
+    expect(d!.question).toContain("On your Claude Max: no extra cost");
+    expect(d!.question).toContain("Quinn: qa\nChecks each release in a browser.\nGets from the start: triage.");
+    expect(d!.question).not.toContain("Harness: Claude Code · Provider: Anthropic");
+    expect((d!.context as { costLine?: string }).costLine).toBe("On your Claude Max: no extra cost");
+    expect((d!.context as { hires: Array<{ fundingSourceKind?: string }> }).hires.map((h) => h.fundingSourceKind)).toEqual(["subscription", "subscription"]);
     // A pick outside the plan is refused and the decision stays open; then the owner ticks only Quinn.
     expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Hire the ticked ones", picks: [5] })).statusCode).toBe(422);
     expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Hire the ticked ones", picks: [0] })).statusCode).toBe(200);
@@ -402,6 +407,9 @@ describe("skills library (R71)", () => {
     const names = (await c.db.select().from(agents)).map((a) => a.name);
     expect(names).toContain("Quinn");
     expect(names).not.toContain("Rae");
+    // (BOS-2824) The CEO hears who was hired and, when one fails, who was not and why, on its next run's notes.
+    const told = (await c.db.select().from(notifications)).map((n) => `${n.title}\n${n.body ?? ""}`).join("\n");
+    expect(told).toContain("Hired from the team plan: Quinn");
   });
 
   it("tells the CEO, on its next run only, about projects, objectives and milestones the owner added (docs/13)", async () => {

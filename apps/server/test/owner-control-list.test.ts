@@ -82,6 +82,10 @@ describe("R7: a card names a button that doesn't exist", () => {
  */
 const FILE_SCREEN: Record<string, OwnerScreen> = {
   "App.tsx": "Any screen",
+  // BOS-2669: the Add to shortcuts chip (26 pages), its toast and the gone-page screen.
+  "pinned-pages.tsx": "Any screen",
+  // BOS-2669 ticket 3: the Edit shortcuts dialog, opened from the menu on any screen.
+  "shortcuts-editor.tsx": "Any screen",
   "components/ImageAttach.tsx": "Any screen",
   // The Dashboard's "Company paused" notice has a Resume button: the same "Resume" the stop-all banner lists.
   "components/DashboardPanels.tsx": "Any screen",
@@ -113,6 +117,7 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   // The weekly email switch on Settings → Notifications (BOS-2195).
   "components/WeeklySummaryForm.tsx": "Notifications",
   "components/TicketActivity.tsx": "Ticket",
+  "components/ReviewHold.tsx": "Ticket",
   "components/TicketLinks.tsx": "Ticket",
   "components/TicketOutputs.tsx": "Ticket",
   "components/TicketRelated.tsx": "Ticket",
@@ -201,6 +206,8 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   // The Runs page's emergency stop, its own component in Runs.tsx (BOS-837).
   "pages/Runs.tsx>EndAllRuns": "Runs",
   // Settings' pages (Settings.tsx SETTINGS_GROUPS): each panel the Settings page shows, by the page that shows it (BOS-1019).
+  // BOS-2669: the Add to shortcuts chip beside every Settings page's title; its words are listed under "Any screen".
+  "pages/Settings.tsx>AddToShortcuts": "Any screen",
   "pages/Settings.tsx>StopAllWork": "Server and runner",
   "pages/Settings.tsx>ServerHealth": "Server and runner",
   "pages/Settings.tsx>ServerPanel": "Server and runner",

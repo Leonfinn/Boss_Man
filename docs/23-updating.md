@@ -32,7 +32,7 @@ You need:
 
 Every way of updating the server takes a database backup first. Database changes apply by themselves during the update. Each one is written so the previous code still runs against the new schema, which is why a code rollback works. The rules are in [docs/10-migrations.md](10-migrations.md).
 
-- With the host deployer: approve the "Deploy <commit>?" card on Decisions. Settings → Server and runner → Updates shows the same offer under **Review and deploy**, or **Check for updates now** when there is none yet. Setting it up is in [docs/30-in-app-updates.md](30-in-app-updates.md).
+- With the host deployer: approve the "Deploy <commit>?" card on Decisions. Settings → Server and runner → Updates shows the same offer under **Review and deploy**, or **Check for updates now** when there is none yet. Setting it up is in [docs/30-in-app-updates.md](30-in-app-updates.md). To reach that page in one click, open it and press **Add to shortcuts** beside its title: it then shows in the Shortcuts section at the top of the menu.
 - Single server, by hand: run `scripts/deploy.sh` from the checkout. It backs up, pulls, rebuilds, restarts, waits for the server to report healthy, and offers to update the runners if their code changed. Success is the line `The server is healthy.` Useful options:
   - `--dry-run` shows the steps without running anything.
   - `--force` rebuilds even when there is nothing new.
@@ -235,7 +235,15 @@ The release list comes from the repository the install was set up with, so it wo
 
 An image install made before this feature existed starts watching only after its next update made by the updater, because that is when the updater gives it the settings it checks with.
 
-Installing the release is still done as described in docs/35; this note only tells you it exists.
+### Installing it with one button
+
+The same line has an **Install 0.1.0-beta.3** button (with your version's number). Press it and the updater does what docs/35 describes: it checks the signed release, downloads the images, backs up the database, starts the new server beside the old one, switches over, and watches the new one for about 15 minutes, going back by itself if it misbehaves. The line shows which step it is on; you can leave the page. When it ends, the line says what happened (updated, or went back and why) with a **Got it** button to clear it.
+
+- The button needs the server to be able to reach the updater. A server made by an updater that has this change reaches it over the updater's own private network and reads its key read-only; nothing else can. A server made earlier cannot, and shows "install this release by hand" instead of a button. Install that one by hand as in docs/35; the server that update makes has the button.
+- The server only passes on the version and the image digest from the release's `release.json`. The updater checks the release's signature and that digest itself, so a wrong request is refused with a plain message and nothing is changed.
+- Only the owner's page can press it. If an update is already running, a second press is refused and the progress is shown.
+
+By hand, as in docs/35, still works for every install.
 
 ## Common problems
 

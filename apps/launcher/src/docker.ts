@@ -76,6 +76,11 @@ export function dockerClient(socketPath = "/var/run/docker.sock", wait: { pollMs
       const r = await call<{ Id: string }>("POST", `/containers/create?name=${encodeURIComponent(name)}`, spec);
       return r.status === 201 && r.json ? r.json.Id : fail(r, "Creating the runner failed");
     },
+    /** Makes a named volume with labels (BOS-2803). Docker answers 201 with the existing volume when the name is taken, so it is safe to repeat. */
+    async createVolume(name: string, labels: Record<string, string>): Promise<void> {
+      const r = await call("POST", "/volumes/create", { Name: name, Labels: labels });
+      if (r.status !== 201 && r.status !== 200) fail(r, "Creating the volume failed");
+    },
     /**
      * Waits for a container to stop and returns how it ended: its exit code, or null when it didn't stop
      * within `timeoutMs` (the caller then kills it). Used for the one-shot Claude pack installer (BOS-972).

@@ -37,8 +37,9 @@ describe.skipIf(!can)("Main menu (BOS-1506)", () => {
       const box = await settings.boundingBox();
       expect(box!.y + box!.height).toBeLessThanOrEqual(SHORT.height);
       expect(await nav.getByRole("button", { name: "Log out" }).isVisible()).toBe(true);
-      // Ten top-level rows above the pinned Settings, and the list itself does not scroll.
-      expect(await nav.locator(".nav-scroll > section > ul > li").count()).toBe(10);
+      // Ten top-level rows above the pinned Settings (nine here: the demo company has no repo, so
+      // Merge queue is hidden, BOS-2819), and the list itself does not scroll.
+      expect(await nav.locator(".nav-scroll > section > ul > li").count()).toBe(9);
       await shot("menu-brave-1667x724-closed.png", page);
       const sizes = await page.evaluate(() => { const s = document.querySelector(".nav-scroll")!; const n = document.querySelector("nav.side")!; return { scroll: s.scrollHeight, client: s.clientHeight, nav: n.clientHeight, navScroll: n.scrollHeight, row: document.querySelector(".nav-scroll a.nav")!.getBoundingClientRect().height }; });
       expect(sizes.scroll, JSON.stringify(sizes)).toBeLessThanOrEqual(sizes.client + 1);

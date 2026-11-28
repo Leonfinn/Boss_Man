@@ -23,6 +23,7 @@ needed_path() {
     docs/35-install-from-images.md) return 0 ;; # scripts/install-images.test.sh checks the guide exists
     apps/site/src/guides/install-boss-man.md) return 0 ;; # scripts/install-images.test.sh checks its compose commands
     apps/launcher/src/launcher.ts) return 0 ;; # scripts/install-images.test.sh checks its guard-missing compose command
+    CHANGELOG.md) return 0 ;; # scripts/changelog-label.test.sh reads the real changelog's label rules
   esac
   return 1
 }

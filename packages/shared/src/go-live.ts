@@ -134,6 +134,18 @@ export const isLiveCheckWait = (t: { systemState: string; mergeCommit?: string |
 
 /** BOS-1907: days a merged ticket is watched when the agent gave no end date for an open-ended event. */
 export const WATCH_DEFAULT_DAYS = 14;
+/** BOS-2863: days an event check (a criterion that waits on a future event, eventWatchPhrase) is watched after go-live, then it closes itself. */
+export const EVENT_WATCH_DAYS = 7;
+/** BOS-2863: the result Boss Man writes on an event criterion whose event never came before the end date. Not a fail. */
+export const EVENT_WATCH_NOT_OBSERVED = `not observed in ${EVENT_WATCH_DAYS} days; covered by the merged tests`;
+/** BOS-2863: hours before the end date the assignee is woken once, so a real reading can still be reported. */
+export const EVENT_WATCH_WARN_HOURS = 24;
+/** BOS-2863: when an event check ends: the date an author gave, else EVENT_WATCH_DAYS after go-live (the merge when none was recorded). */
+export function eventWatchEndsAt(t: { watchUntil?: Date | string | null; liveAt?: Date | string | null; mergedAt?: Date | string | null }): Date | null {
+  if (t.watchUntil) return new Date(t.watchUntil);
+  const from = t.liveAt ?? t.mergedAt;
+  return from ? new Date(new Date(from).getTime() + EVENT_WATCH_DAYS * 24 * 60 * 60 * 1000) : null;
+}
 /** BOS-2288: events Boss Man knows that can wake a ticket in "Merged, watching" (set_ticket_state watch_trigger). */
 export const WATCH_TRIGGERS = ["gate_ci_failed", "github_main_failed", "host_script_live", "server_update", "runner_update"] as const;
 export type WatchTrigger = (typeof WATCH_TRIGGERS)[number];

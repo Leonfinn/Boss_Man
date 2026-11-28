@@ -2028,7 +2028,14 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const from = s && s.target === "server" && s.result === "deployed" && s.to_commit.toLowerCase() === live.toLowerCase() ? s.from_commit : undefined;
       const rows = await db.select({ id: companies.id }).from(companies);
       for (const c of rows) await deps.releaseLog.note(c.id, live, from);
-      const how: ReleaseHow = !s ? "restarted" : s.result === "rolled_back" ? "rolled-back" : "deployed";
+      // BOS-2891: the deployer's status says "deployed" for its own last run, so a version applied from a hand card was
+      // labelled "host deployer". A hand card (infra, or one the owner opened) for this very commit, in any state, says it was by hand.
+      const handCard = (await db
+        .select({ id: decisions.id })
+        .from(decisions)
+        .where(and(sql`${decisions.context}->>'type' = 'self_deploy'`, sql`${decisions.context}->>'target' = 'server'`, sql`lower(${decisions.context}->>'commit') = ${live.toLowerCase()}`, sql`(${decisions.context}->>'infra' = 'true' or ${decisions.context}->>'ownerOpenedAt' is not null)`))
+        .limit(1)).length > 0;
+      const how: ReleaseHow = !s ? "restarted" : s.result === "rolled_back" ? "rolled-back" : handCard ? "hand-applied" : "deployed";
       return deps.releaseLog.releaseManagerWakes(how);
     },
 

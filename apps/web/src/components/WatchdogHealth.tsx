@@ -42,6 +42,7 @@ export function WatchdogHealth({ companyId }: { companyId: string }) {
       href={`#/scrum-master/${companyId}`}
       className={`tag ${h.tone}`}
       aria-label="Watchdog health"
+      title="Boss Man's Scrum Master checks every hour that no task is stuck. Select to see what it found."
       style={{ textDecoration: "none" }}
       onClick={() => setTimeout(() => document.getElementById("open-now")?.scrollIntoView?.({ behavior: "smooth", block: "start" }), 100)}
     >

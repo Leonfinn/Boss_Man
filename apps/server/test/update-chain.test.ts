@@ -2,7 +2,7 @@
 // database): chainFrom reads the records, stepTie is the one table of joins and ends.
 import { describe, expect, it } from "vitest";
 import type { DeployWait } from "../src/services/deploy-wait.js";
-import { chainFrom, EMPTY_CHAIN, forUpdateOf, RUNNER_GONE_GRACE_MS, stepTie, tieView, WAIT_STAGE_TO_WRAP, type ChainInput, type UpdateChain, type WrapTie } from "../src/services/update-chain.js";
+import { autoWrapDue, autoWrapStuck, chainFrom, EMPTY_CHAIN, forUpdateOf, RUNNER_GONE_GRACE_MS, stepTie, tieView, WAIT_STAGE_TO_WRAP, type ChainInput, type UpdateChain, type WrapTie } from "../src/services/update-chain.js";
 import { WAIT_RULES } from "../src/services/update-waits.js";
 
 const T = (hhmm: string, s = 0) => new Date(`2026-11-26T${hhmm}:${String(s).padStart(2, "0")}.000Z`);
@@ -252,5 +252,49 @@ describe("every update stage has a wrap-up stage", () => {
       const m = WAIT_STAGE_TO_WRAP[k as keyof typeof WAIT_STAGE_TO_WRAP];
       expect(WAIT_RULES[k as keyof typeof WAIT_RULES].forUpdate === "server" ? !!m.server : !!m.runner, k).toBe(true);
     }
+  });
+});
+
+// BOS-2786: when Boss Man starts its own wrap-up for a runner update queued behind a trial, and when it gives up.
+describe("autoWrapDue and autoWrapStuck (BOS-2786)", () => {
+  const LEAD = { offFor: null, leadMin: 10 };
+  const queued = (startsAt: string | null) => ({ pressedAt: T("10:05").toISOString(), startsAt, why: "the server update's 15-minute trial" });
+  const onTrial = (end: string) => chain({ wait: wait("window", { windowUntil: end }), trialEndsAt: end, runnerQueued: queued(end) });
+
+  it("queued behind a trial ending in the future: due now, agents asked the lead time before its end", () => {
+    expect(autoWrapDue(onTrial(T("10:14").toISOString()), T("10:00"), LEAD)).toEqual({ queuedAt: T("10:05").toISOString(), startsAt: T("10:14").toISOString(), tellAt: T("10:04").toISOString() });
+  });
+
+  it("less than the lead time left: agents are asked at once", () => {
+    expect(autoWrapDue(onTrial(T("10:14").toISOString()), T("10:08"), LEAD)?.tellAt).toBe(T("10:08").toISOString());
+  });
+
+  it("the press has no start time of its own: the live trial's end is used", () => {
+    const c = chain({ wait: wait("window", { windowUntil: T("10:14").toISOString() }), runnerQueued: queued(null) });
+    expect(autoWrapDue(c, T("10:00"), LEAD)?.startsAt).toBe(T("10:14").toISOString());
+  });
+
+  it("nothing is due: no press, a press with the host, a trial over, no trial at all, or the owner cancelled it for this press", () => {
+    expect(autoWrapDue(chain({ wait: wait("window", { windowUntil: T("10:14").toISOString() }) }), T("10:00"), LEAD)).toBeNull();
+    expect(autoWrapDue(chain({ runnerUnderWay: true, runnerQueued: queued(T("10:14").toISOString()) }), T("10:00"), LEAD)).toBeNull();
+    expect(autoWrapDue(onTrial(T("10:14").toISOString()), T("10:15"), LEAD)).toBeNull();
+    expect(autoWrapDue(chain({ runnerQueued: queued(null) }), T("10:00"), LEAD)).toBeNull();
+    expect(autoWrapDue(chain({ wait: wait("sent", { thenRunners: true }) }), T("10:00"), LEAD)).toBeNull();
+    expect(autoWrapDue(onTrial(T("10:14").toISOString()), T("10:00"), { offFor: T("10:05").toISOString(), leadMin: 10 })).toBeNull();
+  });
+
+  it("gives up only while the press is still queued past the trial's end plus the grace", () => {
+    const auto = { queuedAt: null, startsAt: T("10:14").toISOString(), tellAt: T("10:04").toISOString() };
+    const tie: WrapTie = { runner: { queuedAt: null, stage: "queued", startsAt: T("10:14").toISOString(), why: null, joinedAt: T("10:00").toISOString() } };
+    expect(autoWrapStuck(tie, auto, T("10:23"), 10)).toBe(false);
+    expect(autoWrapStuck(tie, auto, T("10:25"), 10)).toBe(true);
+    expect(autoWrapStuck({ runner: { ...tie.runner!, stage: "building", buildingSince: T("10:16").toISOString() } }, auto, T("10:40"), 10)).toBe(false);
+    expect(autoWrapStuck({}, auto, T("10:40"), 10)).toBe(false);
+  });
+
+  it("tieView says Boss Man started it, with its time, only when asked to", () => {
+    const tie: WrapTie = { runner: { queuedAt: null, stage: "queued", startsAt: T("10:14").toISOString(), why: null, joinedAt: T("10:00").toISOString() } };
+    expect(tieView(tie, T("10:00").toISOString(), { auto: { tellAt: T("10:04").toISOString() } })).toMatchObject({ by: "boss-man", tellAt: T("10:04").toISOString() });
+    expect(tieView(tie, T("10:00").toISOString()).by).toBeUndefined();
   });
 });

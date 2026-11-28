@@ -7,14 +7,17 @@ order: 14
 lead: Meet a Boss Man word you do not know? Find it here. Each term has a sentence or two and a link to the guide that explains it.
 ---
 
+A term marked **[code only]** comes up only in companies whose agents write code. If your agents write documents and research, you can skip it.
+
 ## A
 
 - **Add-ons**: Optional extras that Boss Man works without: Tailscale, ntfy, Penpot and runner add-ons. Each one is off until you turn it on. ([Guide 9](/guides/add-ons))
 - **Advice on permission cards**: A setting under **Settings > Permissions** that lets Boss Man suggest which button to press on a permission card: **Advise**, **Watch** or **Off**. It never answers a card for you. ([Guide 6](/guides/permissions#advice-on-permission-cards))
 - **After-merge check**: A Done when line ticked **On a real host (checked after merge)**, because it can only be checked on the live system. Reviewers skip it, and the ticket stays open after the merge until it has a pass or fail. ([Guide 7](/guides/reviews-and-merge-queue#after-it-goes-live))
-- **Agent**: An AI worker in a company, with a role, instructions and a model. Each agent is a session of Claude Code, Codex or OpenCode. ([Guide 1](/guides/how-boss-man-works#companies-and-agents))
+- **Agent**: An AI worker with a job title (researcher, writer, checker) that works on your tasks. Each agent has instructions and a model, and runs in Claude Code, Codex or OpenCode. ([Guide 1](/guides/how-boss-man-works#companies-and-agents))
 - **Agent program**: The program an agent runs in: Claude Code, Codex or OpenCode. Each one can use different AI accounts. ([Guide 5](/guides/agents-and-models#agent-programs-and-accounts))
 - **Approved, merging**: The Review lane on the board for tickets that every reviewer approved, while Boss Man checks and merges them. ([Guide 4](/guides/board-and-decisions#the-three-review-lanes))
+- **API key**: A password-like code from Anthropic's website that lets Boss Man use Claude and bills you per use. ([Connect a Claude account](/guides/connect-a-claude-account))
 - **Ask**: The notification level for things that need your answer. Urgent asks go to your phone. Choose **All decisions** to get every ask. ([Guide 8](/guides/phone-notifications#notification-levels))
 - **Awaiting review**: The Review lane on the board for tickets an agent has finished and asked to have reviewed. ([Guide 4](/guides/board-and-decisions#the-three-review-lanes))
 
@@ -23,22 +26,27 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 - **Backlog**: The board column for tickets that are written but not started. ([Guide 4](/guides/board-and-decisions#the-board-s-columns))
 - **Backups**: Copies of the database that Boss Man makes before every update, kept in the install folder next to `src`. Test one with `scripts/restore-test.sh` before you rely on it. ([Guide 10](/guides/updates-and-backups#where-backups-are-kept))
 - **Blocked**: The board column for tickets that are only waiting: on another ticket, an open card (plan cards too), a date, or the change going live. Blocked tickets do not count towards the in-progress limits. ([Guide 4](/guides/board-and-decisions#what-blocked-means))
-- **Board**: The page that shows every ticket in a project, in six columns. Open **Projects** and choose a project to see it. ([Guide 4](/guides/board-and-decisions#the-board-s-columns))
+- **Board**: The project's columns that show where each task is, from Backlog to Done. Open **Projects** and choose a project to see it. ([Tasks and the board](/guides/tasks-and-the-board#the-board-s-columns), and [Guide 4](/guides/board-and-decisions#the-board-s-columns))
 - **Built-in allows**: What agents may do at once, with no card: use Boss Man's own tools, read, search and edit files, fetch web pages and run other shell commands. Ask rules do not apply to them. ([Guide 6](/guides/permissions#who-is-asked))
 - **Built-in guards**: Boss Man's fixed checks on risky requests: pushing, publishing and destructive commands come to you, and some deletes go to the CEO first. An Allow rule cannot let a guarded request run. ([Guide 6](/guides/permissions#who-is-asked))
 
 ## C
 
 - **Card**: One thing on the Decisions page that waits for your answer, such as a plan, a permission request, a sign-off or a question. Each card offers its own buttons. A button that promises a screenshot works only once one is attached on the card. ([Guide 4](/guides/board-and-decisions#answering-a-card))
-- **CEO**: The agent every company has. It plans the work, writes and assigns tickets, reviews simpler work and settles many permission requests before you see them. ([Guide 1](/guides/how-boss-man-works#companies-and-agents))
+- **CEO**: The agent in charge: it plans the work, splits it into tasks, and asks you before hiring or spending past your limits. It also reviews simpler work and settles many permission requests before you see them. ([The CEO](/guides/the-ceo))
 - **CEO-first rule**: Commands that no rule or built-in check settles, and deletes in /tmp or in the agent's own folder (apart from plain deletes of its own entries in /tmp, which run at once), go to the CEO first. If the CEO does not settle one within five minutes, or the request is from the CEO itself, it comes to you. ([Guide 6](/guides/permissions#who-is-asked))
-- **Check worker**: A small container on another Docker host that runs checks when the check line is long. It runs no agents. Add one under **Settings > Server and runner > Limits and checks**. ([Guide 9](/guides/add-ons#check-workers-more-machines-for-checks))
-- **Checks before merging**: The command Boss Man runs on approved work before it merges it, chosen under **Before merging, Boss Man will**. If it fails, the ticket goes back to In progress. ([Guide 7](/guides/reviews-and-merge-queue#the-merge-queue))
-- **Company**: A team of agents with its own runner, secrets and budget. One Boss Man server can run several companies. ([Guide 1](/guides/how-boss-man-works#companies-and-agents))
+- **Check**: An automatic test Boss Man runs on finished code before it joins the project. **[code only]** ([Checks and check workers](/guides/checks-and-check-workers))
+- **Check worker**: A second computer that runs checks so the agents' workspace stays free. It runs no agents. Add one under **Settings > Server and runner > Limits and checks**. **[code only]** ([Checks and check workers](/guides/checks-and-check-workers#check-workers-another-machine-for-checks), and [Guide 9](/guides/add-ons#check-workers-more-machines-for-checks))
+- **Checks before merging**: The command Boss Man runs on approved work before it merges it, chosen under **Before merging, Boss Man will**. If it fails, the task goes back to In progress. **[code only]** ([Guide 7](/guides/reviews-and-merge-queue#the-merge-queue), and [Checks and check workers](/guides/checks-and-check-workers))
+- **Claude account**: The Claude plan or API key your agents run on, and so what you pay for their work. ([Connect a Claude account](/guides/connect-a-claude-account))
+- **Company**: One team of agents with its own work, budget and settings. You can run several on one Boss Man server. ([Guide 1](/guides/how-boss-man-works#companies-and-agents))
+- **Company brief**: Boss Man's briefing to your agents about your company. You do not need to read it.
 
 ## D
 
-- **Decisions**: The page where Boss Man and its agents ask you things, one card for each. The sidebar shows how many are waiting. ([Guide 4](/guides/board-and-decisions#decisions))
+- **Decision**: A question, approval or request from an agent that waits for your answer. Each one is a card on the **Decisions** page, and the sidebar shows how many are waiting. ([Decisions](/guides/decisions), and [Guide 4](/guides/board-and-decisions#decisions))
+- **Deploy**: Putting a new version live where people use it, such as your website. Only companies that publish something need it. ([Deploys](/guides/deploys))
+- **Deploy target**: A place where agents may put work live, such as "Production", added under **Settings > Tools and deploys**. You approve each deploy to a production target. ([Deploys](/guides/deploys#who-approves-a-deploy))
 - **Doesn't need code changes**: A tick box on the ticket page for research, wiki or docs work, so the ticket can close with no change to the repository. Without it, Boss Man sends back a ticket that changed nothing. ([Guide 4](/guides/board-and-decisions#the-ticket-page))
 - **Done**: The board column for tickets that are merged or closed. ([Guide 4](/guides/board-and-decisions#the-board-s-columns))
 - **Done when**: The lines on a ticket that say what finished means, up to 10. An agent must report pass or fail for each one before it asks for review. ([Guide 7](/guides/reviews-and-merge-queue#what-a-review-checks))
@@ -52,7 +60,11 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 
 - **Feature**: Something users would notice or ask for, kept on the **Features** page with a status, demand, effort and priority. A feature does no work itself: one or more tasks deliver it. Agents also call it a feature request. ([Guide 1](/guides/how-boss-man-works#features-tasks-and-sub-tasks))
 - **Flag**: The notification level that shows on the Notifications page and as a browser notification. Tick **Also send flags** to get them on your phone too. ([Guide 8](/guides/phone-notifications#notification-levels))
-- **Funding source**: A named account that pays for agents, such as your Claude Max plan, added under **Settings > Funding**. Boss Man uses it to track cost and quota. ([Guide 3](/guides/first-company-and-ticket#7-what-pays-for-the-ceo))
+- **Funding source**: A Claude plan or API key that agents' work is charged to, with its limits, added under **Settings > Funding**. ([What agents cost](/guides/what-agents-cost), and [Guide 3](/guides/first-company-and-ticket#what-pays-for-the-ceo))
+
+## G
+
+- **Git token**: A key from GitHub or Gitea that lets agents save work to your repository. **[code only]** ([Git token](/guides/checks-and-check-workers#git-token))
 
 ## H
 
@@ -76,7 +88,8 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 ## M
 
 - **Master key**: The file `secrets/master.key`, which encrypts every secret Boss Man stores. Keep a copy off the machine, because a backup without it cannot restore your secrets. ([Guide 10](/guides/updates-and-backups#keep-the-master-key-safe))
-- **Merge queue**: Where approved tickets wait while Boss Man runs the checks and merges them, shown under **Merge queue** in the sidebar. Work that waits on you is listed first, under **Needs you**. Agents sometimes call it the merge gate or the merge line. ([Guide 7](/guides/reviews-and-merge-queue#the-merge-queue))
+- **Merge**: Finished, approved code joining the main version of the project. **[code only]** ([Guide 7](/guides/reviews-and-merge-queue#the-merge-queue))
+- **Merge queue**: The line of finished code waiting to join the project, shown under **Merge queue** in the sidebar. Work that waits on you is listed first, under **Needs you**. Agents sometimes call it the merge gate or the merge line. **[code only]** ([Guide 7](/guides/reviews-and-merge-queue#the-merge-queue))
 - **Model**: The AI model an agent uses, chosen from the **Model** list. **Default** uses the agent program's own default. ([Guide 5](/guides/agents-and-models#choose-a-model))
 
 ## N
@@ -100,30 +113,31 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 - **Plan**: An agent's outline of how it will do a ticket, approved before the work starts. By default, the CEO approves plans for low and medium risk, and you approve them for high and critical. You can change this in **Settings > Reviews**. ([Guide 7](/guides/reviews-and-merge-queue#risk-levels))
 - **Points**: How big a ticket is: a number it is given when it is planned. A bigger number means more work. The Roadmap adds up the points still to do to forecast when a milestone finishes. ([Guide 1](/guides/how-boss-man-works#features-tasks-and-sub-tasks))
 - **Priority 1**: A tick box on the ticket page, once called **Urgent**. The ticket goes first in the check queue and the merge line, keeps running when a plan is nearly used up, and you get one alert when it is ready to go live. ([Guide 4](/guides/board-and-decisions#the-ticket-page))
-- **Project**: One git repository that a company's agents work in. Each project has its own board. ([Guide 1](/guides/how-boss-man-works#projects-and-tasks))
+- **Project**: One stream of work with its own task board, such as "Client reports". It can hold documents only, or a code repository that a company's agents work in. ([Guide 1](/guides/how-boss-man-works#projects-and-tasks))
 
 ## Q
 
-- **Quick checks**: The tab on the **Merge queue** page that lists the quick and full checks agents ask for, running or waiting, with each one's ticket, kind, place in line and wait. Merge checks are on the **Merges** tab. Checks are **Held** while main is red. ([Guide 7](/guides/reviews-and-merge-queue#quick-checks))
+- **Quick checks**: The tab on the **Merge queue** page that lists the quick and full checks agents ask for, running or waiting, with each one's ticket, kind, place in line and wait. Merge checks are on the **Merges** tab. Checks are **Held** while main is red. **[code only]** ([Guide 7](/guides/reviews-and-merge-queue#quick-checks))
 - **Quiet hours**: Hours you set under **Notifications > How you're told**, when pages and asks become flags and flags become notes. ([Guide 8](/guides/phone-notifications#quiet-hours-and-limits))
 
 ## R
 
 - **Ready**: The board column for tickets ready for an agent to pick up. ([Guide 4](/guides/board-and-decisions#the-board-s-columns))
-- **Review**: The step where another agent, or you, checks a finished ticket and approves it or sends it back with comments. On the board, the Review column has three lanes. ([Guide 7](/guides/reviews-and-merge-queue#what-a-review-checks))
-- **Risk level**: How risky a ticket is: trivial, low, medium, high or critical. It decides who approves the plan, who reviews the work and whether you sign it off. ([Guide 7](/guides/reviews-and-merge-queue#risk-levels))
+- **Repo** (repository): The online folder, on GitHub or Gitea, where a software project's code is kept. **[code only]** ([Guide 3](/guides/first-company-and-ticket#what-will-your-team-work-on))
+- **Review**: Another agent, or you, checks finished work against the task's Done when lines before it counts as done. On the board, the Review column has three lanes. ([Review and risk](/guides/review-and-risk), and [Guide 7](/guides/reviews-and-merge-queue#what-a-review-checks))
+- **Risk level**: How much harm a task could do if it went wrong: trivial, low, medium, high or critical. Higher risk gets more checks and your sign-off. ([Review and risk](/guides/review-and-risk#the-five-risk-levels))
 - **Rules**: Your own permission rules under **Settings > Permissions**, each with the outcome **Allow**, **Ask the CEO**, **Ask me** or **Deny**. Deny rules always win. Then your Allow rules apply. **Ask the CEO** and **Ask me** rules only apply to requests that would otherwise ask. ([Guide 6](/guides/permissions#rules))
 - **Rules judge**: The name agents use for Advice on permission cards. ([Guide 6](/guides/permissions#advice-on-permission-cards))
-- **Run**: One working session of an agent on a ticket. Runs are listed under **Runs** in the sidebar. ([Guide 3](/guides/first-company-and-ticket#8-a-first-task))
-- **Runner**: The container where a company's agents work, one for each company. It connects out to the Boss Man server and shows **Connected** under **Settings > Server and runner > Runner** when it is working. ([Guide 1](/guides/how-boss-man-works))
+- **Run**: One working session of an agent on a ticket. Runs are listed under **Activity > Runs** in the sidebar. ([Guide 3](/guides/first-company-and-ticket#a-first-task))
+- **Runner**: Your agents' workspace: the separate, locked-down space your agents work in, one for each company. Start it once and it keeps running. It shows **Connected** under **Settings > Server and runner > Runner** when it is working. ([Your agents' workspace](/guides/the-runner))
 - **Runner add-ons**: Extra tools built into the runner image, such as a browser agents can drive. Turn them on with the tick boxes in Settings > Server and runner > Runner. ([Guide 9](/guides/add-ons#runner-add-ons-extra-tools-for-agents))
-- **Runner update**: Rebuilding the runner image with `scripts/update-runner.sh`, after which Boss Man swaps each company's runner when it is idle. Follow it under **Settings > Server and runner > Updates**. ([Guide 10](/guides/updates-and-backups#update-the-runners))
+- **Runner update**: Rebuilding the runner image with `scripts/update-runner.sh`, after which Boss Man swaps each company's runner when it is idle. Follow it under **Settings > Server and runner > Updates**. ([Guide 10](/guides/updates-and-backups#update-the-runners), and [How updates work](/guides/how-updates-work))
 
 ## S
 
-- **Scrum Master**: An optional agent you can hire. It chases tickets that stay stuck. What it may do is set under **Settings > Watchdog**. ([Guide 5](/guides/agents-and-models#hire-an-agent))
-- **Secrets**: The tokens and keys Boss Man stores encrypted under **Settings > Secrets**, such as a Claude setup-token or a git token. Boss Man never shows a secret again after you save it. ([Guide 5](/guides/agents-and-models#add-an-account))
-- **Setup-token**: A long-lived token for your Claude Pro or Max plan, made by running `claude setup-token` on your own computer. ([Guide 3](/guides/first-company-and-ticket#4-claude))
+- **Scrum Master**: An optional agent you can hire. The watchdog wakes it when a task looks stuck, and it nudges whoever can unstick it. Pick it under **Settings > Watchdog**. ([The watchdog](/guides/the-watchdog#what-the-scrum-master-does))
+- **Secret**: A key or password Boss Man stores locked away under **Settings > Secrets** and gives only to the agents that need it, such as a Claude setup token or a git token. Boss Man never shows a secret again after you save it. ([Guide 5](/guides/agents-and-models#add-an-account))
+- **Setup token**: A code that links a Claude Pro or Max plan to Boss Man. You make it once a year by running `claude setup-token` on your own computer. ([Connect a Claude account](/guides/connect-a-claude-account#connect-a-claude-plan-with-a-setup-token))
 - **Setup wizard**: The eight steps that open after you make the owner account, to create a company, connect your accounts and start a first ticket. Run it again with **Settings > Run the setup wizard**. ([Guide 3](/guides/first-company-and-ticket))
 - **Sign-off**: Your approval before Boss Man merges high or critical work, asked for on a card after the reviewer approves. The card lists the reviews, the last quick check and how many files changed. Choose **Approve and merge** or **Send it back**. ([Guide 7](/guides/reviews-and-merge-queue#your-sign-off))
 - **Skills**: Extra know-how for agents, added from a link, a draft or an upload. A Security Reviewer can check each one, and you approve every one. Open **Skills** in the sidebar. ([Guide 9](/guides/add-ons))
@@ -136,20 +150,20 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 
 - **Tailnet**: Your private Tailscale network: the devices that can reach each other through Tailscale. ([Guide 9](/guides/add-ons#tailscale-https-from-anywhere-on-your-tailnet))
 - **Tailscale**: An add-on that gives Boss Man an HTTPS address that only your own devices can reach. You need it for phone notifications. ([Guide 9](/guides/add-ons#tailscale-https-from-anywhere-on-your-tailnet))
-- **Task**: One piece of work an agent does in a project, with a title, a description, a risk level and Done when lines. One or more tasks deliver a feature, and work that is not a feature is a task with no feature. Add one with **Add task**. Also called a ticket. ([Guide 1](/guides/how-boss-man-works#features-tasks-and-sub-tasks))
+- **Task**: One piece of work, with what it should produce and how you will know it is done (its Done when lines). One or more tasks deliver a feature, and work that is not a feature is a task with no feature. Add one with **Add task**. Also called a ticket. ([Tasks and the board](/guides/tasks-and-the-board#how-to-write-a-good-task), and [Guide 1](/guides/how-boss-man-works#features-tasks-and-sub-tasks))
 - **Thinking**: How hard the model thinks before it answers, from **Default** and **Low** up to **Max**. Not every model offers every level. ([Guide 5](/guides/agents-and-models#choose-a-thinking-level))
 - **Ticket**: Another name for a task. See **Task**. ([Guide 1](/guides/how-boss-man-works#projects-and-tasks))
 - **Tool servers**: Servers (MCP) that give agents extra tools, such as reading web pages. Add them under **Settings > Tools and deploys**. ([Guide 9](/guides/add-ons#tool-servers-extra-tools-from-servers-you-run))
 
 ## U
 
+- **Update**: A new version of Boss Man itself, installed by Boss Man when you say so. ([How updates work](/guides/how-updates-work))
 - **Urgent**: The old name for **Priority 1**. See **Priority 1**. ([Guide 4](/guides/board-and-decisions#the-ticket-page))
 
 ## W
 
-- **Watchdog**: The settings for when the Scrum Master steps in, under **Settings > Watchdog**. ([Guide 5](/guides/agents-and-models#hire-an-agent))
-- **Wiki**: The company's shared pages, written by you and the agents. Open **Wiki** in the sidebar.
-
+- **Watchdog**: Boss Man's check, every few minutes, that no task is stuck. When one is, it hands it to the Scrum Master, who nudges whoever can unstick it. Set it under **Settings > Watchdog**. ([The watchdog](/guides/the-watchdog))
+- **Wiki**: Your company's shared pages: research, reports and how-tos written by you and your agents. Open **Wiki** in the sidebar.
 - **Wrap-up**: What **Ask agents to wrap up** starts: every running agent is asked to save its work and stop, and nothing new starts until it lifts by itself or you choose **Cancel wrap-up**. ([Guide 12](/guides/stopping-work#ask-agents-to-wrap-up))
 - **Workspaces**: The runner's copies of your repository, one for each ticket. **Settings > Server and runner > Runner** shows their size, and Boss Man clears those of tickets that finished more than 7 days ago. ([Guide 13](/guides/troubleshooting#updates-and-backups))
 
