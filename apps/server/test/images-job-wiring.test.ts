@@ -56,6 +56,9 @@ it("shows the images job of the ticket's newest CI run, with the branch commit i
   const x = await setup("github");
   const lines = await x.review.imagesJobLines(x.ticketId, x.companyId);
   expect(lines?.[0]).toContain("your branch commit 39b99e03 merged with main");
+  // No token and no API host in what is shown: only GitHub's public run and job pages.
+  expect(lines!.join("\n")).not.toContain("example-token-value");
+  expect(lines!.join("\n")).not.toContain(API);
   expect(lines?.[1]).toBe('- images (amd64): passed; install step: passed; install-images.test.sh: 2 ok, 0 FAIL; last lines: "ok the second install answers /api/health beside the first" | "ok the first install still answers". https://example.com/job/7');
 });
 
