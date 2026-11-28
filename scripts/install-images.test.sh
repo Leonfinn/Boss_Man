@@ -199,7 +199,7 @@ cleanup() {
   rc=$?
   guide_removal
   # The guide's two look-only listings, plus this install's runners and guards (by its label), plus any unlabelled one: all must be empty.
-  left_c="$(docker ps -a --format '{{.Names}}' --filter "label=com.bossman.install=$P"; docker ps -a --format '{{.Names}}' --filter label=boss-man.launcher=1 --filter label=com.bossman.install; unlabelled_ids boss-man.launcher=1; docker ps -a --format '{{.Names}}' --filter label=boss-man.netguard=1 --filter label=com.bossman.install; unlabelled_ids boss-man.netguard=1)"
+  left_c="$(docker ps -a --format '{{.Names}}' --filter "label=com.bossman.install=$P"; docker ps -a --format '{{.Names}}' --filter label=boss-man.launcher=1 --filter "label=com.bossman.install=$P"; unlabelled_ids boss-man.launcher=1; docker ps -a --format '{{.Names}}' --filter label=boss-man.netguard=1 --filter "label=com.bossman.install=$P"; unlabelled_ids boss-man.netguard=1)"
   left_v="$(docker volume ls -q --filter "name=${P}_"; docker volume ls -q --filter "label=com.bossman.install=$P"; docker volume ls -q --filter name=boss-man-claude-pack)"
   if [ -n "$left_c$left_v" ]; then
     bad "removal left behind (containers: ${left_c//$'\n'/ }; volumes: ${left_v//$'\n'/ })"
