@@ -43,7 +43,7 @@ Once a day, Boss Man checks whether a new release is out.
 3. Choose **Install 0.2.0**. Boss Man backs up the database, starts the new version beside the old one and switches over. The line shows each step, such as "Backing up the database". You can leave the page; it may blink once when the new version takes over.
 4. When it ends, the line says what happened: updated, or went back and why. Choose **Got it** to clear it.
 
-If the line says "This server was made before the Install button existed", this one update has to be done by hand on the machine. Ask the CEO in chat for the steps for your install. The version that update brings has the button, so you do this only once.
+If the line says "This server was made before the Install button existed", this one update has to be done by hand on the machine: follow [Install a release by hand](/guides/install-a-release-by-hand). The version that update brings has the button, so you do this only once.
 
 On an image install, the runners update with the release: a working runner moves to the new version the next time it restarts. The **Build and update runners** button is for build-from-source installs and does not apply here.
 
@@ -72,5 +72,6 @@ If a runner update fails its safety check, the runners keep the version they had
 ## Related
 
 - [Updating and backups](/guides/updates-and-backups): the command-line steps, and where backups are kept.
+- [Install a release by hand](/guides/install-a-release-by-hand): the one-time update for an image install made before the Install button.
 - [Stopping work](/guides/stopping-work): ask agents to wrap up before an update.
 - [What's new](/whats-new): what each update brings.

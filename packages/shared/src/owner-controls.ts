@@ -53,9 +53,9 @@ export const OWNER_CONTROLS = {
   "Log in": ["Create owner account", "Log in"],
   Setup: [
     "Create the company", "Add the project", "Check the token against …", "Add the task to …", "Continue", "Dismiss", "Saving",
-    "Back", "Next", "Skip for now", "Leave setup for now", "Skip setup for now", "Fix this",
+    "Back", "Next", "Skip this step", "Leave setup for now", "Skip setup for now", "Fix this",
     // The connect and runner steps (BOS-1495, BOS-2815: one row per way to pay, then its Save; the connect step's
-    // two "What's this?" links go in a new tab, so they are links, not buttons, and are not listed here), then the
+    // "How this works" links go in a new tab, so they are links, not buttons, and are not listed here), then the
     // credentials, funding and project panels Setup shares with Settings and Projects.
     "Browser only", "One command on a computer", "Save and connect", "Go back to the connect step", "Start the runner",
     "Save", "Check with Claude", "Check", "Remove", "Edit", "Delete", "Add funding source", "Cancel", "Re-detect",
@@ -266,7 +266,7 @@ export type OwnerScreen = keyof typeof OWNER_CONTROLS;
  */
 export const OWNER_FIELDS = {
   "Any screen": ["New company name"],
-  "Log in": ["Username", "Password"],
+  "Log in": ["Username", "Password", "Type the password again"],
   // The Engagements list's status filter (BOS-2260).
   Engagements: ["Show", "Search engagements"],
   // The Runs page's search box (BOS-2317).
