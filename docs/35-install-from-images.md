@@ -206,6 +206,10 @@ Runners keep their company data (it is in volumes); the new launcher picks them 
 
 Back up `config` (the master key) and `db-secret` (the database password) after the first install, and keep the copies somewhere other than this machine. They are small. Keep them together with the database volume's backup: if you lose only `db-secret`, `setup` would make a new password, which the existing database refuses, and the server could not start. If that happens, restore `db-secret` from your backup. Without a backup the database password cannot be recovered, and the database volume would have to be recreated, which loses its data.
 
+### Phone notifications (optional add-on)
+
+Pushes to your phone through your own ntfy server come as one more release file, `docker-compose.ntfy.images.yml`. It is a separate Compose project (`boss-man-ntfy`) and is off until you start it; updates and "Start again from nothing" do not touch it. Steps to start, update, restart and stop it are in [docs/31, "Image install"](31-phone-notifications.md). Not yet confirmed on a real host (28 Nov 2026).
+
 ### Settings
 
 Add any of these to `images.env`, then run the start command again (section 3, step 3).

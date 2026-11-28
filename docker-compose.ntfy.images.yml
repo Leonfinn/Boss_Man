@@ -14,8 +14,9 @@
 #   BOSSMAN_FRONT_NETWORK (default boss-man_front: <project>_front, set it if your install uses another project name),
 #   NTFY_CACHE_DURATION (1h), NTFY_UPSTREAM_BASE_URL (iPhone only), NTFY_IMAGE (change version and digest together).
 #
-# How it connects: the updater makes Boss Man's server on the "front" network of your install. ntfy and the sidecar join that
-# same network, so the server publishes to http://ntfy:80 with no address to configure, exactly as on a build install. No port
+# How it connects: the updater makes Boss Man's server on the "front" network of your install (internal: no internet). ntfy
+# joins that network, so the server publishes to http://ntfy:80 with no address to configure, exactly as on a build install.
+# The sidecar is NOT on front: it shares this project's own bridge with ntfy, which has internet so Tailscale can log in. No port
 # is published on the host. Access is deny-all: nobody can publish or read without a user or token made with `ntfy user` /
 # `ntfy token` / `ntfy access`. Sign-up and the web app are off. Never use Tailscale Funnel.
 # The sidecar proxies ONLY ntfy (tailnet port 8443). It does not publish Boss Man's own page, and it is not the trusted proxy
@@ -84,8 +85,11 @@ services:
       timeout: 5s
       retries: 3
     networks:
+      # front: so Boss Man's server reaches http://ntfy:80. default: this project's own bridge, shared with the sidecar, and
+      # the way out to the internet for NTFY_UPSTREAM_BASE_URL (iPhone pushes), which front cannot give (it is internal).
       front:
         aliases: [ntfy]
+      default:
     mem_limit: 256m
     pids_limit: 128
 
@@ -117,7 +121,9 @@ services:
     configs:
       - source: serve
         target: /config/serve.json
-    networks: [front]
+    # Only the project's own bridge (it has internet, so Tailscale can log in) and ntfy is on it. Not on front, which is
+    # internal (no internet) and has only 8 addresses shared with the two server colours and the updater.
+    networks: [default]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     mem_limit: 256m

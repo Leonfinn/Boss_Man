@@ -151,6 +151,8 @@ You need Tailscale HTTPS on your tailnet (Tailscale admin page → DNS → HTTPS
 
 6. On the phone, follow step 6 above (the address is your `NTFY_BASE_URL`, user `phone-read`), then **Send a test to my phone** (step 7) and the lock-down check.
 
+**A week on.** To update the add-on, download the new release's `docker-compose.ntfy.images.yml` (step 1; after a Boss Man update it is the same one unless the release notes say it changed) and run the step 3 command again: it recreates only what changed and keeps the users. To restart it, run the same command; after a reboot it starts by itself (`restart: unless-stopped`). If Boss Man has not been started since you made its network, ntfy waits for it: start Boss Man first. The ntfy and Tailscale containers have their own network access; only ntfy joins Boss Man's private `front` network (which has no internet).
+
 Stop it with `docker compose -p boss-man-ntfy --env-file images.env -f docker-compose.ntfy.images.yml --profile ntfy down` (add nothing else: `-v` would delete the users and the Tailscale login). Back up the volumes `boss-man-ntfy_ntfy-data` and `boss-man-ntfy_tailscale-state` with your other volumes. The Tailscale device stays in your admin page until you remove it there.
 
 ## Blue/green installs
