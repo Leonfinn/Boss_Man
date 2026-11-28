@@ -116,6 +116,26 @@ export function checkSocket(socket: string | undefined, stat: (p: string) => { m
   return socketModeProblem(socket, stat(socket));
 }
 
+/**
+ * The last thing setup prints (BOS-2846): where the two keys are, why they matter, and one command that copies both to a file. Same
+ * wording and command as the "Back up two volumes" section of docs/35-install-from-images.md. The volume names are the project name
+ * plus the volume (compose passes the project name in; it is `boss-man` unless the owner set COMPOSE_PROJECT_NAME). The copy runs in the
+ * database image, which is already on the machine. No host paths: it works on any Docker host.
+ */
+export function doneMessage(project?: string, dbImage?: string): string {
+  const p = project && /^[a-z0-9][a-z0-9_-]*$/.test(project) ? project : "boss-man";
+  const image = dbImage && /^[\w./:@-]+$/.test(dbImage) ? dbImage : "pgvector/pgvector:0.8.7-pg17-bookworm";
+  return [
+    "Setup is done. Two small keys were made, and you need a copy of both:",
+    `  - master.key is in the Docker volume ${p}_config. Without it, the secrets Boss Man stores cannot be read again.`,
+    `  - The database password is in the Docker volume ${p}_db-secret. Without it, the server cannot reach its database.`,
+    "To copy both into one file (boss-man-keys.tgz) in the folder you are in, paste this:",
+    `  docker run --rm -v ${p}_config:/from/config:ro -v ${p}_db-secret:/from/db-secret:ro -v "$PWD":/to ${image} tar czf /to/boss-man-keys.tgz -C /from .`,
+    "Then move boss-man-keys.tgz to another machine or an external disk, not just another folder here: a copy on this machine is lost with it.",
+    "Keep it as private as a password manager export. More in docs/35-install-from-images.md, \"Back up two volumes\".",
+  ].join("\n");
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   try {
     const problem = checkSocket(process.env.BOSSMAN_SETUP_SOCKET);
@@ -126,7 +146,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     else r.kept.push("updater key");
     for (const f of r.created) console.log(`Created ${f}`);
     for (const f of r.kept) console.log(`Kept ${f} (already there; not changed)`);
-    console.log("Setup is done. Back up the config volume: without master.key, stored secrets cannot be read.");
+    console.log(doneMessage(process.env.BOSSMAN_PROJECT_NAME, process.env.BOSSMAN_DB_IMAGE));
   } catch (err) {
     console.error(`Setup failed: ${(err as Error).message}`);
     process.exit(1);
