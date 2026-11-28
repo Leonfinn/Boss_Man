@@ -9,6 +9,7 @@ import { heldSummary, heldText, inLineOf, pausedSlotsText, pausedSummary, paused
 // R43 (BOS-1716): each count in these panels is written with its one label from the shared list.
 import { figureText } from "@boss-man/shared";
 import { inForceHeadline, inForceReason, type LimitInForce } from "../limit-in-force";
+import { GuideLink } from "../guide-links";
 
 export const NEEDS_YOU_MAX = 5;
 
@@ -157,6 +158,11 @@ export function RightNow({ lines, paused, companyId, loading, onResume }: { line
           </li>
         ))}
       </ul>
+      {lines?.some((l) => l.key === "runner" && l.state === "Runner offline") && (
+        <p style={{ margin: "6px 0 0" }}>
+          <GuideLink slug="the-runner">What's the runner?</GuideLink>
+        </p>
+      )}
     </section>
   );
 }

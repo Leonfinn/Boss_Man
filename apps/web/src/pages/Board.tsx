@@ -28,6 +28,7 @@ import { ageShort } from "../age";
 import { yourReviewFirst } from "../board-lane-order";
 import { waitingOnThis, waitingWords } from "../board-waiting";
 import { WorkStands } from "../components/WorkStands";
+import { GuideLink } from "../guide-links";
 import { RecurringTag } from "../components/RecurringTag";
 import { HeldBehindFixLine, heldSummary, type MergeLine } from "../components/MergesStuckBanner";
 
@@ -1187,7 +1188,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged, d
           <h1>{current?.name ?? "Kanban"}</h1>
           {current?.repoUrl && <p className="sub mono" style={{ fontSize: 13 }}>{current.repoUrl}</p>}
           {/* (BOS-1126 Q10) The watchdog status is a small pill on the line under the project name, not floating mid-heading. */}
-          {current && <p style={{ margin: "6px 0 0" }}><WatchdogHealth companyId={current.companyId} /></p>}
+          {current && <p style={{ margin: "6px 0 0" }}><WatchdogHealth companyId={current.companyId} /> <GuideLink slug="the-watchdog">What's the watchdog?</GuideLink></p>}
         </div>
         {current && (
           <StarButton
@@ -1385,6 +1386,11 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged, d
       </div>
       {selecting && view !== "features" && <BulkBar count={selected.size} agents={company?.agents ?? []} busy={bulkBusy} result={bulkResult} onRun={(a) => void runBulk(a)} onClear={() => { setSelected(new Set()); setBulkResult(null); lastPicked.current = null; }} />}
       {board.data && view !== "features" && <WorkStands counts={standing} targets={standingTargets} stuck={stuckCards.length} stuckTicketId={stuckCards[0]?.id} onShowStuck={() => setFilter({ stuckOnly: true })} />}
+      {board.data && view !== "features" && (
+        <p style={{ margin: "4px 0 0" }}>
+          <GuideLink slug="board-and-decisions">How the board works</GuideLink>
+        </p>
+      )}
       {board.data && view !== "features" && filters.stuckOnly && (
         <p className="stuck-filter-line" role="status" data-testid="stuck-filter-line">
           Showing {stuckCards.length} stuck {stuckCards.length === 1 ? "card" : "cards"} ·{" "}
