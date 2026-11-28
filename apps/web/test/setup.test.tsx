@@ -472,6 +472,7 @@ describe("the connect step: one equal list of every way to pay (BOS-2815)", () =
     render(<Setup companies={[withCeo]} go={() => {}} onChanged={() => {}} />);
     fireEvent.click(await screen.findByText("Other API provider"));
     expect(screen.getByText(/These need more than one value, so they are set under Settings → Secrets/)).toBeTruthy();
+    expect(screen.getByText(/The "What pays for the CEO" step then sets which funding source pays for the CEO/)).toBeTruthy();
     expect(screen.getByText(/Amazon Bedrock needs an access key, a secret key and a region/)).toBeTruthy();
     expect(screen.getByText("Open Settings → Secrets").getAttribute("href")).toBe("#/settings/c1/secrets");
     expect(screen.queryByText("Save and connect")).toBeNull();

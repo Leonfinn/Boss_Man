@@ -173,7 +173,7 @@ function ConnectDetail({ o, company, onSaved, known }: { o: ConnectOption; compa
     }
     // No value Boss Man can save for this one: say where it is set instead of a box that would fail.
     const what: Record<string, string> = {
-      other: "These need more than one value, so they are set under Settings → Secrets (Add → Other), not pasted here: Amazon Bedrock needs an access key, a secret key and a region; Microsoft Foundry needs an endpoint and a key; an LLM gateway needs its base address, a key and a model. Then add a funding source for it under Settings → Funding, and pick it for the CEO there.",
+      other: "These need more than one value, so they are set under Settings → Secrets (Add → Other), not pasted here: Amazon Bedrock needs an access key, a secret key and a region; Microsoft Foundry needs an endpoint and a key; an LLM gateway needs its base address, a key and a model. Once they are saved, add a funding source for it under Settings → Funding. The \"What pays for the CEO\" step then sets which funding source pays for the CEO.",
     };
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
