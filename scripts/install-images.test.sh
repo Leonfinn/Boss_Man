@@ -68,9 +68,10 @@ echo "$cfg" | jq -r '.services.updater.environment.UPDATER_SELF_MOUNTS' | grep -
 if grep -v '^[[:space:]]*#' docker-compose.images.yml | grep -Eq '\b(openssl|sudo|chown|stat -c)\b'; then bad "compose file uses host tools"; else ok "no host openssl, chown, stat or sudo"; fi
 [ -f docs/35-install-from-images.md ] && ok "the install guide exists" || bad "docs/35-install-from-images.md is missing"
 # BOS-2803: the guide's removal steps, in order (the real half's cleanup runs the same commands for its own project).
-# BOS-2851: the runners and guards are found by the install label, with an unlabelled fallback, so a host running another install is
-# safe. Checked in both guides: the docs one and the website's.
-guide_cmds=('--filter label=com.bossman.install=boss-man | xargs -r docker rm -f' '--filter label=com.bossman.install=boss-man --filter label=boss-man.launcher=1 | xargs' '--filter label=com.bossman.install=boss-man --filter label=boss-man.netguard=1 | xargs' '--filter label=boss-man.launcher=1 --filter label=com.bossman.install | xargs' '--filter label=boss-man.netguard=1 --filter label=com.bossman.install | xargs' 'down -v --remove-orphans' 'docker volume ls -q --filter label=com.bossman.install=boss-man' 'docker volume ls -q --filter name=boss-man-claude-pack' 'docker volume ls -q --filter name=^boss-man_ | xargs')
+# BOS-2851: the runners and guards are found by the install label; for older unlabelled ones (made before BOS-2803) the guide lists
+# them by inspecting each container's install label, because Docker has no "no label" filter — `--filter label=com.bossman.install`
+# (with no value) would match every labelled container, including a second install's. Checked in both guides: the docs and the website's.
+guide_cmds=('--filter label=com.bossman.install=boss-man | xargs -r docker rm -f' '--filter label=com.bossman.install=boss-man --filter label=boss-man.launcher=1 | xargs' '--filter label=com.bossman.install=boss-man --filter label=boss-man.netguard=1 | xargs' 'docker ps -aq --filter label=boss-man.launcher=1 | xargs -r docker inspect -f' 'docker ps -aq --filter label=boss-man.netguard=1 | xargs -r docker inspect -f' 'down -v --remove-orphans' 'docker volume ls -q --filter label=com.bossman.install=boss-man' 'docker volume ls -q --filter name=boss-man-claude-pack' 'docker volume ls -q --filter name=^boss-man_ | xargs')
 for guide in docs/35-install-from-images.md apps/site/src/guides/install-boss-man.md; do
   [ -f "$guide" ] || { bad "$guide is missing"; continue; }
   prev=0; order_ok=1
@@ -78,7 +79,10 @@ for guide in docs/35-install-from-images.md apps/site/src/guides/install-boss-ma
     n="$(grep -nF -- "$c" "$guide" | head -1 | cut -d: -f1)"
     { [ -n "$n" ] && [ "$n" -gt "$prev" ]; } && prev="$n" || { order_ok=0; echo "$guide: step missing or out of order: $c"; }
   done
-  [ "$order_ok" = 1 ] && ok "$guide removes this install's containers, runners and guards by the install label, then unlabelled ones, then down -v, then the pack volume" || bad "$guide: the removal steps are missing or out of order"
+  [ "$order_ok" = 1 ] && ok "$guide removes this install's containers, runners and guards by the install label, then lists unlabelled ones, then down -v, then the pack volume" || bad "$guide: the removal steps are missing or out of order"
+  # BOS-2851: no label-without-value filter. `--filter label=com.bossman.install` matches every labelled container (any value), so it
+  # cannot single out unlabelled ones; it would remove a second install's runners and guards. The guide must label-inspect instead.
+  if grep -qF -- '--filter label=com.bossman.install ' "$guide" || grep -qE -- '--filter label=com\.bossman\.install([^=]|$)' "$guide"; then bad "$guide uses a label-exists filter (label=com.bossman.install with no value), which matches every labelled container"; else ok "$guide never uses a label-without-value install filter"; fi
   # BOS-2851: the "remove from a host that runs only this install" caveat is gone; another install on the host is untouched.
   if grep -qF 'runs only this install' "$guide" || grep -qF 'runs just this install' "$guide"; then bad "$guide still says to remove only from a host that runs only this install"; else ok "$guide drops the 'runs only this install' caveat"; fi
 done
@@ -145,21 +149,43 @@ P="bminstall$$"
 dc() { docker compose -p "$P" --env-file "$T/run.env" -f docker-compose.images.yml --profile images "$@"; }
 # BOS-2803: removal follows the guide's "Start again from nothing" (docs/35-install-from-images.md) step for step, then checks nothing is
 # left. The updater and the launcher made containers compose does not know; they hold the volumes, so they go before `down -v`.
-# BOS-2851: runners and guards are found by this project's install label, so another install on the host is left alone. Only the
-# unlabelled fallback (a runner or guard made before BOS-2803) could catch another install's, so the test refuses to start where one
-# exists (INSTALL_ALLOW_SHARED_HOST=1 overrides, and then it accepts that a shared host's unlabelled ones may go).
-if [ -z "${INSTALL_ALLOW_SHARED_HOST:-}" ] && [ -n "$(docker ps -aq --filter label=boss-man.launcher=1 --filter label=com.bossman.install; docker ps -aq --filter label=boss-man.netguard=1 --filter label=com.bossman.install)" ]; then
-  bad "this host already has unlabelled Boss Man runners or guards (made before the install label), and the removal step would delete them (set INSTALL_ALLOW_SHARED_HOST=1 to allow)"; exit 1
+# BOS-2851: runners and guards are found by this project's install label, so another install on the host is left alone. For older
+# unlabelled ones (made before BOS-2803), Docker has no "no label" filter — `--filter label=com.bossman.install` matches every labelled
+# container, a second install's too — so the guide lists them by inspecting each one's install label and the test helps only with the
+# id listing below. The test still refuses to start where unlabelled runners or guards exist (INSTALL_ALLOW_SHARED_HOST=1 overrides,
+# and then it accepts that a shared host's unlabelled ones may be removed, since nothing labels them to tell them apart).
+# unlabelled_ids <launcher|netguard label>: ids of containers with that label whose install label is empty, as the guide's inspect shows.
+unlabelled_ids() { docker ps -aq --filter "label=$1" | xargs -r docker inspect -f '{{if not (index .Config.Labels "com.bossman.install")}}{{.Id}}{{end}}'; }
+if [ -z "${INSTALL_ALLOW_SHARED_HOST:-}" ] && [ -n "$(unlabelled_ids boss-man.launcher=1; unlabelled_ids boss-man.netguard=1)" ]; then
+  bad "this host already has unlabelled Boss Man runners or guards (made before the install label), and the guide's removal lists them as this install's (set INSTALL_ALLOW_SHARED_HOST=1 to allow)"; exit 1
 fi
+# A second install's runner survives this install's removal: make two fake labelled containers, remove only this project's, and check
+# the other is still there. Uses the guide's own label filter, so it fails if the filter ever widens to every labelled container.
+# Output is logged, not hidden, so a failure here says what docker said.
+if docker image inspect busybox >"$T/second.log" 2>&1 || docker pull -q busybox >>"$T/second.log" 2>&1; then
+  other="${P}_other"
+  if docker run -d --name "${P}_keep" --label com.bossman.install="$other" --label boss-man.launcher=1 busybox sleep 60 >>"$T/second.log" 2>&1 \
+    && docker run -d --name "${P}_mine" --label com.bossman.install="$P" --label boss-man.launcher=1 busybox sleep 60 >>"$T/second.log" 2>&1; then
+    docker ps -aq --filter "label=com.bossman.install=$P" --filter label=boss-man.launcher=1 | xargs -r docker rm -f >>"$T/second.log" 2>&1
+  fi
+  keep="$(docker ps -aq --filter name="${P}_keep")"
+  mine="$(docker ps -aq --filter name="${P}_mine")"
+  if [ -n "$keep" ] && [ -z "$mine" ]; then
+    ok "removal by the install label leaves a second install's runner and removes only this install's"
+  else bad "removal by the install label did not leave a second install's runner alone"; fi
+  docker rm -f "${P}_keep" "${P}_mine" >>"$T/second.log" 2>&1 || true
+else ok "second-install survival test skipped (no busybox image and could not pull one)"; fi
 guide_removal() {
   # Output goes to a log file, not away: the listings after this step are what fail the test, and the log says why.
   {
     docker ps -aq --filter "label=com.bossman.install=$P" | xargs -r docker rm -f
     docker ps -aq --filter "label=com.bossman.install=$P" --filter label=boss-man.launcher=1 | xargs -r docker rm -f
     docker ps -aq --filter "label=com.bossman.install=$P" --filter label=boss-man.netguard=1 | xargs -r docker rm -f
-    # The guide's fallback for a runner or guard made before the install label existed.
-    docker ps -aq --filter label=boss-man.launcher=1 --filter label=com.bossman.install | xargs -r docker rm -f
-    docker ps -aq --filter label=boss-man.netguard=1 --filter label=com.bossman.install | xargs -r docker rm -f
+    # The guide's handling of older unlabelled runners and guards: list them by inspecting each one's install label, then the operator
+    # removes the ones that are this install's. Here every unlabelled one on the host is this install's (the guard above refused to start
+    # otherwise, unless INSTALL_ALLOW_SHARED_HOST was set), so the test removes the unlabelled ones it listed.
+    unlabelled_ids boss-man.launcher=1 | xargs -r docker rm -f
+    unlabelled_ids boss-man.netguard=1 | xargs -r docker rm -f
   } >> "$T/removal.log" 2>&1
   dc down -v --remove-orphans > "$T/down.log" 2>&1
   {
@@ -173,7 +199,7 @@ cleanup() {
   rc=$?
   guide_removal
   # The guide's two look-only listings, plus this install's runners and guards (by its label), plus any unlabelled one: all must be empty.
-  left_c="$(docker ps -a --format '{{.Names}}' --filter "label=com.bossman.install=$P"; docker ps -a --format '{{.Names}}' --filter label=boss-man.launcher=1 --filter label=com.bossman.install; docker ps -a --format '{{.Names}}' --filter label=boss-man.netguard=1 --filter label=com.bossman.install)"
+  left_c="$(docker ps -a --format '{{.Names}}' --filter "label=com.bossman.install=$P"; docker ps -a --format '{{.Names}}' --filter label=boss-man.launcher=1 --filter label=com.bossman.install; unlabelled_ids boss-man.launcher=1; docker ps -a --format '{{.Names}}' --filter label=boss-man.netguard=1 --filter label=com.bossman.install; unlabelled_ids boss-man.netguard=1)"
   left_v="$(docker volume ls -q --filter "name=${P}_"; docker volume ls -q --filter "label=com.bossman.install=$P"; docker volume ls -q --filter name=boss-man-claude-pack)"
   if [ -n "$left_c$left_v" ]; then
     bad "removal left behind (containers: ${left_c//$'\n'/ }; volumes: ${left_v//$'\n'/ })"

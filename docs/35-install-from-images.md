@@ -176,15 +176,17 @@ The order matters. The updater made the server and the launcher, and the launche
    docker ps -aq --filter label=com.bossman.install=boss-man --filter label=boss-man.netguard=1 | xargs -r docker rm -f
    ```
 
-   A runner or guard made before BOS-2803 has no install label, so step 1 does not catch it. If you first installed from an older release that had no label, remove those unlabelled ones too (they are this install's, unless the host has a second install that is also older than the label):
+   A runner or guard made before BOS-2803 has no install label, so step 1 does not catch it, and Docker has no filter for "no label". Only if you first installed from an older release that had no label, remove those unlabelled ones by hand: this lists them, then you remove the ones that belong to this install (a second install's older containers carry no label either, so leave those). The listing prints each container's id and install label; the removal takes only the ids you pass:
 
    ```
-   docker ps -aq --filter label=boss-man.launcher=1 --filter label=com.bossman.install | xargs -r docker rm -f
+   docker ps -aq --filter label=boss-man.launcher=1 | xargs -r docker inspect -f '{{.Id}} {{index .Config.Labels "com.bossman.install"}}'
    ```
 
    ```
-   docker ps -aq --filter label=boss-man.netguard=1 --filter label=com.bossman.install | xargs -r docker rm -f
+   docker ps -aq --filter label=boss-man.netguard=1 | xargs -r docker inspect -f '{{.Id}} {{index .Config.Labels "com.bossman.install"}}'
    ```
+
+   For each id whose install label is empty, run `docker rm -f <id>`.
 
 3. Let Compose remove what it knows, with the volumes and any container it lost track of:
 

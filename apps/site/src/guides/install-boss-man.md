@@ -174,15 +174,17 @@ docker ps -aq --filter label=com.bossman.install=boss-man --filter label=boss-ma
 docker ps -aq --filter label=com.bossman.install=boss-man --filter label=boss-man.netguard=1 | xargs -r docker rm -f
 ```
 
-A runner or guard made before the install label existed (an older release) has no label, so step 1 does not catch it. If you first installed from an older release that had no label, remove those unlabelled ones too (they are this install's, unless the machine has a second install that is also older than the label):
+A runner or guard made before the install label existed (an older release) has no label, so step 1 does not catch it, and Docker has no filter for "no label". Only if you first installed from an older release that had no label, remove those unlabelled ones by hand: this lists them, then you remove the ones that belong to this install (a second install's older containers carry no label either, so leave those). The listing prints each container's id and install label; the removal takes only the ids you pass:
 
 ```sh Run in the folder with images.env
-docker ps -aq --filter label=boss-man.launcher=1 --filter label=com.bossman.install | xargs -r docker rm -f
+docker ps -aq --filter label=boss-man.launcher=1 | xargs -r docker inspect -f '{{.Id}} {{index .Config.Labels "com.bossman.install"}}'
 ```
 
 ```sh Run in the folder with images.env
-docker ps -aq --filter label=boss-man.netguard=1 --filter label=com.bossman.install | xargs -r docker rm -f
+docker ps -aq --filter label=boss-man.netguard=1 | xargs -r docker inspect -f '{{.Id}} {{index .Config.Labels "com.bossman.install"}}'
 ```
+
+For each id whose install label is empty, run `docker rm -f <id>`.
 
 3. Remove what Compose knows, with its volumes:
 
