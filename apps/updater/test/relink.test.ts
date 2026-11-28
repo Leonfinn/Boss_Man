@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, test } from "vitest";
 import { relinkServer } from "../src/firststart.js";
 import { NEW_COMMIT } from "./fake-daemon.js";
-import { closeAll, setup } from "./swap-helpers.js";
+import { closeAll, D_SERVER, setup } from "./swap-helpers.js";
 
 afterEach(closeAll);
 
@@ -39,6 +39,36 @@ describe("relinkServer", () => {
     expect(s.daemon.containers.has("server-green")).toBe(false);
     expect((await relinkServer(deps, tried)).join(" ")).toMatch(/Install button works/);
     expect(tried.done).toBe(true);
+  });
+
+  test("a move that begins during the probe (busy from begin) is left untouched and not reported as failed (BOS-2900)", async () => {
+    const s = await setup();
+    const blue = s.daemon.containers.get("server-blue")!;
+    blue.env = ["BOSSMAN_IMAGE_INSTALL=1"];
+    blue.commit = NEW_COMMIT;
+    const real = s.deps.probe!;
+    // The owner's Install begins while relinkServer is mid-probe.
+    let ran: ReturnType<typeof s.state.begin> | null = null;
+    const deps = {
+      ...s.deps,
+      probe: async (...a: Parameters<typeof real>) => {
+        const r = await real(...a);
+        ran = s.state.begin("0.3.0", D_SERVER);
+        return r;
+      },
+    };
+    const tried = { done: false };
+    const notes = await relinkServer(deps, tried);
+    expect(notes.join(" ")).toMatch(/another update had just started/);
+    expect(tried.done).toBe(false);
+    expect(ran).not.toBeNull();
+    // The owner's running move is exactly as it was: no failed stage, its report intact.
+    const after = s.state.get();
+    expect(after.stage).toBe(ran!.stage);
+    expect(after.version).toBe("0.3.0");
+    expect(after.report).toEqual(ran!.report);
+    expect(after.error).toBeNull();
+    expect(s.daemon.containers.has("server-green")).toBe(false);
   });
 
   test("a colour that already has the link is left alone", async () => {
