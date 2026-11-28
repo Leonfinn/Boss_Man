@@ -12,15 +12,15 @@ Boss Man is a web app you run on your own Linux machine. You use it to plan work
 
 A company is a team of agents with its own runner, secrets and budget. Every company has a CEO agent, which plans the work, writes tasks, assigns them and reviews simpler work. You hire the other agents from ready-made roles. See [The CEO](/guides/the-ceo) for what it does on its own and what it asks you first.
 
-Each agent is a session of Claude Code, Codex or OpenCode with a role, instructions and a model.
+Each agent is a session of Claude Code, Codex or OpenCode with a role, instructions and a model. For which roles to hire first, see [Hiring your first team](/guides/hiring-your-first-team).
 
 ## The runner
 
-The runner is the container where a company's agents work. Each company has one. It connects out to the Boss Man server, so it needs no open ports. In a code project, agents work on a separate copy of the repository for each task. You can add check workers on other machines to run checks. See [Your agents' workspace (the runner)](/guides/the-runner) for why it is kept separate and what to do if it stops.
+The runner is the container where a company's agents work. Each company has one. It connects out to the Boss Man server, so it needs no open ports. In a code project, agents work on a separate copy of the repository for each task. You can add check workers on other machines to run checks. See [Your agents' workspace (the runner)](/guides/the-runner) for why it is kept separate and what to do if it stops, and [What keeps agents fenced in](/guides/what-keeps-agents-fenced-in) for what agents can and cannot reach.
 
 ## Projects and tasks
 
-A project is one stream of work with its own task board, such as "Client reports". It can hold documents only, or a code repository. In a documents project, agents write their results in your company's **Wiki**, for example "Compare the three biggest garden centres near us and write a one-page summary". In a code project, they change the code in the repository.
+A project is one stream of work with its own task board, such as "Client reports". It can hold documents only, or a code repository. In a documents project, agents write their results in your company's **Wiki**, for example "Compare the three biggest garden centres near us and write a one-page summary". In a code project, they change the code in the repository. See [Using Boss Man for work that isn't code](/guides/work-that-isnt-code) and [Code words for owners](/guides/code-words).
 
 A task is one piece of work in a project. Each task has a title, a description, a risk level and up to 10 "Done when" lines that say what finished means. Agents and some pages also call a task a ticket: it means the same thing.
 
