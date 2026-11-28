@@ -102,7 +102,11 @@ export function ReleaseNoticeBody({ v, busy, set, install, dismiss, extra }: { v
       )}
       {v.available && !running && v.install && !v.install.linked && (
         <p className="muted" style={{ fontSize: 14 }}>
-          The Install button is not here yet: this server was made before it existed. After this release is installed by hand once (see the updating guide), the button appears by itself within about 30 minutes. Nothing else is needed from you.
+          The Install button is not here yet: this server was made before it existed. After this release is installed by hand once (see{" "}
+          <a href="https://github.com/Leonfinn/Boss_Man/blob/main/apps/site/src/guides/install-a-release-by-hand.md" target="_blank" rel="noreferrer">
+            Install a release by hand
+          </a>
+          ), the button appears by itself within about 30 minutes. Nothing else is needed from you.
         </p>
       )}
       {finished && (
