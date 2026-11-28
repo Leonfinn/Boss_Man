@@ -137,22 +137,41 @@ export async function relinkServer(d: MoveDeps, tried: { done: boolean }): Promi
   if (!isSwap(d) || tried.done || !updaterLink(d.cfg)) return [];
   const st = d.state.get();
   if (st.stage !== "idle" && st.stage !== "done" && st.stage !== "failed" && st.stage !== "rolled-back") return [];
-  const cols = await findColours(d.docker);
-  const live = liveColour(cols, d.cfg.swap.frontNetwork);
-  const c = live ? cols[live] : undefined;
-  const env = c?.Config.Env ?? [];
-  const version = releaseOf(c);
-  const digest = digestOf(c);
-  // Only a server this updater made for an image install (it carries the release labels and the image-install flag).
-  if (!c || !version || !digest || !env.includes("BOSSMAN_IMAGE_INSTALL=1") || env.some((e) => e.startsWith(LINK_ENV))) return [];
-  const probe = await (d.probe ?? httpProbe)(LIVE_ALIAS);
-  // Not leader yet (just started): do not mark tried, the next five-minute tick checks again.
-  if (!probe?.ok || probe.role !== "leader" || !probe.commit) return ["The serving server has no link to the updater, but it is not answering as leader right now, so the link was not added. It is tried again at the next check."];
+  // BOS-2900: claim the move before any await, so a refusal from begin is the only way another move can be running. The awaits
+  // below (the Docker list and the leader probe) would otherwise leave a gap in which the owner's Install could start, and begin
+  // here would then throw busy on top of it.
+  let version: string;
+  let digest: string;
+  let probeCommit: string;
+  try {
+    const cols = await findColours(d.docker);
+    const live = liveColour(cols, d.cfg.swap.frontNetwork);
+    const c = live ? cols[live] : undefined;
+    const env = c?.Config.Env ?? [];
+    const v = releaseOf(c);
+    const dg = digestOf(c);
+    // Only a server this updater made for an image install (it carries the release labels and the image-install flag).
+    if (!c || !v || !dg || !env.includes("BOSSMAN_IMAGE_INSTALL=1") || env.some((e) => e.startsWith(LINK_ENV))) return [];
+    version = v;
+    digest = dg;
+    const probe = await (d.probe ?? httpProbe)(LIVE_ALIAS);
+    // Not leader yet (just started): do not mark tried, the next five-minute tick checks again.
+    if (!probe?.ok || probe.role !== "leader" || !probe.commit) return ["The serving server has no link to the updater, but it is not answering as leader right now, so the link was not added. It is tried again at the next check."];
+    probeCommit = probe.commit;
+    // A move that began (an Install by the owner) after the stage check above: leave it alone and try again on the next start.
+    try {
+      d.state.begin(version, digest);
+    } catch (e) {
+      if (e instanceof UpdaterError && e.code === "busy") return ["The serving server has no link to the updater, but another update had just started, so the link was not added. It is tried again at the next start of the updater."];
+      throw e;
+    }
+  } catch (e) {
+    return [`Adding the updater link to the serving server did not work (${e instanceof UpdaterError ? e.message : "unexpected problem"}). The serving server is unchanged; it is tried again at the next start of the updater.`];
+  }
   tried.done = true;
   try {
-    d.state.begin(version, digest);
     d.state.update({ stage: "starting-colour" });
-    await runSwap(d, { commit: probe.commit }, { version, serverDigest: digest }, false, true);
+    await runSwap(d, { commit: probeCommit }, { version, serverDigest: digest }, false, true);
   } catch (e) {
     d.state.update({ stage: "failed", error: null, report: null });
     return [`Adding the updater link to the serving server did not work (${e instanceof UpdaterError ? e.message : "unexpected problem"}). The serving server is unchanged; it is tried again at the next start of the updater.`];
