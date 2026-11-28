@@ -1,6 +1,7 @@
 // What the updater is told when the install is made, from its environment (images.env and the compose file, 941b).
 // None of it can be changed by a request: the one instruction names a release and nothing else (design section 2).
 import path from "node:path";
+import { projectName } from "./names.js";
 
 /** A refusal or failure with a stable code and a sentence an owner can read. Nothing in `message` is a secret. */
 export class UpdaterError extends Error {
@@ -30,6 +31,10 @@ export type SwapConfig = {
   selfNetwork: string;
   /** This updater's own container name (the next updater takes it over at the hand-over). */
   selfName: string;
+  /** BOS-2804: the extra network name the updater answers to (what the server dials), whatever its container is called. */
+  selfAlias: string;
+  /** BOS-2804: UPDATER_NAME_PROJECT. Set = colours and the launcher are made as `<project>-server-blue`, `<project>-launcher`; null = the old fixed names. */
+  nameProject: string | null;
   /** The Docker socket's path on the host, for the next updater's one bind. */
   socketHostPath: string;
   serverMemory: number;
@@ -52,6 +57,8 @@ export type SwapConfig = {
 /** What setup defines for the launcher (design section 5, "The whole release moves"): the same pattern as the server colour's values. */
 export type HelpersConfig = {
   launcherName: string;
+  /** BOS-2804: the name the server dials the launcher by (the host of launcherUrl); the launcher answers to it under any container name. */
+  launcherAlias: string;
   /** KEY=value lines for the launcher (never BOSSMAN_RUNNER_IMAGE / BOSSMAN_NETGUARD_IMAGE: the updater sets those from the release). */
   launcherEnv: string[];
   /** Named volumes the launcher mounts (data, its key folder, the updater's state folder read-only for `release-current`). */
@@ -146,6 +153,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       return { source, target, readOnly: mode === "ro" };
     });
   let swap: SwapConfig | null = null;
+  // BOS-2804: a compose project name (lower-case letters, digits, hyphen, underscore), or unset for the old fixed names.
+  const nameProjectRaw = env["UPDATER_NAME_PROJECT"]?.trim() || "";
+  if (nameProjectRaw && !/^[a-z0-9][a-z0-9_-]{0,62}$/.test(nameProjectRaw)) throw new UpdaterError("config", "UPDATER_NAME_PROJECT is not valid (the compose project name: lower-case letters, digits, - and _).");
+  const nameProject = nameProjectRaw || null;
   if (env["UPDATER_FRONT_NETWORK"]?.trim()) {
     const serverEnv = lines("UPDATER_SPEC_ENV");
     for (const l of serverEnv) {
@@ -161,7 +172,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       serverMounts: mounts("UPDATER_SPEC_MOUNTS"),
       selfMounts: mounts("UPDATER_SELF_MOUNTS"),
       selfNetwork: need("UPDATER_SELF_NETWORK", NAME_RE, "the updater's own network"),
-      selfName: env["UPDATER_SELF_NAME"]?.trim() || "updater",
+      selfName: env["UPDATER_SELF_NAME"]?.trim() || projectName(nameProject, "updater"),
+      selfAlias: env["UPDATER_SELF_ALIAS"]?.trim() || "updater",
+      nameProject,
       socketHostPath: env["UPDATER_DOCKER_SOCK_HOST"]?.trim() || "/var/run/docker.sock",
       serverMemory: Number(env["UPDATER_SERVER_MEMORY"] || 0) || 0,
       serverMemoryReserved: Number(env["UPDATER_SERVER_MEMORY_RESERVED"] || 0) || 0,
@@ -182,6 +195,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       for (const l of launcherEnv) {
         if (!/^[A-Z][A-Z0-9_]*=/.test(l)) throw new UpdaterError("config", "UPDATER_LAUNCHER_ENV has a line that is not KEY=value.");
         if (/^BOSSMAN_(RUNNER|NETGUARD)_IMAGE=/.test(l)) throw new UpdaterError("config", "UPDATER_LAUNCHER_ENV must not set the runner or guard image: the updater sets them from the release.");
+        // BOSSMAN_INSTALL_LABEL is allowed here: install files from BOS-2803 carry it, and the updater appends its own (equal) value last.
+        if (/^BOSSMAN_CLAUDE_PACK_VOLUME=/.test(l)) throw new UpdaterError("config", "UPDATER_LAUNCHER_ENV must not set the pack volume: the updater sets it from its own settings.");
       }
       const dg = (name: string) => {
         const v = env[name]?.trim();
@@ -189,11 +204,19 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
         return v;
       };
       const f = { server: dg("UPDATER_FIRST_SERVER_DIGEST"), launcher: dg("UPDATER_FIRST_LAUNCHER_DIGEST"), runner: dg("UPDATER_FIRST_RUNNER_DIGEST"), netguard: dg("UPDATER_FIRST_NETGUARD_DIGEST") };
+      const launcherUrl = (env["UPDATER_LAUNCHER_URL"]?.trim() || "http://launcher:3105").replace(/\/$/, "");
+      let launcherAlias = "launcher";
+      try {
+        launcherAlias = new URL(launcherUrl).hostname || "launcher";
+      } catch {
+        throw new UpdaterError("config", "UPDATER_LAUNCHER_URL is not a URL.");
+      }
       swap.helpers = {
-        launcherName: env["UPDATER_LAUNCHER_NAME"]?.trim() || "launcher",
+        launcherName: env["UPDATER_LAUNCHER_NAME"]?.trim() || projectName(nameProject, "launcher"),
+        launcherAlias,
         launcherEnv,
         launcherMounts: mounts("UPDATER_LAUNCHER_MOUNTS"),
-        launcherUrl: (env["UPDATER_LAUNCHER_URL"]?.trim() || "http://launcher:3105").replace(/\/$/, ""),
+        launcherUrl,
         launcherKeyFile: env["UPDATER_LAUNCHER_KEY_FILE"]?.trim() || "/run/launcher/key",
         launcherMemory: Number(env["UPDATER_LAUNCHER_MEMORY"] || 0) || 128 * 1024 * 1024,
         busyWaitSeconds: num("UPDATER_BUSY_WAIT_SECONDS", 600),

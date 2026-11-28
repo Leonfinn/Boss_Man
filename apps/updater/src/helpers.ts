@@ -15,8 +15,8 @@ import type { ContainerInfo, Docker } from "./docker.js";
 import type { MoveDeps } from "./move.js";
 import { imageRef } from "./pull.js";
 import type { Release } from "./schema.js";
-import { guardCheckSpec, launcherSpec, RELEASE_FILE_NAME, type HelperRelease } from "./spec.js";
-import { isSwap, realClock, type SwapDeps } from "./swap.js";
+import { guardCheckSpec, LABEL_HELPER, launcherSpec, RELEASE_FILE_NAME, type HelperRelease } from "./spec.js";
+import { bareName, isSwap, realClock, type SwapDeps } from "./swap.js";
 
 export type LauncherBusy = () => Promise<boolean>;
 
@@ -130,6 +130,15 @@ async function waitHealthy(d: SwapDeps, name: string, seconds: number): Promise<
 export const NEXT = "-next";
 
 /**
+ * BOS-2804: the launcher and a half-made next one, found by label under whatever name they have (the old fixed `launcher`, or
+ * `<project>-launcher`). Never by an assumed name, so an install converges to the new name when the launcher is next recreated.
+ */
+export async function findLaunchers(docker: Docker): Promise<{ current: ContainerInfo | null; next: ContainerInfo | null }> {
+  const all = (await docker.listByLabel(LABEL_HELPER).catch(() => [] as ContainerInfo[])).filter((c) => c.Config.Labels?.[LABEL_HELPER] === "launcher");
+  return { current: all.find((c) => !bareName(c).endsWith(NEXT)) ?? null, next: all.find((c) => bareName(c).endsWith(NEXT)) ?? null };
+}
+
+/**
  * Replaces the launcher by the release's: new one created (not started) under a temporary name, the old one stopped, the new one
  * started and waited for; then the old one removed and the new one renamed. If the new one never becomes healthy it is removed and the
  * old one is started again. Only one launcher runs at a time (two would both manage the same guards).
@@ -139,11 +148,12 @@ export async function recreateLauncher(d: SwapDeps, r: HelperRelease): Promise<"
   const h = d.cfg.swap.helpers!;
   const name = h.launcherName;
   const next = `${name}${NEXT}`;
-  const old = await docker.inspectOurs(name).catch(() => null);
+  const old = (await findLaunchers(docker)).current;
+  const oldName = old ? bareName(old) : name;
   if (old && digestOfRef(old.Config.Image) === r.launcher && old.State.Running) return "current";
   await docker.remove(next);
   await docker.createServer(next, launcherSpec(d.cfg, r), "launcher");
-  if (old) await docker.stop(name, 30).catch(() => undefined);
+  if (old) await docker.stop(oldName, 30).catch(() => undefined);
   let startError = "";
   await docker.start(next).catch((e) => {
     startError = String((e as Error)?.message ?? e).slice(0, 300);
@@ -153,14 +163,15 @@ export async function recreateLauncher(d: SwapDeps, r: HelperRelease): Promise<"
     const tail = (await docker.logs(next, 8).catch(() => "")).replace(/\s+/g, " ").slice(-400);
     console.error(`launcher ${next} did not become healthy. start error: ${startError || "none"}; log: ${tail || "empty"}`);
     await docker.remove(next).catch(() => undefined);
-    if (old) await docker.start(name).catch(() => undefined);
+    if (old) await docker.start(oldName).catch(() => undefined);
     return "failed";
   }
-  if (old) await docker.remove(name);
+  if (old) await docker.remove(oldName);
   await docker.rename(next, name);
-  // The launcher is reached by the name "launcher" on the launcher network; set the alias again after the rename, as the updater does.
+  // The launcher is reached by the name in UPDATER_LAUNCHER_URL (`launcher`) on the launcher network, whatever the container is
+  // called (BOS-2804): the alias is set again after the rename, with the container's own name beside it.
   await docker.disconnect(d.cfg.swap.launcherNetwork, name);
-  await docker.connect(d.cfg.swap.launcherNetwork, name, [name]);
+  await docker.connect(d.cfg.swap.launcherNetwork, name, [...new Set([name, h.launcherAlias])]);
   return "moved";
 }
 
@@ -214,7 +225,7 @@ async function moveHelpersOnce(d: SwapDeps, release: Release): Promise<"moved" |
   const { state, docker } = d;
   const r = helperRelease(release);
   const before = readReleaseCurrent(d.cfg);
-  const old = await docker.inspectOurs(d.cfg.swap.helpers!.launcherName).catch(() => null);
+  const old = (await findLaunchers(docker)).current;
   const previous = previousOf(old, before);
   const pending = (note: string): "pending" => {
     state.update({ helpers: { release: state.get().helpers.release, status: "pending", note } });

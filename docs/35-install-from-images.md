@@ -145,7 +145,7 @@ Run these in the folder with the two files.
    docker compose --env-file images.env -f docker-compose.images.yml up -d
    ```
 
-   **It worked if** this lists `boss-man-db-1`, `boss-man-proxy-1` and `updater` at once, and `server-blue` and `launcher` within a few minutes, each with a status starting `Up`. Compose's own `ps` lists only the first three: the updater makes the other two, so compose does not know them.
+   **It worked if** this lists `boss-man-db-1`, `boss-man-proxy-1` and `boss-man-updater` at once, and `boss-man-server-blue` and `boss-man-launcher` within a few minutes, each with a status starting `Up`. Compose's own `ps` lists only the first three: the updater makes the other two, so compose does not know them.
 
    ```
    docker ps --filter label=com.bossman.install=boss-man --format '{{.Names}}  {{.Status}}'
@@ -157,7 +157,7 @@ Run these in the folder with the two files.
    curl -sS http://127.0.0.1:3100/api/health
    ```
 
-   If `server-blue` or `launcher` has not appeared after 10 minutes, the updater's log says what it is waiting for:
+   If `boss-man-server-blue` or `boss-man-launcher` has not appeared after 10 minutes, the updater's log says what it is waiting for:
 
    ```
    docker compose --env-file images.env -f docker-compose.images.yml logs --tail 30 updater
@@ -250,6 +250,7 @@ Install [Docker Desktop](https://docs.docker.com/desktop/) in place of "Install 
 - **The page does not open from another computer**: check the address from `hostname -I` (section 3, step 4) and that `tail -2 images.env` shows the two lines of step 2. If not, run step 2 and then the start command (step 3) again. If the `curl` health line answers on the machine itself but the page does not open elsewhere, a firewall on the machine is blocking port 3100.
 - **The login page reloads**: `images.env` is missing `BOSSMAN_INSECURE_COOKIES=1` (step 2). Run step 2, then the start command again.
 - **Start again from nothing** (this deletes everything, including your company data and keys): see the next section. Do not do this if you want to keep anything.
+- **A `boss-man-claude-pack` volume is left over** (an install from before the names followed the project): the Claude pack now lives in the install's own `<project>_claude-pack` volume. Once the install runs on a release with this change, remove the old one with `docker volume rm boss-man-claude-pack` if no other install on this machine uses it. Not yet confirmed on a real host.
 - **Go back to the build install**: stop this one with `docker compose --env-file images.env -f docker-compose.images.yml down` (without `-v`, so the volumes stay) and follow [docs/00-first-time-install.md](00-first-time-install.md) in a different folder. The two installs do not share data.
 
 ## Start again from nothing
@@ -323,6 +324,16 @@ If either command prints a name, something is still holding it: run `docker ps -
 ## What the install changes on your machine
 
 Only Docker objects: containers, networks and volumes whose names start with `boss-man`. The launcher has access to the Docker socket (it starts one runner per company, from a fixed recipe), so treat the machine as dedicated to Boss Man. See [docs/20-netguard.md](20-netguard.md) for what keeps agents off your home network.
+
+## Container names follow the project (BOS-2804)
+
+The updater, the launcher and the two server colours are named after the compose project: `<project>-updater`, `<project>-launcher`, `<project>-server-blue` and `<project>-server-green` (`boss-man-launcher` and so on with the default project). Two installs on one Docker host therefore never share a container name, and removing one by name or label cannot reach the other's. Everything the install makes carries the label `com.bossman.install=<project>`, including the runners, the network guards and the pack installer the launcher starts.
+
+What the others dial does not change: the launcher still answers to `launcher` on its network, the updater to `updater`, and the server to `server-live` and `server-<colour>-front`.
+
+**Updating an existing install.** Nothing breaks and nothing needs doing at once: an older install keeps its fixed names (`updater`, `launcher`, `server-blue`) until the files below are updated, and the updater finds its containers by label, under either name. To move to the new names, download the newer `docker-compose.images.yml` and run `docker compose --env-file images.env -f docker-compose.images.yml up -d` once (this recreates only the updater, with its new name and settings). After that the launcher is made again under its new name by the next release's update, and each server colour is made again under its new name by the next two updates (an update always replaces the standby colour, so there is no rename of a running container and no downtime). Until then you can see both kinds of name side by side; that is expected.
+
+**A second install on the same machine** needs its own `COMPOSE_PROJECT_NAME`, its own `BOSSMAN_HOST_PORT` and `BOSSMAN_PORTAL_HOST_PORT`, and its own `BOSSMAN_FRONT_SUBNET`, `BOSSMAN_FRONT_RANGE` and `BOSSMAN_FRONT_PROXY_IP` (the private network between the proxy and the server must not overlap the first one's). Runner and guard containers are still named `boss-man-runner-<company>`, so the two installs must not both run a company with the same short name; they are told apart by the install label. Not yet confirmed on a real host.
 
 ## Blue/green updates (the only way this install runs, since BOS-1227)
 

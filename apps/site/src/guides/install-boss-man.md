@@ -205,13 +205,13 @@ These commands show it running. The first lists the install's containers:
 docker ps --filter label=com.bossman.install=boss-man --format '{{.Names}}  {{.Status}}'
 ```
 
-Straight away it shows `boss-man-db-1`, `boss-man-proxy-1` and `updater`. Within a few minutes `server-blue` and `launcher` join them. Each status starts with `Up`. Then this prints a short line of JSON that starts `{"ok":true`:
+Straight away it shows `boss-man-db-1`, `boss-man-proxy-1` and `boss-man-updater`. Within a few minutes `boss-man-server-blue` and `boss-man-launcher` join them. Each status starts with `Up`. Then this prints a short line of JSON that starts `{"ok":true`:
 
 ```sh Run in the folder with the files
 curl -sS http://127.0.0.1:3100/api/health
 ```
 
-If `server-blue` or `launcher` has not appeared after 10 minutes, the updater's log says what it is waiting for:
+If `boss-man-server-blue` or `boss-man-launcher` has not appeared after 10 minutes, the updater's log says what it is waiting for:
 
 ```sh Run in the folder with the files
 docker compose --env-file images.env -f docker-compose.images.yml logs --tail 30 updater

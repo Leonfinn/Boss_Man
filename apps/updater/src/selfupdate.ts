@@ -76,7 +76,8 @@ export async function selfUpdate(d: SwapDeps, release: Release, pending: { versi
           renamed = true;
           await docker.rename(nextName, self);
           await docker.disconnect(cfg.swap.selfNetwork, self);
-          await docker.connect(cfg.swap.selfNetwork, self, [self]);
+          // BOS-2804: the container's own name and the name the server dials (`updater`), which stay apart once the name follows the project.
+          await docker.connect(cfg.swap.selfNetwork, self, [...new Set([self, cfg.swap.selfAlias])]);
         } catch (e) {
           if (renamed) await docker.rename(oldName, self).catch(() => undefined);
           await docker.setRestartUnlessStopped(self).catch(() => undefined);

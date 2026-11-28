@@ -60,6 +60,18 @@ export async function findColours(docker: Docker): Promise<Colours> {
   return out;
 }
 
+export const bareName = (c: ContainerInfo) => (c.Name ?? "").replace(/^\//, "");
+
+/**
+ * BOS-2804: the name to use for a colour. An existing colour is found by its label and used under whatever name it has (the old
+ * fixed `server-blue`, or `<project>-server-blue`), so an install converges to the new names by the replacements an update already
+ * makes, with no rename of a running container. A colour that does not exist yet gets the name it will be made under.
+ */
+export function colourRef(cfg: Config & { swap: SwapConfig }, cols: Colours, colour: Colour): string {
+  return (cols[colour] && bareName(cols[colour]!)) || colourName(colour, cfg.swap.nameProject);
+}
+export const colourRefOf = async (d: SwapDeps, colour: Colour) => colourRef(d.cfg, await findColours(d.docker), colour);
+
 const holdsLiveAlias = (c: ContainerInfo, front: string) => c.State.Running === true && (c.NetworkSettings?.Networks?.[front]?.Aliases ?? []).includes(LIVE_ALIAS);
 
 /** The live colour: the running one holding the alias the proxy dials. With no alias holder, a lone running colour is live. */
@@ -94,10 +106,12 @@ export async function waitReady(d: SwapDeps, host: string, role: string, commit:
 export async function flipAlias(d: SwapDeps, to: Colour, from: Colour): Promise<void> {
   const front = sw(d).frontNetwork;
   const docker = d.docker;
-  await docker.disconnect(front, colourName(to));
-  await docker.connect(front, colourName(to), [frontAlias(to), LIVE_ALIAS]);
-  await docker.disconnect(front, colourName(from));
-  await docker.connect(front, colourName(from), [frontAlias(from)]);
+  const toName = await colourRefOf(d, to);
+  const fromName = await colourRefOf(d, from);
+  await docker.disconnect(front, toName);
+  await docker.connect(front, toName, [frontAlias(to), LIVE_ALIAS]);
+  await docker.disconnect(front, fromName);
+  await docker.connect(front, fromName, [frontAlias(from)]);
 }
 
 /** Leaves the live colour leading again after a failed handover or a restart in the middle of one. */
@@ -105,13 +119,13 @@ async function ensureLeader(d: SwapDeps, colour: Colour): Promise<boolean> {
   const host = frontAlias(colour);
   const r = await probeOf(d)(host);
   if (r?.ok && r.role === "leader") return true;
-  await d.docker.signal(colourName(colour), "SIGUSR2").catch(() => undefined);
+  await d.docker.signal(await colourRefOf(d, colour), "SIGUSR2").catch(() => undefined);
   return waitReady(d, host, "leader", null, sw(d).handoverSeconds);
 }
 
 /** Removes the colour the move made (and the migrate one-shot). Never touches the live colour. */
 export async function removeNewColour(d: SwapDeps, colour: Colour): Promise<void> {
-  await d.docker.remove(colourName(colour)).catch(() => undefined);
+  await d.docker.remove(await colourRefOf(d, colour)).catch(() => undefined);
   await d.docker.remove(`${d.cfg.namePrefix}-migrate`).catch(() => undefined);
 }
 
@@ -123,12 +137,14 @@ export async function switchBack(d: SwapDeps, to: Colour, from: Colour): Promise
   const docker = d.docker;
   try {
     const cols = await findColours(docker);
-    if (!cols[to]?.State.Running) await docker.start(colourName(to));
-    await docker.signal(colourName(from), "SIGUSR1").catch(() => undefined);
-    await docker.signal(colourName(to), "SIGUSR2");
+    const toName = colourRef(d.cfg, cols, to);
+    const fromName = colourRef(d.cfg, cols, from);
+    if (!cols[to]?.State.Running) await docker.start(toName);
+    await docker.signal(fromName, "SIGUSR1").catch(() => undefined);
+    await docker.signal(toName, "SIGUSR2");
     if (!(await waitReady(d, frontAlias(to), "leader", null, sw(d).handoverSeconds))) return false;
     await flipAlias(d, to, from);
-    await docker.stop(colourName(from), sw(d).stopGraceSeconds).catch(() => undefined);
+    await docker.stop(fromName, sw(d).stopGraceSeconds).catch(() => undefined);
     return true;
   } catch {
     return false;
@@ -179,20 +195,24 @@ export async function migrate(d: SwapDeps, image: string, version: string): Prom
 /** Steps 4 and 5: create and start the idle colour, wait for the health gate, then the handover. Leaves the old colour leading on any failure. */
 export async function bringUp(d: SwapDeps, live: Colour, idle: Colour, release: Pick<Release, "commit">, ins: { version: string; serverDigest: string }, restore: boolean): Promise<void> {
   const { docker, state } = d;
-  const idleName = colourName(idle);
   const commit = release.commit;
   state.update({ stage: "starting-colour" });
   const cols = await findColours(docker);
   const cur = cols[idle];
+  const liveName = colourRef(d.cfg, cols, live);
+  // The idle colour as it exists now (any name); a colour made below is made under the install's own name (BOS-2804).
+  let idleName = colourRef(d.cfg, cols, idle);
   if (restore) {
     if (!cur || cur.State.Running || releaseOf(cur) !== ins.version || digestOf(cur) !== ins.serverDigest) fail("downgrade", `${ins.version} is older than the release this install runs, and it is not the release kept as the standby, so the move was refused.`);
     await docker.start(idleName);
   } else {
     if (cur) {
-      // The colour before the standby: removed now, with its image, so at most two colours ever exist.
-      await docker.remove(idleName);
+      // The colour before the standby: removed now, with its image, so at most two colours ever exist. Every container carrying this
+      // colour's label goes, whatever its name, so an old-named and a new-named one never sit side by side.
+      for (const c of await docker.listByLabel(LABEL_COLOUR)) if (c.Config.Labels?.[LABEL_COLOUR] === idle) await docker.remove(bareName(c));
       if (cur.Image) await docker.removeImage(cur.Image).catch(() => undefined);
     }
+    idleName = colourName(idle, d.cfg.swap.nameProject);
     const image = imageRef(d.cfg.registry, "boss-man-server", ins.serverDigest);
     await docker.createServer(idleName, colourSpec(d.cfg, { colour: idle, image, version: ins.version, digest: ins.serverDigest, role: "standby" }), "colour");
     for (const n of colourNetworks(d.cfg, idle, false)) await docker.connect(n.network, idleName, n.aliases);
@@ -204,7 +224,7 @@ export async function bringUp(d: SwapDeps, live: Colour, idle: Colour, release: 
   }
   state.update({ stage: "handing-over" });
   let why = "";
-  await docker.signal(colourName(live), "SIGUSR1").catch(() => (why = "The current version could not be told to step down."));
+  await docker.signal(liveName, "SIGUSR1").catch(() => (why = "The current version could not be told to step down."));
   if (!why && !(await waitReady(d, frontAlias(live), "standby", null, sw(d).handoverSeconds))) why = "The current version did not step down.";
   if (!why) await docker.signal(idleName, "SIGUSR2").catch(() => (why = "The new version could not be told to take over."));
   if (!why && !(await waitReady(d, frontAlias(idle), "leader", commit, sw(d).handoverSeconds))) why = "The new version did not take over.";
@@ -216,7 +236,7 @@ export async function bringUp(d: SwapDeps, live: Colour, idle: Colour, release: 
 }
 
 async function removeOrStopNew(d: SwapDeps, idle: Colour, restore: boolean) {
-  if (restore) await d.docker.stop(colourName(idle), sw(d).stopGraceSeconds).catch(() => undefined);
+  if (restore) await d.docker.stop(await colourRefOf(d, idle), sw(d).stopGraceSeconds).catch(() => undefined);
   else await removeNewColour(d, idle);
 }
 
@@ -242,7 +262,7 @@ export async function soakAndFinish(d: SwapDeps, live: Colour, idle: Colour, com
     }
   }
   state.update({ stage: "stopping-old" });
-  const stopped = await d.docker.stop(colourName(live), sw(d).stopGraceSeconds).then(() => true, () => false);
+  const stopped = await d.docker.stop(await colourRefOf(d, live), sw(d).stopGraceSeconds).then(() => true, () => false);
   state.finish("done", stopped ? `Updated to ${version}. The previous version is kept stopped, ready to go back to.` : `Updated to ${version}. The previous version could not be stopped; it no longer serves and the next update will remove it.`, "info", { currentVersion: version, soakUntil: null, live: idle, idle: live });
   return "done";
 }

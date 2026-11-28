@@ -3,13 +3,13 @@
 // soak (nothing is serving yet). Reconcile runs at every start and after that: it finishes a half-done launcher replacement, retries a
 // helper move that was deferred, and moves this updater to the release the state records when compose started an older one.
 import { UpdaterError } from "./config.js";
-import { healthy, moveHelpers, NEXT, recreateLauncher } from "./helpers.js";
+import { findLaunchers, healthy, moveHelpers, recreateLauncher } from "./helpers.js";
 import { imageRef, pullByDigest } from "./pull.js";
 import { getVerifiedRelease } from "./release.js";
 import { compareVersions } from "./schema.js";
 import { selfUpdate } from "./selfupdate.js";
-import { colourNetworks, colourSpec, frontAlias, LABEL_RELEASE, LIVE_ALIAS, updaterLink } from "./spec.js";
-import { digestOf, findColours, httpProbe, isSwap, liveColour, realClock, releaseOf, runSwap, waitReady, type SwapDeps } from "./swap.js";
+import { colourName, colourNetworks, colourSpec, frontAlias, LABEL_RELEASE, LIVE_ALIAS, updaterLink } from "./spec.js";
+import { bareName, digestOf, findColours, httpProbe, isSwap, liveColour, realClock, releaseOf, runSwap, waitReady, type SwapDeps } from "./swap.js";
 import type { MoveDeps } from "./move.js";
 
 async function ensureImage(d: SwapDeps, name: string, digest: string) {
@@ -41,21 +41,22 @@ export async function firstStart(d: MoveDeps): Promise<string[]> {
   // A launcher replacement the previous updater did not finish. If the old launcher is still there, the half-made one goes and the
   // old one runs again. If the old one is gone and the new one is healthy (the move died between the removal and the rename), the
   // new one is kept: it takes the name.
-  const next = `${h.launcherName}${NEXT}`;
-  const nextC = await docker.inspectOurs(next).catch(() => null);
+  // BOS-2804: found by label, under whatever name they have (the old fixed one or the project's).
+  const found = await findLaunchers(docker);
+  const nextC = found.next;
   if (nextC) {
-    const oldC = await docker.inspectOurs(h.launcherName).catch(() => null);
+    const oldC = found.current;
     if (!oldC && healthy(nextC)) {
-      await docker.rename(next, h.launcherName);
+      await docker.rename(bareName(nextC), h.launcherName);
       await docker.disconnect(d.cfg.swap.launcherNetwork, h.launcherName).catch(() => undefined);
-      await docker.connect(d.cfg.swap.launcherNetwork, h.launcherName, [h.launcherName]);
+      await docker.connect(d.cfg.swap.launcherNetwork, h.launcherName, [...new Set([h.launcherName, h.launcherAlias])]);
       notes.push("A launcher left half-way by an interrupted update was healthy, so it was kept.");
     } else {
-      await docker.remove(next).catch(() => undefined);
+      await docker.remove(bareName(nextC)).catch(() => undefined);
     }
   }
-  const launcher = await docker.inspectOurs(h.launcherName).catch(() => null);
-  if (launcher && !launcher.State.Running) await docker.start(h.launcherName).catch(() => undefined);
+  const launcher = (await findLaunchers(docker)).current;
+  if (launcher && !launcher.State.Running) await docker.start(bareName(launcher)).catch(() => undefined);
   const cols = await findColours(docker);
   const haveColour = !!(cols.blue || cols.green);
   if (launcher && haveColour) return notes;
@@ -85,9 +86,10 @@ export async function firstStart(d: MoveDeps): Promise<string[]> {
     if (!haveColour) {
       await ensureImage(d, "boss-man-server", first.server);
       const sw = d.cfg.swap;
-      await docker.createServer("server-blue", colourSpec(d.cfg, { colour: "blue", image: imageRef(d.cfg.registry, "boss-man-server", first.server), version, digest: first.server, role: "auto" }), "colour");
-      for (const n of colourNetworks(d.cfg, "blue", true)) await docker.connect(n.network, "server-blue", n.aliases);
-      await docker.start("server-blue");
+      const blue = colourName("blue", sw.nameProject);
+      await docker.createServer(blue, colourSpec(d.cfg, { colour: "blue", image: imageRef(d.cfg.registry, "boss-man-server", first.server), version, digest: first.server, role: "auto" }), "colour");
+      for (const n of colourNetworks(d.cfg, "blue", true)) await docker.connect(n.network, blue, n.aliases);
+      await docker.start(blue);
       const ok = await waitReady(d, frontAlias("blue"), "leader", null, sw.readySeconds);
       notes.push(ok ? "The first server was made at first start." : "The first server did not answer in time; it keeps trying and the next start of the updater checks it again.");
       state.update({ currentVersion: version, live: "blue", idle: "green" });
@@ -112,7 +114,7 @@ export async function reconcile(d: MoveDeps): Promise<string[]> {
   if (live && liveRelease && liveRelease !== current) notes.push(`The serving server is release ${liveRelease} but the updater records ${current}.`);
   const h = cfg.swap.helpers;
   if (h) {
-    const l = await docker.inspectOurs(h.launcherName).catch(() => null);
+    const l = (await findLaunchers(docker)).current;
     const lr = l?.Config.Labels?.[LABEL_RELEASE];
     if (l && lr && lr !== current) {
       notes.push(`The launcher is release ${lr}, not ${current}; it is moved when no run is starting.`);

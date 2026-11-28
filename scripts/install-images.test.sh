@@ -12,13 +12,17 @@
 # At the end it removes the install the way docs/35-install-from-images.md "Start again from nothing" says (BOS-2803) and fails if any
 # container labelled for its project, any runner or guard, or any <project>_ or pack volume remains. The runners and guards are found
 # by the install label (BOS-2851), so the removal leaves another install's runners and guards alone.
+# BOS-2804: after the runner check it starts a second install (project "<project>b", own ports, front subnet and network) beside the
+# first, checks both answer and share no container name or pack volume, removes the second by its install label, and checks the first
+# and its runner are untouched.
 # SC2015: ok and bad only print and set a flag, so "test && ok || bad" cannot run both. SC2317: cleanup runs from the EXIT trap.
 # shellcheck disable=SC2015,SC2317
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 fail=0
 ok() { echo "ok   $1"; }
-bad() { echo "FAIL $1"; fail=1; }
+fails=""
+bad() { echo "FAIL $1"; fail=1; fails="${fails}FAIL ${1:0:300}"$'\n'; }
 
 command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 || { echo "skip: no docker CLI with the compose plugin"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: no jq"; exit 0; }
@@ -64,6 +68,13 @@ fd="$(echo "$cfg" | jq -r '.services.updater.environment | [.UPDATER_FIRST_SERVE
 echo "$cfg" | jq -r '.services.updater.environment.UPDATER_LAUNCHER_ENV' | grep -Eq '^BOSSMAN_(RUNNER|NETGUARD)_IMAGE=' && bad "UPDATER_LAUNCHER_ENV sets a runner or guard image" || ok "the launcher's runner and guard images come from the release, not the environment list"
 echo "$cfg" | jq -r '.services.updater.environment.UPDATER_LAUNCHER_MOUNTS' | grep -q ':/run/release:ro$' && ok "the launcher sees release-current read-only" || bad "launcher release mount"
 echo "$cfg" | jq -r '.services.updater.environment.UPDATER_SELF_MOUNTS' | grep -q 'launcher-key:/run/launcher:ro$' && ok "the next updater keeps the launcher key (read-only)" || bad "self mounts miss the launcher key"
+# BOS-2804: the updater and everything it makes are named after the compose project, so two installs on one Docker host never share a
+# container name. The default project keeps the same rule (boss-man-updater), not a bare name.
+echo "$cfg" | jq -e '.services.updater.container_name == "boss-man-updater" and .services.updater.environment.UPDATER_NAME_PROJECT == "boss-man" and .services.updater.environment.UPDATER_SELF_NAME == "boss-man-updater"' >/dev/null && ok "the default project names the updater boss-man-updater and tells the updater its project" || bad "updater name under the default project"
+cfg2="$(COMPOSE_PROJECT_NAME=acme docker compose --env-file "$T/images.env" -f docker-compose.images.yml config --format json)"
+echo "$cfg2" | jq -e '.services.updater.container_name == "acme-updater" and .services.updater.environment.UPDATER_NAME_PROJECT == "acme" and .services.updater.environment.UPDATER_SELF_NAME == "acme-updater"' >/dev/null && ok "another project names the updater acme-updater" || bad "updater name under project acme"
+echo "$cfg2" | jq -r '.services.updater.environment.UPDATER_LAUNCHER_ENV' | grep -q '^BOSSMAN_RUNNER_NETWORK=acme_default$' && ok "runners join the project's own network by default" || bad "runner network under project acme"
+echo "$cfg2" | jq -r '.services.updater.environment.UPDATER_LAUNCHER_ENV' | grep -Eq '^BOSSMAN_CLAUDE_PACK_VOLUME=' && bad "UPDATER_LAUNCHER_ENV sets the pack volume (the updater sets it)" || ok "the pack volume is the updater's to set"
 # No host tools in the compose file's own steps (comments excluded).
 if grep -v '^[[:space:]]*#' docker-compose.images.yml | grep -Eq '\b(openssl|sudo|chown|stat -c)\b'; then bad "compose file uses host tools"; else ok "no host openssl, chown, stat or sudo"; fi
 [ -f docs/35-install-from-images.md ] && ok "the install guide exists" || bad "docs/35-install-from-images.md is missing"
@@ -144,6 +155,8 @@ docker info >/dev/null 2>&1 || { bad "INSTALL_RELEASE_JSON is set but there is n
 # test-shell.sh scrubs the environment, so GITHUB_REPOSITORY is not set here; the updater's compose needs BOSSMAN_UPDATER_REPO.
 GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-example/boss-man}" scripts/render-image-env.sh "$INSTALL_RELEASE_JSON" ${INSTALL_REGISTRY:+"$INSTALL_REGISTRY"} > "$T/real.env" || { bad "images.env from release.json"; exit 1; }
 P="bminstall$$"
+P2="${P}b"
+second_up=0
 {
   cat "$T/real.env"
   # The updater only starts on a release number like 0.1.0 or 0.1.0-beta.1; the CI release.json says "ci". Later lines win.
@@ -153,6 +166,9 @@ P="bminstall$$"
   echo "BOSSMAN_RUNNER_NETWORK=${P}_default"
 } > "$T/run.env"
 dc() { docker compose -p "$P" --env-file "$T/run.env" -f docker-compose.images.yml --profile images "$@"; }
+# BOS-2804: the updater makes the server colours and the launcher (not compose) under names that follow the project, so a second
+# install on this Docker host cannot share a name; removal stays by label.
+NL="${P}-launcher"
 # BOS-2803: removal follows the guide's "Start again from nothing" (docs/35-install-from-images.md) step for step, then checks nothing is
 # left. The updater and the launcher made containers compose does not know; they hold the volumes, so they go before `down -v`.
 # BOS-2851: runners and guards are found by this project's install label, so another install on the host is left alone. For older
@@ -201,12 +217,33 @@ guide_removal() {
     docker volume ls -q --filter "name=^${P}_" | xargs -r docker volume rm
   } >> "$T/removal.log" 2>&1
 }
+# Remove the second install by its label, then its compose project and volumes (the same order as the guide, scoped to one install).
+# Defined before the exit trap and before second_up is set, so an early stop in the second install's setup can still clean it up.
+remove_second() {
+  # The updater and the launcher go first, in that order: they make containers (the launcher re-makes a runner's guard when it is
+  # removed), so removing everything at once lets a live launcher bring back a guard after the sweep. Then everything left by label,
+  # then a second sweep for anything made while the first ran.
+  {
+    docker rm -f "${P2}-updater" "${P2}-launcher"
+    docker ps -aq --filter "label=com.bossman.install=$P2" | xargs -r docker rm -f
+    docker ps -aq --filter "label=com.bossman.install=$P2" | xargs -r docker rm -f
+  } >> "$T/removal2.log" 2>&1 || true
+  dc2 down -v --remove-orphans > "$T/down2.log" 2>&1
+  {
+    docker volume ls -q --filter "label=com.bossman.install=$P2" | xargs -r docker volume rm
+    docker volume ls -q --filter "name=^${P2}_" | xargs -r docker volume rm
+  } >> "$T/removal2.log" 2>&1
+  second_up=0
+}
 cleanup() {
   rc=$?
+  # A second install that was started and not yet removed (the test stopped early) goes first, by its own label.
+  [ "$second_up" = 1 ] && remove_second
   guide_removal
   # The guide's two look-only listings, plus this install's runners and guards (by its label), plus any unlabelled one: all must be empty.
-  left_c="$(docker ps -a --format '{{.Names}}' --filter "label=com.bossman.install=$P"; docker ps -a --format '{{.Names}}' --filter label=boss-man.launcher=1 --filter "label=com.bossman.install=$P"; unlabelled_ids boss-man.launcher=1; docker ps -a --format '{{.Names}}' --filter label=boss-man.netguard=1 --filter "label=com.bossman.install=$P"; unlabelled_ids boss-man.netguard=1)"
-  left_v="$(docker volume ls -q --filter "name=${P}_"; docker volume ls -q --filter "label=com.bossman.install=$P"; docker volume ls -q --filter name=boss-man-claude-pack)"
+  # The second install (BOS-2804) is counted by its own label too.
+  left_c="$(docker ps -a --format '{{.Names}}' --filter "label=com.bossman.install=$P"; docker ps -a --format '{{.Names}}' --filter "label=com.bossman.install=$P2"; docker ps -a --format '{{.Names}}' --filter label=boss-man.launcher=1 --filter "label=com.bossman.install=$P"; unlabelled_ids boss-man.launcher=1; docker ps -a --format '{{.Names}}' --filter label=boss-man.netguard=1 --filter "label=com.bossman.install=$P"; unlabelled_ids boss-man.netguard=1)"
+  left_v="$(docker volume ls -q --filter "name=${P}_"; docker volume ls -q --filter "label=com.bossman.install=$P2"; docker volume ls -q --filter "label=com.bossman.install=$P"; docker volume ls -q --filter name=boss-man-claude-pack)"
   if [ -n "$left_c$left_v" ]; then
     bad "removal left behind (containers: ${left_c//$'\n'/ }; volumes: ${left_v//$'\n'/ })"
     # Say why: the output of down, every container left on the host with its labels, and who still mounts each leftover volume.
@@ -215,6 +252,8 @@ cleanup() {
     for v in $left_v; do echo "--- volume $v used by: $(docker ps -a --filter "volume=$v" --format '{{.Names}}' | tr '\n' ' ')"; done
   else ok "the guide's removal left no container and no volume behind"; fi
   rm -rf "$T"
+  # CI shows only the last 15 lines of a failed test, so repeat every failure here, last (BOS-2804).
+  [ -z "$fails" ] || { echo "--- failures, repeated so they show last:"; printf '%s' "$fails"; }
   [ "$rc" -eq 0 ] || exit "$rc"
   exit "$fail"
 }
@@ -238,7 +277,7 @@ dc up -d || { dc logs --tail 40; bad "up"; exit 1; }
 # Wait for the event (the server answering), with a deadline: a cold pull-and-migrate can take minutes on a slow runner.
 deadline=$((SECONDS + ${INSTALL_WAIT_SECONDS:-300}))
 until curl -fsS "http://127.0.0.1:${INSTALL_HOST_PORT:-31100}/api/health" >/dev/null 2>&1; do
-  [ "$SECONDS" -lt "$deadline" ] || { docker ps -a --format '{{.Names}} {{.Status}}' | tr '\n' ';'; echo; for c in updater launcher server-blue; do echo "--- $c"; docker logs --tail 12 "$c" 2>&1 | cut -c1-260; done; bad "the server did not answer /api/health in time"; exit 1; }
+  [ "$SECONDS" -lt "$deadline" ] || { docker ps -a --format '{{.Names}} {{.Status}}' | tr '\n' ';'; echo; for c in "${P}-updater" "$NL" "${P}-server-blue"; do echo "--- $c"; docker logs --tail 12 "$c" 2>&1 | cut -c1-260; done; bad "the server did not answer /api/health in time"; exit 1; }
   sleep 3
 done
 ok "the server answers /api/health"
@@ -246,16 +285,21 @@ ok "the server answers /api/health"
 # test workflow reads it for the release's result; nothing else needs it.
 [ -z "${INSTALL_SECONDS_FILE:-}" ] || echo "$SECONDS" > "$INSTALL_SECONDS_FILE"
 
-launcher_log="$(docker logs launcher 2>&1)"
+launcher_log="$(docker logs "$NL" 2>&1)"
 # The first server can answer while the launcher is missing (the updater makes the launcher first, and logs why it could not): show that.
-docker inspect launcher >/dev/null 2>&1 || { echo "--- the launcher does not exist; updater log:"; docker logs --tail 15 updater 2>&1 | cut -c1-400; }
+docker inspect "$NL" >/dev/null 2>&1 || { echo "--- the launcher does not exist; updater log:"; docker logs --tail 15 "${P}-updater" 2>&1 | cut -c1-400; }
+# BOS-2804: every container the install made carries its project's name and its label; nothing is left under a fixed name another install could share.
+names="$(docker ps -a --filter "label=com.bossman.install=$P" --format '{{.Names}}' | sort | tr '\n' ' ')"
+for want in "${P}-updater" "$NL" "${P}-server-blue"; do case " $names" in *" $want "*) ok "$want exists and carries the install's label" ;; *) bad "$want is missing or has no install label (found: $names)" ;; esac; done
+# The pack volume is made only when a runner's pack installer first mounts it, so it is checked later, after a runner has started
+# (the "each install has its own pack volume" check below), not here.
 echo "$launcher_log" | grep -q 'dropped to uid 1000' && ok "the launcher dropped to uid 1000 with the socket's group" || bad "launcher privileges: $launcher_log"
 echo "$launcher_log" | grep -q '"msg":"data folder"' && ok "the launcher found its data volume on the host" || bad "launcher data folder"
 echo "$launcher_log" | grep -q 'launcher listening' && ok "the launcher is up and can reach Docker" || bad "launcher not listening"
 
 # Ask the launcher, from inside its container, to start a runner from the published runner image (it will not get a real token, so it cannot connect; starting is the point).
 tok="bmr_$(printf 'x%.0s' {1..43})"
-call() { docker exec --user 1000:1000 launcher node -e '
+call() { docker exec --user 1000:1000 "$NL" node -e '
 const fs=require("fs");const [m,p,b]=process.argv.slice(1);
 fetch("http://127.0.0.1:3105"+p,{method:m,headers:{authorization:"Bearer "+fs.readFileSync("/run/launcher/key","utf8").trim(),"content-type":"application/json"},body:b||undefined})
  .then(async r=>{console.log(r.status+" "+await r.text());process.exit(r.status<300?0:1)}).catch(e=>{console.log(String(e));process.exit(1)})' "$@"; }
@@ -280,5 +324,60 @@ if [ "$run_move" = 1 ]; then
   echo "--- helper move on the live stack (BOS-1227 criterion 4)"
   scripts/helper-move-live.sh "$P" "$T/run.env" || bad "helper move on the live stack"
 fi
+
+# BOS-2804 criterion 3: a second install, under another project name, runs beside the first on this Docker host. It has its own ports,
+# its own front subnet and its own runner network. Both answer; no container name, install label or pack volume is shared; and removing
+# the second by its install label leaves the first (and the runner it started) running and untouched.
+echo "--- second install beside the first (BOS-2804)"
+base_port="${INSTALL_HOST_PORT:-31100}"; base_portal="${INSTALL_PORTAL_PORT:-31101}"
+{
+  cat "$T/run.env"
+  echo "BOSSMAN_HOST_PORT=$((base_port + 10))"
+  echo "BOSSMAN_PORTAL_HOST_PORT=$((base_portal + 10))"
+  echo "BOSSMAN_RUNNER_NETWORK=${P2}_default"
+  echo "BOSSMAN_FRONT_SUBNET=172.30.1.16/28"
+  echo "BOSSMAN_FRONT_RANGE=172.30.1.24/29"
+  echo "BOSSMAN_FRONT_PROXY_IP=172.30.1.18"
+} > "$T/run2.env"
+dc2() { docker compose -p "$P2" --env-file "$T/run2.env" -f docker-compose.images.yml --profile images "$@"; }
+p_before="$(docker ps -aq --filter "label=com.bossman.install=$P" | sort | tr '\n' ' ')"
+second_up=1
+dc2 run --rm setup > "$T/setup-b.log" 2>&1 || { cat "$T/setup-b.log"; bad "setup of the second install"; exit 1; }
+dc2 up -d || { dc2 logs --tail 40; bad "up of the second install"; exit 1; }
+deadline=$((SECONDS + ${INSTALL_WAIT_SECONDS:-300}))
+until curl -fs -o /dev/null "http://127.0.0.1:$((base_port + 10))/api/health"; do
+  [ "$SECONDS" -lt "$deadline" ] || { docker ps -a --format '{{.Names}} {{.Status}}' | tr '\n' ';'; echo; for c in "${P2}-updater" "${P2}-launcher" "${P2}-server-blue"; do echo "--- $c"; docker logs --tail 12 "$c" 2>&1 | cut -c1-260; done; bad "the second install did not answer /api/health in time"; exit 1; }
+  sleep 3
+done
+ok "the second install answers /api/health beside the first"
+curl -fs -o /dev/null "http://127.0.0.1:${base_port}/api/health" && ok "the first install still answers" || bad "the first install stopped answering after the second started"
+names2="$(docker ps -a --filter "label=com.bossman.install=$P2" --format '{{.Names}}' | sort | tr '\n' ' ')"
+for want in "${P2}-updater" "${P2}-launcher" "${P2}-server-blue"; do case " $names2" in *" $want "*) ok "$want exists and carries the second install's label" ;; *) bad "$want is missing or has no label of the second install (found: $names2)" ;; esac; done
+shared="$(comm -12 <(docker ps -a --filter "label=com.bossman.install=$P" --format '{{.Names}}' | sort) <(docker ps -a --filter "label=com.bossman.install=$P2" --format '{{.Names}}' | sort))"
+[ -z "$shared" ] && ok "the two installs share no container name" || bad "container names in both installs: $shared"
+# The pack volume is made when something first mounts it: the launcher's pack installer, when a runner is asked for. So a second install
+# that has not started a runner has no pack volume yet, which is not a fault. Ask the second launcher for a runner (own company name,
+# because runner names are not yet project-scoped, BOS-2904) and read which volume the runner mounts: that proves one pack volume per
+# install, and does not depend on a boss-man-claude-pack another step of the same job (the launcher smoke test) may have left behind.
+call2() { docker exec --user 1000:1000 "${P2}-launcher" node -e '
+const fs=require("fs");const [m,p,b]=process.argv.slice(1);
+fetch("http://127.0.0.1:3105"+p,{method:m,headers:{authorization:"Bearer "+fs.readFileSync("/run/launcher/key","utf8").trim(),"content-type":"application/json"},body:b||undefined})
+ .then(async r=>{console.log(r.status+" "+await r.text());process.exit(r.status<300?0:1)}).catch(e=>{console.log(String(e));process.exit(1)})' "$@"; }
+out2="$(call2 PUT /runners/smoketwo "{\"token\":\"$tok\"}" 2>&1)" && ok "the second launcher started a runner" || bad "second install runner start: $out2"
+mounts1="$(docker inspect --format '{{range .Mounts}}{{.Name}} {{end}}' boss-man-runner-smoke || true)"
+mounts2="$(docker inspect --format '{{range .Mounts}}{{.Name}} {{end}}' boss-man-runner-smoketwo || true)"
+case " $mounts1" in *" ${P}_claude-pack "*) ok "the first install's runner mounts ${P}_claude-pack" ;; *) bad "the first install's runner mounts: $mounts1" ;; esac
+case " $mounts2" in *" ${P2}_claude-pack "*) ok "the second install's runner mounts ${P2}_claude-pack" ;; *) bad "the second install's runner mounts: $mounts2 (launcher env: $(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${P2}-launcher" | grep -E '^BOSSMAN_(CLAUDE_PACK_VOLUME|INSTALL_LABEL|STACK)=' | tr '\n' ' '))" ;; esac
+case "$mounts1$mounts2" in *"boss-man-claude-pack"*) bad "a runner mounts the shared boss-man-claude-pack (first: $mounts1; second: $mounts2)" ;; *) ok "no runner mounts a shared boss-man-claude-pack" ;; esac
+[ -n "$(docker volume ls -q --filter "name=^${P}_claude-pack\$")" ] && [ -n "$(docker volume ls -q --filter "name=^${P2}_claude-pack\$")" ] && ok "each install has its own pack volume" || bad "pack volumes: ${P}_claude-pack and ${P2}_claude-pack must both exist (volumes now: $(docker volume ls -q | grep -i pack | tr '\n' ' '))"
+remove_second
+left2="$(docker ps -a --format '{{.Names}}' --filter "label=com.bossman.install=$P2"; docker volume ls -q --filter "name=^${P2}_"; docker volume ls -q --filter "label=com.bossman.install=$P2")"
+[ -z "$left2" ] && ok "removing the second install left nothing of it behind" || bad "second install left: ${left2//$'\n'/ }"
+p_after="$(docker ps -aq --filter "label=com.bossman.install=$P" | sort | tr '\n' ' ')"
+[ "$p_before" = "$p_after" ] && ok "the first install's containers are the same after the second was removed" || bad "the first install's containers changed: before [$p_before] after [$p_after]"
+[ "$(docker inspect --format '{{.State.Running}}' boss-man-runner-smoke)" = true ] && ok "the first install's runner still runs" || bad "the first install's runner stopped when the second was removed"
+curl -fs -o /dev/null "http://127.0.0.1:${base_port}/api/health" && ok "the first install still answers after the second was removed" || bad "the first install stopped answering after the second was removed"
+[ -n "$(docker volume ls -q --filter "name=^${P}_claude-pack\$")" ] && ok "the first install's pack volume is untouched" || bad "the first install's pack volume is gone"
+
 call DELETE /runners/smoke >/dev/null 2>&1 || true
 exit "$fail"

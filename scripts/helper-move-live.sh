@@ -16,6 +16,9 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 P="${1:?compose project name}"
+# BOS-2804: the updater and the launcher are named after the compose project.
+LNAME="${P}-launcher"
+UNAME="${P}-updater"
 ENVF="${2:?images.env path}"
 fail=0
 oks=0
@@ -55,7 +58,7 @@ GOOD="$(variant netguard good "$NETGUARD" 'LABEL com.bossman.test="good-guard"')
 BADG="$(variant netguard bad "$NETGUARD" 'ENTRYPOINT ["/bin/sh","-c","echo this guard fails its check on purpose >&2; exit 1"]')" || { bad "build the failing guard image"; exit 1; }
 ok "built four test images by digest (launcher x2, guard that works, guard that exits 1)"
 
-call() { docker exec --user 1000:1000 launcher node -e '
+call() { docker exec --user 1000:1000 "$LNAME" node -e '
 const fs=require("fs");const [m,p,b]=process.argv.slice(1);
 fetch("http://127.0.0.1:3105"+p,{method:m,headers:{authorization:"Bearer "+fs.readFileSync("/run/launcher/key","utf8").trim(),"content-type":"application/json"},body:b||undefined})
  .then(async r=>{console.log(await r.text());process.exit(r.status<300?0:1)}).catch(e=>{console.log(String(e));process.exit(1)})' "$@"; }
@@ -95,7 +98,7 @@ move() { # <label> <version> <launcher digest> <guard digest>; prints the JSON l
   local out
   # The updater runs as uid 1000 with the socket's group (it starts as root only to learn that group). A plain exec would be root with
   # every capability dropped, which cannot write the uid-1000 state folder (EACCES on /state/state.json.tmp, run 45481019861).
-  out="$(docker exec -i --user "1000:$(stat -c %g "${BOSSMAN_DOCKER_SOCK:-/var/run/docker.sock}")" -e MOVE_VERSION="$2" -e MOVE_LAUNCHER="$3" -e MOVE_RUNNER="$RUNNER_DIGEST" -e MOVE_NETGUARD="$4" updater node --input-type=module - < scripts/helper-move-live.mjs 2>"$T/move.$1.err")" || {
+  out="$(docker exec -i --user "1000:$(stat -c %g "${BOSSMAN_DOCKER_SOCK:-/var/run/docker.sock}")" -e MOVE_VERSION="$2" -e MOVE_LAUNCHER="$3" -e MOVE_RUNNER="$RUNNER_DIGEST" -e MOVE_NETGUARD="$4" "$UNAME" node --input-type=module - < scripts/helper-move-live.mjs 2>"$T/move.$1.err")" || {
     cat "$T/move.$1.err" >&2; echo "$out" >&2
     # One flat line for the public GitHub notice: the job log can't be read without a login, annotations can (BOS-2528). The updater prints no key or environment.
     # (move runs in a subshell, so the text goes through a file, not a variable.)
@@ -107,7 +110,7 @@ move() { # <label> <version> <launcher digest> <guard digest>; prints the JSON l
 }
 
 # ---- Move 1: new launcher, good guard ----
-r0="$(state_of "$RUNNER")"; g0="$(state_of "$GUARD")"; l0="$(state_of launcher)"
+r0="$(state_of "$RUNNER")"; g0="$(state_of "$GUARD")"; l0="$(state_of "$LNAME")"
 rm -f "$T/stop"; : > "$T/probe1.log"
 probe_loop "$T/probe1.log" &
 loop=$!
@@ -115,11 +118,11 @@ m1="$(move one 0.0.1-helpermove "$L2" "$GOOD")"; rc=$?
 touch "$T/stop"; wait "$loop" 2>/dev/null
 echo "move 1: $m1"
 [ "$rc" = 0 ] && [ "$(jq -r .result <<<"$m1")" = moved ] && ok "move 1 (new launcher, good guard) returned moved" || bad "move 1 did not return moved"
-r1="$(state_of "$RUNNER")"; g1="$(state_of "$GUARD")"; l1="$(state_of launcher)"
+r1="$(state_of "$RUNNER")"; g1="$(state_of "$GUARD")"; l1="$(state_of "$LNAME")"
 [ "$r0" = "$r1" ] && [ "${r1##* }" = true ] && ok "the runner container is the same one (${r1%% *}) and still running" || bad "runner changed: before '$r0' after '$r1'"
 [ "$g0" = "$g1" ] && [ "${g1##* }" = true ] && ok "the guard container is the same one and still running" || bad "guard changed: before '$g0' after '$g1'"
 [ "${l0%% *}" != "${l1%% *}" ] && [ "${l1##* }" = true ] && ok "the launcher was recreated (new container id) and runs" || bad "launcher not recreated: before '$l0' after '$l1'"
-docker inspect --format '{{.Config.Image}} {{.State.Health.Status}}' launcher | grep -q "@$L2 healthy$" && ok "the new launcher runs the new image and is healthy" || bad "new launcher image or health: $(docker inspect --format '{{.Config.Image}} {{.State.Health.Status}}' launcher)"
+docker inspect --format '{{.Config.Image}} {{.State.Health.Status}}' "$LNAME" | grep -q "@$L2 healthy$" && ok "the new launcher runs the new image and is healthy" || bad "new launcher image or health: $(docker inspect --format '{{.Config.Image}} {{.State.Health.Status}}' "$LNAME")"
 list="$(call GET /runners)"
 jq -e '.[] | select(.slug=="smoke") | select(.state=="running")' <<<"$list" >/dev/null && ok "the new launcher lists runner smoke as running (GET /runners)" || bad "GET /runners from the new launcher: $list"
 [ "$(jq -r '.[] | select(.slug=="smoke") | .guard' <<<"$list")" = on ] && ok "after: the new launcher reports the guard on" || bad "after: guard state is not on: $list"
@@ -141,7 +144,7 @@ echo "move 2: $m2"
 [ "$rc" = 0 ] && [ "$(jq -r .result <<<"$m2")" = pending ] && ok "move 2 (guard fails its check) returned pending, not moved" || bad "move 2 result: $(jq -r .result <<<"$m2" 2>/dev/null)"
 jq -r .helpers.note <<<"$m2" | grep -q 'did not pass its check' && ok "the owner-facing note says the guard failed its check" || bad "move 2 note: $(jq -r .helpers.note <<<"$m2")"
 [ "$(jq -c .releaseCurrent <<<"$m2")" = "$rel1" ] && ok "release-current was not written (unchanged from move 1)" || bad "release-current changed: $(jq -c .releaseCurrent <<<"$m2") (was $rel1)"
-r2="$(state_of "$RUNNER")"; g2="$(state_of "$GUARD")"; l2="$(state_of launcher)"
+r2="$(state_of "$RUNNER")"; g2="$(state_of "$GUARD")"; l2="$(state_of "$LNAME")"
 [ "$l1" = "$l2" ] && ok "the launcher was left as it was" || bad "launcher changed on a failed guard check: '$l1' -> '$l2'"
 [ "$r1" = "$r2" ] && ok "the runner was left as it was" || bad "runner changed: '$r1' -> '$r2'"
 [ "$g1" = "$g2" ] && [ "${g2##* }" = true ] && ok "the old guard is the same container and still running" || bad "guard changed: '$g1' -> '$g2'"

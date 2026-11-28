@@ -4,7 +4,7 @@
 // runner still starts and reports Claude absent: OpenCode and Codex keep working. Nothing here is a bypass:
 // the installer holds no extra capability and mounts no company data, only the shared pack volume.
 import { type Docker } from "./docker.js";
-import { CLAUDE_PACK_TARGET, LOG_CONFIG, claudePackVolume, installLabels, runnerImage, type LauncherConfig } from "./spec.js";
+import { CLAUDE_PACK_TARGET, LOG_CONFIG, claudePackVolume, claudePackVolumeOf, installLabels, runnerImage, type LauncherConfig } from "./spec.js";
 
 /** Where the runner image copies the pinned package.json and lockfile (root-owned). */
 export const PACK_SOURCE = "/opt/bossman-claude-pack";
@@ -37,7 +37,7 @@ export function packInstallerSpec(cfg: LauncherConfig, slug: string) {
     Labels: { "boss-man.claude-pack": "1", "boss-man.company": slug, ...(cfg.stack ? { "boss-man.stack": cfg.stack } : {}), ...installLabels(cfg) },
     HostConfig: {
       // A named volume: Docker makes it on first mount. No host folder is exposed, so no company data is.
-      Mounts: [{ Type: "volume", Source: packVolume(cfg.stack), Target: PACK_ROOT }],
+      Mounts: [{ Type: "volume", Source: claudePackVolumeOf(cfg), Target: PACK_ROOT }],
       NetworkMode: cfg.network,
       CapDrop: ["ALL"],
       CapAdd: [],
@@ -88,7 +88,7 @@ async function installPack(docker: Docker, cfg: LauncherConfig, slug: string, lo
   if (old) await docker.remove(old.Id).catch(() => undefined);
   // BOS-2803: make the pack volume with the install label (Docker would otherwise make it unlabelled on first mount). Making a
   // volume that exists is a no-op, so an older, unlabelled one stays as it is. Failing is not a reason to skip the install.
-  if (Object.keys(installLabels(cfg)).length) await docker.createVolume(packVolume(cfg.stack), installLabels(cfg)).catch((err) => log(`couldn't label the Claude pack volume: ${String((err as Error)?.message ?? err)}`));
+  if (Object.keys(installLabels(cfg)).length) await docker.createVolume(claudePackVolumeOf(cfg), installLabels(cfg)).catch((err) => log(`couldn't label the Claude pack volume: ${String((err as Error)?.message ?? err)}`));
   let id: string;
   try {
     id = await docker.create(name, packInstallerSpec(cfg, slug));
