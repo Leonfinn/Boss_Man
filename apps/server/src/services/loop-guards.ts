@@ -16,6 +16,24 @@ export const DEFAULT_LOOP_LIMITS: LoopLimits = { repeatedFinding: 3, maxRounds: 
 export const SEND_BACK = "Send it back anyway";
 export const STOP_WORK = "Stop work on it";
 
+/** Where the owner makes a new Claude token and pastes it in (BOS-2825); the one place the card sends them. */
+export const CLAUDE_TOKEN_PLACE = "Settings → Secrets → Add, choose Claude setup-token";
+
+/**
+ * A refused Claude token's own words (BOS-2825): what Claude said, then the two steps that fix it. Kept apart from
+ * the usage-limit card so the owner isn't told to wait for room that a dead token will never find.
+ */
+export const REFUSED_CLAUDE = (what: string) =>
+  `Claude refused the account's token: make a new one and paste it in ${CLAUDE_TOKEN_PLACE}. A run's Claude login is no longer accepted (wrong, expired or revoked), so this isn't a usage limit and waiting won't clear it. On your own computer run \`claude setup-token\`, sign in with the same Claude account, and paste the token it prints. This closes by itself once a run on the account works again.\n\n${what}`;
+
+/** Whether the failing account is a Claude account, which a refusal fixes by a new token rather than waiting for room. */
+function refusedClaude(source: { id: string; name: string; provider?: string } | null): boolean {
+  if (!source) return false;
+  // The source says which provider it is billed to; without one (an account named on the error alone), read the name.
+  if (source.provider) return source.provider === "anthropic";
+  return /claude|anthropic/i.test(source.name);
+}
+
 /**
  * With `alert`, the guards' decisions go up the alert ladder (BOS-64) instead of straight to the
  * owner: a stuck review to the CEO first (stopping work is beyond the Scrum Master), a circular
@@ -28,7 +46,7 @@ export function loopGuards(
     now?: () => Date;
     alert?: (input: AlertInput) => Promise<{ id: string } | null>;
     /** The funding source an agent's runs use, so a limit card is per account (DR-017 B, BOS-469 point 3). */
-    fundingSourceFor?: (agentId: string | null) => Promise<{ id: string; name: string } | null>;
+    fundingSourceFor?: (agentId: string | null) => Promise<{ id: string; name: string; provider?: string } | null>;
   } = {},
 ) {
   const limits = { ...DEFAULT_LOOP_LIMITS, ...opts.limits };
@@ -100,11 +118,15 @@ export function loopGuards(
       // (DR-015 D, DR-017 B, BOS-469 point 3): the same failure for three agents on one plan is one problem,
       // not three cards and three CEO runs.
       const named = accountOutage(input.text);
-      const source: { id: string; name: string } | null = named ? ((opts.fundingSourceFor ? await opts.fundingSourceFor(input.agentId) : null) ?? { id: "company", name: named.name }) : null;
+      const source: { id: string; name: string; provider?: string } | null = named ? ((opts.fundingSourceFor ? await opts.fundingSourceFor(input.agentId) : null) ?? { id: "company", name: named.name }) : null;
+      // A refused Claude token reads as its own problem, not as a usage limit (BOS-2825): the owner's next step is a
+      // new token, and saying "usage limit or auth error" would send them to wait for room that never comes.
+      const refused = !!named?.auth && refusedClaude(source);
       // An auth or credit failure closes only on a clean run on the account; a revoked key leaves the quota
       // windows empty, so "room again" would close it at once (BOS-469, security review).
       const outage = named && source ? { fundingSourceId: source.id, name: source.name, ...(named.window ? { window: named.window } : {}), ...(named.auth ? { auth: true } : {}) } : null;
-      const question = `${input.what} has hit the same failure ${n} times in ${Math.round(limits.circularWindowMs / 3_600_000)} hours${t ? ` on "${t.title}"` : ""}. It has been told to try a different approach. Last output: ${input.text.slice(-300)}`;
+      const plain = `${input.what} has hit the same failure ${n} times in ${Math.round(limits.circularWindowMs / 3_600_000)} hours${t ? ` on "${t.title}"` : ""}. It has been told to try a different approach. Last output: ${input.text.slice(-300)}`;
+      const question = refused ? REFUSED_CLAUDE(plain) : plain;
       if (outage) {
         if (opts.alert) {
           await opts.alert({

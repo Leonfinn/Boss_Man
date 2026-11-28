@@ -38,6 +38,40 @@ export function normaliseSecret(kind: SecretKind, raw: string): string {
   return raw.trim();
 }
 
+/** The two token kinds that expire on a date the owner knows when they make it (BOS-2825). */
+const EXPIRING_KINDS: ReadonlySet<SecretKind> = new Set(["claude_oauth_token", "generic"]);
+
+/**
+ * How long a new token of this kind usually lasts, so the form can fill in an end date (BOS-2825):
+ * a GitHub/Gitea token made by the wizard lasts 90 days, and a Claude setup-token about a year.
+ * A kind that doesn't expire predictably (an API key) has none, and its form leaves the date empty.
+ */
+export function defaultTokenLifeDays(kind: SecretKind): number | null {
+  if (kind === "claude_oauth_token") return 365;
+  if (kind === "generic") return 90;
+  return null;
+}
+
+/** The date a new token of this kind ends on, as YYYY-MM-DD, or null when its kind has no default. */
+export function defaultEndsOn(kind: SecretKind, now: Date = new Date()): string | null {
+  const days = defaultTokenLifeDays(kind);
+  if (days === null) return null;
+  return new Date(now.getTime() + days * 86_400_000).toISOString().slice(0, 10);
+}
+
+/** A day-only end date, as stored: midnight UTC of that day. Null for anything that isn't a real YYYY-MM-DD date. */
+export function parseEndsOn(raw: string): Date | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return null;
+  const at = new Date(`${raw}T00:00:00.000Z`);
+  return Number.isFinite(at.getTime()) && at.toISOString().slice(0, 10) === raw ? at : null;
+}
+
+/** A stored date as a day, "25 Feb 2027", for a card or a table. UTC, so a late-evening save can't read as the day before. */
+export function endsOnDay(at: Date | string): string {
+  return new Date(at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
+}
+
+export { EXPIRING_KINDS };
 export type SecretCheck = { ok: boolean; problems: string[] };
 
 export function checkSecretFormat(kind: SecretKind, value: string): SecretCheck {

@@ -6,7 +6,7 @@ import websocket from "@fastify/websocket";
 import { and, asc, count, desc, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import { readFileSync } from "node:fs";
 import { z, ZodError } from "zod";
-import { RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, featureHorizon, formatDate, usdToMicros, ruleFor, PERMISSION_JUDGE_MODES, FENCE_MODES, FENCE_ENFORCE_AVAILABLE } from "@boss-man/shared";
+import { RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, featureHorizon, formatDate, parseEndsOn, usdToMicros, ruleFor, PERMISSION_JUDGE_MODES, FENCE_MODES, FENCE_ENFORCE_AVAILABLE } from "@boss-man/shared";
 import { BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, CEO_TEMPLATE, timeZoneOr, WatchdogSettings } from "@boss-man/shared";
 import { BULK_TICKET_MAX, THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, parseRepoUrl, ticketRef, type MergeResult, type WorkspaceDiff } from "@boss-man/shared";
 import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError, windowLabel } from "@boss-man/shared";
@@ -45,6 +45,7 @@ import { addonsService, mergeHostAddons, unknownAddons } from "./services/addons
 import { probeColours } from "./services/bluegreen.js";
 import { createStallMonitor } from "./services/stall-monitor.js";
 import { dailyBackupService } from "./services/daily-backup.js";
+import { tokenExpiryService } from "./services/token-expiry.js";
 import { hostWarningService } from "./services/host-warnings.js";
 import { serverHealthService, type ServerHealth, type ServerHealthDeps } from "./services/server-health.js";
 import { createPermissionLog } from "./services/permission-log.js";
@@ -1087,7 +1088,7 @@ export async function buildApp(opts: AppOptions) {
     alert: (input) => alerts.raise(input),
     fundingSourceFor: async (agentId) => {
       if (!agentId) return null;
-      const [row] = await db.select({ id: fundingSources.id, name: fundingSources.name }).from(fundingSources).innerJoin(agents, eq(agents.fundingSourceId, fundingSources.id)).where(eq(agents.id, agentId));
+      const [row] = await db.select({ id: fundingSources.id, name: fundingSources.name, provider: fundingSources.provider }).from(fundingSources).innerJoin(agents, eq(agents.fundingSourceId, fundingSources.id)).where(eq(agents.id, agentId));
       return row ?? null;
     },
   });
@@ -1188,6 +1189,18 @@ export async function buildApp(opts: AppOptions) {
       return r;
     },
     composeCmd: () => hostFacts.value("compose.cmd"),
+    log: (m) => app.log.warn(m),
+  });
+  // BOS-2825: a git or Claude token whose own end date is a week away gets one owner card, raised by main.ts's leader timer.
+  const tokenExpiry = tokenExpiryService(db, {
+    now: opts.now ?? (() => new Date()),
+    homeCompany: async () => (await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1))[0]?.id ?? null,
+    isOpen: async (dedupeKey) => (await db.select({ id: decisions.id }).from(decisions).where(and(eq(decisions.dedupeKey, dedupeKey), eq(decisions.status, "open"))).limit(1)).length > 0,
+    raise: async (input) => {
+      const r = await alerts.raise(input as Parameters<typeof alerts.raise>[0]);
+      if (r) await notes.syncDecisions();
+      return r;
+    },
     log: (m) => app.log.warn(m),
   });
   // BOS-2674: a host warning seen in 2 reports in a row tells the CEO; the panel reads what is being done about each one.
@@ -1885,6 +1898,8 @@ export async function buildApp(opts: AppOptions) {
       name: z.string().trim().min(1).max(80),
       kind: z.enum(SECRET_KINDS),
       value: z.string().min(1).max(20_000),
+      /** The day the token stops working, YYYY-MM-DD (BOS-2825); optional, and only for a token kind. */
+      endsOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Give the end date as YYYY-MM-DD").refine((d) => parseEndsOn(d) !== null, "That isn't a real day").nullish(),
       acceptUnusualFormat: z.boolean().optional(),
       verify: z.boolean().optional(),
     });
@@ -1909,7 +1924,7 @@ export async function buildApp(opts: AppOptions) {
 
     owner.put("/api/secrets/:id/value", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const body = SecretInput.pick({ value: true, acceptUnusualFormat: true, verify: true }).parse(req.body);
+      const body = SecretInput.pick({ value: true, acceptUnusualFormat: true, verify: true, endsOn: true }).parse(req.body);
       const result = await secretsSvc.rotate(id, body.value, body);
       return result ?? reply.code(404).send({ error: "not_found" });
     });
@@ -3092,5 +3107,5 @@ export async function buildApp(opts: AppOptions) {
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
   /** BOS-2159: removes login rows past their expiry (they are refused already; this stops the table growing). Returns how many. */
   const sweepExpiredSessions = async () => (await db.delete(sessions).where(lte(sessions.expiresAt, new Date())).returning({ h: sessions.tokenHash })).length;
-  return { app, webhooks, sweepExpiredSessions, mailer, weeklySummary, launcher: launch, githubWatch, memory, serverHealth, dailyBackup, hostWarnings, checks, releaseLog, mainCi, secretScan, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, planning: roadmapPlanning, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, ticketMeaningEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer, syncFeatures: (ids: Array<string | null | undefined>) => feedback.syncFeaturesOf(ids) };
+  return { app, webhooks, sweepExpiredSessions, mailer, weeklySummary, launcher: launch, githubWatch, memory, serverHealth, dailyBackup, tokenExpiry, hostWarnings, checks, releaseLog, mainCi, secretScan, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, planning: roadmapPlanning, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, ticketMeaningEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer, syncFeatures: (ids: Array<string | null | undefined>) => feedback.syncFeaturesOf(ids) };
 }

@@ -42,7 +42,7 @@ const leader = createLeader({
 
 const trustedProxies = (env.BOSSMAN_TRUSTED_PROXIES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
-const { app, webhooks, sweepExpiredSessions, mailer, weeklySummary, mainCi, secretScan, launcher, githubWatch, memory, serverHealth, dailyBackup, hostWarnings, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, wiki, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, deployWait, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
+const { app, webhooks, sweepExpiredSessions, mailer, weeklySummary, mainCi, secretScan, launcher, githubWatch, memory, serverHealth, dailyBackup, tokenExpiry, hostWarnings, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, wiki, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, deployWait, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -119,6 +119,8 @@ const bg = createBackground(
     { name: "daily backup watch", everyMs: Number(env.BOSSMAN_DAILY_BACKUP_WATCH_MS ?? 15 * 60_000), run: async () => { await dailyBackup.check(); } },
     // A host warning seen in 2 reports in a row tells the CEO (BOS-2674). // leader-only
     { name: "host warning watch", everyMs: Number(env.BOSSMAN_HOST_WARNING_WATCH_MS ?? 60_000), run: async () => { await hostWarnings.check(); } },
+    // Token end dates (BOS-2825): one owner card per git or Claude token whose date is within a week, closed by a new value. // leader-only
+    { name: "token expiry watch", everyMs: Number(env.BOSSMAN_TOKEN_EXPIRY_MS ?? 6 * 3_600_000), firstAfterMs: 5 * 60_000, run: async () => { await tokenExpiry.check(); } },
     // Boss Man's own alerts that sat on the Scrum Master or the CEO past the time limit move up a rung (BOS-64).
     { name: "alert ladder", everyMs: Number(env.BOSSMAN_ALERT_LADDER_MS ?? 60_000), run: () => alerts.sweep() },
     // Main's GitHub CI (BOS-1072): one ticket per distinct failing step, later runs added to it, a note when green again. Quiet where there is no GitHub CI. // leader-only
