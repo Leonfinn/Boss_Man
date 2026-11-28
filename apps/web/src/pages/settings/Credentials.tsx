@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react";
+import { defaultEndsOn, endsOnDay } from "@boss-man/shared";
 import { api, type Agent, type Company } from "../../api";
 import { usePoll } from "../../hooks";
 import { SaveButton, useSaveState } from "../../components/SaveButton";
@@ -20,8 +21,8 @@ const CREDENTIALS = [
   { kind: "generic", label: "Other", env: "", help: "Any other value an agent needs, under the variable name you choose. The one exception is GITHUB_WATCH_TOKEN, the GitHub watcher's token: only the server reads it and no agent run ever gets it." },
 ] as const;
 
-type Grant = { id: string; envName: string; secretId: string; secretName: string; hint: string | null; deployTargetId: string | null; agentIds: string[] };
-type Secret = { id: string; name: string; kind: string; hint: string | null };
+type Grant = { id: string; envName: string; secretId: string; secretName: string; hint: string | null; deployTargetId: string | null; agentIds: string[]; expiresAt: string | null };
+type Secret = { id: string; name: string; kind: string; hint: string | null; expiresAt: string | null };
 
 /** A setup-token can only be proved by Claude Code, so its check runs on the runner (R58). */
 const CLAUDE_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN";
@@ -58,8 +59,10 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
   const [value, setValue] = useState("");
   const [env, setEnv] = useState("");
   const [existing, setExisting] = useState("");
+  // The day a new token stops working (BOS-2825). Filled in when the owner picks a token kind; they can change it or clear it.
+  const [endsOn, setEndsOn] = useState("");
   const act = useAction();
-  const sv = useSaveState({ choice, name, value, env, existing });
+  const sv = useSaveState({ choice, name, value, env, existing, endsOn });
   const c = CREDENTIALS[choice];
   // A pasted key file (e.g. a Google service-account JSON) only fits "Other".
   const looksLikeJson = !!c && c.kind !== "generic" && value.trim().startsWith("{");
@@ -112,7 +115,7 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
       let secretId = existing;
       let warnings: string[] = [];
       if (!secretId) {
-        const created = await api<{ secret: { id: string }; warnings: string[] }>("/api/secrets", { method: "POST", body: { name: name.trim() || defaultName, kind: c!.kind, value } });
+        const created = await api<{ secret: { id: string }; warnings: string[] }>("/api/secrets", { method: "POST", body: { name: name.trim() || defaultName, kind: c!.kind, value, ...(endsOn ? { endsOn } : {}) } });
         secretId = created.secret.id;
         warnings = created.warnings;
       }
@@ -123,7 +126,8 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
       setExisting("");
       setChoice(-1);
       setEnv("");
-      sv.markSaved({ choice: -1, name: "", value: "", env: "", existing: "" });
+      setEndsOn("");
+      sv.markSaved({ choice: -1, name: "", value: "", env: "", existing: "", endsOn: "" });
       grants.reload();
       secrets.reload();
       onChanged?.();
@@ -156,7 +160,7 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
                 <tr key={g.id}>
                   <td className="mono">{g.envName}</td>
                   <td>{g.secretName}</td>
-                  <td className="mono muted">{g.hint ?? ""}</td>
+                  <td className="mono muted">{g.expiresAt ? endsOnDay(g.expiresAt) : "No date"}</td>
                   <td>{g.deployTargetId ? (targets.data?.find((t) => t.id === g.deployTargetId)?.name ?? "One deploy target") : "Every run"}</td>
                   <td>
                     <GrantAgents key={g.agentIds.join()} grant={g} agents={company.agents} busy={act.busy} onSave={(ids) => setAgents(g, ids)} />
@@ -197,6 +201,8 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
               const i = Number(e.target.value);
               setChoice(i);
               setEnv(CREDENTIALS[i]!.env);
+              // A token kind fills in how long one usually lasts (90 days, or a year for Claude); it can be changed or cleared.
+              setEndsOn(defaultEndsOn(CREDENTIALS[i]!.kind) ?? "");
             }}
           >
             <option value="" disabled>
@@ -239,6 +245,12 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
           <label htmlFor="cred-env">Variable name</label>
           <input id="cred-env" className="mono" autoComplete="off" required pattern="[A-Z_][A-Z0-9_]*" value={env} onChange={(e) => setEnv(e.target.value.toUpperCase())} />
         </div>
+        {!existing && c && defaultEndsOn(c.kind) !== null && (
+          <div className="field">
+            <label htmlFor="cred-ends">Ends on</label>
+            <input id="cred-ends" type="date" aria-describedby="cred-ends-hint" value={endsOn} onChange={(e) => setEndsOn(e.target.value)} />
+          </div>
+        )}
         <div style={{ display: "flex", gap: 8 }}>
           {!existing && (
             <button className="btn" type="button" disabled={act.busy || !value.trim() || !c} onClick={check}>
@@ -261,6 +273,11 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
       {c && (
         <p className="muted" style={{ fontSize: 13 }}>
           {c.help.split("`").map((part, i) => (i % 2 ? <code key={i}>{part}</code> : part))}
+        </p>
+      )}
+      {!existing && c && defaultEndsOn(c.kind) !== null && (
+        <p id="cred-ends-hint" className="muted" style={{ fontSize: 13 }}>
+          <strong>Ends on</strong> is the day this token stops working. Boss Man fills in how long one usually lasts ({c.kind === "claude_oauth_token" ? "a year" : "90 days"}); change it if your token lasts a different time, or clear it if it never expires. A week before, you get one card saying how to replace it, and it closes by itself once you paste a new one. A token saved with no date gets no reminder.
         </p>
       )}
       {act.view}

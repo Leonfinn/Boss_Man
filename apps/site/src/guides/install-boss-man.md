@@ -4,10 +4,10 @@ description: Take a 64-bit machine with Docker to the Boss Man web page, from re
 group: Start here
 order: 2
 lead: This guide takes you from a 64-bit machine with Docker to the Boss Man web page in your browser. The main way installs ready-made images. Building from source is the second option, further down.
-time: {{install-time}}You need a 64-bit machine with Docker and Compose, and a web browser on the same network.
+time: {{install-time}}About 5 minutes of your own time once Docker is installed. The first page can take a few minutes to answer, which is normal. You need a 64-bit Linux machine and a web browser on the same network.
 ---
 
-{{install-test}} The full references are in the repository: [`docs/35-install-from-images.md`](@repo/blob/main/docs/35-install-from-images.md) for the image install, and [`docs/00-first-time-install.md`](@repo/blob/main/docs/00-first-time-install.md) for building from source. Memory limits and other tuning are in [`docs/29-tune-and-troubleshoot.md`](@repo/blob/main/docs/29-tune-and-troubleshoot.md). On Proxmox, use a VM, not an LXC container: see [`docs/32-proxmox.md`](@repo/blob/main/docs/32-proxmox.md).
+{{install-test}} A person has also installed it this way on plain x86 Linux (27 November 2026). On arm64 only the automatic test has run it so far: a person's install there is not yet confirmed.
 
 Still deciding? [What can go wrong with AI agent teams](/what-can-go-wrong) matches published failure stories, such as runaway bills and deleted databases, to what Boss Man does about each, and says where it does nothing yet.
 
@@ -25,7 +25,7 @@ Plan on 16 GB of memory for one company with Boss Man's default settings. 8 GB c
 | Disk | 100 GB free, on an SSD | 250 GB or more, on an SSD or NVMe drive |
 | CPU | 4 cores, 64-bit (x86-64, or arm64 for the image install) | 8 cores or more |
 
-**How memory is shared.** Each company gets one runner, the container its agents work in. Boss Man gives each runner 2 GB, plus 1 GB for each agent that may run at once, plus 3 GB for each check. With the defaults (6 agents and 1 check) that is 11 GB. Boss Man always leaves 2 GB of the machine for its server and database, so on a smaller machine the runner gets less. If the runner gets under 4 GB, Boss Man warns you to run fewer agents. You set both numbers in **Settings → Server and runner → Limits and checks**, under **Agents at once** and **Checks at once**, and the **Checks** section there shows what the runner gets and why.
+**How memory is shared.** Each company gets one [runner](/guides/the-runner), the container its agents work in. Boss Man gives each runner 2 GB, plus 1 GB for each agent that may run at once, plus 3 GB for each [check](/guides/checks-and-check-workers). With the defaults (6 agents and 1 check) that is 11 GB. Boss Man always leaves 2 GB of the machine for its server and database, so on a smaller machine the runner gets less. If the runner gets under 4 GB, Boss Man warns you to run fewer agents. You set both numbers in **Settings → Server and runner → Limits and checks**, under **Agents at once** and **Checks at once**, and the **Checks** section there shows what the runner gets and why.
 
 **More than one company.** Each runner is sized from the whole machine, but a runner with no work uses almost no memory. Add memory for the companies that will be busy at the same time.
 
@@ -35,40 +35,106 @@ Plan on 16 GB of memory for one company with Boss Man's default settings. 8 GB c
 
 ## Install from ready-made images
 
-This install only needs Docker with the Compose plugin. Nothing is built on your machine, and you need no `git`, `openssl`, `sudo` or source code. The images are built and signed by the Boss Man project, and Docker pulls them by their exact digest.
+This install only needs Docker with the Compose plugin. Nothing is built on your machine, and once Docker is installed you need no `git`, `openssl`, `sudo` or source code. The images are built and signed by the Boss Man project, and Docker pulls them by their exact digest.
 
-The image install has not yet been run from start to finish on a real machine for this guide, so treat the exact command output as unverified. The *Install test* workflow runs the full install on an x86 and an arm64 machine after each release: if it is green for the release you install, the steps have worked there.
+Every step below is a command to copy and paste, or a page to open. You type nothing else into the machine.
 
 ### What you need
 
-- a 64-bit machine (x86-64 or arm64) with at least 4 GB of memory, and Docker Engine with Docker Compose v2 (check with `docker compose version`). For agents to run, size it as in [What machine do I need](#what-machine-do-i-need).
-- internet access to the image registry, and to Anthropic if you use Claude Code
+- a 64-bit machine (x86-64 or arm64) with at least 4 GB of memory, running Linux. For agents to run, size it as in [What machine do I need](#what-machine-do-i-need). Step 2 installs Docker on it.
+- internet access from that machine
+- a Claude account: a Pro or Max plan, or an API key from Anthropic. The first start needs it, because the CEO is a Claude Code agent. You can add other AI providers later, under **Settings → Secrets** (see [Agents and models](/guides/agents-and-models)). You pay for this account. Boss Man itself is free. To choose between a plan and a key, see [Connect a Claude account](/guides/connect-a-claude-account).
 - only if your agents will work on code: a GitHub or Gitea account, for the repositories they work in. A team that works on documents and research does not need one.
-- an AI account: a Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic. A Claude Pro or Max plan is the easiest start, because the CEO is a Claude Code agent unless you change it. You pay for this account. Boss Man itself is free.
-- a computer with a web browser
+- a computer with a web browser on the same network
 
 ### Which platforms work
 
 | | Platform |
 |---|---|
-| Supported | 64-bit Linux (a VM or bare metal) with Docker Engine, kernel 5.19 or newer. Kernel 6.12 or newer gives the full file fence. |
+| Supported | 64-bit Linux (a VM or bare metal) with Docker Engine, kernel 5.19 or newer. Kernel 6.12 or newer gives the full agent fence. |
 | Preview | Docker Desktop 4.60 or newer on macOS and Windows. Not yet proven on a real machine. Docker Desktop's enhanced container isolation must be off, or the Boss Man images allowed. |
 | Not yet | Podman, rootless Docker, Docker Desktop before 4.60, Proxmox LXC containers (use a full virtual machine), and 32-bit ARM (use a 64-bit OS). |
 
-Boss Man needs the Linux kernel for two safety features: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. On a platform outside the first row, Boss Man refuses to run agents unless both are proven on that machine, or you choose otherwise in **Settings → Server and runner**. Settings shows whether each one is working: the network guard under **Settings → Server and runner → This server**, and the agent fence under **Settings → Permissions → Agent fence**.
+Boss Man needs the Linux kernel for two safety features: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. On a platform outside the first row, Boss Man refuses to run agents unless both are proven on that machine, or you choose otherwise in **Settings → Server and runner**. **Settings → Permissions → Agent fence** shows whether each one is working. What each one blocks, platform by platform, is in [What keeps agents fenced in](/guides/what-keeps-agents-fenced-in).
 
-### 1. Get the files
+### 1. Open a terminal on the machine
 
-Open the [Boss Man releases page](@repo/releases) and pick a version. The newest *Pre-release* is the beta. Download these two files into an empty folder:
+A terminal is a window where you paste a command and press Enter. Every command in this guide runs in a terminal on the machine that will run Boss Man. To paste, right-click or press Ctrl+Shift+V.
 
-- `docker-compose.images.yml`
-- `images.env`
+- **TrueNAS SCALE.** In the TrueNAS web page, open **System → Shell**.
+- **Proxmox.** Select the virtual machine in the Proxmox web page and open **Console**, or connect from your laptop as below.
+- **A machine with a screen.** Open its Terminal app.
+- **From your laptop.** Open Terminal (macOS) or PowerShell (Windows), and connect with the user name and address you gave the machine when you set it up, as below.
 
-Use 0.1.0-beta.3 or newer. The older 0.1.0-beta.1 has no `images.env`, because its images were not published.
+```sh Run on your laptop
+ssh <your user name>@<host-ip>
+```
+
+For example, `ssh alex@192.168.1.20`. The first time, type `yes` to trust the machine, then type its password. The terminal now runs commands on the machine.
+
+### 2. Install Docker
+
+Skip this step on TrueNAS SCALE 24.10 or newer: Docker is already there. First check whether Docker is already installed:
+
+```sh Run on the machine
+docker compose version
+```
+
+If it prints `Docker Compose version` and a number, go to step 3. If it says `command not found`, install Docker with Docker's own install script. These lines are for Ubuntu and Debian, the usual Linux for a server or a Proxmox virtual machine:
+
+```sh Run on the machine
+sudo apt-get update && sudo apt-get install -y curl
+curl -fsSL https://get.docker.com -o get-docker.sh
+sudo sh get-docker.sh
+sudo usermod -aG docker $USER
+```
+
+The last line lets you run Docker without `sudo`. It takes effect when you next log in, so type `exit`, then open the terminal again as in step 1. Docker describes the same steps on its [Ubuntu](https://docs.docker.com/engine/install/ubuntu/) and [Debian](https://docs.docker.com/engine/install/debian/) pages.
+
+:::worked
+`docker compose version` prints `Docker Compose version` and a number.
+:::
+
+### 3. Get the files
+
+Make a folder called `boss-man` in your home folder, and go into it:
+
+```sh Run on the machine
+mkdir -p ~/boss-man && cd ~/boss-man
+```
+
+On TrueNAS, make the folder on a dataset instead. This lists your storage pools:
+
+```sh Run on TrueNAS
+cd /mnt && ls
+```
+
+Then make the folder in one of them. Put the pool's name where it says `<your pool>`:
+
+```sh Run on TrueNAS
+mkdir -p <your pool>/boss-man && cd <your pool>/boss-man
+```
+
+Then find the newest release and download its two files:
+
+```sh Run in the boss-man folder
+V=$(curl -fsS https://api.github.com/repos/Leonfinn/Boss_Man/releases | grep -m1 '"tag_name"' | cut -d '"' -f 4) && echo $V
+curl -fsSLO https://github.com/Leonfinn/Boss_Man/releases/download/$V/docker-compose.images.yml
+curl -fsSLO https://github.com/Leonfinn/Boss_Man/releases/download/$V/images.env
+```
+
+The first line prints the version it found, such as `v0.1.0-beta.3`. The same list is on the [releases page](@repo/releases).
 
 `images.env` holds the registry and the exact digest of every image. Do not edit the digests.
 
-Optional: check the signatures with [cosign](https://docs.sigstore.dev/cosign/installation/). Download `images.env.sigstore.json` and `docker-compose.images.yml.sigstore.json` from the same release into the same folder, then run these two commands there, one for each file:
+Optional: check the signatures with [cosign](https://docs.sigstore.dev/cosign/installation/). Download the two signature files of the same release into the same folder:
+
+```sh Run in the folder with the files
+curl -fsSLO https://github.com/Leonfinn/Boss_Man/releases/download/$V/images.env.sigstore.json
+curl -fsSLO https://github.com/Leonfinn/Boss_Man/releases/download/$V/docker-compose.images.yml.sigstore.json
+```
+
+Then run these two commands there, one for each file:
 
 ```sh Run in the folder with the files (checks images.env)
 cosign verify-blob --bundle images.env.sigstore.json --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity https://github.com/Leonfinn/Boss_Man/.github/workflows/release.yml@refs/heads/main images.env
@@ -84,7 +150,7 @@ Each prints `Verified OK` when the file is the one the release signed.
 `ls` in the folder shows `docker-compose.images.yml` and `images.env`.
 :::
 
-### 2. Pick a registry
+### 4. Pick a registry (you can skip this)
 
 The images are the same in every registry. This setting only decides where Docker downloads them from.
 
@@ -95,9 +161,9 @@ Docker Hub limits anonymous downloads per IP address. If a pull fails with `toom
 
 The database image, `pgvector/pgvector`, always comes from Docker Hub, so that limit can apply to it even when you use `ghcr.io`. To take it from somewhere else, set `BOSSMAN_DB_IMAGE` in `images.env`.
 
-### 3. Make the keys
+### 5. Make the keys
 
-Run this and every later command in the folder with the two files.
+Run this and every later command in the folder with the two files. If you opened a new terminal, go back into it first with `cd ~/boss-man` (or your TrueNAS folder).
 
 ```sh Run in the folder with the files
 docker compose --env-file images.env -f docker-compose.images.yml run --rm setup
@@ -107,37 +173,60 @@ This writes the master key into a Docker volume called `config`, and the databas
 
 **Back up both volumes**, and keep the copies off this machine. Without the master key, Boss Man cannot read your stored secrets again. Without the database password, the server cannot reach its database.
 
-### 4. Choose who can reach it
+### 6. Let other computers reach it
 
-By default Boss Man listens only on the machine itself. To open it from another computer on your home network, add these two lines to `images.env`:
+If Boss Man is on a server or NAS, do this step. By default Boss Man listens only on the machine itself, so a browser on your laptop could not open it. This line adds two settings to the end of `images.env`, with no text editor:
 
-```sh Add to images.env
-BOSSMAN_BIND=0.0.0.0
-BOSSMAN_INSECURE_COOKIES=1
+```sh Run in the folder with the files
+printf '\nBOSSMAN_BIND=0.0.0.0\nBOSSMAN_INSECURE_COOKIES=1\n' >> images.env
 ```
 
 - `BOSSMAN_BIND=0.0.0.0` shows the web page on every address of the machine
 - `BOSSMAN_INSECURE_COOKIES=1` lets you log in over plain `http://` (remove it once you use HTTPS)
 
-Keep the port off the internet. Skip this step if you only open Boss Man in a browser on the same machine.
+Keep the port off the internet. Skip this step only if you will open Boss Man in a browser on the same machine.
 
-### 5. Start Boss Man
+:::worked
+`tail -2 images.env` prints the two lines.
+:::
+
+### 7. Start Boss Man
 
 ```sh Run in the folder with the files
 docker compose --env-file images.env -f docker-compose.images.yml up -d
 ```
 
-This starts Boss Man. Compose starts only the database, a small proxy and the updater; the updater then downloads the server, launcher, runner and network-guard images by their digests and makes the server and the launcher itself, so the first start takes a few minutes longer than later ones.
+Compose starts the database (`db`), a small `proxy` and the `updater`. The updater then downloads the server, launcher, runner and network-guard images and makes the server and the launcher itself. On the first start this takes a few minutes, which is normal.
 
 :::worked
-`docker compose --env-file images.env -f docker-compose.images.yml ps` shows `db`, `server` and `launcher` running, and `http://<this machine>:3100` opens a Boss Man page. (Expected from the compose file; not yet seen on a real install.)
+These commands show it running. The first lists the install's containers:
 
-If `ps` shows the server restarting, run `docker compose --env-file images.env -f docker-compose.images.yml logs server` to see why, and check the list under "If something goes wrong" below.
+```sh Run in the folder with the files
+docker ps --filter label=com.bossman.install=boss-man --format '{{.Names}}  {{.Status}}'
+```
+
+Straight away it shows `boss-man-db-1`, `boss-man-proxy-1` and `updater`. Within a few minutes `server-blue` and `launcher` join them. Each status starts with `Up`. Then this prints a short line of JSON that starts `{"ok":true`:
+
+```sh Run in the folder with the files
+curl -sS http://127.0.0.1:3100/api/health
+```
+
+If `server-blue` or `launcher` has not appeared after 10 minutes, the updater's log says what it is waiting for:
+
+```sh Run in the folder with the files
+docker compose --env-file images.env -f docker-compose.images.yml logs --tail 30 updater
+```
 :::
 
-### 6. Make the owner account
+### 8. Make the owner account
 
-Open `http://<this machine>:3100` in your browser, for example `http://192.168.1.20:3100`. Type a username and a password of at least 12 characters, and choose **Create owner account**.
+Find the machine's address on your network:
+
+```sh Run on the machine
+hostname -I
+```
+
+It prints one or more addresses. Use the first one, usually starting `192.168.` or `10.`; ignore any starting `172.`, which belong to Docker. Open `http://` and that address followed by `:3100` in your browser, for example `http://192.168.1.20:3100`. Type a username and a password of at least 12 characters, and choose **Create owner account**.
 
 There is only one owner account, and it controls every company on the server. The setup wizard opens next. Carry on with [Your first company and task](/guides/first-company-and-ticket).
 
@@ -147,14 +236,14 @@ The runner image does not contain Claude Code. The first time a runner starts, B
 
 ### Per host
 
-- **Plain Linux.** Install Docker Engine from Docker's own instructions, then follow steps 1 to 6. Check the kernel with `uname -r` (5.19 or newer).
-- **Proxmox.** Use a virtual machine, not an LXC container. Give it at least 4 GB of memory and a 64-bit Linux with kernel 5.19 or newer, install Docker Engine inside it, and follow the steps inside the VM. A Proxmox snapshot of the VM covers the key volumes, because they live on the VM's disk. Not yet run on a real Proxmox host.
-- **TrueNAS SCALE.** Use the machine's shell, put the two files in a folder on a dataset, and follow the steps. First check that `docker compose version` works, because TrueNAS versions differ in how they run Docker. Not yet run on a real TrueNAS machine for this install. For snapshots and backups, see [`docs/06-install-truenas.md`](@repo/blob/main/docs/06-install-truenas.md).
-- **Docker Desktop (preview).** Follow the steps in a terminal. Not tried yet.
+- **Plain Linux (Ubuntu or Debian).** Follow steps 1 to 8. Check the kernel with `uname -r` (5.19 or newer). Confirmed on plain x86 Linux, 27 November 2026; arm64 not yet confirmed by a person.
+- **Proxmox.** Use a virtual machine, not an LXC container. Give it at least 4 GB of memory and install Ubuntu Server or Debian in it, then follow steps 1 to 8 inside the VM. A Proxmox snapshot of the VM covers the key volumes, because they live on the VM's disk. Not yet confirmed on a real Proxmox host.
+- **TrueNAS SCALE 24.10 or newer.** Docker is already installed: skip step 2, but run `docker compose version` to check it works. Use **System → Shell**, which is a root shell, and make the folder on a dataset (step 3). Not yet confirmed on a real TrueNAS machine for this install.
+- **Docker Desktop (preview).** Install [Docker Desktop](https://docs.docker.com/desktop/) in place of step 2, then follow the other steps in a terminal. `hostname -I` does not work on macOS: open `http://localhost:3100` on the same computer. Not tried yet.
 
 ### Start again from nothing
 
-This deletes everything this install made, including your company data, your keys and the database. Back up first if you want to keep anything. Do this only on a machine that runs just this install: step 2 removes every runner and network guard on the machine, not only this install's. `boss-man` below is the project name unless you set another with `-p` or `COMPOSE_PROJECT_NAME`; use your own name in its place. Run each command in the folder with `images.env`. A command that finds nothing to remove prints nothing, and that is fine.
+This deletes everything this install made, including your company data, your keys and the database. Back up first if you want to keep anything. Every step finds this install's own containers and volumes by its install label, so another install on the same machine is left alone. `boss-man` below is the project name unless you set another with `-p` or `COMPOSE_PROJECT_NAME`; use your own name in its place. Run each command in the folder with `images.env`. A command that finds nothing to remove prints nothing, and that is fine.
 
 The order matters: the updater and launcher started some containers that Compose does not know, and they hold your volumes, so they go first.
 
@@ -164,15 +253,27 @@ The order matters: the updater and launcher started some containers that Compose
 docker ps -aq --filter label=com.bossman.install=boss-man | xargs -r docker rm -f
 ```
 
-2. Remove the runners, then the network guards:
+2. Remove this install's runners, then its network guards, found by the install label:
 
 ```sh Run in the folder with images.env
-docker ps -aq --filter label=boss-man.launcher=1 | xargs -r docker rm -f
+docker ps -aq --filter label=com.bossman.install=boss-man --filter label=boss-man.launcher=1 | xargs -r docker rm -f
 ```
 
 ```sh Run in the folder with images.env
-docker ps -aq --filter label=boss-man.netguard=1 | xargs -r docker rm -f
+docker ps -aq --filter label=com.bossman.install=boss-man --filter label=boss-man.netguard=1 | xargs -r docker rm -f
 ```
+
+A runner or guard made before the install label existed (an older release) has no label, so step 1 does not catch it, and Docker has no filter for "no label". Only if you first installed from an older release that had no label, remove those unlabelled ones by hand: this lists them, then you remove the ones that belong to this install (a second install's older containers carry no label either, so leave those). The listing prints each container's id and install label; the removal takes only the ids you pass:
+
+```sh Run in the folder with images.env
+docker ps -aq --filter label=boss-man.launcher=1 | xargs -r docker inspect -f '{{.Id}} {{index .Config.Labels "com.bossman.install"}}'
+```
+
+```sh Run in the folder with images.env
+docker ps -aq --filter label=boss-man.netguard=1 | xargs -r docker inspect -f '{{.Id}} {{index .Config.Labels "com.bossman.install"}}'
+```
+
+For each id whose install label is empty, run `docker rm -f <id>`.
 
 3. Remove what Compose knows, with its volumes:
 
@@ -212,18 +313,26 @@ Not yet confirmed on a real host as of 2026-11-27; the release install test runs
 
 ### Updating to a new release
 
-Nothing updates by itself. Take a release from Boss Man's own update screen: the updater checks the signed release, downloads every image of it by digest, backs up the database, switches the server over, watches it for 15 minutes (going back by itself if it fails), and then moves the rest of the release. Your data and keys stay, because they are in volumes.
+Nothing updates by itself. Take a release from Boss Man's own update screen: the updater checks the signed release, downloads every image of it by digest, backs up the database, switches the server over, watches it for 15 minutes (going back by itself if it fails), and then moves the rest of the release. Your data and keys stay, because they are in volumes. The steps on the update screen are in [How updates work](/guides/how-updates-work#on-an-image-install).
 
 You do not run `docker compose pull` or `up -d` for a release any more. Do not run `setup` again: it is only for the first install. The **Build and update runners** button in Settings builds images from source, so it does not apply to this install.
 
 ### If something goes wrong
 
-- **`required variable BOSSMAN_REGISTRY is missing`.** You left out `--env-file images.env`.
-- **The server cannot read `master.key`, or the database says its password file is missing.** Run step 3 first.
-- **A pull is refused or "denied".** You may have hit Docker Hub's limit (step 2). Run `docker login` for that registry.
-- **The login page reloads.** `images.env` is missing `BOSSMAN_INSECURE_COOKIES=1` (step 4). Add it and run `docker compose --env-file images.env -f docker-compose.images.yml up -d`.
+- **`sudo: command not found` on Debian.** Your user has no `sudo`. Type `su -` and the root password, then run step 2's lines without `sudo` in front.
+- **`permission denied` on `docker.sock`.** Your login does not have Docker rights yet. Type `exit`, open the terminal again (step 1), and run the command again.
+- **`curl: (22)` while getting the files, or the first line of step 3 prints no version.** GitHub did not answer the version question, often because it limits how often one address can ask. Wait a few minutes and run the three lines of step 3 again, in the `boss-man` folder.
+- **`no configuration file provided` or `required variable BOSSMAN_REGISTRY is missing`.** You are not in the folder with the two files, or a part of the command is missing. Run `cd ~/boss-man`, then copy the whole command again.
+- **The server cannot read `master.key`, or the database says its password file is missing.** Run step 5 first.
+- **A pull is refused or "denied".** You may have hit Docker Hub's limit (step 4). Run `docker login` for that registry.
+- **The page does not open from another computer.** Check you used the machine's address from `hostname -I` (step 8), and that `images.env` has the two lines from step 6 (`tail -2 images.env`). If they are missing, run step 6, then step 7 again. If the page still does not open, run the `curl` line from step 7 on the machine: if it answers there, a firewall on the machine is blocking port 3100.
+- **The login page reloads.** `images.env` is missing `BOSSMAN_INSECURE_COOKIES=1` (step 6). Run step 6, then `docker compose --env-file images.env -f docker-compose.images.yml up -d`.
 
 Do not forward the web port on your router. For access from outside your home, use Tailscale (see [Add-ons](/guides/add-ons)).
+
+:::note More detail
+The full references are in the repository: [`docs/35-install-from-images.md`](@repo/blob/main/docs/35-install-from-images.md) for the image install, and [`docs/00-first-time-install.md`](@repo/blob/main/docs/00-first-time-install.md) for building from source. Memory limits and other tuning are in [What machine do I need](#what-machine-do-i-need) above, and in more depth in [`docs/29-tune-and-troubleshoot.md`](@repo/blob/main/docs/29-tune-and-troubleshoot.md). On Proxmox, see [`docs/32-proxmox.md`](@repo/blob/main/docs/32-proxmox.md); on TrueNAS, snapshots are in [`docs/06-install-truenas.md`](@repo/blob/main/docs/06-install-truenas.md). For updates and backups, see [Updating and backups](/guides/updates-and-backups).
+:::
 
 ## Build from source
 
@@ -234,10 +343,10 @@ The second option: build every image on your own machine from the code. Use it i
 - a 64-bit Linux machine with Docker Engine and Docker Compose v2 (check with `docker compose version`)
 - `git`, `openssl` and `curl` on that machine
 - only if your agents will work on code: a GitHub or Gitea account, for the repositories they work in. A team that works on documents and research does not need one.
-- an AI account: a Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic. A Claude Pro or Max plan is the easiest start, because the CEO is a Claude Code agent unless you change it. You pay for this account. Boss Man itself is free.
+- an AI account: a Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic. A Claude Pro or Max plan is the easiest start, because the CEO is a Claude Code agent unless you change it. You pay for this account. Boss Man itself is free. To choose between a Claude plan and a key, see [Connect a Claude account](/guides/connect-a-claude-account).
 - a computer with a web browser on the same network
 
-Boss Man needs Linux because two safety features use the Linux kernel: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. Settings shows whether each one is working on your machine: the network guard under **Settings → Server and runner → This server**, and the agent fence under **Settings → Permissions → Agent fence**.
+Boss Man needs Linux because two safety features use the Linux kernel: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. **Settings → Permissions → Agent fence** shows whether each one is working on your machine. See [What keeps agents fenced in](/guides/what-keeps-agents-fenced-in).
 
 Mac and Windows: not supported yet for this install, but we're testing Docker Desktop. On a Mac with Apple silicon, the agent fence already works under Docker Desktop. The network guard isn't proven there yet, and Windows hasn't been tested. For now, use a Linux machine.
 

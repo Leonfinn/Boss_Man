@@ -133,7 +133,7 @@ export function releaseWatchService(db: Db, deps: ReleaseWatchDeps) {
     try {
       key = readKey(updaterKeyFile).trim();
     } catch {
-      throw new InstallError("This server cannot read the updater's key, so it cannot ask it to install. Install the release by hand (see the updating guide).", 409);
+      throw new InstallError("This server cannot read the updater's key, so it cannot ask it to install. Install the release by hand (see the guide \"Install a release by hand (older image installs)\" in the Boss Man guides).", 409);
     }
     let res: Response;
     try {
@@ -269,7 +269,7 @@ export function releaseWatchService(db: Db, deps: ReleaseWatchDeps) {
   /** BOS-2713: the Install button. Tells the updater to move to the release on offer; the updater checks the signature and does the work. */
   async function install(version: unknown): Promise<ReleaseWatchView> {
     if (!active) throw new InstallError("This install does not take releases from the published images.", 409);
-    if (!linked) throw new InstallError("This server was made before the Install button existed, so it cannot reach the updater. Install this release by hand (see the updating guide); the server made by that update will have the button.", 409);
+    if (!linked) throw new InstallError("This server was made before the Install button existed, so it cannot reach the updater. Install this release by hand (see the guide \"Install a release by hand (older image installs)\" in the Boss Man guides); the server made by that update will have the button.", 409);
     const s = await load();
     const rel = s.latest && compareVersions(s.latest.version, current) > 0 ? s.latest : null;
     if (!rel || rel.version !== version) throw new InstallError("That release is not the one on offer any more. Reload the page.", 409);

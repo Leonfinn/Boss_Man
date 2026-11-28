@@ -19,7 +19,7 @@ import { activity, agentSkills, agents, checkJobs, companies, costEvents, decisi
 import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
 import { record } from "./activity.js";
-import { CHECK_REPORTED_REASON, reportCheckTicket } from "./after-merge-check-tickets.js";
+import { CHECK_REPORTED_REASON, reportCheckTicket, reportFoldedChecks } from "./after-merge-check-tickets.js";
 import { systemMoveTicket } from "./ticket-transition.js";
 import { blockedHolds, openBlockers, ticketBlockerFinished } from "./ticket-links.js";
 import { agentWipHold, oldestMovableInProgress, WIP_REFUSED_REASON } from "./agent-wip.js";
@@ -2489,6 +2489,8 @@ export function schedulerService(
       // so the parent's "unblocked" note already reads the recorded verdict.
       const reported = await reportCheckTicket(db, ticketId, now());
       if (reported) await this.notify(reported.agentId, { ticketId: reported.ticketId, reason: CHECK_REPORTED_REASON, note: reported.note, causedByRunId });
+      // BOS-2855: the builds whose criteria were folded into this check get their own criterion's result.
+      for (const f of await reportFoldedChecks(db, ticketId, now())) await this.notify(f.agentId, { ticketId: f.ticketId, reason: CHECK_REPORTED_REASON, note: f.note, causedByRunId });
       // R52 (BOS-1911): a ticket asked for in chat is reported back in that chat: one chat wake, whose run (or Boss Man's own line) tells the owner.
       const owed = await dueChatReport(db, ticketId, now(), causedByRunId);
       if (owed) await this.notify(owed.agentId, { reason: CHAT_REASON, priority: 4, causedByRunId });

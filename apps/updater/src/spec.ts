@@ -38,7 +38,7 @@ export type ColourParams = { colour: Colour; image: string; version: string; dig
  * the key folder, read-only. Returns the server's mount of that folder (the install's own volume for it) or null when the install
  * does not define one, in which case the colour gets no link and says so on the Updates panel.
  */
-function updaterLink(cfg: SwapReady): { mount: { Type: "volume"; Source: string; Target: string; ReadOnly: true }; env: string[] } | null {
+export function updaterLink(cfg: SwapReady): { mount: { Type: "volume"; Source: string; Target: string; ReadOnly: true }; env: string[] } | null {
   const dir = cfg.keyFile.replace(/\/[^/]*$/, "");
   const m = cfg.swap.selfMounts.find((x) => x.target === dir);
   if (!m) return null;

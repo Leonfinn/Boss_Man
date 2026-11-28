@@ -2,7 +2,7 @@
 // own short steps, and saving one also makes the funding source and points the CEO at it; "The runner" is one
 // status line. The full forms stay in Settings.
 import { useRef, useState, type FormEvent } from "react";
-import { CONNECT_OPTIONS, connectSaves, connectSetsUpElsewhere, connectValueHint, connectValueProblem, providerLabel, type ConnectOption } from "@boss-man/shared";
+import { CONNECT_OPTIONS, connectSaves, connectSetsUpElsewhere, connectValueHint, connectValueProblem, defaultEndsOn, providerLabel, type ConnectOption } from "@boss-man/shared";
 import { api, type Company } from "../api";
 import { usePoll } from "../hooks";
 import { LoadError } from "../components/LoadError";
@@ -49,7 +49,9 @@ export async function runConnect(o: ConnectOption & { secret: NonNullable<Connec
       made.replaced = true;
     }
   } else {
-    made.secretId = (await api<{ secret: { id: string } }>("/api/secrets", { method: "POST", body: { name: `${company.name} ${o.name}`, kind: o.secret.kind, value: value.trim() } })).secret.id;
+    // A token that expires on a date (the Claude setup-token, about a year) is filled in, so its card can warn in time (BOS-2825).
+    const endsOn = defaultEndsOn(o.secret.kind);
+    made.secretId = (await api<{ secret: { id: string } }>("/api/secrets", { method: "POST", body: { name: `${company.name} ${o.name}`, kind: o.secret.kind, value: value.trim(), ...(endsOn ? { endsOn } : {}) } })).secret.id;
   }
   if (!made.granted) {
     await api(`/api/secrets/${made.secretId}/grants`, { method: "POST", body: grantBody });

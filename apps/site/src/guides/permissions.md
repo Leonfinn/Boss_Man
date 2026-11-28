@@ -59,7 +59,7 @@ You can also turn on a **Second opinion**. It can only make the advice stricter,
 
 ## Agent fence
 
-The **Agent fence** keeps agents away from the runner's key and the company's git login. Set it under **Settings > Permissions**.
+The **Agent fence** keeps agents away from the runner's key and the company's git login. Set it under **Settings > Permissions**. For what it and the network guard let agents reach, and which machines give the full fence, see [What keeps agents fenced in](/guides/what-keeps-agents-fenced-in).
 
 ## Standing rules
 

@@ -284,7 +284,8 @@ export const OWNER_FIELDS = {
     "Company name", "What it's for", "Project name", "The CEO", "Title", "Description", "Give it to",
     // The connect step's value box (BOS-2815); each key's box takes the provider's name, so it is not one fixed label.
     "The setup token",
-    "Add", "Value", "Name", "Variable name",
+    // The credentials, funding and project panels Setup shares with Secrets and Access (BOS-2825).
+    "Add", "Value", "Name", "Variable name", "Ends on",
     "Editing …", "New funding source", "Kind", "Provider", "Monthly grant (USD)", "Cycle starts on",
     "Reviews for this project", "Cost cap per task (USD)", "Monthly spend cap (USD)", "Git repo", "Default branch",
     "When work is approved", "Before merging, Boss Man will", "For high-risk work, also",
@@ -453,8 +454,8 @@ export const OWNER_FIELDS = {
     // A project's monthly spending limit (its Budget tab, BOS-1564).
     "Spending limit per month (USD)", "At the limit",
   ],
-  // "Add" is the kind of credential to add (Claude token, GitHub token, Other…).
-  Secrets: ["Add", "Value", "Name", "Variable name", "Rotate: new value"],
+  // "Add" is the kind of credential to add (Claude token, GitHub token, Other…). "Ends on" is the token's own end date (BOS-2825).
+  Secrets: ["Add", "Value", "Name", "Variable name", "Ends on", "Rotate: new value"],
   Workflow: ["Show each agent"],
 } as const satisfies Partial<Record<OwnerScreen, readonly string[]>>;
 

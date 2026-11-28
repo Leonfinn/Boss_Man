@@ -18,6 +18,7 @@ import { buildCsv, download } from "../csv";
 import { clearDraft, saveDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
 import { MoreAbout } from "../components/MoreAbout";
+import { GuideLink } from "../guide-links";
 
 type AgentRecord = { days: number; finished: number; runs: number; failedRuns: number; passedFirstTime: number; sendBacks: number; medianMergeMs: number | null; costPerFinishedMicros: number | null; recent: Array<{ id: string; ref: string | null; title: string; size: number | null; finishedAt: string; sendBacks: number; costMicros: number }> };
 type Template = { id: string; title: string; role: "manager" | "worker"; modelTier: string; summary: string; /** BOS-2824: "code" or "any", which group of roles the Hire form shows it in. */ worksOn?: "any" | "code"; instructions: string };
@@ -400,6 +401,9 @@ function Hire({ companyId, templates, sources, lists, refresh, onDone }: { compa
         <legend className="section-label" style={{ marginBottom: 8 }}>
           Start from
         </legend>
+        <p style={{ margin: "0 0 8px" }}>
+          <GuideLink slug="hiring-your-first-team">Which agents do you need? Hiring your first team</GuideLink>
+        </p>
         {/* BOS-2824: most work is not software, so the roles that suit any work come first. */}
         {([["any", "For any kind of work"], ["code", "For code"]] as const).map(([group, label]) => {
           const inGroup = templates.filter((t) => (t.worksOn ?? "any") === group);
