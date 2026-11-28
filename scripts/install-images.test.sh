@@ -219,9 +219,14 @@ guide_removal() {
 # Remove the second install by its label, then its compose project and volumes (the same order as the guide, scoped to one install).
 # Defined before the exit trap and before second_up is set, so an early stop in the second install's setup can still clean it up.
 remove_second() {
+  # The updater and the launcher go first, in that order: they make containers (the launcher re-makes a runner's guard when it is
+  # removed), so removing everything at once lets a live launcher bring back a guard after the sweep. Then everything left by label,
+  # then a second sweep for anything made while the first ran.
   {
+    docker rm -f "${P2}-updater" "${P2}-launcher"
     docker ps -aq --filter "label=com.bossman.install=$P2" | xargs -r docker rm -f
-  } >> "$T/removal2.log" 2>&1
+    docker ps -aq --filter "label=com.bossman.install=$P2" | xargs -r docker rm -f
+  } >> "$T/removal2.log" 2>&1 || true
   dc2 down -v --remove-orphans > "$T/down2.log" 2>&1
   {
     docker volume ls -q --filter "label=com.bossman.install=$P2" | xargs -r docker volume rm
