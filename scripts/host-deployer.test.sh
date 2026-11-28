@@ -1210,12 +1210,19 @@ handed() { # live-commit what reason
 # every section that deploys from main.
 hand_cases() {
 nl=$'\n'
+# BOS-2910: Dockerfiles that already name a build frontend are part of what runs
+pushc apps/synA/Dockerfile '# syntax=docker/dockerfile:1.7' 'FROM scratch' 'RUN echo a' >/dev/null
+pushc apps/synB/Dockerfile '# syntax=docker/dockerfile:1.7' 'FROM scratch' >/dev/null
+pushc apps/synC/Dockerfile 'FROM scratch' >/dev/null
 sBase="$(pushc svc-server '#yaml' 'image: srv' 'environment:' '  A: one')"
 # a compose file nothing renders from, an updater Dockerfile and an unloaded overlay: automatic
 live="$sBase"; pushc docker-compose.images.yml "x$RANDOM" >/dev/null; auto "$live" "an unloaded compose file"
 pushc apps/updater/Dockerfile "x$RANDOM" >/dev/null; auto "$live" "a Dockerfile"
 pushc deploy/check-worker/compose.yaml "x$RANDOM" >/dev/null; auto "$live" "an unloaded overlay"
 pushc .npmrc "x$RANDOM" >/dev/null; auto "$live" ".npmrc"
+# BOS-2910: a Dockerfile change that keeps its syntax line (or has none) stays automatic
+pushc apps/synA/Dockerfile '# syntax=docker/dockerfile:1.7' 'FROM scratch' 'RUN echo b' >/dev/null; auto "$live" "a RUN edit that keeps the syntax line"
+pushc apps/synC/Dockerfile 'FROM scratch' 'RUN echo c' >/dev/null; auto "$live" "a Dockerfile with no syntax line"
 # an ordinary server setting (its environment) changes: automatic
 pushc2 svc-server $'#yaml\nimage: srv\nenvironment:\n  A: two' docker-compose.yml >/dev/null; auto "$live" "an ordinary server setting"
 # db or proxy settings change: their own card, so hand, with the reason
@@ -1244,7 +1251,12 @@ hasnt "$D/outbox/available.json" handReason
 pushc deploy/prometheus.toml "x$RANDOM" >/dev/null; handed "$live" deploy/prometheus.toml ""
 pushc deploy/cfg/app.xml "x$RANDOM" >/dev/null; handed "$live" deploy/cfg/app.xml ""
 # a build-only change next to a hand-only one lists only the hand-only file
-pushc apps/updater/Dockerfile "x$RANDOM" >/dev/null; [[ $(hand_of "$live") != *Dockerfile* ]] || fail "a Dockerfile was listed as a hand file"
+pushc apps/updater/Dockerfile "x$RANDOM" >/dev/null; [[ $(hand_of "$live") != *updater/Dockerfile* ]] || fail "a Dockerfile was listed as a hand file"
+# BOS-2910: a change to a "# syntax=" line picks the build frontend, which can read the host's .env: hand
+pushc apps/synA/Dockerfile '# syntax=example.com/evil/frontend:1' 'FROM scratch' 'RUN echo b' >/dev/null; handed "$live" apps/synA/Dockerfile ""
+pushc apps/synB/Dockerfile 'FROM scratch' >/dev/null; handed "$live" apps/synB/Dockerfile ""
+pushc apps/synC/Dockerfile '# SYNTAX = example.com/evil/frontend:1' 'FROM scratch' >/dev/null; handed "$live" apps/synC/Dockerfile ""
+pushc apps/synD/Dockerfile '#syntax=example.com/evil/frontend:1' 'FROM scratch' >/dev/null; handed "$live" apps/synD/Dockerfile ""
 }
 
 # no deploy path starts, stops or recreates the database or the proxy: the server deploy rolls the colours only (DR-020 B)
