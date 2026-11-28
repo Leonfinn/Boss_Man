@@ -14,6 +14,7 @@ import { settingsRedirect } from "./pages/settings-redirect";
 import { wrapUpWords, type WrapTieView } from "@boss-man/shared";
 import { atTime, drainTiming, updateWaitExtras, waitingFor, wrapUpBannerText, type RunnerCheckView, type WorkerCheckView } from "./pages/settings/updates";
 import { inLineOf, MergesStuckBannerFor } from "./components/MergesStuckBanner";
+import { useStartBlock } from "./components/StartBlock";
 import { SearchPalette } from "./components/SearchPalette";
 import { Shortcuts } from "./components/Shortcuts";
 import { PinnedProvider, ShortcutGone } from "./pinned-pages";
@@ -352,6 +353,8 @@ function Signed({ onLogout, username, initialPreferences }: { onLogout: () => vo
   // The Decisions menu badge (BOS-969): what needs the owner now, from the server's one count (the
   // Decisions page heading asks the same function), so the two can't drift. It follows the chosen
   // company and refreshes on the same poll as the queue, and on every answer.
+  // BOS-2814: what keeps agents from starting, read only while Decisions is open (the Dashboard and a task read it themselves).
+  const startBlock = useStartBlock(page === "decisions" ? current?.id : undefined);
   const decisionsTally = usePoll(
     (signal) =>
       current ? api<DecisionTally>(`/api/decisions/tally?companyId=${current.id}`, { signal }).catch(() => null) : Promise.resolve(null),
@@ -503,7 +506,7 @@ function Signed({ onLogout, username, initialPreferences }: { onLogout: () => vo
         ) : page === "setup" ? (
           <Setup companies={list} go={go} onChanged={companies.reload} />
         ) : page === "decisions" ? (
-          <Decisions decisions={(decisions.data ?? []).filter((d) => !current || d.companyId === current.id)} elsewhere={list.filter((c) => c.id !== current?.id).map((c) => ({ id: c.id, name: c.name, count: companyTallies.data?.[c.id]?.open ?? (decisions.data ?? []).filter((d) => d.companyId === c.id && !d.waiting).length })).filter((c) => c.count)} onPickCompany={pick} companies={mine} loaded={decisions.data !== null} loadError={decisions.error !== null} agentsWorking={runs.data?.length ?? 0} advised={(advised.data ?? []).filter((a) => !current || a.companyId === current.id)} withTeam={(teamAlerts.data ?? []).filter((a) => !current || a.companyId === current.id)} closedNotices={(closedNotices.data ?? []).filter((a) => !current || a.companyId === current.id)} onAnswered={() => { decisions.reload(); decisionsTally.reload(); }} tally={decisionsTally.data} banner={(folded: boolean) => <><MergesStuckBannerFor companyId={current?.id} /><PageSuspense fallback={null}><SetupChecklist companyId={current?.id} go={go} folded={folded} /></PageSuspense></>} />
+          <Decisions decisions={(decisions.data ?? []).filter((d) => !current || d.companyId === current.id)} elsewhere={list.filter((c) => c.id !== current?.id).map((c) => ({ id: c.id, name: c.name, count: companyTallies.data?.[c.id]?.open ?? (decisions.data ?? []).filter((d) => d.companyId === c.id && !d.waiting).length })).filter((c) => c.count)} onPickCompany={pick} companies={mine} loaded={decisions.data !== null} loadError={decisions.error !== null} agentsWorking={runs.data?.length ?? 0} advised={(advised.data ?? []).filter((a) => !current || a.companyId === current.id)} withTeam={(teamAlerts.data ?? []).filter((a) => !current || a.companyId === current.id)} closedNotices={(closedNotices.data ?? []).filter((a) => !current || a.companyId === current.id)} onAnswered={() => { decisions.reload(); decisionsTally.reload(); }} tally={decisionsTally.data} startBlock={startBlock} banner={(folded: boolean) => <><MergesStuckBannerFor companyId={current?.id} /><PageSuspense fallback={null}><SetupChecklist companyId={current?.id} go={go} folded={folded} /></PageSuspense></>} />
         ) : (
           <Dashboard company={current} onChanged={companies.reload}decisions={decisions.data === null ? null : decisions.data.filter((d) => !current || d.companyId === current.id)} tally={decisionsTally.data} />
         )}
