@@ -58,6 +58,9 @@ export const OWNER_CONTROLS = {
     // "How this works" links go in a new tab, so they are links, not buttons, and are not listed here), then the
     // credentials, funding and project panels Setup shares with Settings and Projects.
     "Browser only", "One command on a computer", "Save and connect", "Go back to the connect step", "Start the runner",
+    // A plan row's one click that makes its funding source and pays for the CEO (the rest is the plan's name), and
+    // its busy label (BOS-2815).
+    "Pay for the CEO with", "Setting up",
     "Save", "Check with Claude", "Check", "Remove", "Edit", "Delete", "Add funding source", "Cancel", "Re-detect",
   ],
   Decisions: [

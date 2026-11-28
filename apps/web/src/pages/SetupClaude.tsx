@@ -56,6 +56,24 @@ export async function runConnect(o: ConnectOption & { secret: NonNullable<Connec
     : "Saved. It is stored encrypted and is not shown again. This company has no CEO yet, so choose what pays for it on the \"What pays for the CEO\" step.";
 }
 
+/**
+ * Makes a plan the CEO runs on, for a row whose plan is signed in to in its own tool (BOS-2815): a subscription
+ * funding source for that provider, used again if the company already has one, then the CEO's link. No value is
+ * pasted here, so this is the one pick step 7 offers for a plan row instead of the full funding form.
+ */
+export async function runPlan(o: ConnectOption, company: Company, made: Made): Promise<string> {
+  if (!made.sourceId) {
+    const all = await api<Array<{ id: string; kind: string; provider: string }>>("/api/funding-sources");
+    const found = Array.isArray(all) ? all.find((s) => s.kind === o.kind && s.provider === o.provider)?.id : undefined;
+    made.sourceId = found ?? (await api<{ id: string }>("/api/funding-sources", { method: "POST", body: { name: `${company.name} ${providerLabel(o.provider)}`, kind: o.kind, provider: o.provider } })).id;
+  }
+  const ceo = company.agents.find((a) => a.role === "ceo");
+  if (ceo) await api(`/api/agents/${ceo.id}`, { method: "PATCH", body: { fundingSourceId: made.sourceId } });
+  return ceo
+    ? `${o.name} now pays for the CEO. Sign in to it on the computer the runner runs on, as the steps above say.`
+    : "This company has no CEO yet, so there is nothing to point at it. The funding source is ready for when there is.";
+}
+
 /** The steps for making the value on a provider's website, each outside step saying when it was last checked. */
 function KeySteps({ o }: { o: ConnectOption }) {
   const s = o.steps;
@@ -93,22 +111,40 @@ function CommandSteps({ o }: { o: ConnectOption }) {
   );
 }
 
-/** The sign-in steps for a plan set up in its own tool (Codex, Ollama): install first, sign in, then finish in Settings. */
-function SignInSteps({ o, company }: { o: ConnectOption; company: Company }) {
+/** The sign-in steps for a plan set up in its own tool (Codex, Ollama): install first, sign in, then one click to pay for the CEO. */
+function SignInSteps({ o, company, onSaved }: { o: ConnectOption; company: Company; onSaved: (secretId: string, optionId: string) => void }) {
   const s = o.signIn;
+  const act = useAction();
+  const made = useRef<Made>({});
   if (!s) return null;
   return (
     <>
       <ol style={{ margin: 0, paddingLeft: 20, display: "flex", flexDirection: "column", gap: 6 }}>
         <li>Install {s.tool} on the computer the runner runs on: <a href={s.installUrl} target="_blank" rel="noreferrer">{s.tool}'s download page</a>.</li>
         <li>{s.site}.</li>
-        <li>
-          Then add a funding source for it under <a href={`#/settings/${company.id}/funding`}>Settings → Funding</a>, kind Subscription, so Boss Man tracks what its agents spend.
-        </li>
         <li className="muted">
           Site steps {s.checked}, checked against <a href={s.url} target="_blank" rel="noreferrer">{s.tool}'s page</a>. {s.note}
         </li>
       </ol>
+      <button
+        type="button"
+        className="btn primary"
+        style={{ alignSelf: "flex-start" }}
+        disabled={act.busy}
+        onClick={() =>
+          void act.run(async () => {
+            const msg = await runPlan(o, company, made.current);
+            onSaved(made.current.sourceId!, o.id);
+            return msg;
+          })
+        }
+      >
+        {act.busy ? "Setting up…" : `Pay for the CEO with ${o.name}`}
+      </button>
+      <p className="muted" style={{ margin: 0, fontSize: 13 }}>
+        This makes the funding source for {providerLabel(o.provider)} and points the CEO at it, so the "What pays for the CEO" step is done.
+      </p>
+      {act.view}
     </>
   );
 }
@@ -128,7 +164,7 @@ function ConnectDetail({ o, company, onSaved, known }: { o: ConnectOption; compa
     if (connectSetsUpElsewhere(o)) {
       return (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <SignInSteps o={o} company={company} />
+          <SignInSteps o={o} company={company} onSaved={onSaved} />
           <p className="muted" style={{ margin: 0, fontSize: 13 }}>
             <a href={guideUrl(o.guide)} target="_blank" rel="noreferrer">How this works</a>
           </p>
@@ -137,7 +173,7 @@ function ConnectDetail({ o, company, onSaved, known }: { o: ConnectOption; compa
     }
     // No value Boss Man can save for this one: say where it is set instead of a box that would fail.
     const what: Record<string, string> = {
-      other: "Amazon Bedrock, Microsoft Foundry and LLM gateways each use two or three values (such as an address and a token), so they are set under Settings → Secrets, under Other. Agents then run on them from the Agents page.",
+      other: "These need more than one value, so they are set under Settings → Secrets (Add → Other), not pasted here: Amazon Bedrock needs an access key, a secret key and a region; Microsoft Foundry needs an endpoint and a key; an LLM gateway needs its base address, a key and a model. Then add a funding source for it under Settings → Funding, and pick it for the CEO there.",
     };
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>

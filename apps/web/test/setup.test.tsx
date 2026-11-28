@@ -471,12 +471,13 @@ describe("the connect step: one equal list of every way to pay (BOS-2815)", () =
     stub();
     render(<Setup companies={[withCeo]} go={() => {}} onChanged={() => {}} />);
     fireEvent.click(await screen.findByText("Other API provider"));
-    expect(screen.getByText(/Amazon Bedrock, Microsoft Foundry and LLM gateways each use two or three values/)).toBeTruthy();
+    expect(screen.getByText(/These need more than one value, so they are set under Settings → Secrets/)).toBeTruthy();
+    expect(screen.getByText(/Amazon Bedrock needs an access key, a secret key and a region/)).toBeTruthy();
     expect(screen.getByText("Open Settings → Secrets").getAttribute("href")).toBe("#/settings/c1/secrets");
     expect(screen.queryByText("Save and connect")).toBeNull();
   });
 
-  it("a plan signed in to in its own tool says to install it first, with a link, then sign in and set it up in Settings", async () => {
+  it("a plan signed in to in its own tool says to install it first, with a link, then sign in and pay for the CEO with one click", async () => {
     stub();
     render(<Setup companies={[withCeo]} go={() => {}} onChanged={() => {}} />);
     fireEvent.click(await screen.findByText("ChatGPT plan"));
@@ -485,34 +486,42 @@ describe("the connect step: one equal list of every way to pay (BOS-2815)", () =
     expect(items[0]).toContain("Install Codex");
     expect(detail.querySelector("ol li a")!.getAttribute("href")).toBe("https://github.com/openai/codex");
     expect(items[1]).toContain("codex login");
-    expect(detail.textContent).toContain("Settings → Funding");
     expect(detail.textContent).toMatch(/not yet confirmed/);
-    // No value box that would fail: this row is not connected by pasting here.
+    // The plan is paid for with one click on this row, not a value box that would fail, nor the full funding form.
+    expect(screen.getByRole("button", { name: "Pay for the CEO with ChatGPT plan" })).toBeTruthy();
     expect(screen.queryByText("Save and connect")).toBeNull();
     // The Ollama Cloud plan is the same: install first, with a link.
     fireEvent.click(screen.getByText("Ollama Cloud plan"));
     const ollama = screen.getByTestId("setup-connect-row-ollama-plan").querySelector(".connect-detail")!;
     expect(ollama.querySelector("ol li")!.textContent).toContain("Install Ollama");
     expect(ollama.querySelector("ol li a")!.getAttribute("href")).toBe("https://ollama.com/download");
+    expect(screen.getByRole("button", { name: "Pay for the CEO with Ollama Cloud plan" })).toBeTruthy();
   });
 
-  it("a plan row that saves nothing still becomes the CEO's funding source: pick it on step 7 and the line goes", async () => {
+  it("pressing a plan row's one click makes its funding source and points the CEO at it, so step 7 is done", async () => {
     const writes: Array<{ url: string; method: string; body: unknown }> = [];
-    stub({
-      writes,
-      sources: [{ id: "f7", name: "App Co OpenAI", kind: "subscription", provider: "openai", secretId: null }],
-    });
+    stub({ writes });
     render(<Setup companies={[withCeo]} go={() => {}} onChanged={() => {}} />);
-    // Open the ChatGPT plan's steps: install and sign in, then finish in Settings.
     fireEvent.click(await screen.findByText("ChatGPT plan"));
-    await screen.findByText(/Install Codex/);
-    // Step 7: the funding source for it is chosen for the CEO, which is what pays for it.
-    fireEvent.click(screen.getByRole("button", { name: /What pays for the CEO/ }));
-    const pick = (await screen.findByLabelText("The CEO runs on")) as HTMLSelectElement;
-    fireEvent.change(pick, { target: { value: "f7" } });
-    await waitFor(() => expect(writes.some((c) => c.method === "PATCH" && c.url === "/api/agents/a1")).toBe(true));
+    fireEvent.click(await screen.findByRole("button", { name: "Pay for the CEO with ChatGPT plan" }));
+    await screen.findByText(/ChatGPT plan now pays for the CEO/);
+    const mine = writes.filter((c) => c.method !== "GET" && c.url !== "/api/setup-progress");
+    // A subscription source for OpenAI with no value pasted, then the CEO pointed at it.
+    expect(mine.map((c) => `${c.method} ${c.url}`)).toEqual(["POST /api/funding-sources", "PATCH /api/agents/a1"]);
+    expect(mine[0]!.body).toMatchObject({ kind: "subscription", provider: "openai" });
+    expect(mine[1]!.body).toEqual({ fundingSourceId: "f9" });
+  });
+
+  it("pressing a plan row's one click reuses the subscription source the company already holds", async () => {
+    const writes: Array<{ url: string; method: string; body: unknown }> = [];
+    stub({ writes, sources: [{ id: "f9", name: "App Co OpenAI", kind: "subscription", provider: "openai", secretId: null }] });
+    render(<Setup companies={[withCeo]} go={() => {}} onChanged={() => {}} />);
+    fireEvent.click(await screen.findByText("ChatGPT plan"));
+    fireEvent.click(await screen.findByRole("button", { name: "Pay for the CEO with ChatGPT plan" }));
+    await screen.findByText(/ChatGPT plan now pays for the CEO/);
+    expect(writes.filter((c) => c.method === "POST" && c.url === "/api/funding-sources")).toEqual([]);
     const patch = writes.filter((c) => c.method === "PATCH" && c.url === "/api/agents/a1").at(-1)!;
-    expect(patch.body).toEqual({ fundingSourceId: "f7" });
+    expect(patch.body).toEqual({ fundingSourceId: "f9" });
   });
 
   it("step 7 says to go back to the connect step until something there is saved, above the form", async () => {
