@@ -32,6 +32,10 @@ services:
     profiles: ["setup"]
     restart: "no"
     command: ["node", "dist/setup.js"]
+    # Only so the "Setup is done" message can name the real volumes and the image that copies them (BOS-2846).
+    environment:
+      BOSSMAN_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-boss-man}
+      BOSSMAN_DB_IMAGE: ${BOSSMAN_DB_IMAGE:-pgvector/pgvector:0.8.7-pg17-bookworm}
     user: "0:0"
     network_mode: none
     read_only: true
