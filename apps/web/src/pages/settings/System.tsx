@@ -14,7 +14,7 @@ import { SaveButton } from "../../components/SaveButton";
 import { Section, useAction } from "./shared";
 import { GuideLink } from "../../guide-links";
 import { CheckWorkers, type CheckWorkerView } from "./CheckWorkers";
-import { ReleaseNotice } from "./ReleaseNotice";
+import { ReleaseNotice, type ReleaseWatchView } from "./ReleaseNotice";
 import { DEFAULT_POLICY, policyLine, policyValid, SlotSplitFields, type SlotPolicy } from "./SlotSplit";
 import { LiveState, RUNNER_APPROVED_REPLY, RUNNER_QUEUED_REPLY, atTime, historyTag, historyWaitingOn, historyWhat, inAbout, runnerProgress, updateStatus, type RunnerProgress, type DeployWaitView, type HistoryRow, type MaintenanceView, type Report, type SelfDeployView, type UpdateStatus, type WrapUpRun, type WrapUpStatus } from "./updates";
 
@@ -252,6 +252,9 @@ export function TrialLines({ trial, wait, now, queue, cancelled, held, failureHo
 /** What the host deployer last did, and a button to ask for the newest main (docs/09-self-deploy.md). Hidden when self-deploy is off. */
 export function SelfDeploy({ go }: { go: (to: string) => void }) {
   const view = usePoll((signal) => api<SelfDeployView>("/api/self-deploy", { signal }), 10_000, "self-deploy");
+  // BOS-2821: an image install (the updater is present) has no host deployer, so the no-deployer text does not apply; tell
+  // it apart from a build-from-source install by the release watch, which only runs on an image install.
+  const releaseWatch = usePoll((signal) => api<ReleaseWatchView>("/api/release-watch", { signal }), 10_000, "release-watch");
   const wait = usePoll((signal) => api<DeployWaitView>("/api/self-deploy/wait", { signal }), 10_000, "self-deploy-wait");
   const maint = usePoll((signal) => api<MaintenanceView>("/api/maintenance", { signal }), 5_000, "maintenance-updates");
   const report = usePoll((signal) => api<Report>("/api/runner-report", { signal }), 5_000, "runner-report");
@@ -264,7 +267,31 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
   const now = useNow();
   const v = view.data;
   if (v && !v.enabled) {
-    // BOS-1486: with no host deployer there is no Build and update runners button, but a hand-built image still needs the drain.
+    const rw = releaseWatch.data;
+    // BOS-2821 (F27): on an image install the updater delivers releases, so there is no deployer, no scripts/update-runner.sh
+    // and nothing to press here. The release notice above already says what is new; one plain line says whether to act.
+    if (rw?.active === true) {
+      return (
+        <Section id="deploy-h" title="Updates">
+          <ReleaseNotice />
+          <p className="muted" style={{ fontSize: 14 }} data-testid="updates-image-line">
+            You run {rw.current}. New releases appear here; nothing to do now.
+          </p>
+          <p style={{ fontSize: 14 }}>
+            <GuideLink slug="how-updates-work">What happens in an update?</GuideLink>
+          </p>
+        </Section>
+      );
+    }
+    // While the release watch loads, show only the release notice: never flash the host-deployer words on an image install.
+    if (!rw) {
+      return (
+        <Section id="deploy-h" title="Updates">
+          <ReleaseNotice />
+        </Section>
+      );
+    }
+    // BOS-1486: a build-from-source install with no host deployer keeps the hand-built image steps (no updater here).
     return (
       <Section id="deploy-h" title="Updates">
         <ReleaseNotice />
