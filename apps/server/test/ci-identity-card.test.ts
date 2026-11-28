@@ -54,7 +54,7 @@ describe("ensureCiIdentityCard", () => {
       await secrets.grant(other.secret.id, co!.id, "SOME_OTHER_ENV");
       expect(await status()).toBe("open");
 
-      const made = await secrets.create({ name: "Git token for the merge gate (second account)", kind: "generic", value: "made-up-token" } as never);
+      const made = await secrets.create({ name: "Merge gate token (second account)", kind: "generic", value: "made-up-token" } as never);
       await secrets.grant(made.secret.id, co!.id, "GIT_CI_TOKEN");
       // The listener works in the background: wait for the card to answer, with a deadline.
       const deadline = Date.now() + 10_000;
