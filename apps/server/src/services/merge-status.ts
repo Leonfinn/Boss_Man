@@ -3,12 +3,14 @@
 // pull request upkeep, the bossman-ci branch sweep and the merge settings' setters. Each is a review service method moved
 // out whole: it takes the service as `this` (so calls to other methods go through the assembled object, where tests spy
 // on them) and the shared context as `ctx`. review.ts keeps one delegate line per method.
-import { and, eq, inArray, isNotNull, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
+import { branchCommitFor, imagesJobLines as imagesJobLines_ } from "./images-job.js";
+import { PREFLIGHT_KIND, PREFLIGHT_STARTED_KIND } from "./ci-preflight.js";
 import { isGateMergeOf, MAIN_LOG_MAX, mergeMessageTicket, wakeCeoIfLiveUnplaced } from "./missed-merges.js";
 import { mergeFacts, recordedMergeKeys, recordTicketMerge } from "./ticket-merges.js";
 import { MERGE_MISSED_AFTER_MS, parseRepoUrl, renderTemplate, ticketRef, type GitHostKind, type MainLogResult, type MergeLineConflictsResult } from "@boss-man/shared";
 import { agents, checkResults, companies, projects, runners, settings, ticketMerges, tickets } from "../db/schema.js";
-import { CI_BRANCH_PREFIX, GitHostError, type CommitChecks } from "./git-hosts.js";
+import { CI_BRANCH_PREFIX, GitHostError, type CommitChecks, type WorkflowRun } from "./git-hosts.js";
 import { clearMergeCards } from "./decisions.js";
 import { record } from "./activity.js";
 import { mergeLineApproved } from "./merge-line-conflicts.js";
@@ -155,6 +157,31 @@ export async function branchChecksLine(this: ReviewSelf, ctx: ReviewCtx, ticketI
     if (err instanceof GitHostError) {
       return `CI on branch head: not available (${err.message}).`;
     }
+    return null;
+  }
+}
+
+/**
+ * BOS-2907: lines for `tickets read` on GitHub's images job for the ticket (images-job.ts): each architecture's result and
+ * how far install-images.test.sh's real install got. Null when there is nothing to show or anything fails unexpectedly;
+ * the same conditions as the CI line (a branch, not merged, not done, a GitHub project with a token).
+ */
+export async function imagesJobLines(this: ReviewSelf, ctx: ReviewCtx, ticketId: string, companyId?: string): Promise<string[] | null> {
+  try {
+    const { deps, ticketWithRepo, db } = ctx;
+    const { t, repoUrl, gitHost, gitApiBase } = await ticketWithRepo(ticketId, companyId);
+    if (!t.branch || t.mergeCommit || t.systemState === "done" || !deps.gitHosts || gitHost !== "github" || !gitApiBase) return null;
+    const a = repoUrl ? parseRepoUrl(repoUrl) : null;
+    const token = await deps.gitToken?.(t.companyId);
+    if (!a || !token) return null;
+    const cfg = { kind: "github" as const, apiBase: gitApiBase, owner: a.owner, repo: a.repo };
+    const kinds = { started: PREFLIGHT_STARTED_KIND, result: PREFLIGHT_KIND };
+    const commit = async (run: WorkflowRun) => {
+      const rows = await db.select({ kind: checkResults.kind, sha: checkResults.sha, at: checkResults.at }).from(checkResults).where(and(eq(checkResults.ticketId, t.id), inArray(checkResults.kind, [kinds.started, kinds.result]))).orderBy(desc(checkResults.at)).limit(40);
+      return branchCommitFor(run.createdAt, rows, kinds);
+    };
+    return await imagesJobLines_(deps.gitHosts, cfg, token, t.id, commit);
+  } catch {
     return null;
   }
 }

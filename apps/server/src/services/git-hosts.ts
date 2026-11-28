@@ -305,7 +305,7 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
      * Whether a token can reach the repo and push to it (R58, R56): one read of the repo, whose
      * answer carries the token's permissions on both hosts. Gitea needs the write:repository scope.
      */
-    async checkAccess(cfg: GitHostConfig, token: string): Promise<{ ok: boolean; canPush: boolean; canReadChecks?: boolean; message: string }> {
+    async checkAccess(cfg: GitHostConfig, token: string): Promise<{ ok: boolean; canPush: boolean; canReadChecks?: boolean; defaultBranch?: string; message: string }> {
       const res = await call(cfg, token, "GET", "");
       if (res.status === 401 || res.status === 403) return { ok: false, canPush: false, message: `The host refused the token (HTTP ${res.status}).` };
       if (res.status === 404) return { ok: false, canPush: false, message: "The token can't see the repo: check its owner and name, and that the token has access to it." };
@@ -315,10 +315,12 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
       const message = canPush ? "The token can read and push to the repo." : "The token can read the repo but not push to it, so merges and pull requests would fail.";
       // GitHub: can the merge gate read CI results (BOS-1070)? It reads them through Actions (BOS-1630), so a fine-grained
       // token needs Actions: Read-only (Metadata comes with every token). `canReadChecks` keeps its name for the web page.
-      if (cfg.kind !== "github") return { ok: true, canPush, message };
+      // The repo's own default branch, so the setup wizard can fill it in (BOS-2823).
+      const defaultBranch = typeof res.json.default_branch === "string" && res.json.default_branch ? res.json.default_branch : undefined;
+      if (cfg.kind !== "github") return { ok: true, canPush, defaultBranch, message };
       const probe = await call(cfg, token, "GET", "/actions/runs?per_page=1").catch(() => null);
       const canReadChecks = !!probe?.ok;
-      return { ok: true, canPush, canReadChecks, message: `${message} ${canReadChecks ? "It can read GitHub Actions runs." : `It can't read GitHub Actions runs${probe ? ` (HTTP ${probe.status})` : ""}, so the merge gate can't wait for CI: give it Repository permissions → Actions: Read-only (and Metadata: Read-only).`}` };
+      return { ok: true, canPush, canReadChecks, defaultBranch, message: `${message} ${canReadChecks ? "It can read GitHub Actions runs." : `It can't read GitHub Actions runs${probe ? ` (HTTP ${probe.status})` : ""}, so the merge gate can't wait for CI: give it Repository permissions → Actions: Read-only (and Metadata: Read-only).`}` };
     },
 
     /**

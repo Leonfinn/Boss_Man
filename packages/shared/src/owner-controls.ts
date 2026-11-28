@@ -54,10 +54,13 @@ export const OWNER_CONTROLS = {
   Setup: [
     "Create the company", "Add the project", "Check the token against …", "Add the task to …", "Continue", "Dismiss", "Saving",
     "Back", "Next", "Skip this step", "Leave setup for now", "Skip setup for now", "Fix this",
-    // The connect and runner steps (BOS-1495, BOS-2815: one row per way to pay, then its Save; the connect step's
-    // "How this works" links go in a new tab, so they are links, not buttons, and are not listed here), then the
-    // credentials, funding and project panels Setup shares with Settings and Projects.
-    "Browser only", "One command on a computer", "Save and connect", "Go back to the connect step", "Start the runner",
+    // The connect, git-token and runner steps (BOS-1495, BOS-2815: one row per way to pay, then its Save; the connect
+    // step's "How this works" links go in a new tab, so they are links, not buttons, and are not listed here), then
+    // the credentials, funding and project panels Setup shares with Settings and Projects.
+    "Browser only", "One command on a computer", "Save and connect", "Go back to the connect step",
+    // The git-token step's box and Check button (BOS-2823).
+    "Save the token",
+    "Start the runner",
     // A plan row's one click that makes its funding source and pays for the CEO (the rest is the plan's name), and
     // its busy label (BOS-2815).
     "Pay for the CEO with", "Setting up",
@@ -284,7 +287,9 @@ export const OWNER_FIELDS = {
     "Company name", "What it's for", "Project name", "The CEO", "Title", "Description", "Give it to",
     // The connect step's value box (BOS-2815); each key's box takes the provider's name, so it is not one fixed label.
     "The setup token",
-    // The credentials, funding and project panels Setup shares with Secrets and Access (BOS-2825).
+    // The git-token step's box and the Claude sign-in code (BOS-2823), and the credentials, funding and project panels
+    // Setup shares with Secrets, Access and funding, and Projects (BOS-2825).
+    "Claude sign-in code", "Git token",
     "Add", "Value", "Name", "Variable name", "Ends on",
     "Editing …", "New funding source", "Kind", "Provider", "Monthly grant (USD)", "Cycle starts on",
     "Reviews for this project", "Cost cap per task (USD)", "Monthly spend cap (USD)", "Git repo", "Default branch",

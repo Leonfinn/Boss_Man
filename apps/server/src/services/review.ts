@@ -15,7 +15,7 @@ import { landOnce, mergePullRequest } from "./merge-attempt.js";
 import { approve, diff, keptRound, landApproved, migrations, needsChanges, noteRead, overrule, passedHead, passedThisHead, readFile, reAskChangesRequested, requireSignoff, reviewStall, sendBack, sendBackRound, sequence, settle, signoffCovers, signoffStale, submit, withdrawRepeatRounds, withdrawStaleSignoff } from "./review-rounds.js";
 import { registerBoardBuilds } from "./board-build.js";
 import { afterLandingSweep, claimLanding, land, landVisible, recordLanded, releaseHolds, retryHeldBy, retryMerge, startLanding } from "./merge-land.js";
-import { branchChecks, branchChecksLine, branchChecksOrThrow, branchClash, followUpFailedChecks, gitAction, landing, landingActive, landingMergeIds, landingMergesByCompany, landingTurnStatus, landingWaitFacts, seatPhase, mergeLineClashes, mergeState, notifyChecks, recordMissedMerge, recordMissedMerges, runningMerges, setCheckMergedResult, setMergeCarry, setMergeRetarget, setMergeTurnMinutes, setTemplates, setWaitForCi, sweepCiBranches, syncPullRequests } from "./merge-status.js";
+import { branchChecks, branchChecksLine, branchChecksOrThrow, branchClash, imagesJobLines, followUpFailedChecks, gitAction, landing, landingActive, landingMergeIds, landingMergesByCompany, landingTurnStatus, landingWaitFacts, seatPhase, mergeLineClashes, mergeState, notifyChecks, recordMissedMerge, recordMissedMerges, runningMerges, setCheckMergedResult, setMergeCarry, setMergeRetarget, setMergeTurnMinutes, setTemplates, setWaitForCi, sweepCiBranches, syncPullRequests } from "./merge-status.js";
 
 /**
  * The assembled review service: the `this` a moved part (review-hold-actions.ts, merge-attempt.ts and later moves) calls other methods on.
@@ -77,6 +77,7 @@ export function reviewService(
     branchChecks(...a: Rest<typeof branchChecks>) { return branchChecks.call(this, ctx, ...a); },
     branchChecksOrThrow(...a: Rest<typeof branchChecksOrThrow>) { return branchChecksOrThrow.call(this, ctx, ...a); },
     branchChecksLine(...a: Rest<typeof branchChecksLine>) { return branchChecksLine.call(this, ctx, ...a); },
+    imagesJobLines(...a: Rest<typeof imagesJobLines>) { return imagesJobLines.call(this, ctx, ...a); },
 
     /** The in-memory merge gate's checks: running and waiting (BOS-420 counts them before a server update). */
     gateState: () => gate.state(),

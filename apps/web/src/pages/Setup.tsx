@@ -7,7 +7,6 @@ import { SaveButton, useSaveState } from "../components/SaveButton";
 import { usePoll } from "../hooks";
 import { clearDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
-import { Credentials } from "./settings/Credentials";
 import { useAction } from "./settings/shared";
 import { Funding } from "./settings/Funding";
 import { ProjectRow } from "./settings/Projects";
@@ -249,7 +248,7 @@ function TokenHelp({ projects }: { projects: Project[] }) {
   const repo = projects.find((p) => p.repoUrl)?.name ?? "the project";
   const both = hosts.size !== 1;
   return (
-    <details className="token-help" style={{ fontSize: 14 }}>
+    <details className="token-help" style={{ fontSize: 14 }} open>
       <summary style={{ cursor: "pointer", color: "var(--link)" }}>How do I get a token?</summary>
       {(both || hosts.has("github")) && (
         <section aria-label="GitHub token steps">
@@ -282,24 +281,76 @@ function TokenHelp({ projects }: { projects: Project[] }) {
 
 function GitStep({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const projects = usePoll((signal) => api<Project[]>(`/api/companies/${company.id}/projects`, { signal }), 60_000, `setup-git-${company.id}`);
+  const grants = usePoll((signal) => api<{ id: string; envName: string; secretName: string }[]>(`/api/companies/${company.id}/grants`, { signal }), 30_000, `setup-git-grants-${company.id}`);
   const [result, setResult] = useState<{ ok: boolean; canPush: boolean; message: string } | null>(null);
+  const [value, setValue] = useState("");
+  const act = useAction();
+  // What a half-finished save already made, so a retry doesn't make a second secret.
+  const made = useRef<{ secretId?: string }>({});
   const withRepo = (projects.data ?? []).filter((p) => p.repoUrl);
+  const connected = grants.data?.find((g) => g.envName === "GIT_TOKEN");
+  const save = (e: FormEvent) => {
+    e.preventDefault();
+    void act.run(async () => {
+      if (!made.current.secretId) made.current.secretId = (await api<{ secret: { id: string } }>("/api/secrets", { method: "POST", body: { name: `${company.name} git token`, kind: "generic", value: value.trim() } })).secret.id;
+      await api(`/api/secrets/${made.current.secretId}/grants`, { method: "POST", body: { companyId: company.id, envName: "GIT_TOKEN" } });
+      made.current = {};
+      setValue("");
+      grants.reload();
+      onChanged();
+      return "Saved. The token is stored encrypted and is not shown again. Now use \"Check the token\".";
+    });
+  };
+  const check = (p: Project) =>
+    void act.run(async () => {
+      const r = await api<{ ok: boolean; canPush: boolean; defaultBranch?: string; message: string }>(`/api/projects/${p.id}/check-git-token`, { method: "POST" });
+      setResult(r);
+      // Ask the repo once what its main branch is called, so the owner doesn't have to know.
+      if (r.ok && r.defaultBranch && r.defaultBranch !== p.defaultBranch) {
+        await api(`/api/projects/${p.id}`, { method: "PATCH", body: { defaultBranch: r.defaultBranch } });
+        projects.reload();
+      }
+      onChanged();
+    });
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <Credentials company={company} onChanged={onChanged} />
-      {projects.data && <TokenHelp projects={withRepo} />}
-      {withRepo.map((p) => (
-        <p key={p.id} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", margin: 0 }}>
-          <button type="button" className="btn" onClick={() => void api<{ ok: boolean; canPush: boolean; message: string }>(`/api/projects/${p.id}/check-git-token`, { method: "POST" }).then(setResult, (err) => setResult({ ok: false, canPush: false, message: (err as Error).message })).finally(onChanged)}>
-            Check the token against {p.name}
-          </button>
-          {result && (
-            <span role="status" className={result.ok && result.canPush ? "" : "error"}>
-              {result.message}
-            </span>
-          )}
+    <div style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 640 }}>
+      <p style={{ margin: 0 }}>Lets your agents save their work to your GitHub repository.</p>
+      {connected ? (
+        <p role="status">
+          <span className="tag green">Saved</span> The git token is saved as <strong>{connected.secretName}</strong>. To change it, use Settings → Secrets.
         </p>
-      ))}
+      ) : (
+        <form onSubmit={save} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div className="field">
+            <label htmlFor="setup-git-token">Git token</label>
+            <input id="setup-git-token" type="password" autoComplete="off" spellCheck={false} required value={value} onChange={(e) => {
+              made.current = {};
+              setValue(e.target.value);
+            }} />
+          </div>
+          <button type="submit" className="btn primary" style={{ alignSelf: "flex-start" }} disabled={act.busy || !value.trim()}>
+            Save the token
+          </button>
+        </form>
+      )}
+      {projects.data && <TokenHelp projects={withRepo} />}
+      {connected &&
+        withRepo.map((p) => (
+          <p key={p.id} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", margin: 0 }}>
+            <button type="button" className="btn" disabled={act.busy} onClick={() => check(p)}>
+              Check the token against {p.name}
+            </button>
+            {result && (
+              <span role="status" className={result.ok && result.canPush ? "" : "error"}>
+                {result.message}
+              </span>
+            )}
+          </p>
+        ))}
+      {act.view}
+      <p className="muted" style={{ fontSize: 14, margin: 0 }}>
+        Three words you will see: the <strong>default branch</strong> is the main copy of your code that approved work is added to. To <strong>merge</strong> is to add approved work into that copy. A <strong>pull request</strong> is a proposal to merge that you read and accept on GitHub first. Other kinds of key and the full form are in Settings → Secrets.
+      </p>
     </div>
   );
 }
