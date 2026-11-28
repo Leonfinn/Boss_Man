@@ -145,11 +145,15 @@ export function checkRequestService(db: Db, deps: CheckRequestDeps) {
           priority: checkPriority(t),
           requestedBy: null,
         });
-        if (reused === "passed") return no;
+        // BOS-2880: a branch that changes CI or image files is held for GitHub's CI before review too, also when its quick check
+        // already passed. The run starts now (or when the live quick check passes) and the hold waits for it.
+        const ci = deps.preflight ? await deps.preflight.needsHold(t, d).catch(() => false) : false;
+        if (reused === "passed" && !ci) return no;
+        if (ci) await deps.preflight!.start(t, input.agentId, d).catch(() => null);
         // BOS-2714: the live job the agent asked for (request_check) now answers the hand-in. Its result belongs to the hold:
         // a pass opens the reviews with no agent run, and a failure wakes the agent once, from the hold's bounce.
         if (reused === "live" && job.requestedBy) await db.update(checkJobs).set({ requestedBy: null }).where(eq(checkJobs.id, job.id));
-        return { held: true, where: await checkPlace(queue, input.companyId, job) };
+        return { held: true, where: reused === "passed" ? "the quick check already passed on this code; GitHub's CI jobs run next" : `${await checkPlace(queue, input.companyId, job)}${ci ? ", then GitHub's CI jobs" : ""}` };
       } catch {
         return no;
       }
@@ -168,6 +172,10 @@ export function checkRequestService(db: Db, deps: CheckRequestDeps) {
       };
       const quick = await quickCheckRefusal(db, ticketId, diff, mover);
       if (quick) return quick;
+      // BOS-2880: the assignee's own move from In progress is held as "Being checked" (holdForReview starts GitHub's run and the
+      // hold waits for it), so it is not refused for GitHub's CI. Any other move can't be held and is refused as before.
+      const [t] = await db.select({ assignee: tickets.assigneeAgentId, state: tickets.systemState, noCode: tickets.noCode }).from(tickets).where(eq(tickets.id, ticketId));
+      if (t && !t.noCode && !!mover && t.assignee === mover && t.state === "in_progress") return null;
       return deps.preflight ? deps.preflight.reviewRefusal(ticketId, diff) : null;
     },
   };

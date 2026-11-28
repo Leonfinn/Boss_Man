@@ -75,7 +75,7 @@ import { recoveryService } from "./services/recovery.js";
 import { holdView } from "./services/review-holds.js";
 import { type CI_TIMING, isSignoffPending, MERGE_WAIT_MS, ReviewError, ReviewHeldError, reviewService } from "./services/review.js";
 import { CI_TIMING as CI_PUBLISH_TIMING } from "./services/ci-publish.js";
-import { ciPreflightService } from "./services/ci-preflight.js";
+import { ciPreflightService, type PreflightHoldState } from "./services/ci-preflight.js";
 import { checkPolicy as checkPolicyIn, effectivePolicy } from "./services/review-policy.js";
 import { listReviews } from "./services/review-kinds.js";
 import { openSignoffCard, signoffState } from "./services/signoff.js";
@@ -411,7 +411,7 @@ export async function buildApp(opts: AppOptions) {
   let checkWake: ((agentId: string, w: { ticketId: string; reason: string; note: string; priority?: number }) => Promise<unknown>) | undefined;
   let checkHold: ReturnType<typeof checkHoldService> | undefined;
   // BOS-2284: set where the GitHub-CI pre-flight is built (below); the check that ended starts or drops the run that waited for it.
-  let ciPreflightLate: { onQuickEnded: (job: { kind: string; ticketId: string }) => Promise<void> } | undefined;
+  let ciPreflightLate: { onQuickEnded: (job: { kind: string; ticketId: string }) => Promise<void>; holdState: (ticketId: string, head: string) => Promise<PreflightHoldState> } | undefined;
   // BOS-1093: a set private-details list that can't be read says so once, in the log and to the owner, and the scan runs its secret rules only.
   const scanListWarning: ScanListWarning = {
     log: (m) => app.log.warn(m),
@@ -1271,6 +1271,8 @@ export async function buildApp(opts: AppOptions) {
     branchHead: opts.branchHead ??((ticketId) => review.diff(ticketId).then((d) => d.head)),
     // BOS-2303: a ticket approved while this check ran merges (or goes back) as soon as the check ends.
     releaseHolds: (ticketId) => review.releaseHolds(ticketId),
+    // BOS-2880: the hold also waits for GitHub's CI before review (built below), so a ticket is not opened for review ahead of it.
+    ci: (ticketId, head) => ciPreflightLate!.holdState(ticketId, head),
   });
   releaseGoLive = (companyId) => review.releaseGoLiveWaiters(companyId);
   // The owner's read-only merge queue screen (BOS-587): what runs, what waits, how the last ones ended.
@@ -1527,6 +1529,8 @@ export async function buildApp(opts: AppOptions) {
     timing: { ...CI_PUBLISH_TIMING, ...opts.ciTiming },
     log: (m) => app.log.warn(m),
     wake: (agentId, w) => scheduler.notify(agentId, w),
+    // BOS-2880: a finished run settles the ticket held as "Being checked" (opens the reviews or sends it back) instead of waking its agent.
+    settleHold: async (ticketId) => (await checkHold?.settle(ticketId)) ?? "none",
     context: async (t) => {
       const [p] = await db.select({ repoUrl: projects.repoUrl, gitHost: projects.gitHost, gitApiBase: projects.gitApiBase, defaultBranch: projects.defaultBranch }).from(projects).where(eq(projects.id, t.projectId));
       const repo = p?.repoUrl ? parseRepoUrl(p.repoUrl) : null;
