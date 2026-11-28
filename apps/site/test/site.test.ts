@@ -148,7 +148,7 @@ describe("build", () => {
 
   it("caps the feed at 20 entries", () => {
     const f = path.join(tmp, "long-changelog.md");
-    const days = Array.from({ length: 25 }, (_, i) => `## ${25 - i} October 2026\n\n- Change ${i}\n`).join("\n");
+    const days = Array.from({ length: 25 }, (_, i) => `## ${25 - i} October 2026\n\n**In image 0.1.0-beta.1**\n\n- Change ${i}\n`).join("\n");
     writeFileSync(f, `# Title\n\n${days}`);
     const out = path.join(tmp, "dist-long");
     build({ outDir: out, siteUrl: "https://example.test", portalUrl: "", changelogFile: f });
@@ -269,7 +269,7 @@ describe("What's new page", () => {
   });
 
   it("stops the build on an entry that is not a date, dates out of order or repeated, a ticket number, or no entries", () => {
-    const ok = "# What's new\n\nIntro.\n\n## 16 November 2026\n\n- A change.\n\n## 2 November 2026\n\n- Another.\n";
+    const ok = "# What's new\n\nIntro.\n\n## 16 November 2026\n\n**In image 0.1.0-beta.1**\n\n- A change.\n\n## 2 November 2026\n\n**In image 0.1.0-beta.1**\n\n- Another.\n";
     expect(changelog(ok)().dates).toEqual(["16 November 2026", "2 November 2026"]);
     expect(changelog(ok.replace("16 November", "Week 46"))).toThrow(/is not a date/);
     expect(changelog(ok.replace("16 November", "31 November"))).toThrow(/is not a date/);
@@ -279,6 +279,80 @@ describe("What's new page", () => {
     expect(changelog(ok.replace("A change.", "A change (BOS-1658)."))).toThrow(/ticket number/);
     expect(changelog("# What's new\n\nNothing yet.\n")).toThrow(/no entries/);
   });
+
+  it("accepts the two image label shapes under a date, and a split day's second label before its older lines", () => {
+    const page = (date: string, label: string, body = "- A change.") => `# What's new\n\n## ${date}\n\n${label}\n\n${body}\n`;
+    const read = (text: string) => changelog(text)();
+
+    const inImage = read(page("16 November 2026", "**In image 0.1.0-beta.4**"));
+    expect(inImage.dates).toEqual(["16 November 2026"]);
+    expect(inImage.sections[0].labels).toEqual([{ index: 2, kind: "in", version: "0.1.0-beta.4", line: "**In image 0.1.0-beta.4**" }]);
+
+    const notImage = read(page("16 November 2026", "**Not in an image yet:** comes with the next weekly image (Tuesdays)."));
+    expect(notImage.sections[0].labels[0]).toMatchObject({ kind: "not", note: "comes with the next weekly image (Tuesdays)." });
+
+    const split = read(page("1 December 2026", "**Not in an image yet:** comes with the next weekly image (Tuesdays).", "- A later change.\n\n**In image 0.1.0-beta.4**\n\n- An older change."));
+    expect(split.sections[0].labels.map((l) => l.kind)).toEqual(["not", "in"]);
+
+    // After the release relabels the top of a split day, both labels are "In image", each with its own version.
+    const releasedSplit = read(page("1 December 2026", "**In image 0.1.0-beta.5**", "- A newer change.\n\n**In image 0.1.0-beta.4**\n\n- An older change."));
+    expect(releasedSplit.sections[0].labels.map((l) => l.version)).toEqual(["0.1.0-beta.5", "0.1.0-beta.4"]);
+  });
+
+  it("refuses a date with no label, an unknown label shape, a second label of the same kind, or a not-yet label below an in-image one, naming the date", () => {
+    const page = (text: string) => `# What's new\n\n${text}\n`;
+    const read = (text: string) => changelog(text);
+
+    expect(read(page("## 16 November 2026\n\n- A change.\n"))).toThrow(/16 November 2026.*no image label line/);
+    expect(read(page("## 16 November 2026\n\n**In image beta.4**\n\n- A change.\n"))).toThrow(/16 November 2026.*unknown image label line/);
+    expect(read(page("## 16 November 2026\n\n**Coming soon**\n\n- A change.\n"))).toThrow(/16 November 2026.*unknown image label line/);
+    // A second "Not in an image yet" is one not-yet label too many.
+    expect(read(page("## 16 November 2026\n\n**Not in an image yet:** first.\n\n- A change.\n\n**Not in an image yet:** second.\n\n- Another.\n"))).toThrow(/16 November 2026/);
+    // Two labels with nothing between them are not a split day.
+    expect(read(page("## 16 November 2026\n\n**In image 0.1.0-beta.4**\n\n**In image 0.1.0-beta.3**\n\n- A change.\n"))).toThrow(/16 November 2026.*nothing between/);
+    // A not-yet date below an in-image date is out of order, whether on another date or on the same split day.
+    expect(read(page("## 16 November 2026\n\n**In image 0.1.0-beta.4**\n\n- A change.\n\n## 15 November 2026\n\n**Not in an image yet:** later.\n\n- Another.\n"))).toThrow(/15 November 2026.*below an "In image" one/);
+    expect(read(page("## 16 November 2026\n\n**In image 0.1.0-beta.4**\n\n- A change.\n\n**Not in an image yet:** later.\n\n- Another.\n"))).toThrow(/16 November 2026.*below an "In image" one/);
+    // The label must be the first thing under the heading.
+    expect(read(page("## 16 November 2026\n\n- A change.\n\n**Not in an image yet:** comes next.\n"))).toThrow(/16 November 2026/);
+  });
+
+  it("shows each label as a badge, links an in-image badge to its GitHub release, and keeps the note beside the not-yet badge", () => {
+    const html = read("whats-new.html");
+    expect(html).toContain('<a class="wn-badge in" href="https://github.com/Leonfinn/Boss_Man/releases/tag/v0.1.0-beta.3">');
+    expect(html).toContain("In image 0.1.0-beta.3");
+    expect(html).toContain('<span class="wn-badge not">');
+    expect(html).toContain("Not in an image yet</span> <span class=\"wn-badge-note\">comes with the next weekly image (Tuesdays).</span>");
+    expect(html).not.toContain("<strong>In image");
+    expect(html).not.toContain("<strong>Not in an image yet");
+    const rows = (html.match(/class="wn-badge-row/g) ?? []).length;
+    const labels = (html.match(/In image 0\.1\.0-beta/g) ?? []).length + (html.match(/Not in an image yet<\/span>/g) ?? []).length;
+    expect(rows).toBe(labels);
+  });
+
+  it("has the source-vs-image explainer box under the lead, with both panels and the Which do I have pointer", () => {
+    const html = read("whats-new.html");
+    expect(html).toContain('<aside class="wn-how" aria-labelledby="wn-how-h">');
+    expect(html).toContain('<h2 id="wn-how-h">When you get each change</h2>');
+    expect(html).toContain("Built from source");
+    expect(html).toContain("You get each change as soon as it is added. Update your server to pick it up.");
+    expect(html).toContain("Ready-made Docker image");
+    expect(html).toContain("A new image comes out once a week, on Tuesdays, with every change up to then. A newer change waits for the next image.");
+    expect(html).toContain("Which do I have?");
+    expect(html).toContain("You run 0.1.0-beta.3");
+    expect(html.indexOf('class="wn-how"')).toBeLessThan(html.indexOf('class="wn-badge-row'));
+  });
+
+  it("styles the badge and box from existing tokens, with no amber and no colour-only difference", () => {
+    const css = readFileSync(path.join(__dirname, "..", "src", "styles.css"), "utf8");
+    expect(css).toContain(".news .wn-badge {");
+    expect(css).toContain(".news .wn-badge.not { border-style: dashed;");
+    expect(css).toContain(".news .wn-badge-row.split {");
+    expect(css).toContain(".news .wn-how {");
+    const badgeRules = css.slice(css.indexOf(".news .wn-badge {"));
+    expect(badgeRules.slice(0, badgeRules.indexOf("}"))).not.toContain("var(--amber)");
+  });
+
 
   it("keeps the release-step comment out of the page but in the file, so the next release knows what to add", () => {
     const source = readFileSync(path.join(__dirname, "..", "..", "..", "CHANGELOG.md"), "utf8");
