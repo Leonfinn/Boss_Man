@@ -5,11 +5,10 @@ import { projectName } from "./names.js";
 
 /** A refusal or failure with a stable code and a sentence an owner can read. Nothing in `message` is a secret. */
 export class UpdaterError extends Error {
-  constructor(
-    readonly code: string,
-    message: string,
-  ) {
+  readonly code: string;
+  constructor(code: string, message: string) {
     super(message);
+    this.code = code;
   }
 }
 
