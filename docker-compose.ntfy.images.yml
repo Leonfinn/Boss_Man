@@ -1,0 +1,154 @@
+# Phone notifications for an IMAGE install (BOS-2912): ntfy plus the Tailscale sidecar that gives it an https address on
+# your tailnet. A release file, signed like docker-compose.images.yml; nothing here needs the source code. OFF by default:
+# it is its own Compose project and Boss Man does not start it. It never goes into your docker-compose.images.yml command.
+#
+# Steps (docs/31-phone-notifications.md, "Image install"): put the lines below in images.env, then start it with
+#   docker compose -p boss-man-ntfy --env-file images.env -f docker-compose.ntfy.images.yml --profile ntfy up -d
+# Stop and remove it (the data volumes stay):
+#   docker compose -p boss-man-ntfy --env-file images.env -f docker-compose.ntfy.images.yml --profile ntfy down
+#
+# In images.env (none of these is a secret except TS_AUTHKEY, which you remove again after the first start):
+#   NTFY_BASE_URL=https://<host-name>.<tailnet>.ts.net:8443   # the Tailscale address of this add-on, https only
+#   TS_AUTHKEY=<one-time key from the Tailscale admin page>    # first start only
+# Optional: TS_HOSTNAME (default boss-man-ntfy; the first part of the address above),
+#   BOSSMAN_FRONT_NETWORK (default boss-man_front: <project>_front, set it if your install uses another project name),
+#   NTFY_CACHE_DURATION (1h), NTFY_UPSTREAM_BASE_URL (iPhone only), NTFY_IMAGE (change version and digest together).
+#
+# How it connects: the updater makes Boss Man's server on the "front" network of your install (internal: no internet). ntfy
+# joins that network, so the server publishes to http://ntfy:80 with no address to configure, exactly as on a build install.
+# The sidecar is NOT on front: it shares this project's own bridge with ntfy, which has internet so Tailscale can log in. No port
+# is published on the host. Access is deny-all: nobody can publish or read without a user or token made with `ntfy user` /
+# `ntfy token` / `ntfy access`. Sign-up and the web app are off. Never use Tailscale Funnel.
+# The sidecar proxies ONLY ntfy (tailnet port 8443). It does not publish Boss Man's own page, and it is not the trusted proxy
+# the server believes forwarded headers from (that is the install's Caddy proxy), so it cannot spoof a client address.
+# Data (users, tokens, cache; the Tailscale login) lives in named Docker volumes: include them in your backup.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: ${BOSSMAN_LOG_MAX_SIZE:-10m}
+    max-file: "${BOSSMAN_LOG_MAX_FILE:-3}"
+
+x-ntfy-image: &ntfy-image ${NTFY_IMAGE:-binwiederhier/ntfy:v2.37.2@sha256:1875ddcf815c8a3c981d6d78c67a93452d0abba79b1ab9520b1f5f5238902bd7}
+
+services:
+  # Hands the data volume to ntfy's user (uid 1000) before ntfy starts, so nobody runs chown by hand. Runs once, then exits.
+  ntfy-init:
+    logging: *logging
+    profiles: ["ntfy"]
+    image: *ntfy-image
+    entrypoint: ["chown", "-R", "1000:1000", "/var/lib/ntfy"]
+    command: []
+    restart: "no"
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    network_mode: none
+    volumes:
+      - ntfy-data:/var/lib/ntfy
+    mem_limit: 64m
+    pids_limit: 16
+
+  ntfy:
+    logging: *logging
+    profiles: ["ntfy"]
+    image: *ntfy-image
+    depends_on:
+      ntfy-init:
+        condition: service_completed_successfully
+    command: ["serve"]
+    restart: unless-stopped
+    user: "1000:1000"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    volumes:
+      - ntfy-data:/var/lib/ntfy
+    environment:
+      NTFY_BASE_URL: ${NTFY_BASE_URL:?Set NTFY_BASE_URL in images.env to the https Tailscale address of this add-on}
+      NTFY_LISTEN_HTTP: ":80"
+      NTFY_BEHIND_PROXY: "true"
+      NTFY_AUTH_FILE: /var/lib/ntfy/user.db
+      NTFY_AUTH_DEFAULT_ACCESS: deny-all
+      NTFY_ENABLE_SIGNUP: "false"
+      NTFY_ENABLE_LOGIN: "true"
+      NTFY_WEB_ROOT: disable
+      NTFY_CACHE_FILE: /var/lib/ntfy/cache.db
+      NTFY_CACHE_DURATION: ${NTFY_CACHE_DURATION:-1h}
+      NTFY_UPSTREAM_BASE_URL: ${NTFY_UPSTREAM_BASE_URL:-}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:80/v1/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      # front: so Boss Man's server reaches http://ntfy:80. default: this project's own bridge, shared with the sidecar, and
+      # the way out to the internet for NTFY_UPSTREAM_BASE_URL (iPhone pushes), which front cannot give (it is internal).
+      front:
+        aliases: [ntfy]
+      default:
+    mem_limit: 256m
+    pids_limit: 128
+
+  tailscale:
+    logging: *logging
+    profiles: ["ntfy"]
+    image: tailscale/tailscale:v1.104.4@sha256:ed6480b33c6eb67c9cbd203ed42b9fb57e361986725b6856def71b7a3d9e276c
+    restart: unless-stopped
+    hostname: ${TS_HOSTNAME:-boss-man-ntfy}
+    environment:
+      # One-time key for the first start only; the login is kept in the volume. Without it containerboot waits for a login
+      # that never completes (docs/20-https-tailscale.md, Troubleshooting).
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_AUTH_ONCE: "true"
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SERVE_CONFIG: /config/serve.json
+      # Userspace networking: no /dev/net/tun and no extra capabilities, so it also runs in a Proxmox VM or a plain Docker host.
+      TS_USERSPACE: "true"
+      TS_ENABLE_HEALTH_CHECK: "true"
+      TS_LOCAL_ADDR_PORT: 127.0.0.1:9002
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9002/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+    configs:
+      - source: serve
+        target: /config/serve.json
+    # Only the project's own bridge (it has internet, so Tailscale can log in) and ntfy is on it. Not on front, which is
+    # internal (no internet) and has only 8 addresses shared with the two server colours and the updater.
+    networks: [default]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    pids_limit: 128
+    depends_on: [ntfy]
+
+# Inline, so the release needs no second file. $$ keeps ${TS_CERT_DOMAIN} for Tailscale itself to fill in.
+configs:
+  serve:
+    content: |
+      {
+        "TCP": { "8443": { "HTTPS": true } },
+        "Web": {
+          "$${TS_CERT_DOMAIN}:8443": {
+            "Handlers": { "/": { "Proxy": "http://ntfy:80" } }
+          }
+        }
+      }
+
+volumes:
+  ntfy-data:
+  tailscale-state:
+
+networks:
+  # The install's own network where the server lives (docker-compose.images.yml names it <project>_front). Not created here.
+  front:
+    external: true
+    name: ${BOSSMAN_FRONT_NETWORK:-boss-man_front}

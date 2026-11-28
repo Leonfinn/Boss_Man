@@ -95,6 +95,66 @@ The buttons make your phone call Boss Man directly, over Boss Man's https addres
 
 If one fails, Notifications says which.
 
+## Image install (no source folder)
+
+Status: **not yet confirmed on a real host** (the file passes Compose's own validation; nobody has run these steps with a phone yet, 28 Nov 2026). For an install made from ready-made images ([docs/35](35-install-from-images.md)). There is no `deploy/` folder and no host deployer, so the add-on comes as a release file, `docker-compose.ntfy.images.yml`, next to `docker-compose.images.yml`, and the two "Set up for me" buttons on the Notifications page (steps 4 and 5 above) are not available. You make the users with the commands below and type the values into the page. Boss Man itself does not change; an update never touches this add-on.
+
+You need Tailscale HTTPS on your tailnet (Tailscale admin page → DNS → HTTPS Certificates enabled) and a one-time auth key (Tailscale admin page → Settings → Keys). The add-on has its own Tailscale device, named `boss-man-ntfy` unless you set `TS_HOSTNAME`; it publishes only ntfy, not Boss Man's page. Run everything in the folder with `images.env`.
+
+1. Download the file of the same release you installed (the same `$V` as in docs/35, section 1; the first line prints the newest tag if `V` is not set):
+
+   ```
+   V=$(curl -fsS https://api.github.com/repos/Leonfinn/Boss_Man/releases | grep -m1 '"tag_name"' | cut -d '"' -f 4) && curl -fsSLO https://github.com/Leonfinn/Boss_Man/releases/download/$V/docker-compose.ntfy.images.yml
+   ```
+
+   It needs Docker Compose 2.23 or newer (`docker compose version` shows yours). It is signed like the other two; `docker-compose.ntfy.images.yml.sigstore.json` is next to it on the release page.
+
+2. Add the address and the one-time key to `images.env`. The address is `https://boss-man-ntfy.<your tailnet>.ts.net:8443` (your tailnet's name is on the Tailscale admin page, DNS tab):
+
+   ```
+   printf '\nNTFY_BASE_URL=https://boss-man-ntfy.<your tailnet>.ts.net:8443\nTS_AUTHKEY=<one-time key>\n' >> images.env
+   ```
+
+3. Start it. If your install uses another Compose project name than `boss-man`, also add `BOSSMAN_FRONT_NETWORK=<project>_front` to `images.env` first (`docker network ls` lists it):
+
+   ```
+   docker compose -p boss-man-ntfy --env-file images.env -f docker-compose.ntfy.images.yml --profile ntfy up -d
+   ```
+
+   Then remove the `TS_AUTHKEY=` line from `images.env`; the login is kept in a volume. `docker compose -p boss-man-ntfy --env-file images.env -f docker-compose.ntfy.images.yml --profile ntfy ps` should show `ntfy` and `tailscale` as `healthy` within a minute.
+
+4. Make the two users. `bossman-publish` lets Boss Man send (write only); `phone-read` lets your phone listen (read only). Choose a topic of 20 or more random letters and digits (it works like a password) and a long password for the phone. Each command is one line; the first of each pair sets the password in the command itself, so nothing waits for typing:
+
+   ```
+   docker compose -p boss-man-ntfy --env-file images.env -f docker-compose.ntfy.images.yml exec -e NTFY_PASSWORD=<publish password> ntfy ntfy user add --role=user bossman-publish
+   ```
+
+   ```
+   docker compose -p boss-man-ntfy --env-file images.env -f docker-compose.ntfy.images.yml exec ntfy ntfy access bossman-publish <topic> write-only
+   ```
+
+   ```
+   docker compose -p boss-man-ntfy --env-file images.env -f docker-compose.ntfy.images.yml exec -e NTFY_PASSWORD=<phone password> ntfy ntfy user add --role=user phone-read
+   ```
+
+   ```
+   docker compose -p boss-man-ntfy --env-file images.env -f docker-compose.ntfy.images.yml exec ntfy ntfy access phone-read <topic> read-only
+   ```
+
+   Make the token Boss Man will use; the last command prints it once (`tk_…`):
+
+   ```
+   docker compose -p boss-man-ntfy --env-file images.env -f docker-compose.ntfy.images.yml exec ntfy ntfy token add bossman-publish
+   ```
+
+5. In Boss Man, **Notifications** → **How you're told**: **ntfy server** `http://ntfy:80`, **Topic** your topic, **Access token** the `tk_…` value, **Boss Man's address on your phone** your https Boss Man address if you have one. **Save**.
+
+6. On the phone, follow step 6 above (the address is your `NTFY_BASE_URL`, user `phone-read`), then **Send a test to my phone** (step 7) and the lock-down check.
+
+**A week on.** To update the add-on, download the new release's `docker-compose.ntfy.images.yml` (step 1; after a Boss Man update it is the same one unless the release notes say it changed) and run the step 3 command again: it recreates only what changed and keeps the users. To restart it, run the same command; after a reboot it starts by itself (`restart: unless-stopped`). If Boss Man has not been started since you made its network, ntfy waits for it: start Boss Man first. The ntfy and Tailscale containers have their own network access; only ntfy joins Boss Man's private `front` network (which has no internet).
+
+Stop it with `docker compose -p boss-man-ntfy --env-file images.env -f docker-compose.ntfy.images.yml --profile ntfy down` (add nothing else: `-v` would delete the users and the Tailscale login). Back up the volumes `boss-man-ntfy_ntfy-data` and `boss-man-ntfy_tailscale-state` with your other volumes. The Tailscale device stays in your admin page until you remove it there.
+
 ## Blue/green installs
 
 With blue/green the two Boss Man copies are not on the `edge` network, so they can't reach `http://ntfy:80`. Add `-f deploy/ntfy-bluegreen.yml` after `-f deploy/ntfy.yml` in step 3's `docker compose` command, and in the rollback command. It also puts ntfy on the internal `front` network, under the same name `ntfy`, so the settings from steps 4 and 5 stay as they are. Use the same two `-f` files every time you start, stop or change ntfy.
