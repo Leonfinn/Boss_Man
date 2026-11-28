@@ -347,14 +347,21 @@ names2="$(docker ps -a --filter "label=com.bossman.install=$P2" --format '{{.Nam
 for want in "${P2}-updater" "${P2}-launcher" "${P2}-server-blue"; do case " $names2" in *" $want "*) ok "$want exists and carries the second install's label" ;; *) bad "$want is missing or has no label of the second install (found: $names2)" ;; esac; done
 shared="$(comm -12 <(docker ps -a --filter "label=com.bossman.install=$P" --format '{{.Names}}' | sort) <(docker ps -a --filter "label=com.bossman.install=$P2" --format '{{.Names}}' | sort))"
 [ -z "$shared" ] && ok "the two installs share no container name" || bad "container names in both installs: $shared"
-# The updater makes the pack volume when it installs the pack, which can follow the first answer from /api/health: wait for it, with a deadline.
-pack_deadline=$((SECONDS + 60))
-until [ -n "$(docker volume ls -q --filter "name=^${P2}_claude-pack\$")" ] || [ "$SECONDS" -ge "$pack_deadline" ]; do sleep 2; done
+# The pack volume is made when something first mounts it: the launcher's pack installer, when a runner is asked for. So a second install
+# that has not started a runner has no pack volume yet, which is not a fault. Ask the second launcher for a runner (own company name,
+# because runner names are not yet project-scoped, BOS-2904) and read which volume the runner mounts: that proves one pack volume per
+# install, and does not depend on a boss-man-claude-pack another step of the same job (the launcher smoke test) may have left behind.
+call2() { docker exec --user 1000:1000 "${P2}-launcher" node -e '
+const fs=require("fs");const [m,p,b]=process.argv.slice(1);
+fetch("http://127.0.0.1:3105"+p,{method:m,headers:{authorization:"Bearer "+fs.readFileSync("/run/launcher/key","utf8").trim(),"content-type":"application/json"},body:b||undefined})
+ .then(async r=>{console.log(r.status+" "+await r.text());process.exit(r.status<300?0:1)}).catch(e=>{console.log(String(e));process.exit(1)})' "$@"; }
+out2="$(call2 PUT /runners/smoketwo "{\"token\":\"$tok\"}" 2>&1)" && ok "the second launcher started a runner" || bad "second install runner start: $out2"
+mounts1="$(docker inspect --format '{{range .Mounts}}{{.Name}} {{end}}' boss-man-runner-smoke 2>/dev/null)"
+mounts2="$(docker inspect --format '{{range .Mounts}}{{.Name}} {{end}}' boss-man-runner-smoketwo 2>/dev/null)"
+case " $mounts1" in *" ${P}_claude-pack "*) ok "the first install's runner mounts ${P}_claude-pack" ;; *) bad "the first install's runner mounts: $mounts1" ;; esac
+case " $mounts2" in *" ${P2}_claude-pack "*) ok "the second install's runner mounts ${P2}_claude-pack" ;; *) bad "the second install's runner mounts: $mounts2 (launcher env: $(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${P2}-launcher" | grep -E '^BOSSMAN_(CLAUDE_PACK_VOLUME|INSTALL_LABEL|STACK)=' | tr '\n' ' '))" ;; esac
+case "$mounts1$mounts2" in *"boss-man-claude-pack"*) bad "a runner mounts the shared boss-man-claude-pack (first: $mounts1; second: $mounts2)" ;; *) ok "no runner mounts a shared boss-man-claude-pack" ;; esac
 [ -n "$(docker volume ls -q --filter "name=^${P}_claude-pack\$")" ] && [ -n "$(docker volume ls -q --filter "name=^${P2}_claude-pack\$")" ] && ok "each install has its own pack volume" || bad "pack volumes: ${P}_claude-pack and ${P2}_claude-pack must both exist (volumes now: $(docker volume ls -q | grep -i pack | tr '\n' ' '))"
-if [ -z "$(docker volume ls -q --filter name=boss-man-claude-pack)" ]; then ok "no shared boss-man-claude-pack volume was made"; else
-  # Name who uses it and what each launcher was told, so the next run says where it came from (names only, no secrets).
-  bad "a shared boss-man-claude-pack volume exists (used by: $(docker ps -a --filter volume=boss-man-claude-pack --format '{{.Names}}' | tr '\n' ' '); launcher env: $(for c in "$NL" "${P2}-launcher"; do echo "$c: $(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$c" | grep -E '^BOSSMAN_(CLAUDE_PACK_VOLUME|INSTALL_LABEL|STACK)=' | tr '\n' ' ')"; done))"
-fi
 remove_second
 left2="$(docker ps -a --format '{{.Names}}' --filter "label=com.bossman.install=$P2"; docker volume ls -q --filter "name=^${P2}_"; docker volume ls -q --filter "label=com.bossman.install=$P2")"
 [ -z "$left2" ] && ok "removing the second install left nothing of it behind" || bad "second install left: ${left2//$'\n'/ }"
