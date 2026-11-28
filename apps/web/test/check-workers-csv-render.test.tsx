@@ -80,7 +80,12 @@ describe.skipIf(!can)("Settings → Check workers: Download CSV (BOS-2519, real 
         }
         if (out) {
           mkdirSync(out, { recursive: true });
-          await root.screenshot({ path: path.join(out, `check-workers-csv-${p.name}.png`) });
+          // The picture is proof, not an assertion (BOS-2899). locator.screenshot waits for the element's box to hold
+          // still, and on GitHub's slower runners it timed out after its own 30 s and failed the CSV and layout checks
+          // above. Stop animations so the box settles, and never let saving the picture fail the test.
+          await root.screenshot({ path: path.join(out, `check-workers-csv-${p.name}.png`), animations: "disabled", timeout: 10_000 }).catch((e: Error) => {
+            process.stderr.write(`check-workers-csv-render: ${p.name} screenshot not saved (checks above passed): ${e.message.split("\n")[0]}\n`);
+          });
         }
         const text = async (i: number) => {
           const [dl] = await Promise.all([page.waitForEvent("download"), buttons.nth(i).click()]);
