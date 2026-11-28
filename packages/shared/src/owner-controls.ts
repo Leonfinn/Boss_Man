@@ -64,7 +64,7 @@ export const OWNER_CONTROLS = {
     // A plan row's one click that makes its funding source and pays for the CEO (the rest is the plan's name), and
     // its busy label (BOS-2815).
     "Pay for the CEO with", "Setting up",
-    "Save", "Check with Claude", "Check", "Remove", "Edit", "Delete", "Add funding source", "Cancel", "Re-detect",
+    "Save", "Edit", "Delete", "Add funding source", "Cancel", "Re-detect",
   ],
   Decisions: [
     "Show more", "Show less", "Show all …", "Show the whole", "Save and approve", "Cancel", "Edit these values before approving", "All companies",
@@ -287,10 +287,9 @@ export const OWNER_FIELDS = {
     "Company name", "What it's for", "Project name", "The CEO", "Title", "Description", "Give it to",
     // The connect step's value box (BOS-2815); each key's box takes the provider's name, so it is not one fixed label.
     "The setup token",
-    // The git-token step's box and the Claude sign-in code (BOS-2823), and the credentials, funding and project panels
-    // Setup shares with Secrets, Access and funding, and Projects (BOS-2825).
-    "Claude sign-in code", "Git token",
-    "Add", "Value", "Name", "Variable name", "Ends on",
+    // The git-token step's box (BOS-2823), then the funding panel Setup shares with Settings and Projects. Since
+    // BOS-2815 the shared Credentials panel is no longer shown on Setup (the connect step sets up the account).
+    "Git token", "Name",
     "Editing …", "New funding source", "Kind", "Provider", "Monthly grant (USD)", "Cycle starts on",
     "Reviews for this project", "Cost cap per task (USD)", "Monthly spend cap (USD)", "Git repo", "Default branch",
     "When work is approved", "Before merging, Boss Man will", "For high-risk work, also",
