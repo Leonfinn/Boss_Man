@@ -43,8 +43,8 @@ Every step below is a command to copy and paste, or a page to open. You type not
 
 - a 64-bit machine (x86-64 or arm64) with at least 4 GB of memory, running Linux. For agents to run, size it as in [What machine do I need](#what-machine-do-i-need). Step 2 installs Docker on it.
 - internet access from that machine
-- a Claude account: a Pro or Max plan, or an API key from Anthropic. The first start needs it, because the CEO is a Claude Code agent. You can add other AI providers later, under **Settings → Secrets** (see [Agents and models](/guides/agents-and-models)).
-- a GitHub or Gitea account, only if your agents will work on code
+- a Claude account: a Pro or Max plan, or an API key from Anthropic. The first start needs it, because the CEO is a Claude Code agent. You can add other AI providers later, under **Settings → Secrets** (see [Agents and models](/guides/agents-and-models)). You pay for this account. Boss Man itself is free.
+- only if your agents will work on code: a GitHub or Gitea account, for the repositories they work in. A team that works on documents and research does not need one.
 - a computer with a web browser on the same network
 
 ### Which platforms work
@@ -241,6 +241,64 @@ The runner image does not contain Claude Code. The first time a runner starts, B
 - **TrueNAS SCALE 24.10 or newer.** Docker is already installed: skip step 2, but run `docker compose version` to check it works. Use **System → Shell**, which is a root shell, and make the folder on a dataset (step 3). Not yet confirmed on a real TrueNAS machine for this install.
 - **Docker Desktop (preview).** Install [Docker Desktop](https://docs.docker.com/desktop/) in place of step 2, then follow the other steps in a terminal. `hostname -I` does not work on macOS: open `http://localhost:3100` on the same computer. Not tried yet.
 
+### Start again from nothing
+
+This deletes everything this install made, including your company data, your keys and the database. Back up first if you want to keep anything. Do this only on a machine that runs just this install: step 2 removes every runner and network guard on the machine, not only this install's. `boss-man` below is the project name unless you set another with `-p` or `COMPOSE_PROJECT_NAME`; use your own name in its place. Run each command in the folder with `images.env`. A command that finds nothing to remove prints nothing, and that is fine.
+
+The order matters: the updater and launcher started some containers that Compose does not know, and they hold your volumes, so they go first.
+
+1. Remove every container this install owns:
+
+```sh Run in the folder with images.env
+docker ps -aq --filter label=com.bossman.install=boss-man | xargs -r docker rm -f
+```
+
+2. Remove the runners, then the network guards:
+
+```sh Run in the folder with images.env
+docker ps -aq --filter label=boss-man.launcher=1 | xargs -r docker rm -f
+```
+
+```sh Run in the folder with images.env
+docker ps -aq --filter label=boss-man.netguard=1 | xargs -r docker rm -f
+```
+
+3. Remove what Compose knows, with its volumes:
+
+```sh Run in the folder with images.env
+docker compose -f docker-compose.images.yml --env-file images.env down -v --remove-orphans
+```
+
+4. Remove the Claude pack volume. The second command catches one an older install made without the label:
+
+```sh Run in the folder with images.env
+docker volume ls -q --filter label=com.bossman.install=boss-man | xargs -r docker volume rm
+```
+
+```sh Run in the folder with images.env
+docker volume ls -q --filter name=boss-man-claude-pack | xargs -r docker volume rm
+```
+
+Compose can leave the `config` and `data` volumes behind, so remove whatever is still named for the project (`boss-man_`, or your own project name):
+
+```sh Run in the folder with images.env
+docker volume ls -q --filter name=^boss-man_ | xargs -r docker volume rm
+```
+
+5. Check nothing is left. Both commands only list, and both must print nothing:
+
+```sh Run in the folder with images.env
+docker ps -a --format '{{.Names}}' --filter label=com.bossman.install=boss-man
+```
+
+```sh Run in the folder with images.env
+docker volume ls -q --filter name=boss-man
+```
+
+If either prints a name, run `docker ps -a` and remove that container with `docker rm -f` and its name, then repeat steps 3 to 5.
+
+Not yet confirmed on a real host as of 2026-11-27; the release install test runs these same steps after each real install.
+
 ### Updating to a new release
 
 Nothing updates by itself. Take a release from Boss Man's own update screen: the updater checks the signed release, downloads every image of it by digest, backs up the database, switches the server over, watches it for 15 minutes (going back by itself if it fails), and then moves the rest of the release. Your data and keys stay, because they are in volumes.
@@ -272,8 +330,8 @@ The second option: build every image on your own machine from the code. Use it i
 
 - a 64-bit Linux machine with Docker Engine and Docker Compose v2 (check with `docker compose version`)
 - `git`, `openssl` and `curl` on that machine
-- a GitHub or Gitea account, for the repositories your agents work in
-- an AI account: a Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic. A Claude Pro or Max plan is the easiest start, because the CEO is a Claude Code agent unless you change it.
+- only if your agents will work on code: a GitHub or Gitea account, for the repositories they work in. A team that works on documents and research does not need one.
+- an AI account: a Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic. A Claude Pro or Max plan is the easiest start, because the CEO is a Claude Code agent unless you change it. You pay for this account. Boss Man itself is free.
 - a computer with a web browser on the same network
 
 Boss Man needs Linux because two safety features use the Linux kernel: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. Settings shows whether each one is working on your machine: the network guard under **Settings → Server and runner → This server**, and the agent fence under **Settings → Permissions → Agent fence**.

@@ -1,6 +1,11 @@
 # What's new in Boss Man
 
-The changes you will notice in Boss Man, newest first, in plain words. Boss Man has no numbered releases: each entry covers the changes that reached `main` on that day. To get them, update your server (see `docs/23-updating.md`). This file is also the "What's new" page on the website.
+The changes you will notice in Boss Man, newest first, in plain words. Each date lists the changes added that day, and its first line says which ready-made image has them. To get them, update your server (see `docs/23-updating.md`). This file is also the "What's new" page on the website.
+
+> [!NOTE]
+> **When you get each change.** If you built Boss Man from source, you get each change as soon as it is added: update your server to pick it up. If you installed the ready-made Docker images, a new image comes out once a week, on Tuesdays, with every change up to then. A newer change waits for the next weekly image, so a feature listed here may not be in your install yet.
+>
+> **Which do I have?** Open Settings → Server and runner → Updates. An image install says which image it runs there, for example "You run 0.1.0-beta.3". An install built from source shows no image number.
 
 <!--
 Release step: adding to this file is part of every release (Release Manager, on the "Release log: record" wake).
@@ -11,6 +16,11 @@ Release step: adding to this file is part of every release (Release Manager, on 
    live commit, using each entry's "Things you'll notice" line. Skip any change that already has a line on this page.
 2. Add those changes under today's heading, "## 16 November 2026" (day, month in full, year). Make the heading if today has none.
    Newest day first. One heading per day: a second release that day adds to the same list.
+   A new heading's first line, before its bullets, is the image label "**Not in an image yet:** comes with the next
+   weekly image (Tuesdays)." with the bold part exactly so. On release day the dates the new image covers change to
+   "**In image 0.1.0-beta.N**" (the full version, as the GitHub release title has it). A line counts as in an image when
+   that release's commit already holds it, the same rule scripts/release-notes.sh uses. A day the weekly cut falls
+   inside gets both labels: the not-yet label above the newer lines, then the image label above the older ones.
 3. One line per change, written for an owner who is not a developer: what they will see or can now do, and "off by default"
    or "after you update the runners" when that applies. Leave out tests, CI, internal tooling, our own server's details,
    agent names and ticket numbers (the site build refuses a ticket number such as BOS-123).
@@ -52,19 +62,50 @@ Release step: adding to this file is part of every release (Release Manager, on 
    an older stage word in the docs, or has no new "What's new" entry, and it stops with a one-line reason.
    The weekly run is Tuesday 10:00 UTC: record the check before then, or that week's release is refused.
 
+8. Label the week's entries, so the What's new page says which weekly version has each group of entries (BOS-2840, with the
+   label format from 2/3 and the gate from BOS-2841). On every Monday docs-vs-code check (BOS-2667), work out the next
+   weekly version (the newest release's number plus one) and run
+   scripts/changelog-label.sh label 0.1.0-beta.N on main's CHANGELOG.md. It turns each "Not in an image yet:" line that has
+   entries under it into "In image 0.1.0-beta.N" and changes nothing else; run it twice and the second run does nothing.
+   Commit it with this week's docs check, and let CI publish that commit's images.
+   Then close the gap that a Thursday landing would otherwise leave. The weekly release takes the newest commit whose checks
+   passed and whose images are all published, which is often a commit merged after the Monday check: its new entries carry
+   no label, and the image label gate (BOS-2841) refuses that week's release. So when code can still land, run the one-shot
+   fallback as well, and again on the evening before the release:
+   scripts/changelog-label-release.sh label-release 0.1.0-beta.N "<the previous release's commit>"
+   "\$(git rev-parse origin/main)". It labels only the entries that release will list, leaves every older label alone, and
+   writes nothing when all of them are already labelled, so a second run is a no-op. Commit it as the docs check, so its
+   images are built in time; a label merged after the run picked a commit is not in that release, and a refused run names
+   the lines to label (label them, wait for that commit's images, and run the release again). The weekly release refuses,
+   and says so, if an entry still has no label (BOS-2841's gate). No image contains this file (no Dockerfile copies it):
+   the label is in the released commit, so the website, which is built from this file on main after the install test, and
+   the release notes show it. You still do nothing by hand after the release: this is the one place the label is remembered.
+
 Check before committing: pnpm --filter @boss-man/site build (it stops on a heading that is not a date, or one out of order).
 Remember to put an empty line after any line you add outside this comment, so the comment's own closing marker still closes it.
 -->
 
 <!-- Docs checked up to 688f2bc5a6c5f50810649a7cfa7af9e4bcec5d37 -->
 
+## 27 November 2026
+
+- The first time you move around Boss Man with the keyboard on a computer (pressing Tab outside a text box, or Ctrl K), a small tip at the bottom left says "Boss Man has keyboard shortcuts. Press ? any time to see them." Press Show shortcuts to open the list, or Got it (or Escape) to close it. It shows once per login, in any browser. It never shows on a phone, or if you have unticked "Use single-letter keys" in Settings → Account → Keyboard shortcuts.
+- Pin the pages you open most. Press **Add to shortcuts** beside the title of any page inside Product, Team, Activity or Settings (for example Settings → Server and runner → Updates). The page then appears in a Shortcuts section at the top of the menu, on every device you sign in from. You can have up to 6. Press the button again, or Undo, to take it out. The menu is unchanged until you add one.
+- **Edit** beside Shortcuts lets you rename, reorder or remove them. Nothing changes until you press Save.
+- With the keyboard, press g then 1 to open your first shortcut, g then 2 for the second, and so on up to 6. The numbers follow the order in the menu. Press ? to see which number opens which page.
+
 ## 26 November 2026
 
+**Not in an image yet:** comes with the next weekly image (Tuesdays).
+
+- Keyboard shortcuts are easier to find. On a computer, press the keyboard button at the bottom of the menu, between Settings and Log out (or press ?), to see them, starting with the keys for the page you're on. Hover over a menu item to see its key, for example "Decisions (g then i)". Don't want single-letter keys, for example because you use voice control? Untick "Use single-letter keys" in Settings → Account → Keyboard shortcuts. The choice follows your login to every browser, and Ctrl K for search always works.
 - A new beta release now goes out by itself every Tuesday morning (10:00 UTC), with that week's changes in its notes, as long as the newest code has passed its checks and its images are ready. If there is nothing new or nothing ready, it skips that week. You don't need to press anything.
 - Boss Man is now in beta, no longer alpha. The website, the GitHub README and the contribution and security pages say so. You can install it from the ready-made Docker images on the GitHub releases page, or build it from the source.
 - In the company brief (Wiki → Company brief), the "In flight" list now marks an agent whose run is on a ticket it does not own, review or have a card on: the line ends "(not assigned: woken by …)" with the reason it was started, so a stray run stands out. Runs on an agent's own tickets look as before.
 
 ## 25 November 2026
+
+**In image 0.1.0-beta.3**
 
 - In Settings → Server and runner → Updates, "Recent updates" no longer leaves older server updates stuck on "Waiting". The one now live says Live, and one a newer update took over from says Replaced. Each row shows its real number of changes, not "10 changes" on every row.
 - The Updates banner describes the newest update that is waiting or queued, not an older "Update failed" message, and "Try again" is hidden while that newer update is pending.
@@ -78,12 +119,15 @@ Remember to put an empty line after any line you add outside this comment, so th
 - Opening a milestone on the Roadmap shows a "What's left" list: every unfinished ticket in it, grouped as Waiting for you, Held up, Needs a look, Running or Being built, with who has it and what it waits on. A ticket held only by one of your cards has an Open card button.
 - Each milestone on the Roadmap has a "CEO manages At risk" button, off by default. Turn it on and, when that milestone turns At risk or Late, the CEO is woken once to plan a remedy. It is not woken again while the status stays the same. A milestone with it off never wakes the CEO. "CEO manages At risk for all" turns it on for every milestone at once, and tells you first that each remedy costs a CEO run.
 - The milestone's "CEO manages At risk" buttons read plainly: "Turn it on" where it said "Take it on", and "Turn it off" where it said "Turning it off".
+- When the CEO manages a milestone that is At risk or Late, the CEO's plan for it now shows on the Roadmap, just under the line that says why the milestone is at risk. The plan goes away by itself once the milestone is back on track.
 - After you answer a card and get its result, later corrections and updates about it also reach your chat, flagged, for 24 hours or until the matter is closed. A "still checking" note stays on the ticket.
 - On the Merge queue page, a change whose own check has passed and that is now waiting for GitHub's tests shows a blue "On GitHub" tag instead of a grey "Waiting", with how long it has been there. Its line says what time its check passed.
 - When a server or runner update fails, Boss Man opens an urgent ticket to find the cause, assigns it to your infrastructure engineer (or the CEO if you have none) and wakes them straight away. The Updates status says "Being looked into" only once their work has started. Until then it says "Not picked up yet" and who was woken when. If nobody starts within 15 minutes, the CEO is woken again. A second failure of the same update is added to the same ticket.
 - If you press "Ask agents to wrap up" while a runner update is being built, the wrap-up now belongs to that update. The banner says "Wrapping up for the runner update", and the wrap-up lifts by itself when the update goes in, fails or is cancelled. Work on an urgent ticket still starts during a wrap-up.
 
 ## 24 November 2026
+
+**In image 0.1.0-beta.3**
 
 - The Feedback page has a summary above the list: how many notes are waiting to be triaged, how long the oldest has waited (with a link to it), and this week's notes by source. The list can be shown newest first or oldest first, the order is kept in the page address, "Show older" reads notes past the newest 50, and Download CSV follows the order you chose.
 - Settings → Team and CEO → Standing rules has a "Past versions" fold with the last 20 changes: who made each, when, and how many lines were added and removed. Each opens a before/after view, and "Put this version back" restores it after asking you first. Undo still reverses it.
@@ -119,6 +163,8 @@ Remember to put an empty line after any line you add outside this comment, so th
 - In Settings → Server and runner → Updates, "Deploy to staging" has a help line saying it is optional, that agents deploy to staging themselves, and when you might press it.
 
 ## 23 November 2026
+
+**In image 0.1.0-beta.3**
 
 - Parts of Boss Man that are still loading now say "Loading…", and a part that fails to load says what failed and offers Retry, instead of a blank space or a false "none yet". This covers the Dashboard, ticket pages, the Spend report, Settings → Funding → Budgets, the Features page, a feature's own page, Settings → Devices, the Roadmap tabs, the Notifications page, four Wiki loads, Settings → Reviews, the CEO's chapters, and Settings → Tools.
 - A ticket's Activity feed says "Loading the conversation" and offers Retry instead of looking empty.
@@ -158,6 +204,8 @@ Remember to put an empty line after any line you add outside this comment, so th
 
 ## 22 November 2026
 
+**In image 0.1.0-beta.3**
+
 - Settings → Account can now change your password and sign out every other device.
 - Parts of Boss Man that are still loading now say "Loading…", and a part that fails to load says so and offers Retry, instead of showing a false "none yet". This covers the Tools, Rules, Credentials and Secrets settings and the Scrum Master log.
 - The Board, Skills and Engagements lists load faster on big projects; older ones are behind a "Show older" button.
@@ -186,6 +234,8 @@ Remember to put an empty line after any line you add outside this comment, so th
 
 ## 21 November 2026
 
+**In image 0.1.0-beta.1**
+
 - Pages that are still loading now say "Loading…", and a page that fails to load says so, instead of showing a blank space. This covers the public portal, the Roadmap, the Wiki, the Agents list, Settings → Watchdog and Settings → Funding.
 - A paused company now has a Resume button.
 - Stopping one run from a ticket or the Run page asks you first, and can't be sent twice.
@@ -204,6 +254,8 @@ Remember to put an empty line after any line you add outside this comment, so th
 - A new website page, "What can go wrong with AI agent teams", tells 11 real failure stories and what Boss Man does about each.
 
 ## 20 November 2026
+
+**In image 0.1.0-beta.1**
 
 - A server update now says what it is waiting on and when it is running late, and your CEO chat keeps answering while it waits, instead of a bare "updating".
 - An update you approve no longer waits for you to press anything else. Every wait along the way has its own end. A runner update still waiting after an hour goes ahead by itself and stops any agent runs still going. A server update still waiting for a quiet machine after an hour goes ahead too, unless memory really is short: then it gives up, tells you and tells your CEO.
@@ -232,6 +284,8 @@ Remember to put an empty line after any line you add outside this comment, so th
 
 ## 19 November 2026
 
+**In image 0.1.0-beta.1**
+
 - The runs history (for the CEO and Data & Analytics) now shows cached read and write tokens and a cost for each run, so a ticket's spend can be checked by token type.
 - A finished change that waits behind another change's landing turn now learns early whether it still fits: if main has moved under it, it is rebuilt and checked again during the wait rather than up to an hour later, and if it clashes it goes back to its author at once. Fewer changes sit waiting only to be sent back.
 - Owner cards with steps now have a "Why:", an "If you skip it:" and a Boss Man-written "Where" line.
@@ -248,6 +302,8 @@ Remember to put an empty line after any line you add outside this comment, so th
 
 ## 17 November 2026
 
+**In image 0.1.0-beta.1**
+
 - Settings → Server and runner → Updates now says a runner update is "needed" or "not needed", never "may be needed".
 - A go-live setup card opens with a short "Why:" line and an "If you skip it:" line, so you can see what a step buys you before you do it.
 - Fewer cards with the wrong walk-through: a card's menu path ("Settings → …") must point at a real screen, or Boss Man refuses it.
@@ -258,6 +314,8 @@ Remember to put an empty line after any line you add outside this comment, so th
 - Fewer stale cards: agents can now withdraw their own out-of-date cards.
 
 ## 16 November 2026
+
+**In image 0.1.0-beta.1**
 
 - A new "Priority 1" switch on tasks and features. It shows on the board, moves the work up the merge line, and tells you once when the work is ready to go live.
 - The limits screens now show the value you saved and the value in force, with the reason and when the lower value lifts. For example: "Saved 16, in force 3" while an update runs.
@@ -270,6 +328,8 @@ Remember to put an empty line after any line you add outside this comment, so th
 
 ## 15 November 2026
 
+**In image 0.1.0-beta.1**
+
 - A new Dashboard. It opens with "Needs you" (your waiting cards and sign-offs) and a live "Right now" strip, and shows a banner when merges are stuck.
 - Simpler menus. The main menu is in three groups, with Settings and Log out at the bottom. "Server and runner" settings are split into six short pages, and the Reviews and Watchdog settings open with simple presets.
 - A task that is only waiting now says so plainly on the board and the task page, for example "approved, waiting to merge", so it doesn't look stuck.
@@ -280,6 +340,8 @@ Remember to put an empty line after any line you add outside this comment, so th
 - New switches, all off by default: hold new work while merges are backed up; send new GitHub issues and comments to your feedback inbox; ask feedback-portal visitors to confirm their posts by email.
 
 ## 14 November 2026
+
+**In image 0.1.0-beta.1**
 
 - Every agent chat has a "Thinking" trace. Open a reply to see what the agent read, ran and decided, while it works and after a reload.
 - Calmer screens: shorter board cards, one "Details" section on each task page with help behind "?" buttons, one-sentence page intros, and notifications filtered by one row of chips.
@@ -292,6 +354,8 @@ Remember to put an empty line after any line you add outside this comment, so th
 
 ## 13 November 2026
 
+**In image 0.1.0-beta.1**
+
 - You can reorder the merge line: "Move to front" on the Merge queue page picks which change goes next, and urgent tasks go ahead of ordinary ones.
 - The Merge queue page shows what is really running. It no longer shows more busy slots than there are, or lists waiting merges as running.
 - "Ask agents to wrap up" now reaches Claude and Codex agents in the middle of a long step, after you update the runners.
@@ -300,6 +364,8 @@ Remember to put an empty line after any line you add outside this comment, so th
 - A withdrawn card says why and what replaces it, and a phone notification that fails says what went wrong.
 
 ## 12 November 2026
+
+**In image 0.1.0-beta.1**
 
 - Decision cards are redesigned. The recommended answer is on the first screen, each button says what it does, and sign-off cards list what you are approving.
 - The Merge queue page puts what needs you first, has one "main is failing" banner, and shows counts on its tabs.
@@ -310,6 +376,8 @@ Remember to put an empty line after any line you add outside this comment, so th
 
 ## 11 November 2026
 
+**In image 0.1.0-beta.1**
+
 - "Answer in Decisions" opens the exact card, and a ticket page lists the cards that are blocking it.
 - The Blocked column takes every kind of wait (your plan approval, a date, or a check after merge), and waiting tickets no longer count towards the in-progress limit.
 - A new "Queued checks" tab on the Merge queue page shows each check's place in line and how long it has waited.
@@ -317,6 +385,8 @@ Remember to put an empty line after any line you add outside this comment, so th
 - A missing page shows a plain "not found" message with a way back, empty dashboard charts say so, and the Wiki opens on the company brief.
 
 ## 10 November 2026
+
+**In image 0.1.0-beta.1**
 
 - Settings is one menu of 9 pages in 3 groups, on a computer and on a phone. Old links still work.
 - You can limit how many tickets each agent works on at once (2 by default), with an optional limit for the whole company.
@@ -328,6 +398,8 @@ Remember to put an empty line after any line you add outside this comment, so th
 
 ## 9 November 2026
 
+**In image 0.1.0-beta.1**
+
 - Approve simple agent questions from a button in the phone notification. Each button works once and expires after 15 minutes, and Settings → Notifications can turn it off. It needs a private notification server on https.
 - "Stop all work" pauses everything until you resume it, and a button on the Runs page ends every run in progress. An optional time limit per company ends long runs (off by default).
 - Every text box keeps a draft as you type. If someone else changed a ticket while you were editing it, your text is kept so you can compare.
@@ -337,6 +409,8 @@ Remember to put an empty line after any line you add outside this comment, so th
 
 ## 8 November 2026
 
+**In image 0.1.0-beta.1**
+
 - Permission cards can offer "Always allow", which saves a narrow rule so the same routine request stops coming back. It is never offered for risky actions, and you can undo it in Settings.
 - A "Restart the server" button in Settings restarts Boss Man at a quiet moment.
 - The board's Review area is split into "Awaiting review", "Approved, merging" and "Your review", and the side menu can shrink to a strip of icons.
@@ -344,6 +418,8 @@ Remember to put an empty line after any line you add outside this comment, so th
 - Approved updates no longer fail when newer work lands first, and a sign-off card is withdrawn if the code changes after it was raised.
 
 ## 7 November 2026
+
+**In image 0.1.0-beta.1**
 
 - Boss Man no longer freezes for seconds at a time, uses much less memory, and the usage pages stay responsive.
 - The Decisions queue shows your cards in the order to deal with them. High-risk work that needs your sign-off always gets a card.
@@ -353,6 +429,8 @@ Remember to put an empty line after any line you add outside this comment, so th
 - The board's Done column is no longer cut off, and the ticket page and side menu work on narrow screens such as folding phones.
 
 ## 6 November 2026
+
+**In image 0.1.0-beta.1**
 
 - Your messages on a ticket always get a reply. If no agent answers, Boss Man wakes it again, and after 10 minutes the CEO agent is asked to answer. The ticket shows whether your message was delivered.
 - Wiki pages can't be wiped by accident. Every edit keeps a version you can restore, and an edit that would remove a large part of a page is refused.
@@ -364,6 +442,8 @@ Remember to put an empty line after any line you add outside this comment, so th
 
 ## 5 November 2026
 
+**In image 0.1.0-beta.1**
+
 - Your approval is tied to the exact code you approved. If nothing changed before it merges, you are not asked again. If it changed, the new card says what changed.
 - "Approve and merge" approves and merges in one press. When work is held, the banner names the agent, the account and when the limit resets.
 - Fewer stale cards: alerts clear themselves once the cause has gone, and repeated account failures become one card.
@@ -372,6 +452,8 @@ Remember to put an empty line after any line you add outside this comment, so th
 - Cards and ticket pages show where a merge stands: queued, checking, or failed and why.
 
 ## 4 November 2026
+
+**In image 0.1.0-beta.1**
 
 - The Chat page fills the window, with the message box always in view at the bottom.
 - Click a picture on a wiki page to enlarge it, with "Fit to window" and "Actual size".
@@ -382,6 +464,8 @@ Remember to put an empty line after any line you add outside this comment, so th
 
 ## 3 November 2026
 
+**In image 0.1.0-beta.1**
+
 - List your Claude plans in order on the Funding page. When one reaches its limit, new work moves to the next plan with room, and you are told when it switches.
 - Two identical permission requests close together now give you one card, not two.
 - The Copy button on cards works on plain "http" addresses too. If copying fails, it selects the text for you.
@@ -390,6 +474,8 @@ Remember to put an empty line after any line you add outside this comment, so th
 - The "Build and update runners" offer appears only after a server update has passed its 15-minute trial.
 
 ## 2 November 2026
+
+**In image 0.1.0-beta.1**
 
 - You can reach Boss Man at a secure (HTTPS) address on your private Tailscale network. Optional: you set it up yourself.
 - Permission cards have an "Ask CEO for advice" option.

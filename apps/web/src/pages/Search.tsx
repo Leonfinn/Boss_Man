@@ -43,7 +43,7 @@ export function readSearchParams(qs: URLSearchParams = hashQuery()): Params {
 /** One search's answer: the first reply (for the counts) and, with a kind, every hit loaded so far. */
 type Loaded = { key: string; since: string | null; results: SearchResults; hits: SearchHit[] };
 
-export function SearchPage({ companyId, go }: { companyId: string | undefined; go: (to: string) => void }) {
+export function SearchPage({ companyId, go, prefix }: { companyId: string | undefined; go: (to: string) => void; prefix?: string | null }) {
   const [p, setP] = useState(readSearchParams);
   useEffect(() => {
     const on = () => setP(readSearchParams());
@@ -127,7 +127,7 @@ export function SearchPage({ companyId, go }: { companyId: string | undefined; g
           to({ q: draft.trim() });
         }}
       >
-        <input type="search" aria-label="Words to search for" placeholder="Search words, or a ticket number like BOS-12" value={draft} onChange={(e) => setDraft(e.target.value)} />
+        <input type="search" aria-label="Words to search for" placeholder={`Search words, or a ticket number like ${prefix || "T"}-12`} value={draft} onChange={(e) => setDraft(e.target.value)} />
         <select aria-label="Kind" value={p.kind} onChange={(e) => to({ kind: e.target.value as SearchKind | "" })}>
           <option value="">All kinds{total === null ? "" : ` (${total})`}</option>
           {GROUPS.map((g) => (
@@ -150,7 +150,7 @@ export function SearchPage({ companyId, go }: { companyId: string | undefined; g
       </form>
 
       {!companyId && <p className="muted">Pick a company first.</p>}
-      {companyId && term.length < SEARCH_MIN && <p className="muted">Type at least {SEARCH_MIN} letters and press Enter, or a ticket number like BOS-12.</p>}
+      {companyId && term.length < SEARCH_MIN && <p className="muted">Type at least {SEARCH_MIN} letters and press Enter, or a ticket number like {prefix || "T"}-12.</p>}
       {error && <LoadError what="the results" message={error} onRetry={() => setAttempt((a) => a + 1)} />}
       {loading && !current && <p className="muted">Searching…</p>}
       {current && total === 0 && <p className="muted">Nothing matches "{term}"{p.since ? " in that time" : ""}.</p>}

@@ -82,7 +82,8 @@ describe("screen inventory", () => {
     const ids = inv.map((i) => i.id);
     for (const want of ["#/board", "#/settings", "#/settings/<company>/funding", "#/settings/<company>/secrets", "#/settings/<company>/permissions", "#/(default)"]) expect(ids).toContain(want);
     // A screen that reads as empty is a scanner miss, not a quiet page.
-    const bare = inv.filter((i) => !i.sections.length && !i.reads.length).map((i) => i.id);
+    // "#/shortcut-gone" is the one on purpose: its heading comes in as a prop ("Page no longer exists") and it reads nothing.
+    const bare = inv.filter((i) => !i.sections.length && !i.reads.length && i.id !== "#/shortcut-gone").map((i) => i.id);
     expect(bare, "These screens read as having no sections and no API reads: the scan lost them").toEqual([]);
   });
 

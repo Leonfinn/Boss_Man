@@ -20,10 +20,11 @@ const LOG_TITLE_PREFIX = "Release log: record ";
 const RELEASES_PROJECT = "Releases";
 
 /** How a new live commit went live, in plain words, for the wake note. */
-export type ReleaseHow = "deployed" | "deployed-bluegreen" | "switched-back" | "rolled-back" | "restarted";
+export type ReleaseHow = "deployed" | "deployed-bluegreen" | "switched-back" | "rolled-back" | "restarted" | "hand-applied";
 
 const HOW_WORDS: Record<ReleaseHow, string> = {
   deployed: "the host deployer",
+  "hand-applied": "a hand-apply (the owner applied it from a hand card)",
   "deployed-bluegreen": "a blue/green switch",
   "switched-back": "a blue/green switch-back",
   "rolled-back": "a rollback",
@@ -65,6 +66,16 @@ const TO_LIVE: Record<string, ReleaseHow> = {
   rolled_back: "rolled-back",
 };
 
+/** The company's live Release Manager: the template it was hired from, else its title, else its name. */
+export async function findReleaseManager(db: Db, companyId: string) {
+  const team = await db
+    .select({ id: agents.id, name: agents.name, title: agents.title, template: agents.template })
+    .from(agents)
+    .where(and(eq(agents.companyId, companyId), isNull(agents.retiredAt)))
+    .orderBy(asc(agents.createdAt));
+  return team.find((a) => a.template === "release-manager") ?? team.find((a) => a.title === "Release Manager") ?? team.find((a) => /^release manager$/i.test(a.name.split(" - ")[0]!.trim())) ?? null;
+}
+
 export const releaseLogService = (
   db: Db,
   deps: {
@@ -88,15 +99,7 @@ export const releaseLogService = (
   // shortcut: one pass at a time, so two observations of the same change can't both open a ticket.
   let busy = false;
 
-  /** The company's live Release Manager: the template it was hired from, else its title, else its name. */
-  async function releaseManagerOf(companyId: string) {
-    const team = await db
-      .select({ id: agents.id, name: agents.name, title: agents.title, template: agents.template })
-      .from(agents)
-      .where(and(eq(agents.companyId, companyId), isNull(agents.retiredAt)))
-      .orderBy(asc(agents.createdAt));
-    return team.find((a) => a.template === "release-manager") ?? team.find((a) => a.title === "Release Manager") ?? team.find((a) => /^release manager$/i.test(a.name.split(" - ")[0]!.trim())) ?? null;
-  }
+  const releaseManagerOf = (companyId: string) => findReleaseManager(db, companyId);
 
   /** Where the ticket goes: a project called Releases, else the company's newest open project. */
   async function releasesProjectId(companyId: string) {

@@ -15,7 +15,7 @@ You need:
 - A **64-bit** machine (x86-64 or arm64) with **at least 4 GB of RAM**, running Linux. Docker Engine with Docker Compose v2; "Install Docker" below installs it.
 - Internet access from that machine.
 - A Claude account (a Pro or Max plan, or an Anthropic API key) for the first start: the CEO is a Claude Code agent. Other AI providers can be added later, under Settings → Secrets.
-- A GitHub or Gitea account, only if your agents will work on code.
+- A GitHub or Gitea account, only if your agents will work on code. A team that works on documents and research does not need one.
 - A browser on any computer that can reach the machine.
 
 ### Open a terminal on the machine
@@ -177,7 +177,7 @@ Company data (workspaces, agent sessions) lives in Docker volumes created by Bos
 
 ### Updating to a new release
 
-Nothing updates by itself. Take a release from Boss Man's own update screen: the updater checks the signed release, downloads every image of it by digest, backs up the database, switches the server over, watches it for 15 minutes (going back by itself if it fails), and then moves the rest of the release: it checks the new network guard, replaces the launcher once no run is starting (it waits up to 10 minutes; if a run is still starting it tries again later and says so on the screen), and removes the previous release's runner and guard images that no container uses any more. Runners that are working are not touched; each one moves to the new runner and guard when it next restarts, and until then keeps the guard it has, so nothing opens up. Your data and keys stay, because they are in volumes.
+Nothing installs by itself: Boss Man tells you about a new release (docs/23, "How you are told about a new release") and you press **Install** in Settings → Server and runner → Updates. Take a release from Boss Man's own update screen: the updater checks the signed release, downloads every image of it by digest, backs up the database, switches the server over, watches it for 15 minutes (going back by itself if it fails), and then moves the rest of the release: it checks the new network guard, replaces the launcher once no run is starting (it waits up to 10 minutes; if a run is still starting it tries again later and says so on the screen), and removes the previous release's runner and guard images that no container uses any more. Runners that are working are not touched; each one moves to the new runner and guard when it next restarts, and until then keeps the guard it has, so nothing opens up. Your data and keys stay, because they are in volumes.
 
 You do not run `docker compose pull` or `up -d` for a release any more, and you must not put an older `images.env` back over a running install: compose would start the older updater, which then moves itself forward to the release it recorded (it takes the release it last finished as the truth), but it is cleaner to leave the files alone. Do not run `setup` again; it is only for the first install (running it again is harmless, it keeps what exists).
 
@@ -249,8 +249,64 @@ Install [Docker Desktop](https://docs.docker.com/desktop/) in place of "Install 
 - **A pull is refused or "denied"**: the package may be private, or you hit Docker Hub's limit (section 2). Run `docker login` for that registry.
 - **The page does not open from another computer**: check the address from `hostname -I` (section 3, step 4) and that `tail -2 images.env` shows the two lines of step 2. If not, run step 2 and then the start command (step 3) again. If the `curl` health line answers on the machine itself but the page does not open elsewhere, a firewall on the machine is blocking port 3100.
 - **The login page reloads**: `images.env` is missing `BOSSMAN_INSECURE_COOKIES=1` (step 2). Run step 2, then the start command again.
-- **Start again from nothing** (this deletes everything, including your company data and keys): `docker compose --env-file images.env -f docker-compose.images.yml down -v`, then `docker rm -f launcher server-blue server-green updater` (the updater made those, so compose does not know them). Do not do this if you want to keep anything.
+- **Start again from nothing** (this deletes everything, including your company data and keys): see the next section. Do not do this if you want to keep anything.
 - **Go back to the build install**: stop this one with `docker compose --env-file images.env -f docker-compose.images.yml down` (without `-v`, so the volumes stay) and follow [docs/00-first-time-install.md](00-first-time-install.md) in a different folder. The two installs do not share data.
+
+## Start again from nothing
+
+This deletes everything this install made, including your company data, your keys and the database. Back up first if you want to keep anything. **Remove from a host that runs only this install**: step 2 removes every runner and network guard on the host, not only this install's, until names follow the project (BOS-2851 narrows step 2 to this install's own runners and guards by the install label).
+
+The order matters. The updater made the server and the launcher, and the launcher made the runners and guards, so Compose does not know them. They hold your volumes, and Docker will not delete a volume a container still uses. Containers go first, then the volumes. The examples use `boss-man`, the project name unless you set another with `-p` or `COMPOSE_PROJECT_NAME`; use your own name in its place. Run each command from the folder with `images.env`. A command that finds nothing to remove prints nothing, and that is fine.
+
+1. Remove every container this install owns (the database, proxy, updater, server and launcher), found by their label:
+
+   ```
+   docker ps -aq --filter label=com.bossman.install=boss-man | xargs -r docker rm -f
+   ```
+
+2. Remove the launcher's runners, then its network guards:
+
+   ```
+   docker ps -aq --filter label=boss-man.launcher=1 | xargs -r docker rm -f
+   ```
+
+   ```
+   docker ps -aq --filter label=boss-man.netguard=1 | xargs -r docker rm -f
+   ```
+
+3. Let Compose remove what it knows, with the volumes and any container it lost track of:
+
+   ```
+   docker compose -f docker-compose.images.yml --env-file images.env down -v --remove-orphans
+   ```
+
+4. Remove the Claude pack volume. A launcher from a release that includes the install label puts it on this volume. An older install made it with no label, under the name `boss-man-claude-pack`, so the second command catches that one:
+
+   ```
+   docker volume ls -q --filter label=com.bossman.install=boss-man | xargs -r docker volume rm
+   ```
+
+   ```
+   docker volume ls -q --filter name=boss-man-claude-pack | xargs -r docker volume rm
+   ```
+
+   Compose can leave the `config` and `data` volumes behind (the real install test found this), so remove whatever is still named for the project (`boss-man_`, or your own project name):
+
+   ```
+   docker volume ls -q --filter name=^boss-man_ | xargs -r docker volume rm
+   ```
+
+5. Check nothing is left. Both commands only list, and both must print nothing:
+
+   ```
+   docker ps -a --format '{{.Names}}' --filter label=com.bossman.install=boss-man
+   ```
+
+   ```
+   docker volume ls -q --filter name=boss-man
+   ```
+
+If either command prints a name, something is still holding it: run `docker ps -a` and remove that container with `docker rm -f <name>`, then repeat steps 3 to 5. Not yet confirmed on a real host after this change; the release install test runs these same steps after each real install (scripts/install-images.test.sh).
 
 ## What the install changes on your machine
 
@@ -258,7 +314,7 @@ Only Docker objects: containers, networks and volumes whose names start with `bo
 
 ## Blue/green updates (the only way this install runs, since BOS-1227)
 
-Compose holds the database, a small Caddy `proxy` that owns the host ports and the name `server`, the `updater` and the one-shot `setup`. The updater makes `server-blue` (and later `server-green`) and the `launcher` itself, from the release `images.env` pins, and takes over from there. The updater swaps the server's two colours through the Docker API: it checks the signed release, backs up the database (the last 3 dumps stay in the `backups` volume), migrates while the old colour serves, starts the idle colour, hands over, moves the `server-live` alias on the private `front` network (the proxy dials it, so no file or reload is involved), watches for 15 minutes and switches back by itself if the new colour fails, then stops the old colour and keeps it as the standby. Going back to the standby's release needs no download; any other older release is refused. The updater replaces itself last, through a hand-over (`updater-next` must report in within 60 seconds, else it is removed and "Updater update failed" is recorded). Migrations must be expand-only so the old release runs on the new schema (docs/10-migrations.md). The first server and the launcher are made at the updater's first start with no backup and no soak. This has been tested against a fake Docker API only; **not yet confirmed on a real host** (the real-Docker proof runs in staging). The launcher is replaced one at a time: the new one is created, the old one stopped, the new one started and waited for; if it never becomes healthy it is removed and the old one starts again. Never delete the `backups` or `updater-state` volumes or remove the standby colour. Because compose no longer owns a server or launcher, `docker compose up -d` cannot bring an older one back; the updater, if compose starts it from an older digest than the release it recorded, moves itself forward again. `docker compose --env-file images.env -f docker-compose.images.yml down -v` (section "Start again from nothing") still deletes the volumes, and with them the updater's records.
+Compose holds the database, a small Caddy `proxy` that owns the host ports and the name `server`, the `updater` and the one-shot `setup`. The updater makes `server-blue` (and later `server-green`) and the `launcher` itself, from the release `images.env` pins, and takes over from there. The updater swaps the server's two colours through the Docker API: it checks the signed release, backs up the database (the last 3 dumps stay in the `backups` volume), migrates while the old colour serves, starts the idle colour, hands over, moves the `server-live` alias on the private `front` network (the proxy dials it, so no file or reload is involved), watches for 15 minutes and switches back by itself if the new colour fails, then stops the old colour and keeps it as the standby. Going back to the standby's release needs no download; any other older release is refused. The updater replaces itself last, through a hand-over (`updater-next` must report in within 60 seconds, else it is removed and "Updater update failed" is recorded). Migrations must be expand-only so the old release runs on the new schema (docs/10-migrations.md). The first server and the launcher are made at the updater's first start with no backup and no soak. This has been tested against a fake Docker API only; **not yet confirmed on a real host** (the real-Docker proof runs in staging). The launcher is replaced one at a time: the new one is created, the old one stopped, the new one started and waited for; if it never becomes healthy it is removed and the old one starts again. Never delete the `backups` or `updater-state` volumes or remove the standby colour. Because compose no longer owns a server or launcher, `docker compose up -d` cannot bring an older one back; the updater, if compose starts it from an older digest than the release it recorded, moves itself forward again. Removing the install (section "Start again from nothing") still deletes the volumes, and with them the updater's records.
 
 ## How the install is tested
 

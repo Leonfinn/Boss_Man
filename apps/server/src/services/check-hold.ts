@@ -13,6 +13,7 @@ import { checkQueue, type CheckJob } from "./check-queue.js";
 import { moveTicket } from "./ticket-moves.js";
 import { systemMoveTicket } from "./ticket-transition.js";
 import { tellOnce } from "./tell-once.js";
+import type { PreflightHoldState } from "./ci-preflight.js";
 
 export type CheckHoldDeps = {
   /** Opens the review round for a ticket that was held (requests the reviews its tier needs and wakes the reviewers). */
@@ -29,6 +30,8 @@ export type CheckHoldDeps = {
    * The merge itself then sends it back if the check failed. Without it the release sweep does the same a little later.
    */
   releaseHolds?: (ticketId: string) => Promise<unknown>;
+  /** BOS-2880: where GitHub's CI before review stands for the checked commit (ci-preflight holdState). Without it the hold waits on the quick check alone. */
+  ci?: (ticketId: string, head: string) => Promise<PreflightHoldState>;
 };
 
 export function checkHoldService(db: Db, deps: CheckHoldDeps) {
@@ -80,9 +83,29 @@ export function checkHoldService(db: Db, deps: CheckHoldDeps) {
       // BOS-1906 note: a pass for a commit other than the branch head covers code that has since changed; it opens no reviews.
       const head = deps.branchHead ? await deps.branchHead(ticketId).catch(() => null) : null;
       if (head && head !== last.commit) return (await bounceStale(ticketId, last, head)) ? "bounced" : "none";
+      // BOS-2880: a branch that changes CI or image files also waits for GitHub's CI before review, which starts after the quick check.
+      const ci = deps.ci ? await deps.ci(ticketId, last.commit).catch(() => ({ state: "none" }) as PreflightHoldState) : ({ state: "none" } as PreflightHoldState);
+      if (ci.state === "waiting") return "waiting";
+      if (ci.state === "failed") return (await bounceCi(ticketId, last, ci.detail)) ? "bounced" : "none";
       return (await release(ticketId, last)) ? "released" : "none";
     }
     return (await bounce(ticketId, last)) ? "bounced" : "none";
+  }
+
+  /** BOS-2880: GitHub's CI before review failed on the held commit: back to In progress with the failing jobs, the agent woken once. */
+  async function bounceCi(ticketId: string, job: CheckJob, detail: string): Promise<boolean> {
+    const why = `The quick check of ${job.commit.slice(0, 8)} passed, but GitHub's CI jobs before review did not: ${detail}`;
+    const moved = await systemMoveTicket(db, { ticketId, from: ["review"], to: "in_progress", reason: `Boss Man: ${why.slice(0, 200)}`, now: now(), stateNote: `GitHub's CI did not pass, so it went back to In progress: ${detail}`.slice(0, 480) });
+    if (!moved) return false;
+    const agentId = moved.assigneeAgentId;
+    if (agentId) {
+      await tellOnce(
+        `check hold ci bounce ${ticketId}`,
+        async () => deps.wake(agentId, { ticketId, reason: "check_result", priority: 2, note: `You handed this ticket in, and Boss Man ran GitHub's CI jobs on it after the quick check. ${why}\n\nIt is back in In progress and no reviewer was woken. Fix it, commit, and move it to review again.` }),
+        deps.log,
+      );
+    }
+    return true;
   }
 
   /** Back to In progress, no wake: the agent's own run is what changed the branch (or nobody is working on it and the next wake finds the note). */

@@ -53,7 +53,7 @@ import { staleVersionMessage, startRefusal, WorkError, type workService } from "
 import { effectiveSize, notInPointsLeft, type planningService } from "./services/planning.js";
 import { findMilestone, milestoneOfTicket, milestoneOut, sizeOut } from "./mcp-ticket-plan.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
-import { acceptanceCriteriaSchema, afterMergeLint, criteriaForCard, criterionOverlap, criteriaText, criterionText, failedAfterMerge, isAfterMerge, missingVerdicts, optionVerdictsRefusal, pageClauseRefusal, readCriteria, unreportedAfterMerge, type Criterion } from "@boss-man/shared";
+import { acceptanceCriteriaSchema, afterMergeLint, criteriaForCard, criterionOverlap, criteriaText, criterionText, failedAfterMerge, isAfterMerge, missingVerdicts, optionVerdictsRefusal, pageClauseRefusal, readCriteria, runnerBlindRefusal, unreportedAfterMerge, type Criterion } from "@boss-man/shared";
 import { TicketChatError, type ticketChatService } from "./services/ticket-chat.js";
 import { findSection, HISTORY_PAGE_MAX, missingPageNote, splitSections, WikiError, type wikiService } from "./services/wiki.js";
 import { conversationLines } from "./services/ticket-chat.js";
@@ -479,7 +479,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         // What choosing each option means for that criterion (BOS-1155): pass, fail or none. Required with criterion.
         optionVerdicts: z.record(z.string().max(200), z.enum(["pass", "fail", "none"])).optional(),
         // BOS-2742: options the owner can only press with a screenshot attached on the card.
-        needsAttachment: z.array(z.string().min(1).max(200)).max(6).optional().describe("Options (their exact text) the owner may only press with a screenshot or file attached, e.g. [\"Done, screenshot of the result attached\"]. The card then shows a paste/attach area, refuses the option with nothing attached, and your wake lists the image ids to open with open_attachment. An option whose words promise one (\"attached\", \"I'll attach\", \"screenshot\") is treated the same without this; pass it anyway when the ask is for a file or picture worded otherwise."),
+        needsAttachment: z.array(z.string().min(1).max(200)).max(6).optional().describe("Options (their exact text) the owner may only press with a screenshot or file attached, e.g. [\"Done, screenshot of the result attached\"]. The card then shows a paste/attach area, refuses the option with nothing attached, and your wake lists the image ids to open with open_attachment. An option whose words promise one (\"screenshot attached\", \"I'll attach\") must be flagged here or the card is refused; flag any other option that asks for a file or picture too."),
+        needsNote: z.array(z.string().min(1).max(200)).max(6).optional().describe("Options (their exact text) the owner may only press with text in the card's note, e.g. [\"Sent\"] when you ask them to paste a command's output. The card then shows the note box open, refuses the option with an empty note, and your wake carries the note in full. An option whose words promise one (\"in my note\", \"pasted\", \"output below\", \"link below\", \"I've entered\") must be flagged here or the card is refused."),
         // BOS-1161: the condition that makes this card moot, so Boss Man closes it by itself and records why. Each key is an
         // alternative (any one closes it); only conditions Boss Man can check are accepted. Without it the card is only flagged "may be out of date".
         clearsWhen: z.object({
@@ -490,7 +491,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         }).strict().optional(),
       },
     },
-    async ({ replaces: givenReplaces, ownerOnly, ownerOnlyWhy, question, options, recommended, blocksTicketId, alsoBlocks, holdsMerge, triedFirst, ownerMustDo, steps, stillNeeded, goLive, rollback, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, why, minutes, criterion, optionVerdicts, needsAttachment, clearsWhen }) => {
+    async ({ replaces: givenReplaces, ownerOnly, ownerOnlyWhy, question, options, recommended, blocksTicketId, alsoBlocks, holdsMerge, triedFirst, ownerMustDo, steps, stillNeeded, goLive, rollback, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, why, minutes, criterion, optionVerdicts, needsAttachment, needsNote, clearsWhen }) => {
       // R38: a go-live card states its undo with its source, and (below) waits for its ticket's preview proof.
       if (goLive) {
         const bad = rollbackRefusal(rollback);
@@ -523,8 +524,10 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         clearWhen = made.clearWhen;
       }
       if (!options.includes(recommended)) return fail("The recommended answer must be one of the options.");
-      const notAnOption = needsAttachment?.filter((o) => !options.includes(o)) ?? [];
-      if (notAnOption.length) return fail(`needsAttachment names ${notAnOption.map((o) => `"${o}"`).join(", ")}, which ${notAnOption.length === 1 ? "is not one of the options" : "are not among the options"}: give each option's exact text.`);
+      for (const [field, named] of [["needsAttachment", needsAttachment], ["needsNote", needsNote]] as const) {
+        const notAnOption = named?.filter((o) => !options.includes(o)) ?? [];
+        if (notAnOption.length) return fail(`${field} names ${notAnOption.map((o) => `"${o}"`).join(", ")}, which ${notAnOption.length === 1 ? "is not one of the options" : "are not among the options"}: give each option's exact text.`);
+      }
       // BOS-1596: owner-facing text the record contradicts (an installed check worker when none ever connected) is held with the live value.
       const factHold = await ownerFactHeldLive(db, scope.companyId, gitTokenProbe, [question, ...options, ...(steps ?? [])]);
       if (factHold) return fail(factHold);
@@ -551,6 +554,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         recommended = filledAs.get(recommended) ?? recommended;
         if (optionVerdicts) optionVerdicts = Object.fromEntries(Object.entries(optionVerdicts).map(([k, v]) => [filledAs.get(k) ?? k, v]));
         if (needsAttachment) needsAttachment = needsAttachment.map((o) => filledAs.get(o) ?? o);
+        if (needsNote) needsNote = needsNote.map((o) => filledAs.get(o) ?? o);
         options = ask.options;
       }
       question = ask.question ?? question;
@@ -619,7 +623,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       }
       let d: { id: string; droppedLinks?: DroppedOrderLink[]; withCeo?: boolean };
       try {
-        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question: [recordLine, question, notLiveLine].filter(Boolean).join("\n\n"), recordSays: !!recordAnswer, options, recommended, blocksTicketId, ...(alsoIds.length ? { alsoBlocksTicketIds: alsoIds } : {}), holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, ...(steps?.length && stepSources ? { stepSources } : {}), ...(steps?.length && ask.opening ? { opening: ask.opening } : {}), stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, ...(needsAttachment?.length ? { attachOptions: needsAttachment } : {}), doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(goLive ? { goLive: true, releasesCommit: releasedCommitOf(question, ...(steps ?? [])) } : {}), ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
+        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question: [recordLine, question, notLiveLine].filter(Boolean).join("\n\n"), recordSays: !!recordAnswer, options, recommended, blocksTicketId, ...(alsoIds.length ? { alsoBlocksTicketIds: alsoIds } : {}), holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, ...(steps?.length && stepSources ? { stepSources } : {}), ...(steps?.length && ask.opening ? { opening: ask.opening } : {}), stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, ...(needsAttachment?.length ? { attachOptions: needsAttachment } : {}), ...(needsNote?.length ? { noteOptions: needsNote } : {}), doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(goLive ? { goLive: true, releasesCommit: releasedCommitOf(question, ...(steps ?? [])) } : {}), ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
       } catch (err) {
         if (err instanceof WorkError || err instanceof AnswerError) return fail(err.message);
         throw err;
@@ -1134,6 +1138,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           // triage, so a note must not talk one into publishing it. Only the owner can tick it on in the app (BOS-991).
           // The guard also runs when this call rewrites the public text of a feature that is already on the portal
           // (BOS-1420), judged on the feature as it would be left, since visitors see that text too.
+          let tickRefused = false;
           if (portalVisibleIn === true || input.publicSummary !== undefined || input.publicTitle !== undefined) {
             const target = await feedback.feature(input.featureId, scope.companyId);
             const facts = await feedback.portalFacts(scope.companyId, target.areaId, target.driverScores as Record<string, number | null>);
@@ -1155,7 +1160,16 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
                 keepOffPortal: input.keepOffPortal ?? target.keepOffPortal,
                 hasPublicSummary: !!publicSummary?.trim(),
               });
-              if (verdict.reason === "security") return fail("This feature reads as security work, so it stays off the feedback portal. Only the owner can put it there, in the Features page.");
+              if (verdict.reason === "security") {
+                const refusal = "This feature reads as security work, so it stays off the feedback portal. Only the owner can put it there, in the Features page.";
+                // Text visitors would see at once (the feature is already on the portal and this call rewrites its public
+                // text) is refused whole, saving nothing. A refused tick alone drops only the tick (BOS-2850).
+                const publicTextShownNow = target.portalVisible && !target.keepOffPortal && (input.publicSummary !== undefined || input.publicTitle !== undefined);
+                if (publicTextShownNow || portalVisibleIn !== true) return fail(refusal);
+                delete (changes as { portalVisible?: boolean }).portalVisible;
+                tickRefused = true;
+                if (!Object.keys(changes).length) return fail(refusal);
+              }
             }
           }
           const f = await feedback.updateFeature(input.featureId, changes, scope.companyId);
@@ -1167,10 +1181,11 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
             input.status !== undefined ? `status ${input.status}` : null,
             input.publicSummary !== undefined ? (input.publicSummary ? "wrote its public summary" : "cleared its public summary") : null,
             input.publicTitle !== undefined ? (input.publicTitle ? "wrote its public title" : "cleared its public title") : null,
-            portalVisibleIn !== undefined ? (portalVisibleIn ? "put it on the feedback portal" : "took it off the feedback portal") : null,
+            portalVisibleIn !== undefined && !tickRefused ? (portalVisibleIn ? "put it on the feedback portal" : "took it off the feedback portal") : null,
             input.keepOffPortal === true ? `kept it off the portal (sensitive${input.keepOffReason ? `: ${input.keepOffReason}` : ""})` : null,
           ].filter(Boolean);
           await record(db, { companyId: scope.companyId, agentId: scope.agentId, kind: "feature_updated", summary: `${me.name} placed "${f.title}" on the roadmap: ${parts.join(", ")}. ${input.reason}` });
+          if (tickRefused) return text(`Updated "${f.title}": ${parts.join(", ")}. The portal tick was refused and portalVisible is unchanged: this feature reads as security work, so it stays off the feedback portal. Only the owner can put it there, in the Features page.`);
           return text(`Updated "${f.title}": ${parts.join(", ")}.`);
         }
         if (input.action === "size") {
@@ -1271,7 +1286,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       "server_status",
       {
         description:
-          "A read-only view of the server, for when you or the owner need to know what is actually running. Say Boss Man is up only when the stack field says healthy: one server answering is not enough. stack is healthy, degraded or down, and stackWhy gives the reasons (for example a failed or partial last deploy, which stays degraded until a later deploy result replaces it). Also shown: both blue/green colours (colours), when the database last started (database.startedAt), the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, recent server errors with secrets redacted, server freezes over 1 s with memory, GC time and requests in flight (stalls), and the Synthetic plan's quota (syntheticUsage: which measure it is, used of the limit (the plan's weekly credits, which regenerate 2% at a time, or else the old request window), when it renews, how old the reading is, recent readings this period and which of your company's agents are paid from it, with the number of other companies' agents on the same plan but not their names). Also claudeQuota: for each Claude subscription, its newest stored quota reports (observedAt, and per window the utilization, resetsAt, status and bossManWritten, true for a row Boss Man wrote itself on a weekly-limit stop), so you can see which limits each real report carried. Also runLimits: the all-companies and per-company run limits in force, with how many work runs each has going (counts only); limit is the number in force and saved the owner's saved number; when allCompanies or background is lower than saved, because says why (a server update's hold), since since when and until the latest it lifts, and mergeChecks.paused says new merge checks wait for the same hold, so never ask the owner whether they meant a lower number; a waiting wake held 'at a concurrency limit: all companies' waits for the first, 'this company' for the second, and 'this agent is busy' for the agent's own run. Also mergeFailures: failed merge attempts in the last hour, with a count per reason (check_failed, landing_refused, main_moved, conflict, lock_timeout, restart, gate_fault). Also mergeTrain: per project, the merge train's seats, who is seated (seatDetails: each seat's phase, e.g. waiting for GitHub CI since 14:05 UTC, when that wait began as ciSince, and the GitHub jobs still running as ciRunning) and who waits, tickets held to land on main alone (who they clashed with, the files, and whether they hold the line), and since when a seat has stood empty or nothing has landed (empty on a server that isn't in charge), and mergeTrainOn: whether the owner's merge train switch is on. Also landingTurns (empty while the merge train runs, because the train uses no landing turn: read mergeTrain seatDetails then): per project, the ticket holding the landing turn (since, capMin, capEndsAt, and phase: what its merge is doing now, e.g. waiting for GitHub CI since 14:05 UTC; a turn past its cap is released when you read this), the line waiting for it in order, and merges whose check passed and whose push waits for it (pushWaiting); each waiter's label is the same line its ticket and the Merges tab show, e.g. 'waiting for BOS-12 to land, then re-checks'. Also addons: ntfy, Tailscale and Penpot, each with state (not_set_up, stopped, needs_login, running or unknown), since and source. Never tell the owner an add-on carries over, is back up or works unless its state is running; unknown means Boss Man can't see it, so say so. For ntfy, running means only that ntfy accepted the last push, not that the phone got it: say a push reached the phone only when ntfy.phone.confirmedAt (the owner's tap on Got it on a test notification) is later than the push, or the owner says so. ntfy.phoneType is the owner's phone (android, iphone, both or unknown): when unknown, ask the owner rather than guessing a phone. It changes nothing and shows no other company's tickets, runs or errors.",
+          "A read-only view of the server, for when you or the owner need to know what is actually running. Say Boss Man is up only when the stack field says healthy: one server answering is not enough. stack is healthy, degraded or down, and stackWhy gives the reasons (for example a failed or partial last deploy, which stays degraded until a later deploy result replaces it). Also shown: both blue/green colours (colours), when the database last started (database.startedAt), the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, recent server errors with secrets redacted, server freezes over 1 s with memory, GC time and requests in flight (stalls), and the Synthetic plan's quota (syntheticUsage: which measure it is, used of the limit (the plan's weekly credits, which regenerate 2% at a time, or else the old request window), when it renews, how old the reading is, recent readings this period and which of your company's agents are paid from it, with the number of other companies' agents on the same plan but not their names). Also claudeQuota: for each Claude subscription, its newest stored quota reports (observedAt, and per window the utilization, resetsAt, status and bossManWritten, true for a row Boss Man wrote itself on a weekly-limit stop), so you can see which limits each real report carried. Also runLimits: the all-companies and per-company run limits in force, with how many work runs each has going (counts only); limit is the number in force and saved the owner's saved number; when allCompanies or background is lower than saved, because says why (a server update's hold), since since when and until the latest it lifts, and mergeChecks.paused says new merge checks wait for the same hold, so never ask the owner whether they meant a lower number; a waiting wake held 'at a concurrency limit: all companies' waits for the first, 'this company' for the second, and 'this agent is busy' for the agent's own run. Also mergeFailures: failed merge attempts in the last hour, with a count per reason (check_failed, landing_refused, main_moved, conflict, lock_timeout, restart, gate_fault). Also mergeTrain: per project, the merge train's seats, who is seated (seatDetails: each seat's phase, e.g. waiting for GitHub CI since 14:05 UTC, when that wait began as ciSince, and the GitHub jobs still running as ciRunning) and who waits, tickets held to land on main alone (who they clashed with, the files, and whether they hold the line), and since when a seat has stood empty or nothing has landed (empty on a server that isn't in charge), and mergeTrainOn: whether the owner's merge train switch is on. Also landingTurns (empty while the merge train runs, because the train uses no landing turn: read mergeTrain seatDetails then): per project, the ticket holding the landing turn (since, capMin, capEndsAt, and phase: what its merge is doing now, e.g. waiting for GitHub CI since 14:05 UTC; a turn past its cap is released when you read this), the line waiting for it in order, and merges whose check passed and whose push waits for it (pushWaiting); each waiter's label is the same line its ticket and the Merges tab show, e.g. 'waiting for BOS-12 to land, then re-checks'. Also addons: ntfy, Tailscale and Penpot, each with state (not_set_up, stopped, needs_login, running or unknown), since and source. Never tell the owner an add-on carries over, is back up or works unless its state is running; unknown means Boss Man can't see it, so say so. Also holdRecords: the last 5 update holds (startedAt, kind, endedAt, endTitle, and wrapUpLines: when a wrap-up was asked, what it was tied to, the banner's exact words and how it lifted), so quote what the banner said from there rather than working it out. For ntfy, running means only that ntfy accepted the last push, not that the phone got it: say a push reached the phone only when ntfy.phone.confirmedAt (the owner's tap on Got it on a test notification) is later than the push, or the owner says so. ntfy.phoneType is the owner's phone (android, iphone, both or unknown): when unknown, ask the owner rather than guessing a phone. It changes nothing and shows no other company's tickets, runs or errors.",
         inputSchema: {},
       },
       async () => text(JSON.stringify(await serverStatus.status(scope.companyId))),
@@ -1468,7 +1483,8 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
       const signoffLog = await signoffHistory(db, ticketId);
       const mergeState = t.systemState === "review" ? await review.mergeState(ticketId) : null;
       const hv = t.systemState === "review" ? await holdView(db, ticketId) : null;
-      const holdLine = hv ? `Merge held by ${hv.reviewer ?? "a reviewer"} (${hv.label}): ${hv.reason}.${hv.ready ? " What it waited for is done; the reviewer re-checks and releases it." : ""}` : null;
+      // BOS-2870: Boss Man's own hold names itself, and a ready reviewer hold says since when the holder was asked.
+      const holdLine = hv ? `Merge held by ${hv.system ? "Boss Man" : hv.reviewer ?? "a reviewer"} (${hv.label}): ${hv.reason}.${hv.ready ? (hv.system ? " What it waited for is done; Boss Man releases it by itself." : ` What it waited for is done; ${hv.reviewer ?? "the reviewer"} re-checks and releases it${hv.readySince ? ` (asked at ${hv.readySince.slice(11, 16)} UTC; asked again after 1 h, and a card goes up after 2 h)` : ""}.`) : ""}` : null;
       const openReviews = t.systemState === "review" ? await openReviewLines(db, t) : [];
       const ciLine = await review.branchChecksLine(ticketId, scope.companyId);
       const liveLine = await goLiveLine(db, t);
@@ -1740,7 +1756,7 @@ function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHoo
         assigneeAgentId = a.id;
       }
       for (const id of input.waitsOn ?? []) if (!(await ownTicket(id))) return fail(`No ticket ${id} in this company.`);
-      const badPage = pageClauseRefusal(input.acceptanceCriteria ?? []);
+      const badPage = pageClauseRefusal(input.acceptanceCriteria ?? []) ?? runnerBlindRefusal(readCriteria(input.acceptanceCriteria ?? []));
       if (badPage) return fail(badPage);
       try {
         const t = await work.createTicket(p.id, { title: input.title, body: input.body ?? null, risk: input.risk, size: input.size as TaskSize | undefined, planFirst: input.planFirst, milestoneId: input.milestoneId, assigneeAgentId, featureId: input.featureId, acceptanceCriteria: input.acceptanceCriteria, noCode: input.noCode });

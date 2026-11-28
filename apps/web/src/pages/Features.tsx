@@ -1,4 +1,5 @@
 import { useState, type FormEvent, type ReactNode } from "react";
+import { AddToShortcuts } from "../pinned-pages";
 import { NoCompany } from "../components/NoCompany";
 import { short } from "../short-date";
 import { featureHorizon, HORIZONS, portalTitle, type Horizon } from "@boss-man/shared";
@@ -732,6 +733,7 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
       <header className="page-head">
         <div>
           <h1>Features</h1>
+          <AddToShortcuts page="features" />
           <p className="sub">
             New features show on your feedback portal unless they look like security work.{" "}
             <button type="button" className="link" style={{ padding: 0 }} aria-expanded={showHelp} aria-controls="features-portal-help" onClick={() => setShowHelp(!showHelp)}>

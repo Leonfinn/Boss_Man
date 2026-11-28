@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { AddToShortcuts } from "../pinned-pages";
 import { NoCompany } from "../components/NoCompany";
 import { api, type Company, type Plan as PlanData, type PlanNode } from "../api";
 import { hashQuery, usePoll } from "../hooks";
@@ -359,6 +360,7 @@ export function Plan({ companies, companyId, go }: { companies: Company[]; compa
       <header className="page-head">
         <div>
           <h1>Plan</h1>
+          <AddToShortcuts page="plan" />
           <p className="sub">Open tasks that wait on something, and what they wait on. Red lines still hold work up. Tap a card to light up its chain.</p>
         </div>
       </header>

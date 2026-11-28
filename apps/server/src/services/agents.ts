@@ -66,6 +66,23 @@ const HARNESS_PROVIDERS: Record<string, readonly string[]> = {
 };
 const labelConfig = (c: AgentModelConfig) => `Harness: ${harnessLabel(c.harness)} · Provider: ${c.provider ? providerLabel(c.provider) : "not set"} · Model: ${c.model || "default"} · Paid from: ${c.fundingSourceName || (c.fundingSourceId ? c.fundingSourceId : "not set")}`;
 
+/**
+ * One plain line saying whether a team plan costs the owner anything extra (BOS-2824): a subscription
+ * pays for the time the agents work, and pay-as-you-go sources bill it. A mix says what fits when
+ * that is one line; otherwise each hire's own line carries the facts, in "Technical details".
+ */
+export function teamCostLine(kinds: string[], names: string[]): string {
+  if (kinds.length && kinds.every((k) => k === "subscription")) return `On your ${names[0]}: no extra cost`;
+  // A source that isn't a subscription bills by how long the agents work (an API key or usage credits).
+  const payg = (kind: string) => kind !== "subscription";
+  const paygNames = [...new Set(names.filter((_, i) => payg(kinds[i]!)))];
+  const subNames = [...new Set(names.filter((_, i) => kinds[i] === "subscription"))];
+  if (!subNames.length) return `Pay as you go: you pay for the time they work${paygNames.length === 1 ? `, on ${paygNames[0]}` : ""}`;
+  if (!paygNames.length) return `On your ${subNames.join(" and ")}, no extra cost`;
+  if (paygNames.length === 1) return `On your ${subNames.join(" and ")}, no extra cost; ${paygNames[0]} is pay as you go, so you pay for the time they work`;
+  return `On your ${subNames.join(" and ")}, no extra cost; the rest are pay as you go, so you pay for the time they work`;
+}
+
 export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify; assignPlanned?: (companyId: string, hired: AgentRow, ticketIds: string[]) => Promise<unknown>; catalog?: Catalog } = {}) {
   const now = opts.now ?? (() => new Date());
   const notify: Notify = opts.notify ?? (async () => undefined);
@@ -497,13 +514,17 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
         if (h.template && !AGENT_TEMPLATES.some((x) => x.id === h.template)) throw new AgentError(422, `There's no template called ${h.template}. Templates: ${AGENT_TEMPLATES.map((x) => x.id).join(", ")}.`);
         await checkSkills(companyId, h.skills ?? [], builtinSkillsForTemplate(h.template));
         const config = await validateModelConfig(companyId, h);
-        hires.push({ ...h, ...config, harness: config.harness, provider: config.provider, model: config.model, fundingSourceId: config.fundingSourceId, fundingSourceName: config.fundingSourceName });
+        const [source] = await db.select({ kind: fundingSources.kind }).from(fundingSources).where(eq(fundingSources.id, config.fundingSourceId));
+        hires.push({ ...h, ...config, harness: config.harness, provider: config.provider, model: config.model, fundingSourceId: config.fundingSourceId, fundingSourceName: config.fundingSourceName, fundingSourceKind: source?.kind });
       }
       const [project] = plan.projectId ? await db.select({ id: projects.id, name: projects.name }).from(projects).where(and(eq(projects.id, plan.projectId), eq(projects.companyId, companyId))) : [];
       if (plan.projectId && !project) throw new AgentError(422, "No project with that ID in this company.");
       const open = await db.select({ context: decisions.context }).from(decisions).where(and(eq(decisions.companyId, companyId), eq(decisions.status, "open")));
       if (open.some((d) => (d.context as { type?: string; projectId?: string | null } | null)?.type === "team_plan" && ((d.context as { projectId?: string | null }).projectId ?? null) === (project?.id ?? null))) throw new AgentError(409, "A team plan for this is already waiting for the owner.");
-      const lines = hires.map((h, i) => `${i + 1}. ${h.name}${h.title ? `, ${h.title}` : ""}${h.template ? ` (${h.template})` : ""} ${labelConfig({ harness: h.harness!, provider: h.provider!, model: h.model!, fundingSourceId: h.fundingSourceId!, fundingSourceName: h.fundingSourceName })}: ${h.reason}${h.skills?.length ? ` Skills: ${h.skills.join(", ")}.` : ""}`);
+      // BOS-2824: one plain row per hire (name, role, what they will do), a line on cost, and the model
+      // setup folded into "Technical details" by the card instead of leading every row with it.
+      const rows = hires.map((h) => [h.name + ((h.title ?? h.template) ? `: ${[h.title, h.template].filter(Boolean).join(" · ")}` : ""), h.reason, h.skills?.length ? `Gets from the start: ${h.skills.join(", ")}.` : null].filter(Boolean).join("\n"));
+      const cost = teamCostLine(hires.map((h) => h.fundingSourceKind ?? ""), hires.map((h) => h.fundingSourceName ?? "an account"));
       const [d] = await db
         .insert(decisions)
         .values({
@@ -511,10 +532,10 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
           raisedByAgentId: ceoId,
           kind: "approval",
           tier: "owner",
-          question: [`Team plan for ${project ? project.name : "the company"}: the CEO proposes ${hires.length === 1 ? "1 hire" : `${hires.length} hires`}.`, `Already covered: ${plan.covered}`, ...lines].join("\n\n"),
+          question: [`Hire ${hires.length === 1 ? "1 agent" : `${hires.length} agents`} for ${project ? project.name : "the company"}?`, plan.covered ? `Already covered: ${plan.covered}` : null, cost, ...rows].filter(Boolean).join("\n\n"),
           options: [TEAM_HIRE, TEAM_NOT_NOW],
           recommendedOption: TEAM_HIRE,
-          context: { type: "team_plan", projectId: project?.id ?? null, covered: plan.covered, hires, byAgentId: ceoId },
+          context: { type: "team_plan", projectId: project?.id ?? null, covered: plan.covered, costLine: cost, hires, byAgentId: ceoId },
         })
         .returning({ id: decisions.id });
       return { decisionId: d!.id };

@@ -326,6 +326,21 @@ describe("set_ticket_state done with hand-off wording", () => {
       expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.stateNote).toMatch(/for Dev, .*with check ticket [A-Z]+-\d+ for its long watch/);
     });
 
+    // BOS-2797: a carried criterion that waits on a future event is split the same way.
+    it("a carried criterion that waits on a future event opens its own check ticket, which waits on the follow-up's merge", async () => {
+      const EVENT = { text: "After the next beta release, a real image install shows the new-release note within a day", after: "merge" as const };
+      const t = await ctx.ticket({ acceptanceCriteria: ["Note written", EVENT] });
+      const c = await ctx.agent(ctx.co.ceo.id);
+      const r = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "Note written; handing the check on.", followUps: [{ title: "Show the release note", assignee: "Dev", why: "Needs a release." }] } });
+      expect((r as { isError?: boolean }).isError, textOf(r)).toBeFalsy();
+      const all = await ctx.db.select().from(tickets);
+      const made = all.find((x) => x.title === "Show the release note")!;
+      const checks = all.filter((x) => x.checksTicketId === made.id);
+      expect(checks.map((x) => [x.checksCriterion, x.acceptanceCriteria, x.systemState])).toEqual([[2, [EVENT.text], "blocked"]]); // both criteria carried (neither reported), the event is 2nd
+      const deps = await ctx.db.select().from(ticketDependencies);
+      expect(deps.filter((d) => d.blockedTicketId === checks[0]!.id).map((d) => [d.blockerTicketId, d.until])).toEqual([[made.id, "merged"]]);
+    });
+
     it("a follow-up whose carried criteria need no long watch opens no check ticket", async () => {
       const t = await ctx.ticket({ acceptanceCriteria: ["Workflow change written", { text: "One go-live reading shows the run", after: "merge" }] });
       const c = await ctx.agent(ctx.co.ceo.id);

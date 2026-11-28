@@ -7,7 +7,8 @@ import { and, eq, isNull } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { checkJobs, checkWorkers, companies, decisions, notifications, projects, runners, runs, settings, tickets, updateHolds, wakes } from "../src/db/schema.js";
+import { updateHoldHistory } from "../src/services/update-hold-history.js";
+import { checkJobs,checkWorkers, companies, decisions, notifications, projects, runners, runs, settings, tickets, updateHolds, wakes } from "../src/db/schema.js";
 import { BUILD_HOLD_MAX_MINUTES, DRAIN_GO_AHEAD_MINUTES, drainForecast, drainGoAheadAt, getHold, HOLD_CAP_MINUTES, HOLD_REASON, holdBlocksStarts, holdCapAt, holdEndsAt, SWAP_WHEN_DONE_CAP_MINUTES, WRAP_UP, WRAPUP_HOLD_REASON,WRAP_UP_ASKED, WRAP_UP_DURING_UPDATE, WRAP_UP_SETTINGS } from "../src/services/maintenance.js";
 import { CEO_REPLY_REASON, MISSED_REASON, UPDATE_ALERT_REASON } from "../src/services/scheduler.js";
 import { FAILED_UPDATE_REASON } from "../src/services/owner-holds.js";
@@ -291,6 +292,63 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(true);
   });
 
+  // BOS-2861: on 27 Nov the owner saw a worker's new quick check as plain "Running" under the update banner and read it as
+  // 20 more minutes. Both Merge queue tabs now mark each running check from the drain's own waited / not-waited reads, and
+  // the banner's count is the waited ones only.
+  it("the Merge queue marks which running checks a runner update waits for, from the drain's own lists (BOS-2861)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const [proj] = await c.db.insert(projects).values({ companyId: a.id, name: "Dev" }).returning();
+    const [t1] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "On the runner", number: 1 }).returning();
+    const [t2] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "On the worker", number: 2 }).returning();
+    const [t3] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "Merge on the worker", number: 3 }).returning();
+    const [w] = await c.db.insert(checkWorkers).values({ name: "worker-example", tokenHash: "x" } as never).returning();
+    const job = async (ticketId: string, o: { kind: string; scope: string; worker: boolean }) =>
+      (await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId, kind: o.kind, scope: o.scope, commit: "c1", tree: randomUUID(), state: "running", workerId: o.worker ? w!.id : null, startedAt: new Date(), lastOutputAt: new Date() }).returning())[0]!;
+    const onRunner = await job(t1!.id, { kind: "pre_review", scope: "quick", worker: false });
+    const onWorker = await job(t2!.id, { kind: "pre_review", scope: "quick", worker: true });
+    const mergeOnWorker = await job(t3!.id, { kind: "merge", scope: "quick", worker: true });
+    type Marks = { updateWait?: { update: string; checks: Array<{ jobId: string; ticketId: string; kind: string; holdsUpdate: boolean }> } };
+    const marks = async (page: "check-queue" | "merge-queue") => ((await c.req("GET", `/api/companies/${a.id}/${page}`)).json() as Marks).updateWait;
+    // No update: no marks.
+    expect(await marks("check-queue")).toBeUndefined();
+    expect(await marks("merge-queue")).toBeUndefined();
+    await c.req("POST", "/api/maintenance/start", {});
+    const want = {
+      update: "runner",
+      checks: expect.arrayContaining([
+        { jobId: onRunner.id, ticketId: t1!.id, kind: "pre_review", holdsUpdate: true },
+        { jobId: onWorker.id, ticketId: t2!.id, kind: "pre_review", holdsUpdate: false },
+        { jobId: mergeOnWorker.id, ticketId: t3!.id, kind: "merge", holdsUpdate: false },
+      ]),
+    };
+    for (const page of ["check-queue", "merge-queue"] as const) {
+      const m = await marks(page);
+      expect(m).toEqual(want);
+      expect(m!.checks).toHaveLength(3);
+    }
+    // The banner's "waiting for N checks" names only the waited one; the worker's two are named as not waited for.
+    const st = (await c.maint()) as { checks: number; checksList: { ticket: string }[]; workerChecksList: { ticket: string }[] };
+    expect(st.checks).toBe(1);
+    expect(st.checksList.map((x) => x.ticket)).toEqual([expect.stringMatching(/-1$/)]);
+    expect(st.workerChecksList.map((x) => x.ticket).sort()).toEqual([expect.stringMatching(/-2$/), expect.stringMatching(/-3$/)]);
+    // The owner's "stop the checks and update now" waits for no check, so nothing is marked as waited for.
+    expect((await c.maintenance.updateNow()).ok).toBe(true);
+    expect(await marks("check-queue")).toBeUndefined();
+  });
+
+  it("with no check worker every running check is marked as waited for (BOS-2861)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const [proj] = await c.db.insert(projects).values({ companyId: a.id, name: "Dev" }).returning();
+    const [t] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "T", number: 1 }).returning();
+    for (const kind of ["merge", "pre_review"]) await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind, scope: "quick", commit: "c1", tree: randomUUID(), state: "running", startedAt: new Date(), lastOutputAt: new Date() });
+    await c.req("POST", "/api/maintenance/start", {});
+    const m = ((await c.req("GET", `/api/companies/${a.id}/check-queue`)).json() as { updateWait?: { checks: Array<{ holdsUpdate: boolean }> } }).updateWait;
+    expect(m!.checks.map((x) => x.holdsUpdate)).toEqual([true, true]);
+    expect(((await c.maint()) as { checks: number }).checks).toBe(2);
+  });
+
   it("the status names the runner check it waits on, and update-now ends the wait (BOS-1600)", async () => {
     const c = (ctx = await setup());
     const a = await c.company("App Co", "app-co");
@@ -385,7 +443,7 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     expect(drainForecast({ runs: 0, checks: [], deadline, now })).toEqual({ phase: "swapping", expectedFinishAt: null, overdue: false });
     expect(drainForecast({ runs: 2, checks: [], deadline, now })).toEqual({ phase: "waiting", expectedFinishAt: null, overdue: false });
     expect(drainForecast({ runs: 2, checks: [], deadline, now: new Date("2026-11-19T14:01:00Z") }).overdue).toBe(true);
-    const check = { companyId: "c1", ticket: "BOS-1", kind: "merge", scope: "full", startedAt: "2026-11-19T13:20:00Z", runningForMinutes: 10, usuallyMinutes: 40 };
+    const check = { id: "j1", companyId: "c1", ticket: "BOS-1", kind: "merge", scope: "full", startedAt: "2026-11-19T13:20:00Z", runningForMinutes: 10, usuallyMinutes: 40 };
     expect(drainForecast({ runs: 0, checks: [check], deadline, now })).toMatchObject({ expectedFinishAt: "2026-11-19T14:00:00.000Z", overdue: false });
     expect(drainForecast({ runs: 0, checks: [{ ...check, usuallyMinutes: null }], deadline, now }).expectedFinishAt).toBeNull();
   });
@@ -1241,6 +1299,53 @@ describe("Ask agents to wrap up (BOS-929): a mode of the same hold", () => {
     expect(await getHold(c.db)).toBeNull();
     expect(c.commands).toHaveLength(1); // the run was not touched
     expect(await c.titles()).toContain("note: Wrap-up lifted after 60 minutes");
+  });
+
+  // BOS-2811: on 27 Nov two checks passed on wording worked out from the code, because nothing kept what the banner said.
+  it("BOS-2811: the hold's record keeps the wrap-up's tie, the banner's exact words and the lift line", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    const wait = { decisionId: randomUUID(), commit: "b".repeat(40), fromCommit: "a".repeat(40), approvedAt: new Date().toISOString(), phase: "waiting", deadline: new Date().toISOString(), minutes: 30, origin: "approve" };
+    await c.db.insert(settings).values({ key: "deploy_wait", value: wait });
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    const lines = async () => (await c.db.select().from(updateHolds).where(eq(updateHolds.kind, "wrapup")))[0]!.events.map((e) => e.text);
+    expect(await lines()).toContain("Wrap-up tied to: the server update (approved)");
+    const banner = (await lines()).find((t) => t.startsWith("Wrap-up banner said: "))!;
+    expect(banner).toContain("Wrapping up for the server update you approved at ");
+    expect(banner.length).toBeLessThanOrEqual(300);
+    // The tie changes (the update is sent): a new tie line and a new banner line, and pressing again adds nothing.
+    await c.db.update(settings).set({ value: { ...wait, phase: "sent" } }).where(eq(settings.key, "deploy_wait"));
+    await c.maintenance.step();
+    await c.maintenance.step();
+    const mid = await lines();
+    expect(mid).toContain("Wrap-up tied to: the server update (going-in)");
+    expect(mid.filter((t) => t.startsWith("Wrap-up banner said: "))).toHaveLength(2);
+    await c.db.update(settings).set({ value: { ...wait, phase: "window", windowUntil: new Date(c.now().getTime() + 15 * MIN).toISOString() } }).where(eq(settings.key, "deploy_wait"));
+    await c.maintenance.step();
+    const all = (await c.db.select().from(updateHolds).where(eq(updateHolds.kind, "wrapup")))[0]!;
+    expect(all.events.map((e) => e.text)).toContain("Wrap-up lifted (update live): Wrap-up over. Wrap-up over: the server update is in (" + `${c.now().toISOString().slice(11, 16)} UTC). Work has restarted.`);
+    expect(all.endedAt).not.toBeNull();
+  });
+
+  it("BOS-2811: a wrap-up the owner cancels records who lifted it", async () => {
+    const c = (ctx = await setup());
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(((await c.db.select().from(updateHolds))[0]!.events.map((e) => e.text))).toContain("Wrap-up tied to: nothing (no update was waiting)");
+    await c.req("POST", "/api/maintenance/cancel", {});
+    expect((await c.db.select().from(updateHolds))[0]!.events.map((e) => e.text).some((t) => t.startsWith("Wrap-up lifted (cancelled by the owner)"))).toBe(true);
+    // After a restart (a new service instance on the same database) the lines read back unchanged.
+    const before = (await c.db.select().from(updateHolds))[0]!.events;
+    const [again] = await updateHoldHistory(c.db, c.now).list(5);
+    expect(again!.events).toEqual(before);
+    expect(before.length).toBeGreaterThanOrEqual(3);
+    // The CEO's server_status lists the record read-only: start, kind, end title and the wrap-up lines.
+    const a = await c.company("App Co", "app-co");
+    const status = (await c.serverStatus.status(a.id)) as { holdRecords: Array<{ kind: string; endTitle: string; wrapUpLines: string[] }> };
+    expect(status.holdRecords).toHaveLength(1);
+    expect(status.holdRecords[0]).toMatchObject({ kind: "wrapup", endTitle: "Wrap-up cancelled" });
+    expect(status.holdRecords[0]!.wrapUpLines.join("\n")).toContain("Wrap-up tied to: nothing (no update was waiting)");
   });
 
   // 20 Nov 11:48: the CEO's note that the update was late sat "update pending" because the swap waited on something it could
