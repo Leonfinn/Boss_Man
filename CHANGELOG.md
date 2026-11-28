@@ -62,13 +62,24 @@ Release step: adding to this file is part of every release (Release Manager, on 
    an older stage word in the docs, or has no new "What's new" entry, and it stops with a one-line reason.
    The weekly run is Tuesday 10:00 UTC: record the check before then, or that week's release is refused.
 
-8. Label the week's entries before the weekly release (BOS-2841). The Release workflow refuses a commit whose new entries are not
-   labelled with the version it is releasing, so that the page never says "not in an image yet" about an image that has them. On
-   the Monday docs check, with the next weekly version (the newest release's number plus one), run
-   scripts/changelog-label.sh label 0.1.0-beta.N on main's CHANGELOG.md, commit it with the docs check, and let CI publish that
-   commit's images. Running it twice does nothing the second time. The workflow cannot do it itself: a push with its own token
-   starts no CI, so the labelled commit would have no images. A run refused for this reason says which lines to label; label them,
-   wait for the new commit's images, and run the release again.
+8. Label the week's entries, so the What's new page says which weekly version has each group of entries (BOS-2840, with the
+   label format from 2/3 and the gate from BOS-2841). On every Monday docs-vs-code check (BOS-2667), work out the next
+   weekly version (the newest release's number plus one) and run
+   scripts/changelog-label.sh label 0.1.0-beta.N on main's CHANGELOG.md. It turns each "Not in an image yet:" line that has
+   entries under it into "In image 0.1.0-beta.N" and changes nothing else; run it twice and the second run does nothing.
+   Commit it with this week's docs check, and let CI publish that commit's images.
+   Then close the gap that a Thursday landing would otherwise leave. The weekly release takes the newest commit whose checks
+   passed and whose images are all published, which is often a commit merged after the Monday check: its new entries carry
+   no label, and the image label gate (BOS-2841) refuses that week's release. So when code can still land, run the one-shot
+   fallback as well, and again on the evening before the release:
+   scripts/changelog-label-release.sh label-release 0.1.0-beta.N "<the previous release's commit>"
+   "\$(git rev-parse origin/main)". It labels only the entries that release will list, leaves every older label alone, and
+   writes nothing when all of them are already labelled, so a second run is a no-op. Commit it as the docs check, so its
+   images are built in time; a label merged after the run picked a commit is not in that release, and a refused run names
+   the lines to label (label them, wait for that commit's images, and run the release again). The weekly release refuses,
+   and says so, if an entry still has no label (BOS-2841's gate). No image contains this file (no Dockerfile copies it):
+   the label is in the released commit, so the website, which is built from this file on main after the install test, and
+   the release notes show it. You still do nothing by hand after the release: this is the one place the label is remembered.
 
 Check before committing: pnpm --filter @boss-man/site build (it stops on a heading that is not a date, or one out of order).
 Remember to put an empty line after any line you add outside this comment, so the comment's own closing marker still closes it.
