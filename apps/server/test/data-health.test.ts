@@ -138,6 +138,57 @@ describe("server health", () => {
     expect((await svc.read()).warnings).toEqual([]);
   });
 
+  it("keeps the disk's used and total bytes in the day's reading and lists them as the disk line", async () => {
+    const { svc, db } = await setup({ freeGb: 50 });
+    const h = await svc.read();
+    const [row] = await db.select().from(serverSizeReadings);
+    expect(row).toMatchObject({ diskUsedBytes: 50 * GB, diskTotalBytes: 100 * GB });
+    expect(h.diskHistory).toEqual([{ day: "2026-11-23", usedBytes: 50 * GB, totalBytes: 100 * GB }]);
+    expect(h.diskTrend).toBeNull(); // no reading from 7 days ago yet
+  });
+
+  it("warns when days to full at the 7-day rate is under 30, with 5% growth not reached", async () => {
+    const { svc, db, companyId } = await setup({ freeGb: 50 }); // 50 GB used, 50 free
+    // 7 days ago 46 GB used: +4 GB in 7 days (4% of the disk, under 5%), 0.57 GB a day, 87 days to full: no warning
+    await db.insert(serverSizeReadings).values({ day: "2026-11-16", dbBytes: 50_000_000, diskUsedBytes: 46 * GB, diskTotalBytes: 100 * GB });
+    expect((await svc.read()).warnings).toEqual([]);
+    await db.delete(serverSizeReadings);
+    const fast = dataHealthService(db, { now: () => new Date("2026-11-23T09:00:00Z"), statfs: disk(15, 100) }); // 85 used, 15 free (15%, above the last-line warning)
+    await db.insert(serverSizeReadings).values({ day: "2026-11-16", dbBytes: 50_000_000, diskUsedBytes: 82 * GB, diskTotalBytes: 100 * GB });
+    const h = await fast.read(); // +3 GB in 7 days = 0.43 GB a day, 35 days to full: no warning
+    expect(h.warnings).toEqual([]);
+    expect(h.diskTrend).toMatchObject({ daysToFull: 35 });
+    await db.delete(serverSizeReadings);
+    await db.insert(serverSizeReadings).values({ day: "2026-11-16", dbBytes: 50_000_000, diskUsedBytes: 79 * GB, diskTotalBytes: 100 * GB });
+    const soon = dataHealthService(db, { now: () => new Date("2026-11-23T09:00:00Z"), statfs: disk(15, 100) }); // +6 GB (6%)
+    expect((await soon.read()).warnings.join(" ")).toMatch(/filling up/);
+    expect(await soon.checkWarnings()).toBe(1);
+    expect(await soon.checkWarnings()).toBe(0);
+    expect((await db.select().from(decisions).where(eq(decisions.companyId, companyId)))[0]!.question).toMatch(/full in about \d+ days/);
+  });
+
+  it("warns on days to full under 30 even when growth is under 5% of the disk", async () => {
+    const { db } = await setup();
+    await db.insert(serverSizeReadings).values({ day: "2026-11-16", dbBytes: 50_000_000, diskUsedBytes: 66 * GB, diskTotalBytes: 100 * GB });
+    const svc = dataHealthService(db, { now: () => new Date("2026-11-23T09:00:00Z"), statfs: disk(15, 100) }); // 85 used, +19 GB: far over 5%
+    expect((await svc.read()).warnings.join(" ")).toMatch(/filling up/);
+    await db.delete(serverSizeReadings);
+    const big = dataHealthService(db, { now: () => new Date("2026-11-23T09:00:00Z"), statfs: disk(100, 1000) }); // 900 used, 100 free
+    await db.insert(serverSizeReadings).values({ day: "2026-11-16", dbBytes: 50_000_000, diskUsedBytes: 865 * GB, diskTotalBytes: 1000 * GB }); // +35 GB = 3.5%, 5 GB a day, 20 days
+    const h = await big.read();
+    expect(h.diskTrend).toMatchObject({ daysToFull: 20 });
+    expect(h.warnings.join(" ")).toMatch(/full in about 20 days/);
+  });
+
+  it("does not warn on a shrinking or flat disk", async () => {
+    const { db } = await setup();
+    await db.insert(serverSizeReadings).values({ day: "2026-11-16", dbBytes: 50_000_000, diskUsedBytes: 60 * GB, diskTotalBytes: 100 * GB });
+    const svc = dataHealthService(db, { now: () => new Date("2026-11-23T09:00:00Z"), statfs: disk(50, 100) }); // 50 used now
+    const h = await svc.read();
+    expect(h.warnings).toEqual([]);
+    expect(h.diskTrend!.daysToFull).toBeNull();
+  });
+
   it("lists a query running over 60 s with its duration and text with values removed", async () => {
     const { db } = await setup();
     // PGlite has one connection, so no second one can be seen running: stub the pg_stat_activity answer, keep the rest real.

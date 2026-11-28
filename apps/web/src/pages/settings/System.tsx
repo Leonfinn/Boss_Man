@@ -78,6 +78,8 @@ type ServerHealthView = {
   disk: { freeBytes: number; totalBytes: number; freePercent: number } | null;
   database: { bytes: number | null; dayAgoBytes: number | null; weekAgoBytes: number | null; growthPercent7d: number | null };
   history?: { day: string; bytes: number }[];
+  diskHistory?: { day: string; usedBytes: number; totalBytes: number }[];
+  diskTrend?: { perDayBytes: number; growthPercent7d: number; daysToFull: number | null } | null;
   limits: { statementTimeouts: number; poolFull: number };
   slowQueries: { seconds: number; query: string }[];
   warnings: string[];
@@ -94,6 +96,7 @@ export function DbHistory({ history }: { history: { day: string; bytes: number }
     <details data-testid="health-db-history" style={{ fontSize: 14, marginTop: 6 }}>
       <summary>Database size, last 14 days</summary>
       {rows.length < 14 && <p className="muted" style={{ margin: "4px 0" }}>{rows.length === 1 ? "1 day recorded so far" : `${rows.length} days recorded so far`}</p>}
+      <div style={{ overflowX: "auto" }}>
       <table style={{ borderCollapse: "collapse" }}>
         <tbody>
           {rows.map((r, i) => {
@@ -111,6 +114,42 @@ export function DbHistory({ history }: { history: { day: string; bytes: number }
           })}
         </tbody>
       </table>
+      </div>
+    </details>
+  );
+}
+
+/** BOS-2918: the same table for the data disk's used space, with the 7-day trend line above it when a week-old reading exists. */
+export function DiskHistory({ history, trend }: { history: { day: string; usedBytes: number; totalBytes: number }[] | undefined; trend: { perDayBytes: number; growthPercent7d: number; daysToFull: number | null } | null | undefined }) {
+  const rows = history ?? [];
+  if (!rows.length) return null;
+  return (
+    <details data-testid="health-disk-history" style={{ fontSize: 14, marginTop: 6 }}>
+      <summary>Disk used, last 14 days</summary>
+      {trend && (
+        <p className="muted" style={{ margin: "4px 0" }} data-testid="health-disk-trend">
+          7-day rate: {healthChange(trend.perDayBytes)} a day ({trend.growthPercent7d}% of the disk){trend.daysToFull !== null ? `, full in about ${trend.daysToFull} days at that rate` : ", not filling"}.
+        </p>
+      )}
+      {rows.length < 14 && <p className="muted" style={{ margin: "4px 0" }}>{rows.length === 1 ? "1 day recorded so far" : `${rows.length} days recorded so far`}</p>}
+      <div style={{ overflowX: "auto" }}>
+      <table style={{ borderCollapse: "collapse" }}>
+        <tbody>
+          {rows.map((r, i) => {
+            const prev = rows[i - 1];
+            const consecutive = prev && Date.parse(r.day) - Date.parse(prev.day) === DAY_MS;
+            const diff = consecutive ? r.usedBytes - prev.usedBytes : null;
+            return (
+              <tr key={r.day}>
+                <td style={{ paddingRight: 16 }}>{r.day}</td>
+                <td style={{ paddingRight: 16 }}>{healthGb(r.usedBytes)} of {healthGb(r.totalBytes)}</td>
+                <td className="muted">{diff === null ? "" : healthChange(diff)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      </div>
     </details>
   );
 }
@@ -123,15 +162,15 @@ export function ServerHealth() {
   return (
     <Section id="server-health-h" title="Server health">
       <p className="muted" style={{ fontSize: 14 }}>
-        Free space on the disk holding the server's data, the size of the database, and queries that were cut off or are running long. You get one notice a day when free space drops below 10% or 5 GB, or the database grows more than 50% in 7 days. Nothing is stopped by it.
+        Free space on the disk holding the server's data, the size of the database, and queries that were cut off or are running long. You get one notice a day when free space drops below 10% or 5 GB, the database grows more than 50% in 7 days, or the disk would be full in under 30 days at its 7-day rate (or grew more than 5% of its size in 7 days). Nothing is stopped by it.
       </p>
       {view.error && !v ? <LoadError what="server health" message={view.error.message} onRetry={view.reload} /> : !v ? <Loader /> : (
         <>
           {(v.warnings ?? []).map((w) => (
             <p key={w} className="error" role="alert">{w}</p>
           ))}
-          <ul style={{ fontSize: 14, margin: 0, paddingLeft: 18 }}>
-            <li data-testid="health-disk">Data disk: {v.disk ? `${healthGb(v.disk.freeBytes)} free of ${healthGb(v.disk.totalBytes)} (${v.disk.freePercent.toFixed(0)}% free)` : "not available"}</li>
+          <ul style={{ fontSize: 14, margin: 0, paddingLeft: 18, minWidth: 0 }}>
+            <li data-testid="health-disk">Data disk: {v.disk ? `${healthGb(v.disk.freeBytes)} free of ${healthGb(v.disk.totalBytes)} (${v.disk.freePercent.toFixed(0)}% free)` : "not available"}<DiskHistory history={v.diskHistory} trend={v.diskTrend} /></li>
             <li data-testid="health-db">
               Database: {healthGb(v.database.bytes)}. 1 day ago {healthGb(v.database.dayAgoBytes)}, 7 days ago {healthGb(v.database.weekAgoBytes)}
               {v.database.growthPercent7d !== null ? ` (growth: ${v.database.growthPercent7d > 0 ? "+" : ""}${v.database.growthPercent7d}% in 7 days)` : " (growth: not enough history yet)"}. Earlier days fill in as the server keeps one reading a day.

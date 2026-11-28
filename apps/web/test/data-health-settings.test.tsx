@@ -66,6 +66,32 @@ describe("Server health", () => {
     expect(screen.getAllByTestId("health-db-jump")).toHaveLength(1);
   });
 
+  it("lists the daily disk line with the 7-day rate and days to full (BOS-2918)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        json({
+          disk: { freeBytes: 100 * GB, totalBytes: 1000 * GB, freePercent: 10 },
+          database: { bytes: 1000, dayAgoBytes: null, weekAgoBytes: null, growthPercent7d: null },
+          diskHistory: [
+            { day: "2026-11-22", usedBytes: 880 * GB, totalBytes: 1000 * GB },
+            { day: "2026-11-23", usedBytes: 890 * GB, totalBytes: 1000 * GB },
+          ],
+          diskTrend: { perDayBytes: 5 * GB, growthPercent7d: 3.5, daysToFull: 20 },
+          limits: { statementTimeouts: 0, poolFull: 0 },
+          slowQueries: [],
+          warnings: [],
+        }),
+      ),
+    );
+    render(<ServerHealth />);
+    const fold = await screen.findByTestId("health-disk-history");
+    expect(fold.querySelectorAll("tr")).toHaveLength(2);
+    expect(fold.textContent).toContain("890.0 GB of 1000.0 GB");
+    expect(fold.textContent).toContain("+10.0 GB");
+    expect(text("health-disk-trend")).toContain("full in about 20 days");
+  });
+
   it("says so when there is no history or no disk reading", async () => {
     vi.stubGlobal(
       "fetch",
