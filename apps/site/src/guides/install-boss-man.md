@@ -154,7 +154,7 @@ The runner image does not contain Claude Code. The first time a runner starts, B
 
 ### Start again from nothing
 
-This deletes everything this install made, including your company data, your keys and the database. Back up first if you want to keep anything. Do this only on a machine that runs just this install: step 2 removes every runner and network guard on the machine, not only this install's. `boss-man` below is the project name unless you set another with `-p` or `COMPOSE_PROJECT_NAME`; use your own name in its place. Run each command in the folder with `images.env`. A command that finds nothing to remove prints nothing, and that is fine.
+This deletes everything this install made, including your company data, your keys and the database. Back up first if you want to keep anything. Every step finds this install's own containers and volumes by its install label, so another install on the same machine is left alone. `boss-man` below is the project name unless you set another with `-p` or `COMPOSE_PROJECT_NAME`; use your own name in its place. Run each command in the folder with `images.env`. A command that finds nothing to remove prints nothing, and that is fine.
 
 The order matters: the updater and launcher started some containers that Compose does not know, and they hold your volumes, so they go first.
 
@@ -164,14 +164,24 @@ The order matters: the updater and launcher started some containers that Compose
 docker ps -aq --filter label=com.bossman.install=boss-man | xargs -r docker rm -f
 ```
 
-2. Remove the runners, then the network guards:
+2. Remove this install's runners, then its network guards, found by the install label:
 
 ```sh Run in the folder with images.env
-docker ps -aq --filter label=boss-man.launcher=1 | xargs -r docker rm -f
+docker ps -aq --filter label=com.bossman.install=boss-man --filter label=boss-man.launcher=1 | xargs -r docker rm -f
 ```
 
 ```sh Run in the folder with images.env
-docker ps -aq --filter label=boss-man.netguard=1 | xargs -r docker rm -f
+docker ps -aq --filter label=com.bossman.install=boss-man --filter label=boss-man.netguard=1 | xargs -r docker rm -f
+```
+
+A runner or guard made before the install label existed (an older release) has no label, so step 1 does not catch it. If you first installed from an older release that had no label, remove those unlabelled ones too (they are this install's, unless the machine has a second install that is also older than the label):
+
+```sh Run in the folder with images.env
+docker ps -aq --filter label=boss-man.launcher=1 --filter label=com.bossman.install | xargs -r docker rm -f
+```
+
+```sh Run in the folder with images.env
+docker ps -aq --filter label=boss-man.netguard=1 --filter label=com.bossman.install | xargs -r docker rm -f
 ```
 
 3. Remove what Compose knows, with its volumes:

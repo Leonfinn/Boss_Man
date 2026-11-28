@@ -156,7 +156,7 @@ Follow sections 1 to 3 in a terminal. The launcher finds where Docker keeps its 
 
 ## Start again from nothing
 
-This deletes everything this install made, including your company data, your keys and the database. Back up first if you want to keep anything. **Remove from a host that runs only this install**: step 2 removes every runner and network guard on the host, not only this install's, until names follow the project (BOS-2851 narrows step 2 to this install's own runners and guards by the install label).
+This deletes everything this install made, including your company data, your keys and the database. Back up first if you want to keep anything. Every step finds this install's own containers and volumes by its install label (`com.bossman.install=<project>`, which they carry since BOS-2803), so another install on the same host is left alone.
 
 The order matters. The updater made the server and the launcher, and the launcher made the runners and guards, so Compose does not know them. They hold your volumes, and Docker will not delete a volume a container still uses. Containers go first, then the volumes. The examples use `boss-man`, the project name unless you set another with `-p` or `COMPOSE_PROJECT_NAME`; use your own name in its place. Run each command from the folder with `images.env`. A command that finds nothing to remove prints nothing, and that is fine.
 
@@ -166,14 +166,24 @@ The order matters. The updater made the server and the launcher, and the launche
    docker ps -aq --filter label=com.bossman.install=boss-man | xargs -r docker rm -f
    ```
 
-2. Remove the launcher's runners, then its network guards:
+2. Remove this install's launcher runners, then its network guards, found by the install label:
 
    ```
-   docker ps -aq --filter label=boss-man.launcher=1 | xargs -r docker rm -f
+   docker ps -aq --filter label=com.bossman.install=boss-man --filter label=boss-man.launcher=1 | xargs -r docker rm -f
    ```
 
    ```
-   docker ps -aq --filter label=boss-man.netguard=1 | xargs -r docker rm -f
+   docker ps -aq --filter label=com.bossman.install=boss-man --filter label=boss-man.netguard=1 | xargs -r docker rm -f
+   ```
+
+   A runner or guard made before BOS-2803 has no install label, so step 1 does not catch it. If you first installed from an older release that had no label, remove those unlabelled ones too (they are this install's, unless the host has a second install that is also older than the label):
+
+   ```
+   docker ps -aq --filter label=boss-man.launcher=1 --filter label=com.bossman.install | xargs -r docker rm -f
+   ```
+
+   ```
+   docker ps -aq --filter label=boss-man.netguard=1 --filter label=com.bossman.install | xargs -r docker rm -f
    ```
 
 3. Let Compose remove what it knows, with the volumes and any container it lost track of:
