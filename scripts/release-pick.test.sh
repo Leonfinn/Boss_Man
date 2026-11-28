@@ -2,6 +2,8 @@
 # Tests for scripts/release-pick.sh and scripts/release-notes.sh (BOS-2662) with a fake gh, docker and cosign and a
 # throw-away git repository: no GitHub, no registry, no network. Covers the three cases the weekly release must get
 # right: a commit whose CI is red, a commit with a missing or unsigned image, and nothing new since the last release.
+# For the notes, it checks the added lines, the closing signed-files sentence, and the "What's new" pointer line taken
+# from SITE_URL (BOS-2903).
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 S="$(mktemp -d)"; trap 'rm -rf "$S"' EXIT
@@ -178,5 +180,34 @@ echo "$notes" | grep -q "New line one" && fail "c2..c4 must not hold line one"
 notes="$(cd "$G" && "$N" "$C3" "$C3")"; echo "$notes" | grep -q "No changes you will notice" || fail "no new lines should say so"
 notes="$(cd "$G" && "$N" "" "$C4")"; echo "$notes" | grep -q "No changes you will notice" || fail "no previous commit should say so"
 notes="$(cd "$G" && "$N" "0123456789abcdef0123456789abcdef01234567" "$C4")"; echo "$notes" | grep -q "No changes you will notice" || fail "an unknown previous commit should not fail the release"
+
+# BOS-2903: one "What's new" pointer line at the end, from the configured site address (SITE_URL), never a host in the repo.
+grep -Eq "https://[a-z0-9]" "$N" && fail "release-notes.sh must not hardcode a site address, it comes from SITE_URL"
+notes="$(cd "$G" && SITE_URL=https://example.test "$N" "$C1" "$C4")"
+echo "$notes" | tail -n1 | grep -qx "Built from source? You get each change as soon as it is added. Update your server to pick it up. What's new shows which image has each change: https://example.test/whats-new" \
+  || fail "the last line should be the What's new pointer, got: $notes"
+# The words match the website's "Built from source" explainer box (apps/site/scripts/build.mjs), so the two never drift.
+box="$(grep -o 'Built from source</h3><p>You get each change as soon as it is added[^<]*' "$REPO_ROOT/apps/site/scripts/build.mjs" | sed 's/.*<p>//')"
+if [ -z "$box" ]; then fail "could not read the Built from source explainer box from build.mjs"; fi
+echo "$notes" | grep -qF "$box" || fail "the pointer should keep the explainer box's words: $box"
+# A trailing slash on the address is trimmed, so the link is never ...//whats-new.
+notes="$(cd "$G" && SITE_URL=https://example.test/ "$N" "$C1" "$C4")"
+echo "$notes" | grep -q "https://example.test/whats-new$" || fail "a trailing slash should be trimmed: $notes"
+# An address that is not https does not go into the notes: the line is left out rather than ship a link that cannot work.
+notes="$(cd "$G" && SITE_URL=http://example.test "$N" "$C1" "$C4")"
+echo "$notes" | grep -q "What's new shows" && fail "an address that is not https must not be linked: $notes"
+# No address (a fork has no website): no pointer line, and the notes still print.
+notes="$(cd "$G" && env -u SITE_URL "$N" "$C1" "$C4")"
+echo "$notes" | grep -q "What's new shows" && fail "with no SITE_URL there should be no pointer: $notes"
+echo "$notes" | grep -qx -- "- New line one." || fail "with no SITE_URL the notes should still print: $notes"
+
+# BOS-2903: the release job must pass SITE_URL to the notes step, or the pointer above never appears in a real release.
+# The job runs in the `publish` environment, so it can only read a variable as ${{ vars.SITE_URL }} from the repository or
+# that environment; a secret, or the `site` environment's copy the website publish uses, would never reach it.
+wf="$REPO_ROOT/.github/workflows/release.yml"
+grep -Eq '^      SITE_URL: \$\{\{ vars\.SITE_URL \}\}$' "$wf" \
+  || fail "release.yml must pass SITE_URL from a variable (vars.SITE_URL) to the release step that writes the notes"
+awk '/^  [a-z][a-z-]*:$/{job=$1} job=="release:" && /^    environment:/{print; exit}' "$wf" | grep -qx '    environment: publish' \
+  || fail "release.yml's release job should still run in the publish environment"
 
 echo "release-pick.test.sh: ok"
