@@ -63,6 +63,8 @@ describe("ReleaseNotice", () => {
     expect(await screen.findByText(/the button appears by itself within about 30 minutes/)).toBeTruthy();
     expect(screen.getByText(/Nothing else is needed from you/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: /^Install/ })).toBeNull();
+    const guide = screen.getByRole("link", { name: "Install a release by hand" });
+    expect(guide.getAttribute("href")).toMatch(/apps\/site\/src\/guides\/install-a-release-by-hand\.md$/);
   });
 
   it("a finished move can be dismissed with Got it", async () => {
