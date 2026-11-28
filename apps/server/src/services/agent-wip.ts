@@ -31,6 +31,7 @@ export async function queuedBehindByTicket(
   prefix: string | null | undefined,
   agentLimit: number | null,
 ): Promise<Map<string, string[]>> {
+  // not state: a local built and returned within this call
   const out = new Map<string, string[]>();
   const assignees = [...new Set(ready.map((r) => r.assigneeAgentId).filter((x): x is string => !!x))];
   if (agentLimit == null || !assignees.length) return out;
@@ -39,6 +40,7 @@ export async function queuedBehindByTicket(
     .from(tickets)
     .where(and(inArray(tickets.assigneeAgentId, assignees), eq(tickets.systemState, "in_progress"), sql`not ${cantMoveSql}`))
     .orderBy(asc(tickets.number));
+  // not state: a local built and dropped within this call
   const refsBy = new Map<string, string[]>();
   for (const w of counting) refsBy.set(w.assigneeAgentId!, [...(refsBy.get(w.assigneeAgentId!) ?? []), ticketRef(prefix, w.number) ?? `#${w.number}`]);
   for (const r of ready) {
