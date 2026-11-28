@@ -548,3 +548,26 @@ a { color: inherit; text-underline-offset: 3px; }
 @media (max-width: 760px) {
   .news .g-main > h2 { font-size: 22px; margin-top: 36px; }
 }
+
+/* What's new: the per-date image badge and the source-vs-image explainer box (BOS-2842, design note BOS-2838 3.2).
+   Both use existing tokens only. The two badge states differ in words, outline (solid vs dashed) and icon, not colour:
+   no amber, because amber on this site means "waiting on you" and nothing here needs the reader to act. */
+.news .wn-badge-row { margin-top: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+.news .wn-badge { display: inline-flex; align-items: center; gap: 7px; min-height: 32px; padding: 3px 12px; border-radius: 999px; border: 1.5px solid var(--ink); background: var(--paper); color: var(--ink); font-weight: 700; font-size: 15px; line-height: 1.3; text-decoration: none; }
+.news .wn-badge svg { width: 16px; height: 16px; flex: none; }
+.news a.wn-badge:hover { background: var(--board); }
+.news a.wn-badge:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+.news .wn-badge.not { border-style: dashed; background: transparent; }
+.news .wn-badge-note { color: var(--ink-2); font-size: 16px; }
+.news .wn-badge-row.split { margin-top: 16px; padding-top: 14px; border-top: 1px dashed var(--line-light); }
+
+.news .wn-how { margin-top: 28px; padding: 22px 24px; border-radius: 12px; border: 2px solid var(--line-light); background: var(--paper); }
+.news .wn-how > h2 { margin: 0; font-size: 22px; }
+.news .wn-how-panels { margin-top: 14px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px 32px; }
+.news .wn-how-panels h3 { margin: 0; font-size: 18px; }
+.news .wn-how-panels p { margin-top: 6px; }
+.news .wn-which { margin-top: 16px; }
+@media (max-width: 760px) {
+  .news .wn-how { padding: 18px 20px; }
+  .news .wn-how-panels { grid-template-columns: 1fr; gap: 14px; }
+}
