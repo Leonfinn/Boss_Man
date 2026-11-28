@@ -2,7 +2,7 @@
 // own short steps, and saving one also makes the funding source and points the CEO at it; "The runner" is one
 // status line. The full forms stay in Settings.
 import { useRef, useState, type FormEvent } from "react";
-import { CONNECT_OPTIONS, connectSaves, connectValueHint, connectValueProblem, providerLabel, type ConnectOption } from "@boss-man/shared";
+import { CONNECT_OPTIONS, connectSaves, connectSetsUpElsewhere, connectValueHint, connectValueProblem, providerLabel, type ConnectOption } from "@boss-man/shared";
 import { api, type Company } from "../api";
 import { usePoll } from "../hooks";
 import { LoadError } from "../components/LoadError";
@@ -93,6 +93,26 @@ function CommandSteps({ o }: { o: ConnectOption }) {
   );
 }
 
+/** The sign-in steps for a plan set up in its own tool (Codex, Ollama): install first, sign in, then finish in Settings. */
+function SignInSteps({ o, company }: { o: ConnectOption; company: Company }) {
+  const s = o.signIn;
+  if (!s) return null;
+  return (
+    <>
+      <ol style={{ margin: 0, paddingLeft: 20, display: "flex", flexDirection: "column", gap: 6 }}>
+        <li>Install {s.tool} on the computer the runner runs on: <a href={s.installUrl} target="_blank" rel="noreferrer">{s.tool}'s download page</a>.</li>
+        <li>{s.site}.</li>
+        <li>
+          Then add a funding source for it under <a href={`#/settings/${company.id}/funding`}>Settings → Funding</a>, kind Subscription, so Boss Man tracks what its agents spend.
+        </li>
+        <li className="muted">
+          Site steps {s.checked}, checked against <a href={s.url} target="_blank" rel="noreferrer">{s.tool}'s page</a>. {s.note}
+        </li>
+      </ol>
+    </>
+  );
+}
+
 /** One listed option with its steps open: the value box, a plain error tied to it, and Save. */
 function ConnectDetail({ o, company, onSaved, known }: { o: ConnectOption; company: Company; onSaved: (secretId: string, optionId: string) => void; known: SourceBySecret }) {
   const [value, setValue] = useState("");
@@ -104,11 +124,20 @@ function ConnectDetail({ o, company, onSaved, known }: { o: ConnectOption; compa
   const errorId = `${boxId}-error`;
   const hint = connectValueHint(o);
   if (!connectSaves(o)) {
+    // A plan set up in its own tool says how to install and sign in; "Other" (several values) says where it is set.
+    if (connectSetsUpElsewhere(o)) {
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <SignInSteps o={o} company={company} />
+          <p className="muted" style={{ margin: 0, fontSize: 13 }}>
+            <a href={guideUrl(o.guide)} target="_blank" rel="noreferrer">How this works</a>
+          </p>
+        </div>
+      );
+    }
     // No value Boss Man can save for this one: say where it is set instead of a box that would fail.
     const what: Record<string, string> = {
       other: "Amazon Bedrock, Microsoft Foundry and LLM gateways each use two or three values (such as an address and a token), so they are set under Settings → Secrets, under Other. Agents then run on them from the Agents page.",
-      "chatgpt-plan": "A ChatGPT plan is signed in to in Codex itself, on the computer the runner runs on; no value is pasted here. See the guide for how, or choose OpenAI API key to connect from this page alone.",
-      "ollama-plan": "An Ollama Cloud plan is signed in to in Ollama itself; no value is pasted here. See the guide for how, or choose Ollama Cloud API key to connect from this page alone.",
     };
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -177,6 +206,35 @@ function ConnectDetail({ o, company, onSaved, known }: { o: ConnectOption; compa
 }
 
 /**
+ * The list of equal rows, drawn from its options and which one is open (BOS-2815), so a test can draw a real open
+ * row with no data loaded. `ClaudeStep` keeps the open row in state; this only draws.
+ */
+export function ConnectList({ options, open, company, known, onPick, onSaved }: { options: readonly ConnectOption[]; open: string | null; company: Company; known: SourceBySecret; onPick: (id: string) => void; onSaved: (secretId: string, optionId: string) => void }) {
+  return (
+    <div role="list" aria-label="Ways to connect an agent" className="connect-list">
+      {options.map((o) => {
+        const isOpen = open === o.id;
+        return (
+          <div key={o.id} role="listitem" className="connect-row" data-testid={`setup-connect-row-${o.id}`}>
+            <button type="button" className="connect-pick" aria-expanded={isOpen} onClick={() => onPick(o.id)}>
+              <span className="connect-name">{o.name}</span>
+              <span className="connect-meta">
+                {o.cost} · {o.needs === "browser" ? "Browser only" : "One command on a computer"}
+              </span>
+            </button>
+            {isOpen && (
+              <div className="connect-detail">
+                <ConnectDetail o={o} company={company} known={known} onSaved={onSaved} />
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
  * The connect step: every way to pay for an agent as equal rows, in one order, with no favourite (BOS-2815).
  * A row opens its own short steps; saving one sets what pays for the CEO, so step 7 is done.
  */
@@ -202,26 +260,7 @@ export function ClaudeStep({ company, onChanged, onSaved }: { company: Company; 
           <span className="tag green">Connected</span> Your agents can run on {name(saved)}. It pays for the CEO too. To change it, use Settings → Credentials.
         </p>
       )}
-      <div role="list" aria-label="Ways to connect an agent" className="connect-list">
-        {CONNECT_OPTIONS.map((o) => {
-          const isOpen = open === o.id;
-          return (
-            <div key={o.id} role="listitem" className="connect-row" data-testid={`setup-connect-row-${o.id}`}>
-              <button type="button" className="connect-pick" aria-expanded={isOpen} onClick={() => setOpen(isOpen ? null : o.id)}>
-                <span className="connect-name">{o.name}</span>
-                <span className="connect-meta">
-                  {o.cost} · {o.needs === "browser" ? "Browser only" : "One command on a computer"}
-                </span>
-              </button>
-              {isOpen && (
-                <div className="connect-detail">
-                  <ConnectDetail o={o} company={company} known={known} onSaved={onSaved} />
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
+      <ConnectList options={CONNECT_OPTIONS} open={open} company={company} known={known} onPick={(id) => setOpen(open === id ? null : id)} onSaved={onSaved} />
       <p className="muted" style={{ fontSize: 14, margin: 0 }}>
         <a href={guideUrl("connect-a-claude-account")} target="_blank" rel="noreferrer">Plan or API key: which is right for me?</a>
       </p>

@@ -1,20 +1,22 @@
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterAll, describe, expect, it } from "vitest";
 import { CONNECT_OPTIONS } from "@boss-man/shared";
-import { Setup } from "../src/pages/Setup";
+import type { Company } from "../src/api";
+import { ConnectList } from "../src/pages/SetupClaude";
 
-// BOS-2815: a rendering check of the setup wizard's connect step (BOS-2511). The real Setup component, which the
-// wizard draws as its page (the step title and one line), with the real styles.css, in a headless browser at the
+// BOS-2815: a rendering check of the setup wizard's connect step (BOS-2511). It draws the real ConnectList — every
+// row of the one equal list, and one row open with its steps — with the real styles.css, in a headless browser at the
 // widths the devices tool gives (Safari 1550, the Brave foldable 1667×724) and a 390 px phone. It measures geometry:
-// the title and its line fit the page on one column, and no page scrolls sideways. The step's rows and boxes are
-// drawn by the step's own markup, which the app styles with the same rules this test loads, and are checked in
-// setup-connect-render-rows.test.tsx by their own test; the wizard frame is what this file adds.
+// every row is the same height and full width with a 44 px tap target on touch, an open row's steps stay inside the
+// page, and no width scrolls sideways. The rows are CONNECT_OPTIONS, so a new provider is drawn without a change here.
 // Skipped, not failed, where no browser is installed (CI's web-browser job fails on a skip).
 
 type Page = {
   setContent: (html: string, opts?: { waitUntil?: "load" }) => Promise<void>;
-  evaluate: <T>(fn: () => T) => Promise<T>;
+  evaluate: <T, A>(fn: (arg: A) => T, arg: A) => Promise<T>;
+  screenshot: (opts: { path: string }) => Promise<unknown>;
   close: () => Promise<void>;
 };
 type Browser = {
@@ -44,43 +46,85 @@ afterAll(async () => {
   await browser?.close();
 });
 
-const company = { id: "c1", name: "App Co", mission: "Reports for clients", paused: false, agents: [{ id: "a1", companyId: "c1", name: "CEO", role: "ceo" as const, agentKind: "claude", model: null, fundingSourceId: null, paused: false, starred: false, duty: null }] };
-const css = (await import("node:fs")).readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+// Opt-in proof: with BOSSMAN_SCRATCH set, one full-page shot per device and state. Never a repo file.
+const scratch = process.env.BOSSMAN_SCRATCH;
 
-describe.skipIf(!browser)("the setup wizard's connect step title (BOS-2815)", () => {
-  it("the step's title is the question the card asked for, not the old 'Claude'", async () => {
-    // The wizard's STEPS holds the title; its heading is that title, so the page reads "How do you want to connect
-    // your first agent?" and never "Claude" alone. Read through the component's own module, not a copy.
-    const { readFileSync } = await import("node:fs");
-    const src = readFileSync(new URL("../src/pages/Setup.tsx", import.meta.url), "utf8");
-    expect(src).toContain("How do you want to connect your first agent?");
-    expect(src).not.toMatch(/\{ id: "credential", title: "Claude"/);
-    // The rows' list is the shared one, so a new provider appears without a wizard change.
-    expect(CONNECT_OPTIONS.length).toBeGreaterThanOrEqual(9);
-    expect(CONNECT_OPTIONS.map((o) => o.name)).toContain("Other API provider");
-    // It draws: the page's own head with that title fits the width and doesn't scroll sideways, at each device.
-    for (const p of [
+const company: Company = { id: "c1", name: "App Co", mission: "Reports for clients", paused: false, agents: [{ id: "a1", companyId: "c1", name: "CEO", role: "ceo" as const, agentKind: "claude", model: null, fundingSourceId: null, paused: false, starred: false, duty: null }] };
+const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+
+/**
+ * The step's list drawn with its data given: the real `ConnectList`, so the test draws the rows and an open row's
+ * steps themselves, not a hand-written copy of them.
+ */
+function draw(openId: string | null): string {
+  const html = renderToStaticMarkup(
+    <ConnectList options={CONNECT_OPTIONS} open={openId} company={company} known={{}} onPick={() => undefined} onSaved={() => undefined} />,
+  );
+  return `<!doctype html><html lang="en-GB"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>${css}</style></head><body><div class="app"><main><section class="card">${html}</section></main></div></body></html>`;
+}
+
+const states = [
+  { name: "nothing-chosen", open: null as string | null },
+  { name: "plan-open", open: "claude-plan" },
+  { name: "signin-plan-open", open: "chatgpt-plan" },
+  { name: "key-open", open: "anthropic-key" },
+  { name: "other-open", open: "other" },
+];
+
+describe.skipIf(!browser)("the setup wizard's connect step, drawn (BOS-2815)", () => {
+  it("draws every option as one equal list, and an open row's steps fit the page at each device", async () => {
+    const devices = [
       { width: 1550, height: 1000, touch: false, ratio: 1 },
       { width: 1667, height: 724, touch: true, ratio: 1 },
       { width: 390, height: 844, touch: true, ratio: 2 },
-    ]) {
-      const page = await browser!.newPage({ viewport: { width: p.width, height: p.height }, deviceScaleFactor: p.ratio, hasTouch: p.touch, isMobile: p.touch });
-      try {
-        const html = `<!doctype html><html lang="en-GB"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>${css}</style></head><body><div class="app"><main><header class="page-head"><div><p class="label">Setting up</p><h1>How do you want to connect your first agent?</h1><p class="sub">Your agents need an account to run on, and that account is what you pay for their work. Pick whichever you already have; saving it also sets what pays for the CEO.</p></div></header></main></div></body></html>`;
-        await page.setContent(html, { waitUntil: "load" });
-        const m = await page.evaluate(() => {
-          const h = document.querySelector("h1")!.getBoundingClientRect();
-          const sub = document.querySelector(".sub")!.getBoundingClientRect();
-          const doc = document.documentElement;
-          return { h, sub, scrolls: doc.scrollWidth > doc.clientWidth + 1 };
-        });
-        expect(m.h.x).toBeGreaterThanOrEqual(0);
-        expect(m.h.width).toBeGreaterThan(200);
-        expect(m.sub.right).toBeLessThanOrEqual(p.width + 1);
-        expect(m.scrolls, `a sideways scroll at ${p.width}`).toBe(false);
-      } finally {
-        await page.close();
+    ];
+    for (const state of states) {
+      const html = draw(state.open);
+      expect(html).toContain("setup-connect-row-claude-plan");
+      for (const d of devices) {
+        const p = await browser!.newPage({ viewport: { width: d.width, height: d.height }, deviceScaleFactor: d.ratio, hasTouch: d.touch, isMobile: d.touch });
+        try {
+          await p.setContent(html, { waitUntil: "load" });
+          const m = await p.evaluate(
+            (expectCount) => {
+              const rows = Array.from(document.querySelectorAll<HTMLElement>("[data-testid^='setup-connect-row-']"));
+              // The closed rows are what must be one size; the open row is its header plus its steps by design.
+              const closed = rows.filter((r) => !r.querySelector(".connect-detail"));
+              const picks = closed.map((r) => r.querySelector<HTMLElement>(".connect-pick")!.getBoundingClientRect());
+              const allPicks = rows.map((r) => r.querySelector<HTMLElement>(".connect-pick")!.getBoundingClientRect());
+              const detail = document.querySelector<HTMLElement>(".connect-detail");
+              const box = detail?.getBoundingClientRect() ?? null;
+              const doc = document.documentElement;
+              return {
+                count: rows.length,
+                heights: [...new Set(picks.map((b) => Math.round(b.height)))],
+                widths: [...new Set(picks.map((b) => Math.round(b.width)))],
+                minTap: Math.min(...allPicks.map((b) => Math.round(b.height))),
+                right: box ? box.right : 0,
+                expands: document.querySelectorAll(".connect-pick[aria-expanded='true']").length,
+                scrolls: doc.scrollWidth > doc.clientWidth + 1,
+                expectCount,
+              };
+            },
+            CONNECT_OPTIONS.length,
+          );
+          // Every option is drawn, and the rows are one size: equal height and width, so none stands out.
+          expect(m.count).toBe(m.expectCount);
+          expect(m.heights.length, `rows differ in height at ${d.width} (${state.name})`).toBe(1);
+          expect(m.widths.length, `rows differ in width at ${d.width} (${state.name})`).toBe(1);
+          // A row is a 44 px tap target on a touch screen.
+          if (d.touch) expect(m.minTap, `row under 44 px at ${d.width} (${state.name})`).toBeGreaterThanOrEqual(44);
+          // The open row's steps stay inside the page, and exactly one row is open when one should be.
+          if (state.open) {
+            expect(m.expands).toBe(1);
+            expect(m.right).toBeLessThanOrEqual(d.width + 1);
+          }
+          expect(m.scrolls, `a sideways scroll at ${d.width} (${state.name})`).toBe(false);
+          if (scratch) await p.screenshot({ path: (await import("node:path")).join(scratch, `connect-${state.name}-${d.width}.png`) });
+        } finally {
+          await p.close();
+        }
       }
     }
-  });
+  }, 120_000);
 });

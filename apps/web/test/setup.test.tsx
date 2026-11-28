@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
 import { Setup, SetupChecklist } from "../src/pages/Setup";
@@ -331,7 +331,7 @@ describe("the connect step: one equal list of every way to pay (BOS-2815)", () =
     { name: "Anthropic API key", cost: "Pay as you go", needs: "Browser only" },
     { name: "ChatGPT plan", cost: "Fixed monthly", needs: "One command on a computer" },
     { name: "OpenAI API key", cost: "Pay as you go", needs: "Browser only" },
-    { name: "Ollama Cloud plan", cost: "Fixed monthly", needs: "Browser only" },
+    { name: "Ollama Cloud plan", cost: "Fixed monthly", needs: "One command on a computer" },
     { name: "Ollama Cloud API key", cost: "Pay as you go", needs: "Browser only" },
     { name: "Synthetic", cost: "Pay as you go, or a fixed monthly plan", needs: "Browser only" },
     { name: "OpenRouter", cost: "Pay as you go", needs: "Browser only" },
@@ -449,6 +449,45 @@ describe("the connect step: one equal list of every way to pay (BOS-2815)", () =
     expect(screen.getByText(/Amazon Bedrock, Microsoft Foundry and LLM gateways each use two or three values/)).toBeTruthy();
     expect(screen.getByText("Open Settings → Secrets").getAttribute("href")).toBe("#/settings/c1/secrets");
     expect(screen.queryByText("Save and connect")).toBeNull();
+  });
+
+  it("a plan signed in to in its own tool says to install it first, with a link, then sign in and set it up in Settings", async () => {
+    stub();
+    render(<Setup companies={[withCeo]} go={() => {}} onChanged={() => {}} />);
+    fireEvent.click(await screen.findByText("ChatGPT plan"));
+    const detail = screen.getByTestId("setup-connect-row-chatgpt-plan").querySelector(".connect-detail")!;
+    const items = Array.from(detail.querySelectorAll("ol li")).map((li) => li.textContent!);
+    expect(items[0]).toContain("Install Codex");
+    expect(detail.querySelector("ol li a")!.getAttribute("href")).toBe("https://github.com/openai/codex");
+    expect(items[1]).toContain("codex login");
+    expect(detail.textContent).toContain("Settings → Funding");
+    expect(detail.textContent).toMatch(/not yet confirmed/);
+    // No value box that would fail: this row is not connected by pasting here.
+    expect(screen.queryByText("Save and connect")).toBeNull();
+    // The Ollama Cloud plan is the same: install first, with a link.
+    fireEvent.click(screen.getByText("Ollama Cloud plan"));
+    const ollama = screen.getByTestId("setup-connect-row-ollama-plan").querySelector(".connect-detail")!;
+    expect(ollama.querySelector("ol li")!.textContent).toContain("Install Ollama");
+    expect(ollama.querySelector("ol li a")!.getAttribute("href")).toBe("https://ollama.com/download");
+  });
+
+  it("a plan row that saves nothing still becomes the CEO's funding source: pick it on step 7 and the line goes", async () => {
+    const writes: Array<{ url: string; method: string; body: unknown }> = [];
+    stub({
+      writes,
+      sources: [{ id: "f7", name: "App Co OpenAI", kind: "subscription", provider: "openai", secretId: null }],
+    });
+    render(<Setup companies={[withCeo]} go={() => {}} onChanged={() => {}} />);
+    // Open the ChatGPT plan's steps: install and sign in, then finish in Settings.
+    fireEvent.click(await screen.findByText("ChatGPT plan"));
+    await screen.findByText(/Install Codex/);
+    // Step 7: the funding source for it is chosen for the CEO, which is what pays for it.
+    fireEvent.click(screen.getByRole("button", { name: /What pays for the CEO/ }));
+    const pick = (await screen.findByLabelText("The CEO runs on")) as HTMLSelectElement;
+    fireEvent.change(pick, { target: { value: "f7" } });
+    await waitFor(() => expect(writes.some((c) => c.method === "PATCH" && c.url === "/api/agents/a1")).toBe(true));
+    const patch = writes.filter((c) => c.method === "PATCH" && c.url === "/api/agents/a1").at(-1)!;
+    expect(patch.body).toEqual({ fundingSourceId: "f7" });
   });
 
   it("step 7 says to go back to the connect step until something there is saved, above the form", async () => {

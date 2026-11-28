@@ -2091,7 +2091,9 @@ details.pushes[open] > summary { margin-bottom: 8px; }
 @media (max-width: 640px) { .pin-toast-undo { min-height: 44px; } }
 
 /* ---------- Setup wizard: "How do you want to connect your first agent?" (BOS-2815) ---------- */
-/* Every option is one row of the same size and style; none is marked or picked for the owner (the owner's card). */
+/* Every option is one row of the same size and style; none is marked or picked for the owner (the owner's card).
+   The pick's min-height is that of the tallest meta on a phone (cost plus "One command on a computer" wraps to two
+   lines), so a two-line cost doesn't make its row taller than the rest. */
 .connect-list { display: flex; flex-direction: column; gap: 10px; max-width: 760px; }
 .connect-row { border: 1px solid var(--line); border-radius: 10px; background: var(--card); }
 .connect-pick { all: unset; box-sizing: border-box; display: flex; flex-direction: column; gap: 2px; width: 100%; min-height: 56px; padding: 10px 14px; border-radius: 10px; cursor: pointer; color: var(--ink); }
@@ -2104,4 +2106,4 @@ details.pushes[open] > summary { margin-bottom: 8px; }
 .connect-detail li code { font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; }
 /* The line's two parts on a phone are its own tap targets, as every other button is on touch (BOS-2811's bar). */
 .banner .linkish { align-self: center; }
-@media (max-width: 640px) { .connect-pick { min-height: 60px; } .connect-detail { padding: 12px; } .banner { flex-wrap: wrap; } .banner .linkish { min-height: 44px; padding: 4px 6px; } }
+@media (max-width: 640px) { .connect-pick { min-height: 84px; } .connect-detail { padding: 12px; } .banner { flex-wrap: wrap; } .banner .linkish { min-height: 44px; padding: 4px 6px; } }
