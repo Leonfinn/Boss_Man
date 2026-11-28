@@ -7,7 +7,7 @@
 import { and, eq, isNull } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, settings } from "../db/schema.js";
-import { allMergeOrder, liveServerRecord, placeInOrder } from "./go-live-wait.js";
+import { allMergeOrder, liveServerRecord, placeInOrder, serverIsGoLive } from "./go-live-wait.js";
 
 /** How many of main's newest first-parent commits each sweep reads: hours of merges, far more than one swap can lose. */
 export const MAIN_LOG_MAX = 50;
@@ -53,6 +53,9 @@ export async function wakeCeoIfLiveUnplaced(
   onMain: Array<{ sha: string; subject: string; message: string }>,
   wake: ((agentId: string, input: { reason: string; note: string }) => Promise<unknown>) | null | undefined,
 ): Promise<boolean> {
+  // BOS-2931: our server's commit is recorded for every company, but only the home company's merges go live with it.
+  // Any other company works in its own repository, so its merges can never place our commit: no wake, and no record.
+  if (!(await serverIsGoLive(db, companyId))) return false;
   const { live, contains } = await liveServerRecord(db, companyId);
   const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, KEY(companyId)));
   const seen = (row?.value as { commit?: string } | undefined)?.commit ?? null;
