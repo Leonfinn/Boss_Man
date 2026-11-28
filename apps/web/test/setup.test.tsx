@@ -46,11 +46,41 @@ describe("setup wizard checks", () => {
     render(<Setup companies={[company]} go={() => {}} onChanged={() => {}} />);
     const link = await screen.findByText("How do I get a token?");
     const details = link.closest("details")!;
-    expect(details.open).toBe(false);
-    fireEvent.click(link);
-    details.open = true; // jsdom doesn't toggle <details> on summary click
+    expect(details.open).toBe(true); // open by default (BOS-2823)
     expect(screen.getByLabelText("GitHub token steps")).toBeTruthy();
     expect(screen.queryByLabelText("Gitea token steps")).toBeNull();
+    expect(details.textContent).toContain("Actions read and write");
+  });
+
+  it("is one Git token box: first line, no Credentials form, a Check button only once saved (BOS-2823)", async () => {
+    mock(4);
+    render(<Setup companies={[company]} go={() => {}} onChanged={() => {}} />);
+    expect(await screen.findByLabelText("Git token")).toBeTruthy();
+    expect(screen.getByText("Lets your agents save their work to your GitHub repository.")).toBeTruthy();
+    expect(screen.queryByLabelText("Variable name")).toBeNull();
+    expect(screen.queryByText(/Check the token against/)).toBeNull();
+    expect(screen.getByText(/pull request/, { selector: "strong" })).toBeTruthy();
+  });
+
+  it("with a saved token, Check fills in the repo's default branch (BOS-2823)", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push(`${init?.method ?? "GET"} ${url}`);
+        const body =
+          url === "/api/setup-progress" ? { dismissed: false, step: 4, companyId: "c1" }
+          : url.endsWith("/projects") ? [project]
+          : url.endsWith("/grants") ? [{ id: "g1", envName: "GIT_TOKEN", secretName: "App Co git token" }]
+          : url.endsWith("/check-git-token") ? { ok: true, canPush: true, defaultBranch: "trunk", message: "The token can read and push to the repo." }
+          : [];
+        return new Response(JSON.stringify(body), { status: 200 });
+      }),
+    );
+    render(<Setup companies={[company]} go={() => {}} onChanged={() => {}} />);
+    fireEvent.click(await screen.findByText("Check the token against Site"));
+    expect(await screen.findByText("The token can read and push to the repo.")).toBeTruthy();
+    await vi.waitFor(() => expect(calls).toContain("PATCH /api/projects/p1"));
   });
 });
 

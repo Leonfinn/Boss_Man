@@ -438,6 +438,7 @@ describe("CI on a commit for the merge gate (BOS-1070, read through Actions sinc
       }).checkAccess(cfg("github"), "t");
     const ok = await access(200);
     expect(ok).toMatchObject({ ok: true, canPush: true, canReadChecks: true, message: expect.stringContaining("can read GitHub Actions runs") });
+    expect(ok.defaultBranch).toBe("main");
     expect(urls).toContain("https://host/api/repos/leon/site/actions/runs?per_page=1");
     const no = await access(403);
     expect(no).toMatchObject({ ok: true, canReadChecks: false, message: expect.stringContaining("Actions: Read-only (and Metadata: Read-only)") });
