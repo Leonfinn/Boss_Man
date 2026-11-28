@@ -291,8 +291,8 @@ docker inspect "$NL" >/dev/null 2>&1 || { echo "--- the launcher does not exist;
 # BOS-2804: every container the install made carries its project's name and its label; nothing is left under a fixed name another install could share.
 names="$(docker ps -a --filter "label=com.bossman.install=$P" --format '{{.Names}}' | sort | tr '\n' ' ')"
 for want in "${P}-updater" "$NL" "${P}-server-blue"; do case " $names" in *" $want "*) ok "$want exists and carries the install's label" ;; *) bad "$want is missing or has no install label (found: $names)" ;; esac; done
-# One pack volume: the one compose declares for this project; the launcher's own default (boss-man-claude-pack) is not made for it.
-[ -n "$(docker volume ls -q --filter "name=^${P}_claude-pack\$")" ] && ok "the install's pack volume exists" || bad "the install's pack volume ${P}_claude-pack is missing"
+# The pack volume is made only when a runner's pack installer first mounts it, so it is checked later, after a runner has started
+# (the "each install has its own pack volume" check below), not here.
 echo "$launcher_log" | grep -q 'dropped to uid 1000' && ok "the launcher dropped to uid 1000 with the socket's group" || bad "launcher privileges: $launcher_log"
 echo "$launcher_log" | grep -q '"msg":"data folder"' && ok "the launcher found its data volume on the host" || bad "launcher data folder"
 echo "$launcher_log" | grep -q 'launcher listening' && ok "the launcher is up and can reach Docker" || bad "launcher not listening"
