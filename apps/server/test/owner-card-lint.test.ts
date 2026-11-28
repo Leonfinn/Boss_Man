@@ -67,12 +67,23 @@ describe("lintOwnerSteps", () => {
   it("only warns about links, several commands in one step, hedging and long cards", () => {
     const r = lintOwnerSteps([
       "Background is on BOS-276; open Settings → Server and runner.",
-      step("Check it:", sh("docker ps", H), "Then:", sh("docker logs server-blue", H)),
+      step("Check it:", sh("docker ps", H), "Then:", sh("docker logs --tail 5 server-blue", H)),
       step("It should be green by now:", sh("docker ps", H)),
     ], undefined, REHEARSED);
     expect(r.refuse).toEqual([]);
     expect(r.warn.map((f) => f.step)).toEqual([1, 2, 3]);
     expect(lintOwnerSteps(Array.from({ length: 13 }, () => "Open Settings.")).warn).toHaveLength(1);
+  });
+
+  // BOS-2874: a log read that prints everything can bury the owner in output; a warning, never a refusal.
+  it("warns about a log read with no cut on its output, and not about one that has it", () => {
+    const warns = (command: string) => lintOwnerSteps([step("Read the log:", sh(command, H))], undefined, REHEARSED);
+    for (const c of ["docker logs server-blue", "docker compose logs server", "journalctl --no-pager -u bossman", "cat /var/log/app.log", "kubectl logs web-0"]) {
+      const r = warns(c);
+      expect(r.refuse, c).toEqual([]);
+      expect(r.warn.map((f) => f.problem).join("\n"), c).toMatch(/tail -n 5/);
+    }
+    for (const c of ["docker logs server-blue 2>&1 | tail -n 5", "docker logs --tail 20 server-blue", "journalctl -u bossman -n 30", "docker logs server-blue 2>&1 | sort | uniq -c | sort -rn | head", "docker ps"]) expect(warns(c).warn, c).toEqual([]);
   });
 });
 

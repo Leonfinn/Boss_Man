@@ -1,13 +1,14 @@
 // Server and host admin routes: scheduling and kill switches, the runner update hold, self-deploy and
 // restart, and deploy targets. Owner routes: app.ts registers these inside its owner scope, so the
 // owner check and error handling are the same as for its other routes.
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { RUNNER_ADDONS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { companies } from "../db/schema.js";
 import { record } from "../services/activity.js";
+import { AnswerError } from "../services/decisions.js";
 import { DeployError, type deploysService } from "../services/deploys.js";
 import type { launcherService } from "../services/launcher.js";
 import type { maintenanceService } from "../services/maintenance.js";
@@ -15,7 +16,7 @@ import type { runnerReportService } from "../services/runner-report.js";
 import type { schedulerService } from "../services/scheduler.js";
 import type { deployWaitService } from "../services/deploy-wait.js";
 import type { selfDeployService } from "../services/self-deploy.js";
-import type { releaseWatchService } from "../services/release-watch.js";
+import { InstallError, type releaseWatchService } from "../services/release-watch.js";
 import type { ActiveWait } from "../services/update-waits.js";
 
 const Uuid = z.string().uuid();
@@ -38,13 +39,32 @@ export function serverAdminRoutes(
     activeWaits: () => Promise<ActiveWait[]>;
     /** BOS-2663: the new-release watch of an install from the published images. */
     releaseWatch: ReturnType<typeof releaseWatchService>;
+    /**
+     * BOS-2859: answers a runner update card "Update runners" as the signed-in owner, via the Updates panel (the
+     * decisions service's own answer). Resolves falsy when the card was no longer open; throws AnswerError on a refusal.
+     */
+    approveRunnerCard: (decisionId: string, req: FastifyRequest) => Promise<unknown>;
   },
 ) {
-  const { db, scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun, activeWaits, releaseWatch } = deps;
+  const { db, scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun, activeWaits, releaseWatch, approveRunnerCard } = deps;
   // The Updates panel's "new release" line and its two switches. An install that isn't from the images answers { active: false }.
   owner.get("/api/release-watch", async () => releaseWatch.status());
   owner.put("/api/release-watch", async (req) => releaseWatch.setOptions(z.object({ enabled: z.boolean().optional(), ntfy: z.boolean().optional() }).strict().parse(req.body ?? {})));
   owner.post("/api/release-watch/check", async () => releaseWatch.check({ force: true }));
+  // BOS-2713: the Install button. A refusal carries a plain sentence for the panel.
+  const plain = async <T>(run: () => Promise<T>, reply: { code: (n: number) => unknown }) => {
+    try {
+      return await run();
+    } catch (e) {
+      if (e instanceof InstallError) {
+        reply.code(e.status);
+        return { error: e.message };
+      }
+      throw e;
+    }
+  };
+  owner.post("/api/release-watch/install", async (req, reply) => plain(() => releaseWatch.install(z.object({ version: z.string() }).strict().parse(req.body ?? {}).version), reply));
+  owner.post("/api/release-watch/ack", async (_req, reply) => plain(() => releaseWatch.acknowledge(), reply));
   // One list for every screen (rule c): what each update wait waits on, since when, and when it goes ahead or ends.
   owner.get("/api/update-waits", async () => ({ waits: await activeWaits() }));
 
@@ -149,12 +169,26 @@ export function serverAdminRoutes(
     return r.tooLate ? reply.code(409).send({ error: "too_late", message: "The machine has already started this update, so it can't be cancelled. The hold lifts when it ends." }) : r;
   });
 
-  owner.post("/api/self-deploy/update-runners",async (_req, reply) => {
+  owner.post("/api/self-deploy/update-runners", async (req, reply) => {
     const r = await selfDeploy.updateRunners();
     // BOS-953: during the trial the refusal says when it can work, and carries the time so the panel shows it too.
-    return "error" in r
-      ? reply.code(409).send({ error: "cannot_update_runners", message: r.error, ...("retryAt" in r && r.retryAt ? { retryAt: r.retryAt } : {}) })
-      : r;
+    if ("error" in r) return reply.code(409).send({ error: "cannot_update_runners", message: r.error, ...("retryAt" in r && r.retryAt ? { retryAt: r.retryAt } : {}) });
+    // A queued press already starts by itself with no card (BOS-1086).
+    if (!("decisionId" in r)) return r;
+    // BOS-2859: the owner's press IS the approval. The card it raised (or the open card for the same commit) is answered
+    // "Update runners" through the one approval path, so the request reaches the host, Recent updates and the audit
+    // log as for any approval, and there are never two approvals for one update. The panel stays where it is.
+    const note = "note" in r && r.note ? r.note : null;
+    try {
+      const done = await approveRunnerCard(r.decisionId, req);
+      // Answered between the raise and here (a second press, another tab): it is approved either way.
+      return { approved: true, decisionId: r.decisionId, ...(done ? {} : { already: true }), note };
+    } catch (err) {
+      // The approval path refused it (e.g. the server update it would build from has not succeeded): the card stays
+      // open with its reason, and the panel says so instead of pretending it started.
+      if (err instanceof AnswerError) return { approved: false, decisionId: r.decisionId, message: err.message, note };
+      throw err;
+    }
   });
 
   // BOS-1086: take back a queued runner update.

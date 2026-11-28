@@ -29,6 +29,7 @@ const api = urlStub({
   // The per-login preferences read at sign-in (BOS-2689).
   "/api/preferences": { singleLetterKeys: true, pinnedPages: [], keyboardTipSeen: true },
   "/api/setup-progress": { dismissed: true },
+  "/api/companies/c1/setup-checklist": [],
   "/api/companies": [company],
   "/api/notifications": { items: [], unread: 0 },
   "/api/notifications/unseen": { count: 0 },

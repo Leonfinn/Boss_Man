@@ -407,7 +407,7 @@ export function projectsToCsv(list: Array<{ id: string; name: string }>, statsFo
 
 function ProjectCard({ p, go, agents, onStar, starBusy, onChanged, stats }: { p: Project; go: (to: string) => void; agents: Agent[]; onStar: () => void; starBusy?: boolean; onChanged: () => void; stats?: ProjectSummary }) {
   const [open, setOpen] = useState(false);
-  const summary = `${p.repoUrl ? "Repo set" : "No repo"} · ${p.landing === "pull_request" ? "opens pull requests" : "merges into the default branch"}`;
+  const summary = p.repoUrl ? `Repo set · ${p.landing === "pull_request" ? "opens pull requests" : "merges into the default branch"}` : "Documents and research · work is kept in the wiki and on each task";
   return (
     <div style={{ borderTop: "1px solid var(--line)", padding: "10px 0" }}>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
@@ -478,9 +478,11 @@ export function ProjectsPage({ companies, companyId, go, onChanged }: { companie
             />
           </Section>
           <Section id="projects-h" title={`Projects (${active.length})`}>
-            <p className="muted" style={{ fontSize: 14 }}>
-              With a repo, each task gets its own branch and its own copy of the code to work in. Approved work is checked, then merged into the default branch or sent as a pull request. The token in <span className="mono">GIT_TOKEN</span> is used to clone, push and open pull requests. Don't put a token in the URL.
-            </p>
+            {(projects.data ?? []).some((p) => p.repoUrl) && (
+              <p className="muted" style={{ fontSize: 14 }}>
+                With a repo, each task gets its own branch and its own copy of the code to work in. Approved work is checked, then merged into the default branch or sent as a pull request. The token in <span className="mono">GIT_TOKEN</span> is used to clone, push and open pull requests. Don't put a token in the URL.
+              </p>
+            )}
             {active.length > 0 && (
               <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "flex-end" }}>
                 {active.length > 1 && (

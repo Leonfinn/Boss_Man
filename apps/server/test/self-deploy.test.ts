@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, readdir, rm, utimes, writeFile } from "node:f
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { DEPLOY_UNCHANGED_REASON, selfDeployService } from "../src/services/self-deploy.js";
 import { currentHold, FAILED_UPDATE_REASON, linkHold, releaseHold } from "../src/services/owner-holds.js";
@@ -572,7 +572,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
   it("does not add the 'after this, rebuild the runners' line to the runner update card itself", async () => {
     const c = (ctx = await setup());
     await c.available({ runnerChanged: true });
-    await c.req("POST", "/api/self-deploy/update-runners");
+    await c.selfDeploy.updateRunners(); // the card the press raises; the route then approves it (BOS-2859)
     const runnerCards = (await c.open()).filter((d) => (d.context as { target?: string }).target === "runner");
     expect(runnerCards.length).toBeGreaterThan(0);
     for (const d of runnerCards) expect(d.question).not.toContain("the merge gate keeps running the old code");
@@ -930,24 +930,61 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect((await c.req("POST", "/api/self-deploy/update-runners")).statusCode).toBe(200);
   });
 
-  it("builds the runners from what is deployed, on request", async () => {
+  it("builds the runners from what is deployed, on request: the press is the approval, no card is left open (BOS-2859)", async () => {
     const c = (ctx = await setup());
     await c.available({ deployed: B });
     const r = await c.req("POST", "/api/self-deploy/update-runners");
     expect(r.statusCode).toBe(200);
-    const [d] = await c.open();
-    expect(d).toMatchObject({ options: ["Update runners", "Not now"], context: { target: "runner", commit: B } });
-    // Pressing it again reuses the open question.
-    expect((await c.req("POST", "/api/self-deploy/update-runners")).json()).toEqual({ decisionId: d!.id });
-    expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Update runners" })).statusCode).toBe(200);
-    expect(JSON.parse(await readFile(path.join(c.dir, "inbox", "request.json"), "utf8"))).toMatchObject({ target: "runner", commit: B });
+    expect(r.json()).toMatchObject({ approved: true, decisionId: expect.any(String) });
+    // Nothing waits in Decisions: the request is with the host already.
+    expect(await c.open()).toHaveLength(0);
+    expect(JSON.parse(await readFile(path.join(c.dir, "inbox", "request.json"), "utf8"))).toMatchObject({ id: r.json().decisionId, target: "runner", commit: B });
+    // The card is kept as the record of the approval: answered "Update runners", so Recent updates lists it.
+    const [d] = await c.db.select().from(decisions).where(eq(decisions.id, r.json().decisionId));
+    expect(d).toMatchObject({ status: "answered", answer: "Update runners", context: { target: "runner", commit: B, requested: true } });
+    expect((await c.req("GET", "/api/self-deploy/history")).json()).toEqual(expect.arrayContaining([expect.objectContaining({ id: d!.id })]));
+    // The audit log says who approved it and where.
+    const lines = (await c.db.select().from(activity).where(eq(activity.kind, "decision_answered"))).map((a) => a.summary);
+    expect(lines.some((s) => s.includes("Update runners (approved by owner via Updates panel)"))).toBe(true);
+    // Pressing again while it is with the host is not a second approval.
+    const again = await c.req("POST", "/api/self-deploy/update-runners");
+    expect(again.statusCode).toBe(409);
+    expect(again.json().message).toContain("already under way");
+  });
+
+  it("a press answers the runner card Boss Man already raised for the same commit, so one update has one approval (BOS-2859)", async () => {
+    const c = (ctx = await setup());
+    await c.available({ deployed: B });
+    // The card Boss Man raised by itself (not the owner's press): it stays on the queue as before until something answers it.
+    await c.selfDeploy.updateRunners();
+    await c.db.update(decisions).set({ context: sql`${decisions.context} - 'requested'` }).where(eq(decisions.status, "open"));
+    const [auto] = await c.open();
+    expect(auto).toMatchObject({ context: { target: "runner", commit: B } });
+    expect((auto!.context as { requested?: boolean }).requested).toBeUndefined();
+    const r = await c.req("POST", "/api/self-deploy/update-runners");
+    expect(r.json()).toMatchObject({ approved: true, decisionId: auto!.id });
+    expect(await c.open()).toHaveLength(0);
+    const all = (await c.db.select().from(decisions)).filter((d) => (d.context as { type: string; target?: string }).type === "self_deploy" && (d.context as { target?: string }).target === "runner");
+    expect(all.map((d) => [d.id, d.status, d.answer])).toEqual([[auto!.id, "answered", "Update runners"]]);
+    expect(JSON.parse(await readFile(path.join(c.dir, "inbox", "request.json"), "utf8"))).toMatchObject({ id: auto!.id, target: "runner", commit: B });
+  });
+
+  it("a press the approval path refuses leaves its card open with the reason, and says so (BOS-2859)", async () => {
+    const c = (ctx = await setup());
+    // The server update to C was switched back, but the host still reports C as what runs: answering is refused.
+    await c.status({ id: randomUUID(), result: "rolled_back", message: "Switched back.", to_commit: C });
+    await c.available({ deployed: C });
+    const r = await c.req("POST", "/api/self-deploy/update-runners");
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toMatchObject({ approved: false, message: expect.stringContaining("has not succeeded") });
+    expect((await c.open()).map((d) => d.id)).toEqual([r.json().decisionId]);
   });
 
   it("builds runners for what runs after a rolled-back deploy, but not for the commit that failed", async () => {
     const c = (ctx = await setup());
     await c.status({ id: randomUUID(), result: "rolled_back", message: "Switched back.", to_commit: C });
     await c.available({ deployed: B });
-    await c.req("POST", "/api/self-deploy/update-runners");
+    await c.selfDeploy.updateRunners(); // the card the press raises; the route then approves it (BOS-2859)
     const [ok] = await c.open();
     expect((await c.req("POST", `/api/decisions/${ok!.id}/answer`, { answer: "Update runners" })).statusCode).toBe(200);
     await c.app.close();
@@ -956,7 +993,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     const d = (ctx = await setup());
     await d.status({ id: randomUUID(), result: "rolled_back", message: "Switched back.", to_commit: C });
     await d.available({ deployed: C });
-    await d.req("POST", "/api/self-deploy/update-runners");
+    await d.selfDeploy.updateRunners(); // the card the press raises; the route then approves it (BOS-2859)
     const [bad] = await d.open();
     const r = await d.req("POST", `/api/decisions/${bad!.id}/answer`, { answer: "Update runners" });
     expect(r.statusCode).toBeGreaterThanOrEqual(400);
@@ -1064,7 +1101,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       const c = (ctx = await setup());
       // A runner card from before the server update, for what ran then.
       await c.available({ deployed: A, tip: A });
-      await c.req("POST", "/api/self-deploy/update-runners");
+      await c.selfDeploy.updateRunners(); // the card the press raises; the route then approves it (BOS-2859)
       const [early] = await c.open();
       await c.available({ runnerChanged: true });
       await c.selfDeploy.sync();
@@ -1117,7 +1154,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       vi.setSystemTime(new Date("2026-11-03T01:00:00Z"));
       const c = (ctx = await setup());
       await c.available({ deployed: A, tip: A });
-      await c.req("POST", "/api/self-deploy/update-runners");
+      await c.selfDeploy.updateRunners(); // the card the press raises; the route then approves it (BOS-2859)
       const [early] = await c.open();
       // The host reports a server update nobody asked for through a decision (empty id).
       await c.status({ id: "", result: "deployed", message: "Switched in.", ended: "2026-11-03T01:01:00Z", soak_seconds: "300" });
@@ -1175,7 +1212,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       await c.selfDeploy.sync();
       expect((await c.open()).filter((d) => target(d).target === "runner")).toHaveLength(0);
       // The withdrawn card for A must not block a fresh runner offer for A (Freddy, round 6: dedupe key kept).
-      await c.req("POST", "/api/self-deploy/update-runners");
+      await c.selfDeploy.updateRunners(); // the card the press raises; the route then approves it (BOS-2859)
       expect((await c.open()).filter((d) => target(d).target === "runner" && target(d).commit === A)).toHaveLength(1);
     });
 
@@ -1300,7 +1337,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       const c = (ctx = await setup());
       // A runner card from before the server update, for what ran then; the switch-back must withdraw it.
       await c.available({ deployed: A, tip: A });
-      await c.req("POST", "/api/self-deploy/update-runners");
+      await c.selfDeploy.updateRunners(); // the card the press raises; the route then approves it (BOS-2859)
       expect((await c.open()).filter((d) => target(d).target === "runner")).toHaveLength(1);
       // The owner is told the switch-back happened, but the notify fails: the run dies before the seen mark is saved.
       const notify = c.notes.notify;
@@ -1798,7 +1835,7 @@ describe("a deploy card carrying the fix for a live problem (BOS-639)", () => {
     // A second runner card for the same fix (the owner said "Not now", then pressed the button) is a repeat: it
     // keeps the heading text but is routine again, so the owner is not paged twice for one fix.
     await c.req("POST", `/api/decisions/${runner!.id}/answer`, { answer: "Not now" });
-    await c.req("POST", "/api/self-deploy/update-runners");
+    await c.selfDeploy.updateRunners(); // the card the press raises; the route then approves it (BOS-2859)
     const [again] = (await c.open()).filter((d) => (d.context as { target?: string }).target === "runner");
     expect(again!.id).not.toBe(runner!.id);
     expect(urgentOf(again!)).toMatchObject({ heading: HEADING, repeat: true });
@@ -2795,7 +2832,8 @@ describe("the runner update card only when it can be acted on, and one at a time
     const c = (ctx = await setup());
     await hostTicks(c, "2026-11-09T18:25:00Z");
     await c.available({ deployed: B, tip: B });
-    expect((await c.req("POST", "/api/self-deploy/update-runners")).json().decisionId).toBeTruthy();
+    // The card the press raises (since BOS-2859 the route then approves it; these tests are about the card itself).
+    expect(((await c.selfDeploy.updateRunners()) as { decisionId?: string }).decisionId).toBeTruthy();
     expect(await runnerCards(c)).toHaveLength(1);
     return c;
   }
@@ -2946,7 +2984,7 @@ describe("the runner update card only when it can be acted on, and one at a time
     await hostTicks(c, "2026-11-03T01:00:00Z");
     // A runner card for A, from what ran before the server update.
     await c.available({ deployed: A, tip: A });
-    await c.req("POST", "/api/self-deploy/update-runners");
+    await c.selfDeploy.updateRunners(); // the card the press raises; the route then approves it (BOS-2859)
     const [early] = await runnerCards(c);
     expect(target(early!)).toMatchObject({ commit: A });
     // A server update to B is offered: the open runner card stays (BOS-1086), and, once B's trial is over, the fresh card
@@ -2978,11 +3016,11 @@ describe("the runner update card only when it can be acted on, and one at a time
   it("a retry after 'Not now' still leaves exactly one open runner card", async () => {
     const c = await cardOpenForB();
     const [first] = await runnerCards(c);
-    expect((await c.req("POST", "/api/self-deploy/update-runners")).json()).toEqual({ decisionId: first!.id });
+    expect(await c.selfDeploy.updateRunners()).toEqual({ decisionId: first!.id });
     // An answered card holds the plain key, so the button raises a keyed copy (the retry path): still only one open.
     await c.db.update(decisions).set({ status: "answered", answer: "Not now", dedupeKey: null, answeredAt: new Date() }).where(eq(decisions.id, first!.id));
-    const r = await c.req("POST", "/api/self-deploy/update-runners");
-    expect(r.json().decisionId).toBeTruthy();
+    const r = (await c.selfDeploy.updateRunners()) as { decisionId?: string };
+    expect(r.decisionId).toBeTruthy();
     expect(await runnerCards(c)).toHaveLength(1);
   });
 
@@ -2997,8 +3035,9 @@ describe("the runner update card only when it can be acted on, and one at a time
     await c.db.insert(decisions).values({ companyId: (await c.db.select().from(companies))[0]!.id, kind: "approval", question: "Update the runners to bbbbbbbb?", options: ["Update runners", "Not now"], recommendedOption: "Update runners", dedupeKey: `self-deploy:runner:${B}`, context: { type: "self_deploy", target: "runner", commit: B, fromCommit: A }, createdAt: new Date("2026-11-09T17:00:00Z") });
     expect(await runnerCards(c)).toHaveLength(1);
     // The button raises its own card for the live version (C); the earlier automatic card is withdrawn with the plain reason.
-    const r = await c.req("POST", "/api/self-deploy/update-runners");
-    expect(r.json().decisionId).toBeTruthy();
+    // (The service step; since BOS-2859 the route then approves that card at once.)
+    const r = (await c.selfDeploy.updateRunners()) as { decisionId?: string };
+    expect(r.decisionId).toBeTruthy();
     const cards = await runnerCards(c);
     expect(cards).toHaveLength(1);
     expect(target(cards[0]!)).toMatchObject({ commit: C });
@@ -3087,11 +3126,13 @@ describe("runner updates queue instead of being refused (BOS-1086)", () => {
     expect((await c.open()).filter((d) => target(d).target === "server")).toHaveLength(1);
     const r = await c.req("POST", "/api/self-deploy/update-runners");
     expect(r.statusCode).toBe(200);
-    expect(r.json().decisionId).toBeTruthy();
-    // The next pass leaves that runner card open beside the server card: a deploy waiting never closes it.
+    // BOS-2859: the press is the approval, so the runner update goes to the host for B at once, beside the server card.
+    expect(r.json()).toMatchObject({ approved: true, decisionId: expect.any(String) });
+    expect(JSON.parse(await readFile(inbox(c), "utf8"))).toMatchObject({ target: "runner", commit: B });
     await hostTicks(c, "2026-11-10T17:01:00Z");
     await c.selfDeploy.sync();
-    expect(await runnerCards(c)).toHaveLength(1);
+    expect(await runnerCards(c)).toHaveLength(0);
+    expect((await c.open()).filter((d) => target(d).target === "server")).toHaveLength(1);
   });
 
   it("a press during the trial is kept when something blocks at the trial's end, and the update starts once it clears", async () => {

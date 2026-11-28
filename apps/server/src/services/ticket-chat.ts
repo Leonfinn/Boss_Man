@@ -9,6 +9,7 @@ import { RunError, type runsService } from "./runs.js";
 import { record } from "./activity.js";
 import { stampPost } from "./progress.js";
 import { ownerActed } from "./stale-requests.js";
+import { stripCodeNotes } from "./reply-notes.js";
 import { reviewTicketWriteRefusal } from "./skill-proposals.js";
 import type { OwnerRepliesService } from "./owner-replies.js";
 
@@ -231,7 +232,9 @@ export async function conversationLines(db: Db, ticketId: string) {
     const who = m.author === "owner" ? "Owner" : m.author === "agent" ? (m.agent ?? "An agent") : systemAuthor(m.delivery);
     // The owner's text reaches the agent whole: a pasted log must not arrive cut. Agent replies keep
     // their own limit, and the untrusted wrapper a review ticket puts around them is never sliced apart.
-    const text = m.author === "owner" || m.text.length <= PROMPT_TEXT_MAX ? m.text : `${m.text.slice(0, PROMPT_TEXT_MAX)}…`;
+    // BOS-2854: an agent's earlier words come back without any note the code added under them.
+    const said = m.author === "agent" ? stripCodeNotes(m.text) : m.text;
+    const text = m.author === "owner" || said.length <= PROMPT_TEXT_MAX ? said : `${said.slice(0, PROMPT_TEXT_MAX)}…`;
     return `${who}: ${m.author === "agent" && reviewing ? untrusted(`agent ${m.agent ?? "an agent"} on a skill review ticket`, text) : text}`;
   });
 }

@@ -177,10 +177,14 @@ export function Sidebar(props: {
   decisions: Decision[];
   /** (BOS-969) What needs the owner now, from the same server figure the Decisions page heading shows. */
   decisionsTally?: { open: number; waiting: number } | null;
+  /** (BOS-2818) Setup still open: its count, for the link at the top of the menu. */
+  setupOpen?: { done: number; total: number } | null;
   /** (BOS-1485) The same tally for every company, for the company switcher. */
   companyTallies?: Record<string, { open: number; waiting: number }>;
   unread: number;
   feedback: number;
+  /** BOS-2819: false for a company with no code project: no Merge queue row. Absent means true. */
+  hasCode?: boolean;
   mergeWaiting: number;
   mergeStuck: number;
   /** Kept for the callers; the browser-notifications button now sits on the Notifications page (BOS-1506). */
@@ -311,6 +315,11 @@ export function Sidebar(props: {
       </div>
       <div id="nav-groups" className={`nav-groups${menu ? " open" : ""}`}>
         <div className="nav-scroll">
+        {props.setupOpen && !props.collapsed && (
+          <a className="side-setup" href="#/setup">
+            Setup: {props.setupOpen.done} of {props.setupOpen.total}
+          </a>
+        )}
         {shortcutRows.length > 0 && (
           <section className="side-shortcuts" aria-label="Shortcuts">
             <div className="side-shortcuts-head">
@@ -344,7 +353,7 @@ export function Sidebar(props: {
         {BLOCKS.map((block, bi) => (
           <section key={bi} aria-label={["Overview", "Work", "Company"][bi]}>
             <ul>
-              {block.map((entry) => {
+              {block.filter((entry) => props.hasCode !== false || isGroup(entry) || entry.id !== "merge-queue").map((entry) => {
                 if (isGroup(entry)) {
                   const open = !panelMode && openGroups.includes(entry.group);
                   const shown = panelMode && panel?.id === entry.group;

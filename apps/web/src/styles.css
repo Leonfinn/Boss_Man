@@ -363,12 +363,16 @@ p { margin: 0; }
 .stuck-line { color: var(--amber-ink); }
 .standing-item.inProgress .standing-icon { animation: pulse 1.6s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) { .standing-item.inProgress .standing-icon { animation: none; } }
-.standing-quiet { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; padding: 0 6px 0 12px; border: 1px dashed var(--line-strong); border-radius: 999px; }
-.standing-quiet-title { font-size: 12px; color: var(--muted); }
-.standing-quiet .standing-item { color: var(--muted); padding: 0 8px; }
-.standing-item:hover { text-decoration: underline; }
+/* BOS-2879: the dashed box takes its own full row, so its label and items sit on one grid (same left indent, even gaps, no empty band). */
+.standing-item.working { background: var(--green-soft); color: var(--green-ink); }
+.standing-item.working .standing-icon { animation: pulse 1.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .standing-item.working .standing-icon { animation: none; } }
+.standing-item.inProgress:not(:has(.standing-icon)) { background: var(--panel-soft, rgba(127, 127, 127, 0.12)); color: var(--head); }
+.standing-quiet { flex: 1 1 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 0 4px; padding: 0 12px; border: 1px dashed var(--line-strong); border-radius: 20px; }
+.standing-quiet-title { font-size: 12px; color: var(--muted); margin-right: 8px; }
+.standing-quiet .standing-item { color: var(--muted); padding: 0 8px; }.standing-item:hover { text-decoration: underline; }
 @media (pointer: coarse) { .standing-item { min-height: 44px; } }
-@media (max-width: 640px) { .standing-item { min-height: 44px; } .standing-quiet { border-radius: 14px; padding: 4px 6px 4px 12px; } }
+@media (max-width: 640px) { .standing-item { min-height: 44px; } .standing-quiet { padding: 4px 12px; } }
 .icon-btn { margin-left: auto; width: 32px; height: 32px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); display: inline-flex; align-items: center; justify-content: center; }
 .icon-btn:hover { background: var(--card); color: var(--head); }
 .rename { display: flex; flex-direction: column; gap: 6px; padding: 2px; }
@@ -854,8 +858,8 @@ button.preset-card { cursor: pointer; }
   .set-layout { display: grid; grid-template-columns: 228px minmax(0, 1fr); gap: 28px; align-items: start; }
   .set-nav { position: sticky; top: 16px; align-self: start; }
   .set-nav li > a { min-height: 40px; padding: 8px 12px; }
+  /* The wizard button sits top right on a wide screen (it was hidden at every wide width, F21). */
   .set-nav .set-wizard { display: none; }
-  .set-head-wizard { display: none; }
   .set-jump a { min-height: 24px; }
   /* (BOS-1126 Q8) The bare #/settings menu on a wide screen: each page's one-line hint under its name, two columns of pages (the sidebar beside a page stays names only). */
   .set-nav-index ul { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
@@ -1386,6 +1390,10 @@ p.dash-line { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0;
 .host-facts-list dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 /* A last resort: a comma list breaks after its commas, and a single over-long word breaks anywhere. */
 .host-fact-value { overflow-wrap: anywhere; word-break: break-word; }
+/* BOS-2828: the "More options" fold on the task page, and the sideways-scroll hint over the board. */
+.more-options > summary { cursor: pointer; color: var(--muted); font-size: 14px; padding: 4px 0; }
+.more-options[open] > summary { margin-bottom: 6px; }
+.board-more { margin: 0 0 4px; font-size: 13px; text-align: right; }
 .fold { padding: 0; }
 .fold > summary { display: flex; gap: 10px; align-items: flex-start; padding: 14px 18px; cursor: pointer; list-style: none; }
 .fold > summary::-webkit-details-marker { display: none; }
@@ -1551,7 +1559,12 @@ p.dash-line { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0;
 .stepper li.done .linkish span { background: var(--green-soft); color: var(--green-ink); }
 .stepper li[aria-current="step"] .linkish { color: var(--ink); font-weight: 600; }
 .stepper li[aria-current="step"] .linkish span { background: var(--accent); color: #fff; }
-.checklist { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px 16px; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); font-size: 14px; }
+.checklist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
+.setup-count { margin: 0; font-size: 14px; color: var(--muted); }
+.setup-before { display: flex; flex-direction: column; gap: 10px; max-width: 640px; }
+.setup-before ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.setup-before li { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: space-between; }
+.side-setup { display: block; margin: 0 0 8px; padding: 8px 10px; border-radius: 6px; font-size: 14px; font-weight: 600; background: var(--side-hover, rgba(255,255,255,0.08)); color: inherit; text-decoration: none; }
 .checklist li > span[aria-hidden] { display: inline-block; width: 1.2em; color: var(--muted); }
 .checklist li.done { color: var(--muted); }
 .checklist li.done > span[aria-hidden] { color: var(--green-ink); }
