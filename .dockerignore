@@ -5,4 +5,10 @@ docs
 .git
 data
 secrets
+# The host's settings file (database password, launcher settings) must never reach an image (BOS-2885, BOS-2908).
+# No Dockerfile reads it; Compose reads .env from the project folder, not from the build context.
+.env
+.env.*
+**/.env
+**/.env.*
 **/dist

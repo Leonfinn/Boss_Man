@@ -490,16 +490,21 @@ infra_re="$(grep -o "^INFRA='[^']*'" "$here/host-deployer.sh" | sed "s/^INFRA='/
 compose_re="$(grep -o "^COMPOSE_FILES='[^']*'" "$here/host-deployer.sh" | sed "s/^COMPOSE_FILES='//; s/'\$//")"
 not_re="$(grep -o "^NOT_INFRA='[^']*'" "$here/host-deployer.sh" | sed "s/^NOT_INFRA='//; s/'\$//")"
 # Hand-only whatever the host's settings say: deploy scripts, .env*, and the files under deploy/ that are not Compose files.
-for p in scripts/deploy.sh scripts/rebuild-live.sh scripts/update-runner.sh scripts/host-deployer.sh scripts/install-deployer.sh scripts/daily-backup.sh .env.example deploy/caddy/Caddyfile deploy/tailscale/serve.json deploy/x.toml deploy/cfg/app.xml deploy/index.html deploy/l; do # daily-backup.sh runs as root in the backup container (BOS-2176)
+for p in scripts/deploy.sh scripts/rebuild-live.sh scripts/update-runner.sh scripts/host-deployer.sh scripts/install-deployer.sh scripts/daily-backup.sh .env.example .dockerignore deploy/caddy/Caddyfile deploy/tailscale/serve.json deploy/x.toml deploy/cfg/app.xml deploy/index.html deploy/l; do # daily-backup.sh runs as root in the backup container (BOS-2176)
   if ! echo "$p" | grep -Eq "$infra_re" || echo "$p" | grep -Eq "$compose_re" || echo "$p" | grep -Eq "$not_re"; then fail "$p should count as infra"; fi
 done
 # Compose files are candidates: hand only when the rendered settings say so (BOS-2885). needs_hand takes them out of INFRA's deploy/ clause.
 for p in docker-compose.yml docker-compose.images.yml deploy/x.yml deploy/truenas-bluegreen.yml deploy/check-worker/compose.yaml; do
   if ! echo "$p" | grep -Eq "$compose_re"; then fail "$p should be a compose candidate"; fi
 done
-# CI files, build inputs (Dockerfiles, .dockerignore, .npmrc) and the Penpot and ntfy add-ons don't touch Boss Man's containers.
-for p in .github/workflows/ci.yml deploy/penpot.yml scripts/make-app-icons.mjs scripts/check-all.sh scripts/lint-migrations.mjs scripts/restore-test.sh deploy/ntfy.yml deploy/ntfy-bluegreen.yml apps/server/Dockerfile apps/updater/Dockerfile .dockerignore .npmrc; do
+# CI files, build inputs (Dockerfiles, .npmrc) and the Penpot and ntfy add-ons don't touch Boss Man's containers.
+for p in .github/workflows/ci.yml deploy/penpot.yml scripts/make-app-icons.mjs scripts/check-all.sh scripts/lint-migrations.mjs scripts/restore-test.sh deploy/ntfy.yml deploy/ntfy-bluegreen.yml apps/server/Dockerfile apps/updater/Dockerfile .npmrc; do
   if { echo "$p" | grep -Eq "$infra_re" && ! echo "$p" | grep -Eq "$compose_re" || echo "$p" | grep -Eq "$compose_re"; } && ! echo "$p" | grep -Eq "$not_re"; then fail "$p should not count as infra"; fi
+done
+
+# The host's .env must stay out of every image (BOS-2908): .dockerignore excludes it, at the top and in any folder.
+for pat in '.env' '.env.*' '**/.env' '**/.env.*'; do
+  grep -Fxq -- "$pat" "$here/../.dockerignore" || fail ".dockerignore does not exclude $pat"
 done
 
 # 7. Bad files: garbage, shell syntax in a field, a symlink, an oversized file. None run anything.

@@ -19,7 +19,7 @@ needed_path() {
     scripts/* | deploy/* | apps/runner/* | apps/netguard/* | skills/penpot/* | .github/workflows/*) return 0 ;;
     docker-compose*.yml | */docker-compose*.yml) return 0 ;;
     Dockerfile* | */Dockerfile*) return 0 ;;
-    .dockerignore) return 0 ;; # scripts/host-deployer.test.sh checks it is NOT a hand-apply path
+    .dockerignore) return 0 ;; # scripts/host-deployer.test.sh checks it IS a hand-apply path and excludes .env
     package.json | pnpm-lock.yaml | pnpm-workspace.yaml) return 0 ;;
     docs/35-install-from-images.md) return 0 ;; # scripts/install-images.test.sh checks the guide exists
     apps/site/src/guides/install-boss-man.md) return 0 ;; # scripts/install-images.test.sh checks its compose commands
