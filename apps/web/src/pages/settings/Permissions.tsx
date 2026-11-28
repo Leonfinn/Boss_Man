@@ -5,6 +5,7 @@ import { usePoll } from "../../hooks";
 import { when } from "../Runs";
 import { SaveButton, useSaveState } from "../../components/SaveButton";
 import { Section, useAction } from "./shared";
+import { GuideLink } from "../../guide-links";
 
 type FenceStatus = { registered: boolean; sandbox?: { level: "full" | "partial" | "unavailable"; missing: string[]; probe: boolean | null; guard?: { state: "on" | "absent"; reason: string } } | null; sandboxCheckedAt?: string | null };
 
@@ -56,6 +57,9 @@ export function FenceSetting({ company, onChanged }: { company: Company; onChang
     <Section id="fence-h" title="Agent fence">
       <p className="muted" style={{ fontSize: 14 }}>
         The fence is a kernel limit on what an agent's commands can touch: its own folders and nothing else. It doesn't ask you anything and doesn't change which permission cards appear. When it refuses something the agent just sees "Permission denied", and Boss Man writes that to its permission log.
+      </p>
+      <p style={{ fontSize: 14 }}>
+        <GuideLink slug="what-keeps-agents-fenced-in">What keeps agents fenced in</GuideLink>
       </p>
       <p style={{ fontSize: 14 }}>{hostLine}</p>
       {sb?.guard ? (

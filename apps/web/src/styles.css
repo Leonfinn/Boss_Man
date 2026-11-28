@@ -68,6 +68,11 @@ p { margin: 0; }
 .mono { font-family: var(--mono); }
 .muted { color: var(--muted); overflow-wrap: anywhere; }
 .label { font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+/* "What's this?" guide links (BOS-2832): 14 px in the link colour, right after the line they explain.
+   On touch the row is at least 44 px tall, so it is easy to hit. */
+.guide-link { display: inline-block; font-size: 14px; color: var(--link); }
+.guide-link:hover { color: var(--link-hover); }
+@media (pointer: coarse) { .guide-link { min-height: 44px; padding: 12px 0; } }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
 /* ---------- Buttons ---------- */

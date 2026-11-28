@@ -13,6 +13,7 @@ import { Funding } from "./settings/Funding";
 import { ProjectRow } from "./settings/Projects";
 import { ClaudeStep, RunnerStep } from "./SetupClaude";
 import { useStartBlock } from "../components/StartBlock";
+import { GuideLink, type GuideSlug } from "../guide-links";
 
 type Progress = { dismissed: boolean; left?: boolean; step: number; companyId: string | null; firstMerge?: { ref: string; minutes: number } | null; work?: "docs" | "code" };
 export type ChecklistItem = { id: string; label: string; done: boolean };
@@ -28,6 +29,14 @@ const STEPS = [
   { id: "ticket", title: "First task", why: "Optional: something for the team to start on." },
   { id: "before", title: "Before you go", why: "What is ready, what still stops agents starting, and how Boss Man reaches you." },
 ] as const;
+
+/** The explainer a step's subtitle links to (BOS-2832), right after the line it explains. */
+const STEP_GUIDE: Partial<Record<(typeof STEPS)[number]["id"], { slug: GuideSlug; text: string }>> = {
+  company: { slug: "the-ceo", text: "What does the CEO do?" },
+  credential: { slug: "connect-a-claude-account", text: "Plan or API key: which is right for me?" },
+  runner: { slug: "the-runner", text: "What's the runner?" },
+  funding: { slug: "what-agents-cost", text: "What's a funding source?" },
+};
 
 /** The saved step number keeps its old meaning (2 = the workspace, 3 = Claude) so an owner mid-wizard when the Claude step moved ahead of the workspace resumes on the same step. The swap is its own inverse: use it on read and on write. */
 const savedStep = (n: number) => (n === 2 ? 3 : n === 3 ? 2 : n);
@@ -174,6 +183,9 @@ function ProjectStep({ company, work, onWork, onChanged }: { company: Company; w
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <WorkChoice work={work} onWork={onWork} />
+      <p style={{ margin: 0 }}>
+        <GuideLink slug="work-that-isnt-code">Work that isn't code: what you can skip</GuideLink>
+      </p>
       {list.length === 0 && (
         <form onSubmit={add} style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
           <div className="field" style={{ flex: "1 1 240px" }}>
@@ -203,6 +215,11 @@ function ProjectStep({ company, work, onWork, onChanged }: { company: Company; w
       {work === "code" && (
         <p className="muted" style={{ fontSize: 13, margin: 0 }}>
           The checks that run before merging are chosen at the "Checks before merging" step, once the runner and git token are set up.
+        </p>
+      )}
+      {work === "code" && (
+        <p style={{ margin: 0 }}>
+          <GuideLink slug="code-words">Merge or pull request? Code words in plain words</GuideLink>
         </p>
       )}
     </div>
@@ -504,6 +521,11 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
           <progress className="setup-bar" aria-label="Setup progress" max={visible.length} value={pos + 1} />
           <h1>{s.title}</h1>
           <p className="sub">{s.why}</p>
+          {STEP_GUIDE[s.id] && (
+            <p style={{ marginTop: 4 }}>
+              <GuideLink slug={STEP_GUIDE[s.id]!.slug}>{STEP_GUIDE[s.id]!.text}</GuideLink>
+            </p>
+          )}
         </div>
       </header>
       <ol className="stepper" aria-label="Setup steps">
