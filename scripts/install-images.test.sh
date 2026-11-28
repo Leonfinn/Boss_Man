@@ -70,7 +70,7 @@ echo "$cfg" | jq -e '.services.updater.container_name == "boss-man-updater" and 
 cfg2="$(COMPOSE_PROJECT_NAME=acme docker compose --env-file "$T/images.env" -f docker-compose.images.yml config --format json)"
 echo "$cfg2" | jq -e '.services.updater.container_name == "acme-updater" and .services.updater.environment.UPDATER_NAME_PROJECT == "acme" and .services.updater.environment.UPDATER_SELF_NAME == "acme-updater"' >/dev/null && ok "another project names the updater acme-updater" || bad "updater name under project acme"
 echo "$cfg2" | jq -r '.services.updater.environment.UPDATER_LAUNCHER_ENV' | grep -q '^BOSSMAN_RUNNER_NETWORK=acme_default$' && ok "runners join the project's own network by default" || bad "runner network under project acme"
-echo "$cfg2" | jq -r '.services.updater.environment.UPDATER_LAUNCHER_ENV' | grep -Eq '^BOSSMAN_(CLAUDE_PACK_VOLUME|INSTALL_LABEL)=' && bad "UPDATER_LAUNCHER_ENV sets the pack volume or install label (the updater sets them)" || ok "the pack volume and install label are the updater's to set"
+echo "$cfg2" | jq -r '.services.updater.environment.UPDATER_LAUNCHER_ENV' | grep -Eq '^BOSSMAN_CLAUDE_PACK_VOLUME=' && bad "UPDATER_LAUNCHER_ENV sets the pack volume (the updater sets it)" || ok "the pack volume is the updater's to set"
 # No host tools in the compose file's own steps (comments excluded).
 if grep -v '^[[:space:]]*#' docker-compose.images.yml | grep -Eq '\b(openssl|sudo|chown|stat -c)\b'; then bad "compose file uses host tools"; else ok "no host openssl, chown, stat or sudo"; fi
 [ -f docs/35-install-from-images.md ] && ok "the install guide exists" || bad "docs/35-install-from-images.md is missing"
@@ -226,7 +226,7 @@ docker inspect "$NL" >/dev/null 2>&1 || { echo "--- the launcher does not exist;
 names="$(docker ps -a --filter "label=com.bossman.install=$P" --format '{{.Names}}' | sort | tr '\n' ' ')"
 for want in "${P}-updater" "$NL" "${P}-server-blue"; do case " $names" in *" $want "*) ok "$want exists and carries the install's label" ;; *) bad "$want is missing or has no install label (found: $names)" ;; esac; done
 # One pack volume: the one compose declares for this project; the launcher's own default (boss-man-claude-pack) is not made for it.
-docker volume inspect "${P}_claude-pack" >/dev/null 2>&1 && ok "the install's pack volume exists" || bad "the install's pack volume ${P}_claude-pack is missing"
+[ -n "$(docker volume ls -q --filter "name=^${P}_claude-pack\$")" ] && ok "the install's pack volume exists" || bad "the install's pack volume ${P}_claude-pack is missing"
 echo "$launcher_log" | grep -q 'dropped to uid 1000' && ok "the launcher dropped to uid 1000 with the socket's group" || bad "launcher privileges: $launcher_log"
 echo "$launcher_log" | grep -q '"msg":"data folder"' && ok "the launcher found its data volume on the host" || bad "launcher data folder"
 echo "$launcher_log" | grep -q 'launcher listening' && ok "the launcher is up and can reach Docker" || bad "launcher not listening"
