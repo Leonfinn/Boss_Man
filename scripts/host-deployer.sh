@@ -80,7 +80,16 @@ INBOX="$D/inbox" OUTBOX="$D/outbox" STATE="$D/state" LOG="$D/deployer.log"
 # docs/09-self-deploy.md lists the same files. scripts/host-deployer.sh stays on the list (BOS-1588, security review): it is
 # what root runs, so a change to it is applied by the owner on the hand-apply card; that hand deploy then refreshes the copy
 # itself with scripts/install-deployer.sh (also on the list, as it runs as root).
-INFRA='^(docker-compose[^/]*\.ya?ml$|deploy/|scripts/(deploy|rebuild-live|update-runner|host-deployer|install-deployer|daily-backup)\.sh$|\.dockerignore$|\.npmrc$|\.env|(.*/)?Dockerfile[^/]*$)'
+#
+# BOS-2885: INFRA is only what is hand-only whatever the host's settings say: the deploy scripts, .env*, and the files under
+# deploy/ that are not Compose files (the Caddyfile, the Tailscale serve file: mounted into a container, so a change to them is
+# invisible in the rendered settings). Compose files and deploy/*.yml/yaml (COMPOSE_FILES) are hand only when this host's
+# rendered settings change in a way the swap can't apply (compose_hand_reason). Dockerfiles and .npmrc are build inputs of the
+# images the deploy builds itself, so they are not on the list. .dockerignore stays on it (BOS-2908): it keeps the host's .env
+# out of every image, so a merged change to it is applied by the owner's hand. So does any *.dockerignore in a folder, such as
+# apps/runner/Dockerfile.dockerignore: Docker lets it replace the top-level one for that build.
+INFRA='^(scripts/(deploy|rebuild-live|update-runner|host-deployer|install-deployer|daily-backup)\.sh$|([^/]*/)*[^/]*\.dockerignore$|\.env|deploy/)' # deploy/ files that are Compose files are taken out again in needs_hand (COMPOSE_FILES)
+COMPOSE_FILES='^(docker-compose[^/]*\.ya?ml$|deploy/([^/]+/)*[^/]*\.ya?ml$)'
 # Under deploy/ but never used by Boss Man's own containers: the Penpot add-on is its own Compose project (docs/15).
 NOT_INFRA='^deploy/(penpot|ntfy|ntfy-bluegreen)\.yml$'
 # Same rule as needs_runner in scripts/deploy.sh (scripts/host-deployer.test.sh keeps them equal) and RUNNER_CODE_PATHS in
@@ -204,14 +213,13 @@ checked_list() {
 # and that needs no hand-apply. None: the approved commit itself, which is still on main and is what was approved.
 # Sets COMMIT and PICK_NOTE. Every later check (fast-forward, deployment files, rate limit) still runs on the result.
 pick_newest_checked() { # head approved tip
-  local head=$1 approved=$2 tip=$3 c checked unchecked=0 hand=0 why="" infra
+  local head=$1 approved=$2 tip=$3 c checked unchecked=0 hand=0 why=""
   checked="$(checked_list)"
   # Newest first; never a commit the running version already contains, so whatever is picked is a fast-forward of it.
   while IFS= read -r c; do
     [[ -n $c ]] || continue
     if ! grep -qxF "$c" <<<"$checked"; then unchecked=$((unchecked + 1)); continue; fi
-    infra="$(g diff --name-only "$head" "$c" | grep -E "$INFRA" | { grep -Ev "$NOT_INFRA" || true; } || true)"
-    if [[ -n $infra ]]; then hand=$((hand + 1)); continue; fi
+    if needs_hand "$head" "$c"; then hand=$((hand + 1)); continue; fi
     COMMIT=$c
     break
   done < <(g rev-list --first-parent "$tip" "^$approved" "^$head" 2>/dev/null || true)
@@ -285,8 +293,8 @@ compose_project() {
 # rendered under the live project's name and a pinned BOSSMAN_COMMIT, so nothing differs but the settings themselves.
 # Nothing in the checkout is touched. Returns non-zero (and logs why) when it can't render.
 unpack_commit() { (set -o pipefail; g archive "$1" | tar -x -C "$RENDER_DIR"); } # commit: into $RENDER_DIR
-render_hashes() { # commit project
-  local commit=$1 project=$2 out="" rc=0
+prepare_render() { # commit project: unpack into $RENDER_DIR with the host's .env; non-zero (logged) when it can't
+  local commit=$1 project=$2
   [[ -n $project ]] || { log "Service compare: could not tell the compose project name."; return 1; }
   rm -rf "$RENDER_DIR"; mkdir -p "$RENDER_DIR"
   # A function and not `if ! ( … ) 2>>"$LOG"`: bash does not apply the `!` when a group's or subshell's own redirect
@@ -301,6 +309,10 @@ render_hashes() { # commit project
   rm -rf "$RENDER_DIR/.env" "$RENDER_DIR/secrets"
   [[ ! -f $REPO/.env ]] || cp "$REPO/.env" "$RENDER_DIR/.env"
   [[ ! -d $REPO/secrets ]] || ln -s "$REPO/secrets" "$RENDER_DIR/secrets"
+}
+render_hashes() { # commit project
+  local commit=$1 project=$2 out="" rc=0
+  prepare_render "$commit" "$project" || return 1
   out="$(cd "$RENDER_DIR" && BOSSMAN_DEPLOYER="$D" BOSSMAN_COMMIT=compare timeout 120 docker compose --project-name "$project" config --hash '*' 2>>"$LOG")" || rc=$?
   if ((rc != 0)) || ! grep -qE '^[A-Za-z0-9_.-]+ [0-9a-f]{8,}$' <<<"$out"; then
     # An older Compose has no --hash: hash each service's block of the rendered file instead.
@@ -315,6 +327,126 @@ render_hashes() { # commit project
 # Names whose hash differs between two "service hash" lists, including services that were added or removed.
 changed_between() { # old-file new-file
   LC_ALL=C join -a1 -a2 -e MISSING -o 0,1.2,2.2 <(LC_ALL=C sort "$1") <(LC_ALL=C sort "$2") | awk '$2 != $3 { print $1 }'
+}
+
+# ---------------------------------------------------------------------------------------------------
+# BOS-2885: is a change to Compose files hand-only on THIS host? Decided from the rendered settings of the live commit and of
+# the candidate, never from file names. Hand when: either render fails; a service other than the server colours changes (db,
+# proxy and the rest keep their own owner card); a top-level volume, network or secret changes (a volume can bind a host
+# folder); or a server service gains host reach: a bind mount from the host, privileged, cap_add, devices, host network_mode,
+# pid, ipc or userns_mode, or security_opt. No change at all, or ordinary server settings, is automatic.
+# needs_hand sets HAND_FILES (newline-separated paths) and HAND_REASON (plain words, empty for a deploy-script verdict).
+# ---------------------------------------------------------------------------------------------------
+SERVER_SERVICES='^server(-blue|-green)?$'
+declare -A CFG_CACHE=() HAND_CACHE=()
+RCFG="" HAND_FILES="" HAND_REASON=""
+
+# stdin: rendered config. One "service|kind|detail" line per host-reach setting of every service, sorted.
+reach_facts() {
+  LC_ALL=C awk '
+    function emit(k, v) { print svc "|" k "|" v }
+    function flush(   src) {
+      if (key == "volumes" && item != "") {
+        if (item ~ /(^|\n) *(- )?type: bind/) { src = item; sub(/^.*source: /, "", src); sub(/\n.*$/, "", src); emit("bind", src) }
+        else if (item ~ /^      - [\/.~]/) { src = item; sub(/^      - /, "", src); emit("bind", src) }
+      }
+      item = ""
+    }
+    /^[^ ]/ { flush(); key = ""; svc = ""; ins = ($0 ~ /^services:/); next }
+    !ins { next }
+    /^  [A-Za-z0-9_.-]+:[ ]*$/ { flush(); key = ""; svc = $1; sub(/:$/, "", svc); next }
+    /^    [A-Za-z_]+:/ {
+      flush(); key = $1; sub(/:$/, "", key); v = $0; sub(/^    [A-Za-z_]+:[ ]*/, "", v); gsub(/["\047]/, "", v)
+      if (key == "privileged" && v == "true") emit("privileged", "true")
+      if ((key == "network_mode" || key == "pid" || key == "ipc" || key == "userns_mode") && v == "host") emit(key, "host")
+      next
+    }
+    key == "volumes" { if ($0 ~ /^      - /) { flush(); item = $0 } else if (item != "") item = item "\n" $0; next }
+    (key == "cap_add" || key == "devices" || key == "security_opt") && /^      - / {
+      v = $0; sub(/^      - /, "", v)
+      if (v !~ /^no-new-privileges[:=]true$/) emit(key, v) # that one takes reach away
+    }
+    END { flush() }
+  ' | LC_ALL=C sort -u
+}
+# Allow-list (BOS-2885 security review): the only keys of a server service that may change on the automatic path. Any other
+# key added, changed or removed (volumes_from, group_add, build, env_file, cgroup, uts, user, ports, a key Compose adds later...)
+# goes by hand. volumes stays on the list because ordinary volume changes are common; reach_facts still refuses a host bind.
+SERVER_KEYS_OK='^(environment|image|labels|healthcheck|deploy|command|entrypoint|restart|stop_grace_period|stop_signal|mem_limit|mem_reservation|cpus|pids_limit|expose|depends_on|volumes|networks)$'
+# stdin: rendered config. One "service|key|block" line per top-level key of every service (block's newlines turned into "~"), sorted.
+server_key_blocks() {
+  LC_ALL=C awk '
+    function flush() { if (svc != "" && key != "") print svc "|" key "|" blk; key = ""; blk = "" }
+    /^[^ ]/ { flush(); svc = ""; ins = ($0 ~ /^services:/); next }
+    !ins { next }
+    /^  [A-Za-z0-9_.-]+:[ ]*$/ { flush(); svc = $1; sub(/:$/, "", svc); next }
+    /^    [A-Za-z_0-9.-]+:/ { flush(); key = $1; sub(/:$/, "", key); blk = $0; next }
+    { if (key != "") blk = blk "~" $0 }
+    END { flush() }
+  ' | LC_ALL=C sort
+}
+# stdin: rendered config. Everything that is not under services: (top-level volumes, networks, secrets).
+non_service_text() { awk '/^[^ ]/ { ins = ($0 ~ /^services:/) } !ins { print }'; }
+
+render_config() { # commit project: sets RCFG to the rendered config of a commit, cached by commit (a failure is cached too)
+  local commit=$1 project=$2 out="" rc=0
+  RCFG=""
+  [[ -z ${CFG_CACHE[$commit]+x} ]] || { [[ ${CFG_CACHE[$commit]} != FAIL ]] || return 1; RCFG=${CFG_CACHE[$commit]}; return 0; }
+  if prepare_render "$commit" "$project"; then
+    out="$(cd "$RENDER_DIR" && BOSSMAN_DEPLOYER="$D" BOSSMAN_COMMIT=compare timeout 120 docker compose --project-name "$project" config 2>>"$LOG")" || rc=$?
+  else
+    rc=1
+  fi
+  rm -rf "$RENDER_DIR"
+  if ((rc != 0)) || ! grep -q '^services:' <<<"$out"; then
+    log "Could not render the compose settings of ${commit:0:8}."; CFG_CACHE[$commit]=FAIL; return 1
+  fi
+  CFG_CACHE[$commit]=$out RCFG=$out
+}
+
+# Sets HAND_REASON; returns 0 when the change has to be applied by hand, 1 when the swap can apply it.
+compose_hand_reason() { # head commit
+  local head=$1 commit=$2 project old new f1 f2 n gained odd
+  HAND_REASON=""
+  project="$(compose_project)"
+  if render_config "$head" "$project"; then old=$RCFG; else old=""; fi
+  if [[ -z $old ]] || ! render_config "$commit" "$project"; then
+    HAND_REASON="the host could not compare this update's Compose settings with the running ones"; return 0
+  fi
+  new=$RCFG
+  [[ $old != "$new" ]] || return 1
+  f1="$STATE/hand.old" f2="$STATE/hand.new"
+  split_hash <<<"$old" >"$f1"; split_hash <<<"$new" >"$f2"
+  for n in $(changed_between "$f1" "$f2"); do
+    if [[ ! $n =~ $SERVER_SERVICES ]]; then rm -f "$f1" "$f2"; HAND_REASON="it changes the $n service"; return 0; fi
+  done
+  rm -f "$f1" "$f2"
+  if [[ $(non_service_text <<<"$old") != "$(non_service_text <<<"$new")" ]]; then
+    HAND_REASON="it changes the volumes, networks or secrets"; return 0
+  fi
+  odd="$(LC_ALL=C comm -3 <(server_key_blocks <<<"$old") <(server_key_blocks <<<"$new") | tr -d '\t' | awk -F'|' -v ok="$SERVER_KEYS_OK" '$1 ~ /^server(-blue|-green)?$/ && $2 !~ ok { print $2 }' | sort -u | head -3 | tr '\n' ',')"
+  gained="$(LC_ALL=C comm -13 <(reach_facts <<<"$old") <(reach_facts <<<"$new") | { grep -E '^server(-blue|-green)?\|' || true; } | head -3 | tr '\n' ';')"
+  if [[ -n $gained ]]; then HAND_REASON="the server gains access to the host (${gained%;})"; return 0; fi
+  if [[ -n $odd ]]; then HAND_REASON="it changes the server's ${odd%,} setting, which the host does not apply by itself"; return 0; fi
+  return 1
+}
+
+needs_hand() { # head commit
+  local head=$1 commit=$2 paths cand key="$1 $2"
+  if [[ -n ${HAND_CACHE[$key]+x} ]]; then
+    HAND_FILES="${HAND_CACHE[$key]%%$'\x01'*}" HAND_REASON="${HAND_CACHE[$key]#*$'\x01'}"
+    [[ -n $HAND_FILES ]]; return
+  fi
+  paths="$(g diff --name-only "$head" "$commit" | { grep -Ev "$NOT_INFRA" || true; })"
+  HAND_FILES="$(grep -E "$INFRA" <<<"$paths" | { grep -Ev "$COMPOSE_FILES" || true; } || true)" HAND_REASON=""
+  cand="$(grep -E "$COMPOSE_FILES" <<<"$paths" || true)"
+  if [[ -n $cand ]] && compose_hand_reason "$head" "$commit"; then
+    HAND_FILES+="${HAND_FILES:+$'\n'}$cand"
+  else
+    HAND_REASON=""
+  fi
+  HAND_CACHE[$key]="$HAND_FILES"$'\x01'"$HAND_REASON"
+  [[ -n $HAND_FILES ]]
 }
 
 service_container() { compose ps -q "$1" 2>/dev/null | head -n 1 || true; } # service: its container id, empty if none
@@ -398,9 +530,17 @@ refresh_available() {
   while IFS= read -r p; do
     [[ -n ${p//[[:space:]]/} ]] || continue
     plist+="$sep$(jstr "$p")"; sep=", "
-    if [[ $p =~ $INFRA && ! $p =~ $NOT_INFRA ]]; then ilist+="${ilist:+, }$(jstr "$p")"; fi
     if [[ $p =~ $RUNNER_PATHS ]]; then runner=true; fi
   done <"$paths"
+  # Only what really sends the update to the hand path (BOS-2885): the same verdict as the refusal and pick_newest_checked.
+  local hreason=""
+  if [[ $tip != "$head" ]] && needs_hand "$head" "$tip"; then
+    while IFS= read -r p; do
+      [[ -n $p ]] || continue
+      ilist+="${ilist:+, }$(jstr "$p")"
+    done <<<"$HAND_FILES"
+    [[ -z $HAND_REASON ]] || hreason=", \"handReason\": $(jstr "$HAND_REASON")"
+  fi
   # What this install really looks like, so the owner's hand-apply steps never guess a folder (BOS-269).
   local srcdir deployerdir bg=false colour="" soak=""
   srcdir="$(cd "$REPO" 2>/dev/null && pwd)" || srcdir=""
@@ -416,6 +556,7 @@ refresh_available() {
   local svc
   svc=", \"changedServices\": $(json_names "$SVC_CHANGED"), \"servicesChecked\": $SVC_CHECKED, \"pendingServices\": $(json_names "$SVC_PENDING")"
   if [[ -n $DB_CID ]]; then svc+=", \"dbContainerId\": $(jstr "$DB_CID"), \"dbStartedAt\": $(jstr "$DB_STARTED")"; fi
+  svc+="$hreason"
   printf '{"version": 1, "checkedAt": %s, "deployed": %s, "tip": %s, "commits": %s, "paths": [%s], "infraPaths": [%s], "runnerChanged": %s, "srcDir": %s, "deployerDir": %s, "bluegreen": %s, "liveColour": %s%s%s}' \
     "$(jstr "$(now)")" "$(jstr "$head")" "$(jstr "$tip")" "$clist" "$plist" "$ilist" "$runner" "$(jstr "$srcdir")" "$(jstr "$deployerdir")" "$bg" "$(jstr "$colour")" "$soak" "$svc" >"$f.tmp"
   chmod 644 "$f.tmp"; mv "$f.tmp" "$f"
@@ -2049,9 +2190,11 @@ main() {
     g fetch --quiet origin main || finish rejected "Rejected: git fetch from GitHub failed."
     g cat-file -e "$COMMIT^{commit}" 2>/dev/null || finish rejected "Rejected: commit ${COMMIT:0:8} is not in the repository after fetching."
     g merge-base --is-ancestor "$head" "$COMMIT" || finish rejected "Rejected: ${COMMIT:0:8} is not a fast-forward of the deployed ${head:0:8}."
-    local infra
-    infra="$(g diff --name-only "$head" "$COMMIT" | grep -E "$INFRA" | { grep -Ev "$NOT_INFRA" || true; } | head -5 | paste -sd, - || true)"
-    [[ -z $infra ]] || finish rejected "Rejected: this change touches deployment files ($infra). Deploy it by hand on the host: scripts/deploy.sh"
+    if needs_hand "$head" "$COMMIT"; then
+      local infra
+      infra="$(head -5 <<<"$HAND_FILES" | paste -sd, - || true)"
+      finish rejected "Rejected: this change touches deployment files ($infra${HAND_REASON:+; $HAND_REASON}). Deploy it by hand on the host: scripts/deploy.sh"
+    fi
     # Whether the runners need rebuilding for what really goes out (BOS-753): the card only knew its own range.
     if ((${#REQ_KV[@]})); then
       local rp
