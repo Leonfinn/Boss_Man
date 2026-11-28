@@ -73,6 +73,12 @@ for guide in docs/35-install-from-images.md apps/site/src/guides/install-boss-ma
   [ -z "$nof" ] && ok "$guide: every image-install compose command names -f docker-compose.images.yml" || bad "$guide: compose command without -f docker-compose.images.yml: $nof"
 done
 
+# BOS-2796: the compose file's own usage comment and the launcher's guard-missing message show the same command.
+for f in docker-compose.images.yml apps/launcher/src/launcher.ts; do
+  nof="$(grep -n 'docker compose .*--env-file images\.env' "$f" | grep -v -- '-f docker-compose\.images\.yml' || true)"
+  [ -z "$nof" ] && ok "$f: every image-install compose command names -f docker-compose.images.yml" || bad "$f: compose command without -f docker-compose.images.yml: $nof"
+done
+
 # BOS-2388: the real install half below only runs with a Docker daemon and INSTALL_RELEASE_JSON, so a workflow that builds its
 # test release.json by hand can drift from what the install needs and only GitHub notices. Check the contract here, with no daemon:
 #  1. every image scripts/render-image-env.sh requires is in the list the .github/workflows/ci.yml install step puts in release.json;

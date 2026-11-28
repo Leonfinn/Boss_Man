@@ -5,8 +5,8 @@
 # registry come from images.env, which is made from a release's signed release.json (scripts/render-image-env.sh) and downloaded
 # with this file from the release page. To use another registry, change BOSSMAN_REGISTRY in images.env.
 #
-#   docker compose --env-file images.env run --rm setup        # once: master key and database password, in a volume
-#   docker compose --env-file images.env up -d
+#   docker compose -f docker-compose.images.yml --env-file images.env run --rm setup        # once: master key and database password, in a volume
+#   docker compose -f docker-compose.images.yml --env-file images.env up -d
 # Then open http://<host>:3100 and create the owner account. Back up the "config" volume: without master.key, stored
 # secrets cannot be read.
 #
