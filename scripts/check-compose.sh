@@ -47,6 +47,7 @@ sets=(
   "deploy/ntfy.yml deploy/ntfy-bluegreen.yml"
   "deploy/penpot.yml"
   "docker-compose.images.yml"
+  "docker-compose.ntfy.images.yml"
   "deploy/check-worker/compose.yaml"
 )
 
