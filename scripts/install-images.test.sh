@@ -21,7 +21,8 @@ set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 fail=0
 ok() { echo "ok   $1"; }
-bad() { echo "FAIL $1"; fail=1; }
+fails=""
+bad() { echo "FAIL $1"; fail=1; fails="${fails}FAIL ${1:0:300}"$'\n'; }
 
 command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 || { echo "skip: no docker CLI with the compose plugin"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: no jq"; exit 0; }
@@ -251,6 +252,8 @@ cleanup() {
     for v in $left_v; do echo "--- volume $v used by: $(docker ps -a --filter "volume=$v" --format '{{.Names}}' | tr '\n' ' ')"; done
   else ok "the guide's removal left no container and no volume behind"; fi
   rm -rf "$T"
+  # CI shows only the last 15 lines of a failed test, so repeat every failure here, last (BOS-2804).
+  [ -z "$fails" ] || { echo "--- failures, repeated so they show last:"; printf '%s' "$fails"; }
   [ "$rc" -eq 0 ] || exit "$rc"
   exit "$fail"
 }
