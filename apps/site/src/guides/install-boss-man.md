@@ -55,7 +55,7 @@ The image install has not yet been run from start to finish on a real machine fo
 | Preview | Docker Desktop 4.60 or newer on macOS and Windows. Not yet proven on a real machine. Docker Desktop's enhanced container isolation must be off, or the Boss Man images allowed. |
 | Not yet | Podman, rootless Docker, Docker Desktop before 4.60, Proxmox LXC containers (use a full virtual machine), and 32-bit ARM (use a 64-bit OS). |
 
-Boss Man needs the Linux kernel for two safety features: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. On a platform outside the first row, Boss Man refuses to run agents unless both are proven on that machine, or you choose otherwise in **Settings → Server and runner**. Settings shows whether each one is working: the network guard under **Settings → Server and runner → This server**, and the agent fence under **Settings → Permissions → Agent fence**.
+Boss Man needs the Linux kernel for two safety features: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. On a platform outside the first row, Boss Man refuses to run agents unless both are proven on that machine, or you choose otherwise in **Settings → Server and runner**. **Settings → Permissions → Agent fence** shows whether each one is working. What each one blocks, platform by platform, is in [What keeps agents fenced in](/guides/what-keeps-agents-fenced-in).
 
 ### 1. Get the files
 
@@ -179,7 +179,7 @@ The second option: build every image on your own machine from the code. Use it i
 - an AI account: a Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic. A Claude Pro or Max plan is the easiest start, because the CEO is a Claude Code agent unless you change it. You pay for this account. Boss Man itself is free.
 - a computer with a web browser on the same network
 
-Boss Man needs Linux because two safety features use the Linux kernel: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. Settings shows whether each one is working on your machine: the network guard under **Settings → Server and runner → This server**, and the agent fence under **Settings → Permissions → Agent fence**.
+Boss Man needs Linux because two safety features use the Linux kernel: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. **Settings → Permissions → Agent fence** shows whether each one is working on your machine. See [What keeps agents fenced in](/guides/what-keeps-agents-fenced-in).
 
 Mac and Windows: not supported yet for this install, but we're testing Docker Desktop. On a Mac with Apple silicon, the agent fence already works under Docker Desktop. The network guard isn't proven there yet, and Windows hasn't been tested. For now, use a Linux machine.
 

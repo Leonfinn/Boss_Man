@@ -27,9 +27,9 @@ Pick one:
 - **Documents, research and writing**: reports, research, plans and other written work. The agents write their results in your company's **Wiki**. This is the default.
 - **Code in a git repository**: the agents change code in a repository on GitHub or Gitea.
 
-A project is one stream of work with its own task board, such as "Client reports". Type a **Project name** and choose **Add the project**. You can change your choice later in **Settings**.
+A project is one stream of work with its own task board, such as "Client reports". Type a **Project name** and choose **Add the project**. You can change your choice later in **Settings**. For what a documents company sees and skips, see [Using Boss Man for work that isn't code](/guides/work-that-isnt-code).
 
-If you picked code, the project also needs its repository. Paste its address into **Git repo**, for example `https://github.com/you/repo.git`. Under **When work is approved**, choose **Merge into the default branch** or **Open a pull request**. Choose the pull request option if your default branch only accepts pull requests.
+If you picked code, the project also needs its repository. Paste its address into **Git repo**, for example `https://github.com/you/repo.git`. Under **When work is approved**, choose **Merge into the default branch** or **Open a pull request**. Choose the pull request option if your default branch only accepts pull requests. New to repos, branches and pull requests? See [Code words for owners](/guides/code-words).
 
 ## The runner
 
@@ -93,6 +93,8 @@ The CEO needs someone to hand work to.
 :::worked
 The agent shows on the Agents page with a **Pause** button. To change it later, open the ⋯ menu and choose **Edit**.
 :::
+
+To choose the rest of your team, or to read the CEO's team-plan card, see [Hiring your first team](/guides/hiring-your-first-team).
 
 ## Add more tasks and features
 

@@ -54,7 +54,7 @@ The card reads like this:
 
 1. **The heading** says how many agents the CEO proposes and for what, for example "Hire 3 agents for Client reports?".
 2. **Already covered** says which work your current agents can do already.
-3. **The cost line** says what the hires cost on the account that pays for them. On a Claude plan it says there is no extra cost, because agents use the plan's allowance. On an API key you pay as you go, for the work they do.
+3. **The cost line** says what the hires cost on the account that pays for them. On a Claude plan it says there is no extra cost, because agents use the plan's allowance. On an API key it says "Pay as you go: you pay for the time they work".
 4. **One row per hire** gives the agent's name, its role and a plain line on what it will do. Each row has a tick box, and every row starts ticked.
 5. **Technical details** is folded shut. Open it to see each hire's agent program, AI provider, model and instructions. You don't need to open it to decide.
 
