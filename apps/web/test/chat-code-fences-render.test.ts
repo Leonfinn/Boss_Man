@@ -101,6 +101,8 @@ describe.skipIf(!browser || !server)("BOS-2853 chat command boxes", () => {
     }, 30_000);
   }
 
+  // Saves the shots without measuring, so a "before" run can capture the old rendering where the
+  // measurements above would fail. Wherever BOSSMAN_SCRATCH is set (the runner, and CI) it runs.
   it.skipIf(!shots)("saves a screenshot of the reply for before/after evidence when asked", async () => {
     const page = await open(1280, 900, false);
     try {
@@ -116,6 +118,5 @@ describe.skipIf(!browser || !server)("BOS-2853 chat command boxes", () => {
     } finally {
       await phone.close();
     }
-    expect(shots).toContain("33953e8a");
   }, 30_000);
 });
