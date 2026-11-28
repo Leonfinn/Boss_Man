@@ -1487,6 +1487,8 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
       const holdLine = hv ? `Merge held by ${hv.system ? "Boss Man" : hv.reviewer ?? "a reviewer"} (${hv.label}): ${hv.reason}.${hv.ready ? (hv.system ? " What it waited for is done; Boss Man releases it by itself." : ` What it waited for is done; ${hv.reviewer ?? "the reviewer"} re-checks and releases it${hv.readySince ? ` (asked at ${hv.readySince.slice(11, 16)} UTC; asked again after 1 h, and a card goes up after 2 h)` : ""}.`) : ""}` : null;
       const openReviews = t.systemState === "review" ? await openReviewLines(db, t) : [];
       const ciLine = await review.branchChecksLine(ticketId, scope.companyId);
+      // BOS-2907: GitHub's images job per architecture and how far install-images.test.sh got, for Docker-only criteria.
+      const imagesLines = await review.imagesJobLines(ticketId, scope.companyId);
       const liveLine = await goLiveLine(db, t);
       // One page covers the whole thing, description through conversation, so a long owner message is
       // followed rather than cut; the whole text is paged by offset, and a long line is split and continued.
@@ -1500,6 +1502,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
         ...(holdLine ? [holdLine] : []),
         ...openReviews,
         ...(ciLine ? [ciLine] : []),
+        ...(imagesLines ?? []),
         ...(liveLine ? [liveLine] : []),
         ...(t.systemState === "blocked" && t.blockedUntil ? [`Blocked until ${t.blockedUntil.toISOString().slice(0, 16).replace("T", " ")} UTC${t.blockedUntilReason ? `: ${t.blockedUntilReason}` : ""}.`] : []),
         t.branch ? `Branch: ${t.branch}${row.repoUrl ? ` in ${row.repoUrl}` : ""}${t.mergeCommit ? `, merged as ${t.mergeCommit}` : ", not merged"}.` : "No branch yet.",
