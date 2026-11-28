@@ -6,6 +6,8 @@ order: 8
 lead: Boss Man tells you about things at four levels. You can have the urgent ones sent to your phone through your own ntfy server. ntfy is a free, open-source notification service.
 ---
 
+**Image install or build-from-source?** The levels, browser notifications, quiet hours and the choice of which cards reach your phone are settings in Boss Man, and work on both installs. Sending to your phone needs your own ntfy server and Tailscale, which are started from files in the source code. On an image install (your folder holds `images.env` and `docker-compose.images.yml`) there are no steps for that yet, so use browser notifications. The phone steps below are for a build-from-source install only.
+
 ## Notification levels
 
 ![How Boss Man tells you: four levels, from a note in the Notifications page, to a flag as a browser notification, to a page and an ask that also reach your phone.](/img/how-youre-told.svg =1160x800 narrow=/img/how-youre-told-narrow.svg:360x1330 "The four levels and the three places they can show up.")
@@ -30,7 +32,7 @@ Open **Notifications** in the sidebar and find **How you're told**.
 
 ## Send notifications to your phone
 
-You need Tailscale set up first (see [Add-ons](/guides/add-ons)), because your phone reaches ntfy over your tailnet. The full steps are in [`docs/31-phone-notifications.md`](@repo/blob/main/docs/31-phone-notifications.md), and work on any Linux host.
+Build-from-source install only. You need Tailscale set up first (see [Add-ons](/guides/add-ons)), because your phone reaches ntfy over your tailnet. The full steps are in [`docs/31-phone-notifications.md`](@repo/blob/main/docs/31-phone-notifications.md), and work on any Linux host.
 
 1. Add `NTFY_BASE_URL=https://<host-name>.<tailnet>.ts.net:8443` to `.env`.
 2. Start ntfy as its own Compose project with `docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy up -d`.
@@ -68,7 +70,7 @@ If pushes only show when you open the app after an ntfy restart, close the app f
 
 ## iPhone
 
-iPhones need a wake-up sent through ntfy.sh for instant delivery. Without it, a push can take hours to arrive. Add `NTFY_UPSTREAM_BASE_URL=https://ntfy.sh` to `.env` and run the start command again. ntfy.sh receives only the message ID, not the text. Android does not need this.
+iPhones need a wake-up sent through ntfy.sh for instant delivery. Without it, a push can take hours to arrive. Add `NTFY_UPSTREAM_BASE_URL=https://ntfy.sh` to `.env` on your build-from-source install and run the start command again. ntfy.sh receives only the message ID, not the text. Android does not need this.
 
 The ntfy.sh wake-up is about speed only. It does not help a push break through a Focus or Do Not Disturb.
 
