@@ -10,7 +10,7 @@ import { carriedCriteria, criteriaText, criterionText, readCriteria, readVerdict
 import type { Db } from "../db/client.js";
 import { agents, companies, features, ticketMessages, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
-import { openLongWatchChecks } from "./after-merge-check-tickets.js";
+import { foldFollowUpIntoCheck, openLongWatchChecks } from "./after-merge-check-tickets.js";
 import type { workService } from "./work.js";
 
 type Work = ReturnType<typeof workService>;
@@ -163,10 +163,19 @@ export async function openFollowUps(db: Db, work: Work, ticketId: string, follow
   // BOS-2599 (cock-ups G1): the criterion the hand-on came from goes with it, so the follow-up has to show the outcome
   // and not just do the task. Read here, after the move, so the note is the one this close stored.
   const [fresh] = await db.select({ criteria: tickets.acceptanceCriteria, note: tickets.stateNote }).from(tickets).where(eq(tickets.id, ticketId));
-  const opened: { id: string; ref: string; title: string; assignee: string; carried: string[]; checks: string[]; feature: string | null }[] = [];
+  const opened: { id: string; ref: string; title: string; assignee: string; carried: string[]; checks: string[]; feature: string | null; joined?: boolean }[] = [];
   for (const [i, f] of followUps.entries()) {
     const suggestion = opts.suggested[i] ? [`**Suggested assignee:** ${opts.suggested[i]} (named by the closing agent; the CEO decides).`, ""] : [];
     const carry = fresh ? carriedCriteria(readCriteria(fresh.criteria), fresh.note, f.criterion !== undefined ? [f.criterion] : undefined) ?? [] : [];
+    // BOS-2855: an open check ticket already carrying every criterion this follow-up would carry takes it instead.
+    const joined = fresh ? await foldFollowUpIntoCheck(db, { id: t.id, projectId: t.projectId, criteria: readCriteria(fresh.criteria) }, carry, byAgentId) : null;
+    if (joined) {
+      const line = `Follow-up "${f.title}" not opened: open check ticket ${joined.ref} (#/tickets/${joined.id}) already carries its criteria and reports them here.`;
+      const [now] = await db.select({ note: tickets.stateNote }).from(tickets).where(eq(tickets.id, t.id));
+      await db.update(tickets).set({ stateNote: `${(now?.note ?? "").trim()}${now?.note?.trim() ? " " : ""}${line}`.slice(0, 4000) }).where(eq(tickets.id, t.id));
+      opened.push({ id: joined.id, ref: joined.ref, title: f.title, assignee: "", carried: criteriaText(carry), checks: [], feature: null, joined: true });
+      continue;
+    }
     const carried = carry.length
       ? [`**Done when** (carried from ${ref}, which left ${carry.length > 1 ? "these criteria" : "this criterion"} failed or not reported):`, ...carry.map((c) => `- ${criterionText(c)}`), "Not reported: say pass or fail for each before moving this ticket to review.", ""]
       : [];

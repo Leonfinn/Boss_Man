@@ -727,6 +727,27 @@ export const ticketDependencies = pgTable(
   ],
 );
 
+/**
+ * BOS-2855: a check ticket (one with checksTicketId) that also settles another build's after-merge criterion, folded in
+ * because both wait on the same event ("the next release") or the same criterion. Its own criterion ownCriterion (1-based)
+ * is that build's criterion; when it closes, that one verdict is written on ticketId's criterion, so each build still gets
+ * its own pass or fail. The check's original tie (checksTicketId/checksCriterion) reads the criteria no row here claims.
+ */
+export const checkTicketLinks = pgTable(
+  "check_ticket_links",
+  {
+    id: id(),
+    checkTicketId: uuid("check_ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    ownCriterion: integer("own_criterion").notNull(),
+    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    criterion: integer("criterion").notNull(),
+    /** True when the fold added ownCriterion to the check; false when it was already there (a follow-up carrying the same criterion). The original tie never reads an added one. */
+    appended: boolean("appended").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("check_ticket_links_check").on(t.checkTicketId), index("check_ticket_links_ticket").on(t.ticketId), uniqueIndex("check_ticket_links_one").on(t.checkTicketId, t.ticketId, t.criterion)],
+);
+
 // ---------- Scheduling (R30) ----------
 
 /** Instance-wide settings, e.g. the global kill switch and launch limits. */

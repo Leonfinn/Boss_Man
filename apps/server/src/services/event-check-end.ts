@@ -7,7 +7,7 @@
 import { and, eq, isNotNull, ne, sql } from "drizzle-orm";
 import { EVENT_WATCH_NOT_OBSERVED, EVENT_WATCH_WARN_HOURS, criterionText, eventWatchEndsAt, eventWatchPhrase, isAfterMerge, longWatchPhrase, readCriteria, readVerdicts, ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { activity, companies, tickets } from "../db/schema.js";
+import { activity, checkTicketLinks, companies, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
 
 /** The wake reason; "waiting" class in wake-classes.ts, so it is never dropped. */
@@ -47,7 +47,18 @@ export async function eventCheckEndSweep(db: Db, deps: EventCheckDeps): Promise<
     const n = check.checksCriterion!;
     const criterion = readCriteria(parent.acceptanceCriteria)[n - 1];
     if (!criterion || !isAfterMerge(criterion) || !isEventCriterion(criterionText(criterion))) continue;
-    const ends = eventWatchEndsAt({ watchUntil: check.watchUntil, liveAt: parent.liveAt, mergedAt: parent.mergedAt });
+    let ends = eventWatchEndsAt({ watchUntil: check.watchUntil, liveAt: parent.liveAt, mergedAt: parent.mergedAt });
+    // BOS-2855: a check other builds' criteria were folded into ends with the last of them, since each build's watch
+    // starts at its own go-live; one not live yet means no end yet.
+    const folded = await db
+      .select({ t: tickets })
+      .from(checkTicketLinks)
+      .innerJoin(tickets, eq(tickets.id, checkTicketLinks.ticketId))
+      .where(eq(checkTicketLinks.checkTicketId, check.id));
+    for (const { t: b } of folded) {
+      const e = b.mergeCommit && !(b.goLiveWait && !b.liveAt) ? eventWatchEndsAt({ watchUntil: null, liveAt: b.liveAt, mergedAt: b.mergedAt }) : null;
+      ends = e && ends ? (e > ends ? e : ends) : null;
+    }
     if (!ends) continue;
     if (ends.getTime() > now.getTime()) {
       if (ends.getTime() - now.getTime() > EVENT_WATCH_WARN_HOURS * 3_600_000 || !check.assigneeAgentId) continue;
@@ -62,9 +73,12 @@ export async function eventCheckEndSweep(db: Db, deps: EventCheckDeps): Promise<
     }
     // Past its end and still unreported: the line is the check's result (criterion 1 of the check ticket is the event's own).
     // A real reading the assignee already wrote on the check is kept and the check is left to them to close.
-    const reported = readVerdicts(readCriteria(check.acceptanceCriteria), check.stateNote).some((r) => r.verdict !== null);
+    const own = readCriteria(check.acceptanceCriteria);
+    const reported = readVerdicts(own, check.stateNote).some((r) => r.verdict !== null);
     if (reported) continue;
-    await db.update(tickets).set({ stateNote: `1 pass: ${EVENT_WATCH_NOT_OBSERVED}`, stateNoteAt: now }).where(eq(tickets.id, check.id));
+    // BOS-2855: every criterion of the check (a folded one too) gets the line, so each build reads its own pass.
+    const lines = (own.length ? own : [null]).map((_, i) => `${i + 1} pass: ${EVENT_WATCH_NOT_OBSERVED}`).join("\n");
+    await db.update(tickets).set({ stateNote: lines, stateNoteAt: now }).where(eq(tickets.id, check.id));
     await record(db, { companyId: check.companyId, ticketId: check.id, kind: "after_merge_check", summary: `Event check ended: ${EVENT_WATCH_NOT_OBSERVED}.`, detail: { key: `event-check-ended:${check.id}` }, at: now });
     await deps.close(check.id);
     closed++;
