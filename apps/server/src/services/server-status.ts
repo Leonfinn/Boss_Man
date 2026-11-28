@@ -211,6 +211,9 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
       const status = (deploy?.status as DeployStatus) ?? null;
       const available = (deploy?.available as Available) ?? null;
       const recentErrors = deps.errors.recent(20, companyId);
+      const maint = (await deps.hold().catch(() => null)) as { last?: { at: string; ok: boolean; title: string; body: string } | null } | null;
+      const lastRunnerSwap = maint?.last ? { at: maint.last.at, ok: maint.last.ok, title: maint.last.title, body: maint.last.body } : null;
+      const runnerSwapNewer = !!lastRunnerSwap && (!status?.ended || Date.parse(lastRunnerSwap.at) > Date.parse(status.ended));
       // Only a finished SERVER deploy says which commit is live. A refused or failed request (e.g. a runner update) names a commit that never went live.
       const serverDeployed = status?.target === "server" && status.result === "deployed";
       // A failed probe is "couldn't check", never "single server": that would hide a down colour.
@@ -246,7 +249,10 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
           liveCommit: short(serverDeployed ? status?.to_commit : (available?.deployed ?? deps.commit)),
           liveSince: serverDeployed ? (status?.ended ?? null) : null,
           lastResult: status?.result ?? null,
-          lastMessage: status?.message ?? null,
+          // BOS-2933: the host's text for a runner build ends "waiting for runs to finish, then swaps"; the server does the swap and
+          // never rewrites it, so when the last runner swap ended after the host's last report, its record is the newer word.
+          lastMessage: runnerSwapNewer ? `Runner update ${lastRunnerSwap!.ok ? "ended" : "failed"}: ${lastRunnerSwap!.title}. ${lastRunnerSwap!.body}`.trim() : (status?.message ?? null),
+          lastRunnerSwap,
           pending: !!deploy?.pending,
           mainTip: short(available?.tip),
           checkedAt: available?.checkedAt ?? null,

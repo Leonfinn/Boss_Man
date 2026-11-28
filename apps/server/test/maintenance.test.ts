@@ -1329,6 +1329,15 @@ describe("Ask agents to wrap up (BOS-929): a mode of the same hold", () => {
     expect(all.endedAt).not.toBeNull();
   });
 
+  it("BOS-2933: a wrap-up pressed during a runner drain records the runner update as its tie", async () => {
+    const c = (ctx = await setup());
+    await c.req("POST", "/api/maintenance/start", {});
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    const texts = (await c.db.select().from(updateHolds)).flatMap((r) => r.events.map((e) => e.text));
+    expect(texts).toContain("Wrap-up tied to: the runner update (swapping)");
+    expect(texts).not.toContain("Wrap-up tied to: nothing (no update was waiting)");
+  });
+
   it("BOS-2811: a wrap-up the owner cancels records who lifted it", async () => {
     const c = (ctx = await setup());
     await c.req("POST", "/api/maintenance/wrapup", {});
