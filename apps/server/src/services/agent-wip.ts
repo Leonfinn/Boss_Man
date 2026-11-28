@@ -21,6 +21,35 @@ export async function readWipLimits(db: Db): Promise<WipLimits> {
   return { agent: v && "agent" in v ? (v.agent ?? null) : DEFAULT_AGENT_WIP_LIMIT, company: v?.company ?? null };
 }
 
+/**
+ * BOS-2875 / BOS-2911: for each ready ticket whose assignee already has `agentLimit` tickets counting toward their limit, the
+ * refs of those tickets ("BOS-4", "BOS-9"): it is queued behind them. Tickets under their limit, or with no assignee, are left out.
+ */
+export async function queuedBehindByTicket(
+  db: Db,
+  ready: Array<{ id: string; assigneeAgentId: string | null }>,
+  prefix: string | null | undefined,
+  agentLimit: number | null,
+): Promise<Map<string, string[]>> {
+  // not state: a local built and returned within this call
+  const out = new Map<string, string[]>();
+  const assignees = [...new Set(ready.map((r) => r.assigneeAgentId).filter((x): x is string => !!x))];
+  if (agentLimit == null || !assignees.length) return out;
+  const counting = await db
+    .select({ assigneeAgentId: tickets.assigneeAgentId, number: tickets.number })
+    .from(tickets)
+    .where(and(inArray(tickets.assigneeAgentId, assignees), eq(tickets.systemState, "in_progress"), sql`not ${cantMoveSql}`))
+    .orderBy(asc(tickets.number));
+  // not state: a local built and dropped within this call
+  const refsBy = new Map<string, string[]>();
+  for (const w of counting) refsBy.set(w.assigneeAgentId!, [...(refsBy.get(w.assigneeAgentId!) ?? []), ticketRef(prefix, w.number) ?? `#${w.number}`]);
+  for (const r of ready) {
+    const refs = r.assigneeAgentId ? refsBy.get(r.assigneeAgentId) : undefined;
+    if (refs && refs.length >= agentLimit) out.set(r.id, refs);
+  }
+  return out;
+}
+
 /** The one WIP counting rule: tickets matching `where` (a board column's tickets of its state, or an agent's in-progress ones), not counting `exceptId`. */
 export async function countWip(db: Db, where: SQL | undefined, exceptId?: string): Promise<number> {
   const [r] = await db

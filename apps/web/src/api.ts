@@ -295,6 +295,8 @@ export type Ticket = {
   looksStuck?: { rule: string; idleMs: number; since: string; /** BOS-2737: actionClaim's "who acts on it" line; absent from an older server. */ claim?: string } | null;
   /** BOS-1908: in Ready, the agent's one "Next up": starts by itself when the agent finishes what it is running. */
   nextUp?: boolean;
+  /** BOS-2911: in Ready, the tickets that fill the assignee's in-progress limit ("BOS-4"); null when it is not queued behind any. */
+  queuedBehind?: string[] | null;
   blockedBy: Array<{ ticketId: string | null; until?: "merged" | "done" | null;ticketTitle?: string | null; ticketNumber?: number | null; engagementId: string | null; decisionId: string | null }>;
   /** Agents running on the ticket right now, with what they're doing (e.g. "Security Reviewer reviewing"). */
   working?: string[];

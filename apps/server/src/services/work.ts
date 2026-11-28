@@ -29,8 +29,8 @@ import { derivedSignoff } from "./signoff.js";
 import { heldTicketIds, holdView, type HoldView } from "./review-holds.js";
 import { fixesLiveProblem } from "./decisions.js";
 import { hiddenWhileRechecked } from "./card-validity.js";
-import { cantMoveSql, isWorkingRun, wipExemptKind } from "./agent-wip.js";
-import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, wakes, watchdogFlags, workflowColumns } from "../db/schema.js";
+import { cantMoveSql, isWorkingRun, queuedBehindByTicket, readWipLimits, wipExemptKind } from "./agent-wip.js";
+import { agents, companies, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, wakes, watchdogFlags, workflowColumns } from "../db/schema.js";
 import { baselineRefusal } from "./hand-offs.js";
 import { looksStuck, type StuckFlag } from "./board-stuck.js";
 import { SCRUM_MASTER_DUTY } from "./watchdog.js";
@@ -518,6 +518,10 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       const hoursNotes = await workingHoursNotes(db, rows.filter((r) => r.t.systemState === "backlog" || r.t.systemState === "ready" || r.t.systemState === "in_progress").map((r) => ({ id: r.t.id, assigneeAgentId: r.t.assigneeAgentId })), now());
       const blocker = (id: string | null) => (id ? byId.get(id) : undefined);
       const doneIds = new Set([...byId.values()].filter((t) => t.systemState === "done").map((t) => t.id));
+      // BOS-2911: a Ready ticket whose assignee is at their in-progress limit says which tickets it is queued behind (the same rule the watchdog uses).
+      const readyRows = rows.filter((r) => r.t.systemState === "ready" && r.t.assigneeAgentId).map((r) => r.t);
+      const [prefixRow] = readyRows.length ? await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, p.companyId)) : [];
+      const queuedBehind = readyRows.length ? await queuedBehindByTicket(db, readyRows, prefixRow?.prefix, (await readWipLimits(db)).agent) : new Map<string, string[]>();
       const updateCards = rows.some((r) => r.t.goLiveWait && r.t.systemState !== "done") ? await openUpdateCards(db, p.companyId) : { server: null, runner: null };
       const cards = rows.map(({ t, milestoneTarget }) => {
         const waitingDecisionId = t.systemState === "review" ? (deps.find((d) => d.blockedTicketId === t.id && d.blockerDecisionId && signoffs.has(d.blockerDecisionId))?.blockerDecisionId ?? null) : null;
@@ -565,6 +569,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         busyOnTicketId: t.systemState === "in_progress" ? (busyOn(t)?.id ?? null) : null,
         busyOnNumber: t.systemState === "in_progress" ? (busyOn(t)?.number ?? null) : null,
         nextUp: t.systemState === "ready" && !!t.nextUpAt,
+        queuedBehind: queuedBehind.get(t.id) ?? null,
         quotaHeldUntil: heldFor(t)?.until?.toISOString() ?? null,
         quotaHeldReason: heldFor(t)?.reason ?? null,
         quotaHeldAgent: heldByAgent(t),
