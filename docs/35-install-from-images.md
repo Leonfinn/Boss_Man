@@ -210,6 +210,14 @@ Back up `config` (the master key) and `db-secret` (the database password) after 
 
 Pushes to your phone through your own ntfy server come as one more release file, `docker-compose.ntfy.images.yml`. It is a separate Compose project (`boss-man-ntfy`) and is off until you start it; updates and "Start again from nothing" do not touch it. Steps to start, update, restart and stop it are in [docs/31, "Image install"](31-phone-notifications.md). Not yet confirmed on a real host (28 Nov 2026).
 
+### Penpot and the public portal (optional add-ons)
+
+Penpot (a design tool) comes as the release file `penpot.yml`, and the feedback portal on a public address through a Cloudflare tunnel as `docker-compose.cloudflared.images.yml`. Each is its own Compose project (`boss-man-penpot`, `boss-man-portal`), off until you start it, and untouched by updates and "Start again from nothing". Steps to start, update, stop and back up: [docs/15, "Image install"](15-penpot.md) and [docs/33, "Image install"](33-public-portal-cloudflare.md). Not yet confirmed on a real host (28 Nov 2026).
+
+### Runner add-ons (browsers for agents)
+
+The runner add-ons (`agent-browser`, `webkit`; [docs/12](12-runner-add-ons.md)) are tools built into the runner image when it is built from the source code. An image install pulls one ready-made runner image without them, and Boss Man cannot build one for you here, so the add-ons are **not available on an image install yet**. If you need them, install from the source code instead ([docs/00](00-first-time-install.md)).
+
 ### Settings
 
 Add any of these to `images.env`, then run the start command again (section 3, step 3).

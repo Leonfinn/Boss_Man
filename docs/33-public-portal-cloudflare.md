@@ -35,3 +35,39 @@ Create a tunnel (Networks, then Tunnels, then Create a tunnel, type Cloudflared)
 - `https://roadmap.example.com/` shows it too only if you ticked **Open this portal at the public address itself** under **Short public address** on the Feedback page (off by default). Without the tick it opens the portal page with "This link is incomplete. Ask for the full portal link."
 - `https://roadmap.example.com/api/health` and any other owner-app route answer 404.
 - Roll back: remove `:deploy/cloudflared.yml` from `COMPOSE_FILE`, restart the stack, delete the tunnel in the dashboard.
+
+## Image install (no source folder)
+
+Status: **not yet confirmed on a real host** (the file passes Compose's own validation; nobody has run these steps against a real Cloudflare tunnel yet, 28 Nov 2026). For an install made from ready-made images ([docs/35](35-install-from-images.md)). There is no `deploy/` folder, so the tunnel comes as a release file, `docker-compose.cloudflared.images.yml`, next to `docker-compose.images.yml`. It is its own Compose project (`boss-man-portal`) and is off until you start it; updates and "Start again from nothing" do not touch it. Run everything in the folder with `images.env`.
+
+1. Make the tunnel and its public hostname in the Cloudflare dashboard (section "Cloudflare dashboard" above; the URL is `server:3101`). Copy the token.
+2. Download the file of the same release you installed (the same `$V` as in docs/35, section 1):
+
+   ```
+   V=$(curl -fsS https://api.github.com/repos/Leonfinn/Boss_Man/releases | grep -m1 '"tag_name"' | cut -d '"' -f 4) && curl -fsSLO https://github.com/Leonfinn/Boss_Man/releases/download/$V/docker-compose.cloudflared.images.yml
+   ```
+
+3. Add these lines to `images.env`. Edit the file by hand: the token is a secret, so never paste it anywhere else. `172.30.0.18` is the install's proxy; use your `BOSSMAN_FRONT_PROXY_IP` instead if you set one:
+
+   ```
+   CLOUDFLARE_TUNNEL_TOKEN=<the token>
+   BOSSMAN_PORTAL_URL=https://roadmap.example.com
+   BOSSMAN_PORTAL_CLIENT_HEADER=cf-connecting-ip
+   BOSSMAN_PORTAL_TRUSTED_PROXY=172.30.0.18
+   ```
+
+4. Run the install's start command again, so the server learns the three portal lines (it is remade with them at the next update):
+
+   ```
+   docker compose --env-file images.env -f docker-compose.images.yml up -d
+   ```
+
+5. Start the tunnel:
+
+   ```
+   docker compose -p boss-man-portal --env-file images.env -f docker-compose.cloudflared.images.yml --profile portal up -d
+   ```
+
+6. Check as in "Check" above. `docker compose -p boss-man-portal --env-file images.env -f docker-compose.cloudflared.images.yml --profile portal ps` shows `healthy` once the tunnel is connected. If Docker says the network `boss-man_default` is not found, your install uses another project name: set `BOSSMAN_DEFAULT_NETWORK=<project>_default` in `images.env` (`docker network ls` lists it).
+
+**A week on.** Nothing to repeat: the tunnel restarts with Docker and the lines stay in `images.env`. To update the tunnel, download the new release's file (step 2) and run step 5 again. Stop it with the step 5 command ending `--profile portal down`, and delete the tunnel in the dashboard.

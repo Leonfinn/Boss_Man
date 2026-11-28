@@ -7,6 +7,8 @@
 
 The add-on shows as Working once the runners are on the new image. To remove one, take its id out of the line and update again.
 
+An install made from ready-made images ([docs/35](35-install-from-images.md)) pulls one runner image without add-ons and cannot build one, so add-ons are not available there yet (28 Nov 2026). Use an install from the source code if you need them.
+
 The rest of this page is the design.
 
 Status: built (steps 1 to 4 below). The owner chose this over a browser running as a separate tool server, because browser checks are central to their projects (24 Oct 2026).

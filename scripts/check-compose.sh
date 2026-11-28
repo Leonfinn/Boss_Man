@@ -48,6 +48,7 @@ sets=(
   "deploy/penpot.yml"
   "docker-compose.images.yml"
   "docker-compose.ntfy.images.yml"
+  "docker-compose.cloudflared.images.yml"
   "deploy/check-worker/compose.yaml"
 )
 

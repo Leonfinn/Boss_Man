@@ -300,7 +300,7 @@ jobs:
           set -euo pipefail
           # A scheduled run may release a commit older than main's head, which is what is checked out: take the compose
           # file as it was at the released commit, so it matches that release's images. (A pressed run is unchanged.)
-          if [ "$GITHUB_EVENT_NAME" = schedule ]; then git checkout "$RELEASE_SHA" -- docker-compose.images.yml docker-compose.ntfy.images.yml; fi
+          if [ "$GITHUB_EVENT_NAME" = schedule ]; then git checkout "$RELEASE_SHA" -- docker-compose.images.yml docker-compose.ntfy.images.yml docker-compose.cloudflared.images.yml deploy/penpot.yml; fi
           # The image install needs all four images. Until the runner image is published (BOS-972) a release has no images.env;
           # say so and carry on, so the existing beta release is not held up.
           # BOS-1227: the updater is in the default stack, so the install files need it too.
@@ -313,7 +313,10 @@ jobs:
           # The compose file is the one checked out at this commit, signed as it is.
           # BOS-2912: docker-compose.ntfy.images.yml (phone notifications for an image install) has no image digests of ours, so it
           # is signed as it is, like the compose file.
-          for f in images.env docker-compose.images.yml docker-compose.ntfy.images.yml; do
+          # BOS-2913: the same for the public portal tunnel (docker-compose.cloudflared.images.yml) and Penpot, which is
+          # deploy/penpot.yml as it is, published as penpot.yml (a build install uses it from the checkout).
+          cp deploy/penpot.yml penpot.yml
+          for f in images.env docker-compose.images.yml docker-compose.ntfy.images.yml docker-compose.cloudflared.images.yml penpot.yml; do
             cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"
             cosign verify-blob --bundle "$f.sigstore.json" \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
@@ -333,7 +336,7 @@ jobs:
           flags=(--prerelease)
           [ "$(scripts/release-docs-gate.sh stage-of "$VERSION")" != stable ] || flags=()
           assets=(release.json release.json.sigstore.json)
-          if [ -f images.env ]; then assets+=(images.env images.env.sigstore.json docker-compose.images.yml docker-compose.images.yml.sigstore.json docker-compose.ntfy.images.yml docker-compose.ntfy.images.yml.sigstore.json); fi
+          if [ -f images.env ]; then assets+=(images.env images.env.sigstore.json docker-compose.images.yml docker-compose.images.yml.sigstore.json docker-compose.ntfy.images.yml docker-compose.ntfy.images.yml.sigstore.json docker-compose.cloudflared.images.yml docker-compose.cloudflared.images.yml.sigstore.json penpot.yml penpot.yml.sigstore.json); fi
           # BOS-2601: this step failed in 1 s on release #3 and the job log is not readable by agents. Name any missing
           # file, and put GitHub's own error text in an annotation (annotations are readable without the log).
           for f in "${assets[@]}"; do
