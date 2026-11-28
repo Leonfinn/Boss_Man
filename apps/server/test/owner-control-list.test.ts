@@ -461,7 +461,10 @@ describe("OWNER_CONTROLS matches the web app", () => {
   });
 
   it("has no entry the app no longer shows", () => {
-    expect(readFileSync(join(WEB, "pages/Decisions.tsx"), "utf8")).toMatch(/Copy this command/);
+    // The command block's Copy button moved to components/CommandBlock.tsx (BOS-2853): the label lives there,
+    // and Decisions.tsx still renders it for its steps.
+    expect(readFileSync(join(WEB, "components/CommandBlock.tsx"), "utf8")).toMatch(/Copy this command/);
+    expect(readFileSync(join(WEB, "pages/Decisions.tsx"), "utf8")).toMatch(/<CommandBlock[\s/>]/);
     expect(tsx.some((f) => /\bconfirm\(/.test(readFileSync(f, "utf8")))).toBe(true);
     const approveLabel = readFileSync(join(WEB, "pages/Ticket.tsx"), "utf8").match(/const approveLabel = (.*);/)?.[1] ?? "";
     expect(shown(approveLabel).sort()).toEqual([...NOT_FROM_BUTTONS.Ticket!].sort());
