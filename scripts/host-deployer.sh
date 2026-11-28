@@ -85,7 +85,7 @@ INBOX="$D/inbox" OUTBOX="$D/outbox" STATE="$D/state" LOG="$D/deployer.log"
 # deploy/ that are not Compose files (the Caddyfile, the Tailscale serve file: mounted into a container, so a change to them is
 # invisible in the rendered settings). Compose files and deploy/*.yml/yaml (COMPOSE_FILES) are hand only when this host's
 # rendered settings change in a way the swap can't apply (compose_hand_reason). Dockerfiles and .npmrc are build inputs of the
-# images the deploy builds itself, so they are not on the list. .dockerignore stays on it (BOS-2908): it keeps the host's .env
+# images the deploy builds itself, so they are not on the list (but a changed "# syntax=" line is hand-only, BOS-2910). .dockerignore stays on it (BOS-2908): it keeps the host's .env
 # out of every image, so a merged change to it is applied by the owner's hand. So does any *.dockerignore in a folder, such as
 # apps/runner/Dockerfile.dockerignore: Docker lets it replace the top-level one for that build.
 INFRA='^(scripts/(deploy|rebuild-live|update-runner|host-deployer|install-deployer|daily-backup)\.sh$|([^/]*/)*[^/]*\.dockerignore$|\.env|deploy/)' # deploy/ files that are Compose files are taken out again in needs_hand (COMPOSE_FILES)
@@ -431,14 +431,31 @@ compose_hand_reason() { # head commit
   return 1
 }
 
+# BOS-2910: the "# syntax=" line of a Dockerfile names the image BuildKit runs as the build frontend; that image reads the
+# build context, the host's .env included. So a change to that line (added, removed or edited, in any Dockerfile) is hand-only.
+# Case and spaces are ignored on purpose (the directive is case-insensitive); a wider match only sends more to the hand path.
+SYNTAX_LINE='^[[:space:]]*#[[:space:]]*syntax[[:space:]]*='
+syntax_lines() { # commit path: the syntax directive lines of that file at that commit, empty if the file is absent
+  g show "$1:$2" 2>/dev/null | { grep -iE "$SYNTAX_LINE" || true; }
+}
+syntax_changed_files() { # head commit: Dockerfiles whose syntax line differs, one path per line
+  local p
+  while IFS= read -r p; do
+    [[ $p =~ (^|/)Dockerfile[^/]*$ && ! $p =~ \.dockerignore$ ]] || continue
+    if [[ $(syntax_lines "$1" "$p") != "$(syntax_lines "$2" "$p")" ]]; then printf '%s\n' "$p"; fi
+  done < <(g diff --name-only "$1" "$2")
+}
+
 needs_hand() { # head commit
-  local head=$1 commit=$2 paths cand key="$1 $2"
+  local head=$1 commit=$2 paths cand syn key="$1 $2"
   if [[ -n ${HAND_CACHE[$key]+x} ]]; then
     HAND_FILES="${HAND_CACHE[$key]%%$'\x01'*}" HAND_REASON="${HAND_CACHE[$key]#*$'\x01'}"
     [[ -n $HAND_FILES ]]; return
   fi
   paths="$(g diff --name-only "$head" "$commit" | { grep -Ev "$NOT_INFRA" || true; })"
   HAND_FILES="$(grep -E "$INFRA" <<<"$paths" | { grep -Ev "$COMPOSE_FILES" || true; } || true)" HAND_REASON=""
+  syn="$(syntax_changed_files "$head" "$commit")"
+  if [[ -n $syn ]]; then HAND_FILES+="${HAND_FILES:+$'\n'}$syn"; fi
   cand="$(grep -E "$COMPOSE_FILES" <<<"$paths" || true)"
   if [[ -n $cand ]] && compose_hand_reason "$head" "$commit"; then
     HAND_FILES+="${HAND_FILES:+$'\n'}$cand"
