@@ -33,7 +33,7 @@ check apps/server/package.json no
 cd /; t="$(mktemp -d)"; trap 'rm -rf "$d" "$t"' EXIT
 git init -q --bare -b main "$t/origin.git"
 git clone -q "$t/origin.git" "$t/src" 2>/dev/null; cd "$t/src"; git config user.email t@t; git config user.name t
-mkdir scripts; cp "$here/deploy.sh" scripts/; echo 1 >f; git add -A; git commit -qm one; git push -q origin HEAD:main 2>/dev/null; git fetch -q
+mkdir scripts; cp "$here/deploy.sh" "$here/prune-build-cache.sh" scripts/; echo 1 >f; git add -A; git commit -qm one; git push -q origin HEAD:main 2>/dev/null; git fetch -q
 git branch -q --set-upstream-to=origin/main main; git remote set-head origin main >/dev/null
 one="$(git rev-parse HEAD)"; echo 2 >f; git commit -qam two; two="$(git rev-parse HEAD)"; echo 3 >f; git commit -qam three; three="$(git rev-parse HEAD)"
 git push -q origin HEAD:main 2>/dev/null; git reset -q --hard "$one"
@@ -41,6 +41,7 @@ mkdir "$t/bin"; cat >"$t/bin/docker" <<'FAKE'
 #!/usr/bin/env bash
 echo "docker $*" >>"$FAKE_LOG"
 case "$*" in
+  *"builder prune"*) echo "Total: 1GB"; exit "${FAKE_PRUNE_RC:-0}" ;;
   *pg_dump*) echo dump ;; *"config --services"*) printf 'server\nbackup\n' ;; *"ps -q"*) echo cid ;; *inspect*) echo "${FAKE_HEALTH:-healthy}" ;;
   *"logs --no-color"*) echo "Error: EACCES: permission denied, open '/app/x.ts'" ;;
 esac
@@ -53,6 +54,10 @@ PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --commit "$two" >/dev/nu
 grep -q '"result":"deployed"' "$t/backups/deploy-status.json" || { echo "FAIL: status result"; exit 1; }
 grep -q "\"to_commit\":\"$two\"" "$t/backups/deploy-status.json" || { echo "FAIL: status commit"; exit 1; }
 grep -q "compose up -d" "$FAKE_LOG" || { echo "FAIL: did not restart"; exit 1; }
+# BOS-2924: the build cache is pruned once, after the build finished and before anything restarts.
+[[ $(grep -c "builder prune --force --filter until=168h" "$FAKE_LOG") == 1 ]] || { echo "FAIL: did not prune the build cache once"; exit 1; }
+b=$(grep -n "compose build" "$FAKE_LOG" | head -1 | cut -d: -f1); p=$(grep -n "builder prune" "$FAKE_LOG" | head -1 | cut -d: -f1); u=$(grep -n "compose up -d" "$FAKE_LOG" | head -1 | cut -d: -f1)
+((b < p && p < u)) || { echo "FAIL: the prune was not between the build and the restart ($b, $p, $u)"; exit 1; }
 # BOS-2176: an update also starts the daily backup service (an older install would never get it otherwise).
 grep -q "compose up -d --no-deps backup" "$FAKE_LOG" || { echo "FAIL: did not ensure the daily backup service"; exit 1; }
 ! grep -E "compose (up|run) " "$FAKE_LOG" | grep -v -- "--no-deps" | grep -q . || { echo "FAIL: a compose up/run without --no-deps"; exit 1; }
@@ -119,6 +124,11 @@ PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --commit "$two" >/dev/nu
 [[ $(cat "$t/backups/deploy-status.previous-commit") == "$one" ]] || { echo "FAIL: setup: rollback record"; exit 1; }
 : >"$FAKE_LOG"
 PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --force --commit "$two" >"$t/force.out" 2>&1 || { echo "FAIL: --force at the same commit"; cat "$t/force.out"; exit 1; }
+# BOS-2924: a build cache prune that fails changes nothing about the result.
+: >"$FAKE_LOG"
+FAKE_PRUNE_RC=1 PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --force --commit "$two" >"$t/prunefail.out" 2>&1 || { echo "FAIL: a failing build cache prune failed the deploy"; cat "$t/prunefail.out"; exit 1; }
+grep -q "builder prune" "$FAKE_LOG" || { echo "FAIL: the failing prune was not tried"; exit 1; }
+grep -q '"result":"deployed"' "$t/backups/deploy-status.json" || { echo "FAIL: status after a failing prune"; exit 1; }
 [[ $(git rev-parse HEAD) == "$two" ]] || { echo "FAIL: --force at the same commit moved the checkout"; exit 1; }
 grep -q "compose up -d --no-deps --force-recreate server$" "$FAKE_LOG" || { echo "FAIL: --force at the same commit did not recreate the server"; cat "$FAKE_LOG"; exit 1; }
 [[ $(cat "$t/backups/deploy-status.previous-commit") == "$one" ]] || { echo "FAIL: --force at the same commit overwrote the rollback record"; exit 1; }
